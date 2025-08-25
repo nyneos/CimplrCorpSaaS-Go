@@ -2,7 +2,7 @@ services:
   - name: logger
     start_order: 1
     config:
-      folder_path: "/logs"
+      folder_path: "./logs"
       max_file_mb: 5
       retention_days: 7
   - name: resourcemanager
