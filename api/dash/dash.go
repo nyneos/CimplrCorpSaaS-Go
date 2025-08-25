@@ -3,7 +3,6 @@ package dash
 import (
 	"log"
 	"net/http"
-	"os"
 )
 
 func StartDashService() {
