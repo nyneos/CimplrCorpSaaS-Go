@@ -3,7 +3,6 @@ package master
 import (
 	"log"
 	"net/http"
-	"os"
 )
 
 func StartMasterService() {
@@ -12,13 +11,7 @@ func StartMasterService() {
 		w.Write([]byte("Hello from Master Service"))
 	})
 	log.Println("Master Service started on :2143")
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "2143" // fallback for local dev
-	}
-	log.Printf("Master Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
-
+	err := http.ListenAndServe(":2143", mux)
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}
