@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/joho/godotenv" // Add this import
 	_ "github.com/lib/pq"
 
 	"CimplrCorpSaas/api"
@@ -15,22 +16,26 @@ import (
 	"CimplrCorpSaas/internal/appmanager"
 )
 
+// InitDB loads DB config from env vars
 func InitDB() (*sql.DB, error) {
+	user := os.Getenv("DB_USER")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
 	connStr := fmt.Sprintf(
 		"user=%s password=%s host=%s port=%s dbname=%s sslmode=disable",
-		"postgres.sgryutycrupiuhovmbfo",
-		"NyneOS@1234$",
-		"aws-0-ap-south-1.pooler.supabase.com",
-		"5432",
-		"postgres",
+		user, pass, host, port, name,
 	)
-
 	return sql.Open("postgres", connStr)
 }
 
 func main() {
+	// Load .env for local dev (ignored on Render)
+	_ = godotenv.Load()
+
 	// Initialize DB for Auth
-	db, err := auth.InitDB()
+	db, err := InitDB()
 	if err != nil {
 		log.Fatal("failed to connect to DB:", err)
 	}
@@ -39,7 +44,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
