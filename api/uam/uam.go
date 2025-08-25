@@ -9,7 +9,6 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
-	"os"
 )
 
 func StartUAMService(db *sql.DB) {
@@ -41,13 +40,7 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/permissions/approve-reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolesStatus(db))))
 
 	log.Println("UAM Service started on :5143")
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "5143" // fallback for local dev
-	}
-	log.Printf("UAM Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
-
+	err := http.ListenAndServe(":5143", mux)
 	if err != nil {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
