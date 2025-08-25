@@ -5,6 +5,7 @@ import (
 	// "CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/exposures" // <-- Import exposures
 	"database/sql"
+	"os"
 
 	// "encoding/json"
 	"log"
@@ -17,7 +18,7 @@ func StartFXService(db *sql.DB) {
 		w.Write([]byte("Hello from FX Service"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
-/*upload */
+	/*upload */
 	mux.Handle("/fx/exposures/upload-exposure", api.BusinessUnitMiddleware(db)(http.HandlerFunc(exposures.UploadExposure)))
 	mux.Handle("/fx/exposures/edit", api.BusinessUnitMiddleware(db)(exposures.EditExposureHeadersLineItemsJoined(db)))
 	mux.Handle("/fx/exposures/headers-line-items", api.BusinessUnitMiddleware(db)(exposures.GetExposureHeadersLineItems(db)))
@@ -26,15 +27,21 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/exposures/reject-multiple-headers", api.BusinessUnitMiddleware(db)(exposures.RejectMultipleExposureHeaders(db)))
 	mux.Handle("/fx/exposures/approve-multiple-headers", api.BusinessUnitMiddleware(db)(exposures.ApproveMultipleExposureHeaders(db)))
 	mux.Handle("/fx/exposures/batch-upload-staging", api.BusinessUnitMiddleware(db)(exposures.BatchUploadStagingData(db)))
-/*bucketing */
+	/*bucketing */
 	mux.Handle("/fx/exposures/update-bucketing", api.BusinessUnitMiddleware(db)(exposures.UpdateExposureHeadersLineItemsBucketing(db)))
 	mux.Handle("/fx/exposures/get-bucketing", api.BusinessUnitMiddleware(db)(exposures.GetExposureHeadersLineItemsBucketing(db)))
 	mux.Handle("/fx/exposures/approve-bucketing-status", api.BusinessUnitMiddleware(db)(exposures.ApproveBucketingStatus(db)))
 	mux.Handle("/fx/exposures/reject-bucketing-status", api.BusinessUnitMiddleware(db)(exposures.RejectBucketingStatus(db)))
-/*hedging-proposals */
+	/*hedging-proposals */
 	mux.Handle("/fx/exposures/get-hedging-proposals", api.BusinessUnitMiddleware(db)(exposures.GetHedgingProposalsAggregated(db)))
 	log.Println("FX Service started on :3143")
-	err := http.ListenAndServe(":3143", mux)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3143" // fallback for local dev
+	}
+	log.Printf("FX Service started on :%s", port)
+	err := http.ListenAndServe(":"+port, mux)
+
 	if err != nil {
 		log.Fatalf("FX Service failed: %v", err)
 	}
