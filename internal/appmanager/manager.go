@@ -11,6 +11,7 @@ import (
 	"CimplrCorpSaas/api/cash"
 	"CimplrCorpSaas/api/dash"
 	"CimplrCorpSaas/api/fx"
+	"CimplrCorpSaas/api/master"
 	"CimplrCorpSaas/api/uam"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/resource"
@@ -29,31 +30,35 @@ func SetDB(database *sql.DB) {
 }
 
 var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.Service{
-	"logger": func(cfg map[string]interface{}) serviceiface.Service {
-		return logger.NewLoggerService(cfg)
-	},
-	"resourcemanager": func(cfg map[string]interface{}) serviceiface.Service {
-		return resource.NewResourceManagerService(cfg)
-	},
-	"fx": func(cfg map[string]interface{}) serviceiface.Service {
-		return fx.NewFXService(cfg, db) // Pass db here
-	},
-	"dash": func(cfg map[string]interface{}) serviceiface.Service {
-		return dash.NewDashService(cfg)
-	},
-	"cash": func(cfg map[string]interface{}) serviceiface.Service {
-		return cash.NewCashService(cfg)
-	},
-	"uam": func(cfg map[string]interface{}) serviceiface.Service {
-		return uam.NewUAMService(cfg,db)
-	},
-	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
-		return api.NewGatewayService(cfg)
-	},
-	"auth": func(cfg map[string]interface{}) serviceiface.Service {
-		maxUsers := 2 // or get from cfg
-		return auth.NewAuthService(AuthDB, maxUsers)
-	},
+	   "logger": func(cfg map[string]interface{}) serviceiface.Service {
+		   return logger.NewLoggerService(cfg)
+	   },
+	   "resourcemanager": func(cfg map[string]interface{}) serviceiface.Service {
+		   return resource.NewResourceManagerService(cfg)
+	   },
+	   "fx": func(cfg map[string]interface{}) serviceiface.Service {
+		   return fx.NewFXService(cfg, db) // Pass db here
+	   },
+	   "dash": func(cfg map[string]interface{}) serviceiface.Service {
+		   return dash.NewDashService(cfg)
+	   },
+	   "cash": func(cfg map[string]interface{}) serviceiface.Service {
+		   return cash.NewCashService(cfg)
+	   },
+	   "uam": func(cfg map[string]interface{}) serviceiface.Service {
+		   return uam.NewUAMService(cfg,db)
+	   },
+	   "master": func(cfg map[string]interface{}) serviceiface.Service {
+		   // Import master package at top: "CimplrCorpSaas/api/master"
+		   return master.NewMasterService(cfg)
+	   },
+	   "gateway": func(cfg map[string]interface{}) serviceiface.Service {
+		   return api.NewGatewayService(cfg)
+	   },
+	   "auth": func(cfg map[string]interface{}) serviceiface.Service {
+		   maxUsers := 2 // or get from cfg
+		   return auth.NewAuthService(AuthDB, maxUsers)
+	   },
 }
 
 // ------------------- MANAGER -------------------

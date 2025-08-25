@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -109,22 +110,28 @@ func createReverseProxy(target string) http.HandlerFunc {
 			clientIP = xff
 		}
 
-		// Try to extract userId from JSON body (if present)
-		var userId string
-		if r.Method == "POST" || r.Method == "PUT" {
-			if r.Header.Get("Content-Type") == "application/json" {
-				bodyBytes, err := io.ReadAll(r.Body)
-				if err == nil && len(bodyBytes) > 0 {
-					var bodyMap map[string]interface{}
-					if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
-						if uid, ok := bodyMap["user_id"]; ok {
-							userId, _ = uid.(string)
-						}
-					}
-				}
-				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			}
-		}
+		   // Try to extract userId from JSON or multipart/form-data body (if present)
+		   var userId string
+		   if r.Method == "POST" || r.Method == "PUT" {
+			   ct := r.Header.Get("Content-Type")
+			   if strings.HasPrefix(ct, "application/json") {
+				   bodyBytes, err := io.ReadAll(r.Body)
+				   if err == nil && len(bodyBytes) > 0 {
+					   var bodyMap map[string]interface{}
+					   if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+						   if uid, ok := bodyMap["user_id"]; ok {
+							   userId, _ = uid.(string)
+						   }
+					   }
+				   }
+				   r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			   } else if strings.HasPrefix(ct, "multipart/form-data") {
+				   err := r.ParseMultipartForm(32 << 20) // 32MB
+				   if err == nil {
+					   userId = r.FormValue("user_id")
+				   }
+			   }
+		   }
 
 		msg := fmt.Sprintf("[Gateway] Incoming request: %s %s from %s userId=%s", r.Method, r.URL.Path, clientIP, userId)
 		if logr != nil {
@@ -190,6 +197,7 @@ func StartGateway() {
 	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
 	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
 	mux.HandleFunc("/cash/", createReverseProxy("http://localhost:6143"))
+	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
 
 	mux.HandleFunc("/healt", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
