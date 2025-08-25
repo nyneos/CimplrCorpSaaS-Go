@@ -5,7 +5,6 @@ import (
 	// "CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/exposures" // <-- Import exposures
 	"database/sql"
-	"os"
 
 	// "encoding/json"
 	"log"
