@@ -35,13 +35,7 @@ func StartFXService(db *sql.DB) {
 	/*hedging-proposals */
 	mux.Handle("/fx/exposures/get-hedging-proposals", api.BusinessUnitMiddleware(db)(exposures.GetHedgingProposalsAggregated(db)))
 	log.Println("FX Service started on :3143")
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3143" // fallback for local dev
-	}
-	log.Printf("FX Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
-
+	err := http.ListenAndServe(":3143", mux)
 	if err != nil {
 		log.Fatalf("FX Service failed: %v", err)
 	}
