@@ -1,0 +1,43 @@
+services:
+  - name: logger
+    start_order: 1
+    config:
+      folder_path: "../logs"
+      max_file_mb: 5
+      retention_days: 7
+  - name: resourcemanager
+    start_order: 2
+    config:
+      heartbeat_interval: 1000s
+  - name: gateway
+    start_order: 3
+    config:
+      port: 8081
+      load_balancer: round_robin
+      vip_failover: true
+  - name: auth
+    start_order: 4
+    config:
+      max_users: 2
+  - name: dashboard
+    start_order: 5
+    config:
+      ws_port: 9090
+  - name: session
+    start_order: 6
+  - name: fx
+    start_order: 7
+    config:
+      port: 3143
+  - name: dash
+    start_order: 8
+    config:
+      port: 4143
+  - name: uam
+    start_order: 9
+    config:
+      port: 5143
+  - name: cash
+    start_order: 10
+    config:
+      port: 6143
