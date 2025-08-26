@@ -1,13 +1,17 @@
 package cash
 
-import "CimplrCorpSaas/internal/serviceiface"
+import (
+	"CimplrCorpSaas/internal/serviceiface"
+	"database/sql"
+)
 
 type CashService struct {
 	config map[string]interface{}
+	db     *sql.DB
 }
 
-func NewCashService(cfg map[string]interface{}) serviceiface.Service {
-	return &CashService{config: cfg}
+func NewCashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
+	return &CashService{config: cfg, db: db}
 }
 
 func (s *CashService) Name() string {
@@ -15,7 +19,7 @@ func (s *CashService) Name() string {
 }
 
 func (s *CashService) Start() error {
-	go StartCashService()
+	go StartCashService(s.db)
 	return nil
 }
 

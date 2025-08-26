@@ -1,11 +1,12 @@
 package cash
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 )
 
-func StartCashService() {
+func StartCashService(db *sql.DB) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))

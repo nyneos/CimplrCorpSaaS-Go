@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	// "CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/fx/exposures" // <-- Import exposures
+	"CimplrCorpSaas/api/fx/forwards"  // <-- Import forwards
 	"database/sql"
 
 	// "encoding/json"
@@ -17,6 +18,7 @@ func StartFXService(db *sql.DB) {
 		w.Write([]byte("Hello from FX Service"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
+	/*-------------     exposures    ;)      --------------------*/
 	/*upload */
 	mux.Handle("/fx/exposures/upload-exposure", api.BusinessUnitMiddleware(db)(http.HandlerFunc(exposures.UploadExposure)))
 	mux.Handle("/fx/exposures/edit", api.BusinessUnitMiddleware(db)(exposures.EditExposureHeadersLineItemsJoined(db)))
@@ -33,6 +35,26 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/exposures/reject-bucketing-status", api.BusinessUnitMiddleware(db)(exposures.RejectBucketingStatus(db)))
 	/*hedging-proposals */
 	mux.Handle("/fx/exposures/get-hedging-proposals", api.BusinessUnitMiddleware(db)(exposures.GetHedgingProposalsAggregated(db)))
+/*linkage */
+	mux.Handle("/fx/exposures/hedge-links-details", api.BusinessUnitMiddleware(db)(exposures.HedgeLinksDetails(db)))
+	mux.Handle("/fx/exposures/expfwd-linking-bookings", api.BusinessUnitMiddleware(db)(exposures.ExpFwdLinkingBookings(db)))
+	mux.Handle("/fx/exposures/expfwd-linking", api.BusinessUnitMiddleware(db)(exposures.ExpFwdLinking(db)))
+	mux.Handle("/fx/exposures/link-exposure-hedge", api.BusinessUnitMiddleware(db)(exposures.LinkExposureHedge(db)))
+
+// Settlement endpoints
+	mux.Handle("/fx/exposures/filter-forward-bookings-for-settlement", api.BusinessUnitMiddleware(db)(exposures.FilterForwardBookingsForSettlement(db)))
+	mux.Handle("/fx/exposures/get-forward-bookings-by-entity-currency", api.BusinessUnitMiddleware(db)(exposures.GetForwardBookingsByEntityAndCurrency(db)))
+
+	/*-------------     forward    ;)      --------------------*/
+	/*mtm upload */
+	mux.Handle("/fx/forwards/upload-mtm", api.BusinessUnitMiddleware(db)(forwards.UploadMTMFiles(db)))
+	mux.Handle("/fx/forwards/get-mtm", api.BusinessUnitMiddleware(db)(forwards.GetMTMData(db)))
+
+	// Forward cancel/roll endpoints
+	mux.Handle("/fx/forwards/forward-booking-list", api.BusinessUnitMiddleware(db)(forwards.GetForwardBookingList(db)))
+	mux.Handle("/fx/forwards/exposures-by-booking-ids", api.BusinessUnitMiddleware(db)(forwards.GetExposuresByBookingIds(db)))
+	mux.Handle("/fx/forwards/create-forward-cancellations", api.BusinessUnitMiddleware(db)(forwards.CreateForwardCancellations(db)))
+
 	log.Println("FX Service started on :3143")
 	err := http.ListenAndServe(":3143", mux)
 	if err != nil {
@@ -40,30 +62,3 @@ func StartFXService(db *sql.DB) {
 	}
 }
 
-// func ForwardBooking(w http.ResponseWriter, r *http.Request) {
-// 	var req struct {
-// 		UserID string `json:"user_id"`
-// 		// ...other booking fields...
-// 	}
-// 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-// 		http.Error(w, "Invalid request", http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	activeSessions := auth.GetActiveSessions()
-// 	found := false
-// 	for _, session := range activeSessions {
-// 		if session.UserID == req.UserID {
-// 			found = true
-// 			break
-// 		}
-// 	}
-
-// 	if !found {
-// 		http.Error(w, "Unauthorized: invalid session", http.StatusUnauthorized)
-// 		return
-// 	}
-
-// 	// Forward the booking request
-// 	w.Write([]byte("Booking forwarded!"))
-// }

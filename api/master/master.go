@@ -1,11 +1,12 @@
 package master
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 )
 
-func StartMasterService() {
+func StartMasterService(db *sql.DB) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/master/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Master Service"))

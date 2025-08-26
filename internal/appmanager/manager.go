@@ -40,17 +40,17 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		   return fx.NewFXService(cfg, db) // Pass db here
 	   },
 	   "dash": func(cfg map[string]interface{}) serviceiface.Service {
-		   return dash.NewDashService(cfg)
+		   return dash.NewDashService(cfg, db) // Pass db here
 	   },
 	   "cash": func(cfg map[string]interface{}) serviceiface.Service {
-		   return cash.NewCashService(cfg)
+		   return cash.NewCashService(cfg, db) // Pass db here
 	   },
 	   "uam": func(cfg map[string]interface{}) serviceiface.Service {
-		   return uam.NewUAMService(cfg,db)
+		   return uam.NewUAMService(cfg, db)
 	   },
 	   "master": func(cfg map[string]interface{}) serviceiface.Service {
 		   // Import master package at top: "CimplrCorpSaas/api/master"
-		   return master.NewMasterService(cfg)
+		   return master.NewMasterService(cfg, db)
 	   },
 	   "gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		   return api.NewGatewayService(cfg)

@@ -1,13 +1,17 @@
 package master
 
-import "CimplrCorpSaas/internal/serviceiface"
+import (
+	"CimplrCorpSaas/internal/serviceiface"
+	"database/sql"
+)
 
 type MasterService struct {
 	config map[string]interface{}
+	db     *sql.DB
 }
 
-func NewMasterService(cfg map[string]interface{}) serviceiface.Service {
-	return &MasterService{config: cfg}
+func NewMasterService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
+	return &MasterService{config: cfg, db: db}
 }
 
 func (s *MasterService) Name() string {
@@ -15,7 +19,7 @@ func (s *MasterService) Name() string {
 }
 
 func (s *MasterService) Start() error {
-	go StartMasterService()
+	go StartMasterService(s.db)
 	return nil
 }
 
