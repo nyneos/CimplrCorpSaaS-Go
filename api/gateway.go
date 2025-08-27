@@ -154,6 +154,28 @@ func createReverseProxy(target string) http.HandlerFunc {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(url)
 
+		// Add CORS headers to the response from the proxy
+		originalDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
+			// Optionally, you can modify the request here if needed
+		}
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			resp.Header.Set("Access-Control-Allow-Origin", "*") // Or your frontend URL
+			resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			return nil
+		}
+
+		// Handle preflight OPTIONS at the gateway
+		if r.Method == "OPTIONS" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
 		proxy.ServeHTTP(rw, r)
 		if rw.statusCode >= 400 {
