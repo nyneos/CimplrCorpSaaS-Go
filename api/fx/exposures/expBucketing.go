@@ -4,7 +4,7 @@ package exposures
 
 import (
 	"CimplrCorpSaas/api"
-	// "CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -28,12 +28,12 @@ import (
 func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID         string                 `json:"user_id"`
-			ExposureHeaderID string               `json:"exposure_header_id"`
-			HeaderFields   map[string]interface{} `json:"headerFields"`
-			LineItemFields map[string]interface{} `json:"lineItemFields"`
-			BucketingFields map[string]interface{} `json:"bucketingFields"`
-			HedgingFields  map[string]interface{} `json:"hedgingFields"`
+			UserID           string                 `json:"user_id"`
+			ExposureHeaderID string                 `json:"exposure_header_id"`
+			HeaderFields     map[string]interface{} `json:"headerFields"`
+			LineItemFields   map[string]interface{} `json:"lineItemFields"`
+			BucketingFields  map[string]interface{} `json:"bucketingFields"`
+			HedgingFields    map[string]interface{} `json:"hedgingFields"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ExposureHeaderID == "" {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body or exposure_header_id missing")
@@ -239,7 +239,6 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-
 // Handler: Get exposure headers, line items, and bucketing for accessible business units
 func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +356,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 
 		resp := map[string]interface{}{
 			"buAccessible": buNames,
-			"pageData": pageData,
+			"pageData":     pageData,
 		}
 		if perms, ok := exposureBucketingPerms["exposure-bucketing"]; ok {
 			resp["exposure-bucketing"] = perms
@@ -367,99 +366,124 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-
 func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        var req struct {
-			UserID string `json:"user_id"`
-            ExposureHeaderIds []string `json:"exposure_header_ids"`
-            UpdatedBy         string   `json:"updated_by"`
-            Comments          string   `json:"comments"`
-        }
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-            len(req.ExposureHeaderIds) == 0 || req.UpdatedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "exposure_header_ids and updated_by are required")
-            return
-        }
-        rows, err := db.Query(
-            `UPDATE exposure_bucketing
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID            string   `json:"user_id"`
+			ExposureHeaderIds []string `json:"exposure_header_ids"`
+			Comments          string   `json:"comments"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "exposure_header_ids and user_id are required")
+			return
+		}
+
+		// Get updatedBy from session
+		var updatedBy string
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				updatedBy = s.Name // or s.Email
+				break
+			}
+		}
+		if updatedBy == "" {
+			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			return
+		}
+
+		rows, err := db.Query(
+			`UPDATE exposure_bucketing
              SET status_bucketing = 'Approved', updated_by = $2, comments = $3, updated_at = NOW()
              WHERE exposure_header_id = ANY($1)
              RETURNING *`,
-            pq.Array(req.ExposureHeaderIds), req.UpdatedBy, req.Comments,
-        )
-        if err != nil {
-            respondWithError(w, http.StatusInternalServerError, err.Error())
-            return
-        }
-        defer rows.Close()
-        cols, _ := rows.Columns()
-        approved := []map[string]interface{}{}
-        for rows.Next() {
-            vals := make([]interface{}, len(cols))
-            valPtrs := make([]interface{}, len(cols))
-            for i := range vals {
-                valPtrs[i] = &vals[i]
-            }
-            rows.Scan(valPtrs...)
-            rowMap := map[string]interface{}{}
-            for i, col := range cols {
-                rowMap[col] = parseDBValue(col, vals[i])
-            }
-            approved = append(approved, rowMap)
-        }
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(map[string]interface{}{
-            "success": true,
-            "Approved": approved,
-        })
-    }
+			pq.Array(req.ExposureHeaderIds), updatedBy, req.Comments,
+		)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		approved := []map[string]interface{}{}
+		for rows.Next() {
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			rows.Scan(valPtrs...)
+			rowMap := map[string]interface{}{}
+			for i, col := range cols {
+				rowMap[col] = parseDBValue(col, vals[i])
+			}
+			approved = append(approved, rowMap)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"Approved": approved,
+		})
+	}
 }
 
 func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        var req struct {
-			UserID string `json:"user_id"`
-            ExposureHeaderIds []string `json:"exposure_header_ids"`
-            UpdatedBy         string   `json:"updated_by"`
-            Comments          string   `json:"comments"`
-        }
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-            len(req.ExposureHeaderIds) == 0 || req.UpdatedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "exposure_header_ids and updated_by are required")
-            return
-        }
-        rows, err := db.Query(
-            `UPDATE exposure_bucketing
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID            string   `json:"user_id"`
+			ExposureHeaderIds []string `json:"exposure_header_ids"`
+			Comments          string   `json:"comments"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "exposure_header_ids and user_id are required")
+			return
+		}
+
+		// Get updatedBy from session
+		var updatedBy string
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				updatedBy = s.Name // or s.Email
+				break
+			}
+		}
+		if updatedBy == "" {
+			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			return
+		}
+
+		rows, err := db.Query(
+			`UPDATE exposure_bucketing
              SET status_bucketing = 'Rejected', updated_by = $2, comments = $3, updated_at = NOW()
              WHERE exposure_header_id = ANY($1)
              RETURNING *`,
-            pq.Array(req.ExposureHeaderIds), req.UpdatedBy, req.Comments,
-        )
-        if err != nil {
-            respondWithError(w, http.StatusInternalServerError, err.Error())
-            return
-        }
-        defer rows.Close()
-        cols, _ := rows.Columns()
-        rejected := []map[string]interface{}{}
-        for rows.Next() {
-            vals := make([]interface{}, len(cols))
-            valPtrs := make([]interface{}, len(cols))
-            for i := range vals {
-                valPtrs[i] = &vals[i]
-            }
-            rows.Scan(valPtrs...)
-            rowMap := map[string]interface{}{}
-            for i, col := range cols {
-                rowMap[col] = parseDBValue(col, vals[i])
-            }
-            rejected = append(rejected, rowMap)
-        }
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(map[string]interface{}{
-            "success": true,
-            "Rejected": rejected,
-        })
-    }
+			pq.Array(req.ExposureHeaderIds), updatedBy, req.Comments,
+		)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		rejected := []map[string]interface{}{}
+		for rows.Next() {
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			rows.Scan(valPtrs...)
+			rowMap := map[string]interface{}{}
+			for i, col := range cols {
+				rowMap[col] = parseDBValue(col, vals[i])
+			}
+			rejected = append(rejected, rowMap)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"Rejected": rejected,
+		})
+	}
 }
