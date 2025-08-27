@@ -111,28 +111,28 @@ func createReverseProxy(target string) http.HandlerFunc {
 			clientIP = xff
 		}
 
-		   // Try to extract userId from JSON or multipart/form-data body (if present)
-		   var userId string
-		   if r.Method == "POST" || r.Method == "PUT" {
-			   ct := r.Header.Get("Content-Type")
-			   if strings.HasPrefix(ct, "application/json") {
-				   bodyBytes, err := io.ReadAll(r.Body)
-				   if err == nil && len(bodyBytes) > 0 {
-					   var bodyMap map[string]interface{}
-					   if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
-						   if uid, ok := bodyMap["user_id"]; ok {
-							   userId, _ = uid.(string)
-						   }
-					   }
-				   }
-				   r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			//    } else if strings.HasPrefix(ct, "multipart/form-data") {
-			// 	   err := r.ParseMultipartForm(32 << 20) // 32MB
-			// 	   if err == nil {
-			// 		   userId = r.FormValue("user_id")
-			// 	   }
-			   }
-		   }
+		// Try to extract userId from JSON or multipart/form-data body (if present)
+		var userId string
+		if r.Method == "POST" || r.Method == "PUT" {
+			ct := r.Header.Get("Content-Type")
+			if strings.HasPrefix(ct, "application/json") {
+				bodyBytes, err := io.ReadAll(r.Body)
+				if err == nil && len(bodyBytes) > 0 {
+					var bodyMap map[string]interface{}
+					if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+						if uid, ok := bodyMap["user_id"]; ok {
+							userId, _ = uid.(string)
+						}
+					}
+				}
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			} else if strings.HasPrefix(ct, "multipart/form-data") {
+				err := r.ParseMultipartForm(32 << 20) // 32MB
+				if err == nil {
+					userId = r.FormValue("user_id")
+				}
+			}
+		}
 
 		msg := fmt.Sprintf("[Gateway] Incoming request: %s %s from %s userId=%s", r.Method, r.URL.Path, clientIP, userId)
 		if logr != nil {
@@ -186,6 +186,19 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Or specify your frontend URL
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // StartGateway starts the API gateway server
 func StartGateway() {
 	mux := http.NewServeMux()
@@ -223,7 +236,7 @@ func StartGateway() {
 		port = "8081"
 	}
 	log.Printf("API Gateway started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":8081", withCORS(mux))
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
