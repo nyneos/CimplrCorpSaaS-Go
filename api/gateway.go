@@ -197,7 +197,7 @@ func StartGateway() {
 		port = "8081"
 	}
 	log.Printf("API Gateway started on :%s", port)
-	err := http.ListenAndServe(":8081", mux)
+	err := http.ListenAndServe(":"+port, mux)
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
