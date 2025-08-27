@@ -580,19 +580,34 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
-			RequestedBy       string   `json:"requested_by"`
 			DeleteComment     string   `json:"delete_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.RequestedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and requested_by are required")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
 			return
 		}
+
+		// Get session info
+		var requestedBy string
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				requestedBy = s.Name // or s.Email
+				break
+			}
+		}
+		if requestedBy == "" {
+			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			return
+		}
+
 		// Mark for delete approval first
 		res, err := db.Exec(
-			`UPDATE exposure_headers SET approval_status = 'Delete-Approval', delete_comment = $1 WHERE exposure_header_id = ANY($2::uuid[])`,
+			`UPDATE exposure_headers SET approval_status = 'Delete-Approval', delete_comment = $1, requested_by = $2 WHERE exposure_header_id = ANY($3::uuid[])`,
 			req.DeleteComment,
+			requestedBy,
 			pq.Array(req.ExposureHeaderIds),
 		)
 		if err != nil {
@@ -614,22 +629,37 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 // Handler: rejectMultipleExposureHeaders - rejects multiple headers
 func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
-			RejectedBy        string   `json:"rejected_by"`
 			RejectionComment  string   `json:"rejection_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.RejectedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and rejected_by are required")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
 			return
 		}
+
+		// Get session info
+		var rejectedBy string
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				rejectedBy = s.Name // or s.Email
+				break
+			}
+		}
+		if rejectedBy == "" {
+			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			return
+		}
+
 		rows, err := db.Query(
 			`UPDATE exposure_headers SET approval_status = 'Rejected', rejected_by = $1, rejection_comment = $2, rejected_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`,
-			req.RejectedBy,
+			rejectedBy,
 			req.RejectionComment,
 			pq.Array(req.ExposureHeaderIds),
 		)
@@ -656,24 +686,39 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			rejected = append(rejected, rowMap)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success":  true,
 			"rejected": rejected,
 		})
 	}
 }
+
 // Handler: approveMultipleExposureHeaders - approves multiple headers and handles business logic
 func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID            string   `json:"user_id"`
 			ExposureHeaderIds []string `json:"exposureHeaderIds"`
-			ApprovedBy        string   `json:"approved_by"`
 			ApprovalComment   string   `json:"approval_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.ApprovedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and approved_by are required")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
 			return
 		}
+
+		// Get session info for ApprovedBy
+		var approvedBy string
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				approvedBy = s.Name // or s.Email
+				break
+			}
+		}
+		if approvedBy == "" {
+			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			return
+		}
+
 		tx, err := db.Begin()
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -690,7 +735,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 		type headerRow struct {
-			ExposureHeaderId     string
+			ExposureHeaderId    string
 			ApprovalStatus      string
 			ExposureType        string
 			Status              string
@@ -729,10 +774,10 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		results := map[string]interface{}{
-			"deleted": []map[string]interface{}{},
+			"deleted":  []map[string]interface{}{},
 			"approved": []map[string]interface{}{},
-			"rolled": []map[string]interface{}{},
-			"skipped": skipped,
+			"rolled":   []map[string]interface{}{},
+			"skipped":  skipped,
 		}
 		// Handle delete-approval: delete header and line items
 		if len(toDelete) > 0 {
@@ -829,10 +874,10 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		
+
 		// Approve remaining headers
 		if len(toApprove) > 0 {
-			appRows, _ := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, req.ApprovedBy, req.ApprovalComment, pq.Array(toApprove))
+			appRows, _ := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
 			approvedHeaders := []map[string]interface{}{}
 			appCols, _ := appRows.Columns()
 			for appRows.Next() {
@@ -909,15 +954,14 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		tx.Commit()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"deleted": results["deleted"],
+			"success":  true,
+			"deleted":  results["deleted"],
 			"approved": results["approved"],
-			"rolled": results["rolled"],
-			"skipped": results["skipped"],
+			"rolled":   results["rolled"],
+			"skipped":  results["skipped"],
 		})
 	}
 }
-
 // Handler: BatchUploadStagingData - handles batch upload for staging tables
 func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
