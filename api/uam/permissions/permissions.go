@@ -206,11 +206,9 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse request body
-		// Example: user_id from middleware (set in context)
 		userID := r.Context().Value("user_id")
 		var req struct {
-			UserID   string `json:"user_id"`
-			RoleName string `json:"roleName"`
+			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"success":false,"error":"invalid request body"}`, http.StatusBadRequest)
@@ -224,14 +222,24 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
 			return
 		}
-		if req.RoleName == "" {
-			http.Error(w, `{"success":false,"error":"roleName required"}`, http.StatusBadRequest)
+
+		// Get RoleName from session
+		roleName := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				roleName = s.Role // or s.RoleCode, depending on your session struct
+				break
+			}
+		}
+		if roleName == "" {
+			http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
 			return
 		}
 
 		// Find role
 		var roleID int
-		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
+		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", roleName).Scan(&roleID)
 		if err == sql.ErrNoRows {
 			http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
 			return
@@ -240,7 +248,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Query permissions
+		// Query permissions (same as before)
 		rows, err := db.Query(`
 			   SELECT p.page_name, p.tab_name, p.action, rp.allowed
 			   FROM role_permissions rp
@@ -253,7 +261,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		// Build pages structure
+		// Build pages structure (same as before)
 		pages := make(map[string]interface{})
 		for rows.Next() {
 			var page, action string
@@ -291,11 +299,9 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		// Final response
 		resp := struct {
 			RoleName string                 `json:"roleName"`
-			//    UserID   string                 `json:"user_id"`
 			Pages    map[string]interface{} `json:"pages"`
 		}{
-			RoleName: req.RoleName,
-			//    UserID:   req.UserID,
+			RoleName: roleName,
 			Pages:    pages,
 		}
 
