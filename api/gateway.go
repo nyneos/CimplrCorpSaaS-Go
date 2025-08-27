@@ -100,6 +100,17 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Always set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// Handle preflight OPTIONS at the gateway
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		url, err := url.Parse(target)
 		if err != nil {
 			http.Error(w, "Bad target URL", http.StatusInternalServerError)
@@ -107,8 +118,15 @@ func createReverseProxy(target string) http.HandlerFunc {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(url)
 
-		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
-		proxy.ServeHTTP(rw, r)
+		// Ensure CORS headers are set on the proxied response too
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			resp.Header.Set("Access-Control-Allow-Origin", "*")
+			resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			return nil
+		}
+
+		proxy.ServeHTTP(w, r)
 	}
 }
 
@@ -179,7 +197,7 @@ func StartGateway() {
 		port = "8081"
 	}
 	log.Printf("API Gateway started on :%s", port)
-	err := http.ListenAndServe(":8081", withCORS(mux))
+	err := http.ListenAndServe(":8081", mux)
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
