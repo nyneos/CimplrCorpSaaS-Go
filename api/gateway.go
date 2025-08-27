@@ -100,13 +100,11 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Always set CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
 		// Handle preflight OPTIONS at the gateway
 		if r.Method == "OPTIONS" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -118,7 +116,7 @@ func createReverseProxy(target string) http.HandlerFunc {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(url)
 
-		// Ensure CORS headers are set on the proxied response too
+		// Set CORS headers ONLY in ModifyResponse for proxied requests
 		proxy.ModifyResponse = func(resp *http.Response) error {
 			resp.Header.Set("Access-Control-Allow-Origin", "*")
 			resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
