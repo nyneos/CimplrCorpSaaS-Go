@@ -5,14 +5,11 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 )
 
@@ -103,91 +100,33 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		logr := logger.GlobalLogger
+		// Always set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-		// Get client IP (prefer X-Forwarded-For)
-		clientIP := r.RemoteAddr
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			clientIP = xff
-		}
-
-		// Try to extract userId from JSON or multipart/form-data body (if present)
-		var userId string
-		if r.Method == "POST" || r.Method == "PUT" {
-			ct := r.Header.Get("Content-Type")
-			if strings.HasPrefix(ct, "application/json") {
-				bodyBytes, err := io.ReadAll(r.Body)
-				if err == nil && len(bodyBytes) > 0 {
-					var bodyMap map[string]interface{}
-					if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
-						if uid, ok := bodyMap["user_id"]; ok {
-							userId, _ = uid.(string)
-						}
-					}
-				}
-				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			} else if strings.HasPrefix(ct, "multipart/form-data") {
-				err := r.ParseMultipartForm(32 << 20) // 32MB
-				if err == nil {
-					userId = r.FormValue("user_id")
-				}
-			}
-		}
-
-		msg := fmt.Sprintf("[Gateway] Incoming request: %s %s from %s userId=%s", r.Method, r.URL.Path, clientIP, userId)
-		if logr != nil {
-			logr.LogAudit(msg)
-		} else {
-			log.Println(msg)
+		// Handle preflight OPTIONS at the gateway
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 
 		url, err := url.Parse(target)
 		if err != nil {
-			msg := fmt.Sprintf("[Gateway][ERROR] Proxy error: bad target URL %s for %s", target, r.URL.Path)
-			if logr != nil {
-				logr.LogAudit(msg)
-			} else {
-				log.Println(msg)
-			}
 			http.Error(w, "Bad target URL", http.StatusInternalServerError)
 			return
 		}
 		proxy := httputil.NewSingleHostReverseProxy(url)
 
-		// Add CORS headers to the response from the proxy
-		originalDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			originalDirector(req)
-			// Optionally, you can modify the request here if needed
-		}
 		proxy.ModifyResponse = func(resp *http.Response) error {
-			resp.Header.Set("Access-Control-Allow-Origin", "*") // Or your frontend URL
+			resp.Header.Set("Access-Control-Allow-Origin", "*")
 			resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			return nil
 		}
 
-		// Handle preflight OPTIONS at the gateway
-		if r.Method == "OPTIONS" {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
 		proxy.ServeHTTP(rw, r)
-		if rw.statusCode >= 400 {
-			msg = fmt.Sprintf("[Gateway][ERROR] Proxied to %s for %s, status %d, error: %s", target, r.URL.Path, rw.statusCode, rw.body.String())
-		} else {
-			msg = fmt.Sprintf("[Gateway] Proxied to %s for %s, status %d", target, r.URL.Path, rw.statusCode)
-		}
-		if logr != nil {
-			logr.LogAudit(msg)
-		} else {
-			log.Println(msg)
-		}
 	}
 }
 
