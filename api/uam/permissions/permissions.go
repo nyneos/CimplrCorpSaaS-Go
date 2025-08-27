@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"CimplrCorpSaas/api/auth"
 )
 
 // Helper: send JSON error response
