@@ -100,30 +100,12 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Always set CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Handle preflight OPTIONS at the gateway
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
 		url, err := url.Parse(target)
 		if err != nil {
 			http.Error(w, "Bad target URL", http.StatusInternalServerError)
 			return
 		}
 		proxy := httputil.NewSingleHostReverseProxy(url)
-
-		proxy.ModifyResponse = func(resp *http.Response) error {
-			resp.Header.Set("Access-Control-Allow-Origin", "*")
-			resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			return nil
-		}
 
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
 		proxy.ServeHTTP(rw, r)
@@ -149,7 +131,7 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Or specify your frontend URL
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
