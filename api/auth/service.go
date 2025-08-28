@@ -125,21 +125,25 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	return session, nil
 }
 
-func (a *AuthService) Logout(sessionID string) error {
+func (a *AuthService) Logout(UserID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	session, exists := a.users[sessionID]
-	if !exists {
-		return errors.New("session not found")
+	found := false
+	// Remove all sessions for this user
+	for sessionID, session := range a.users {
+		if session.UserID == UserID {
+			delete(a.users, sessionID)
+			delete(a.userPointers, session.UserID)
+			found = true
+			if logger.GlobalLogger != nil {
+				logger.GlobalLogger.LogAudit("User logged out: " + session.UserID)
+			}
+		}
 	}
-	delete(a.users, sessionID)
-	delete(a.userPointers, session.UserID)
-
-	if logger.GlobalLogger != nil {
-		logger.GlobalLogger.LogAudit("User logged out: " + session.UserID)
+	if !found {
+		return errors.New("no active session found for user")
 	}
-
 	return nil
 }
 
