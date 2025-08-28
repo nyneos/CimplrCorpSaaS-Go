@@ -151,10 +151,11 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 }
 
 // Handler: GetExposuresByBookingIds
+// Handler: GetExposuresByBookingIds
 func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID              string   `json:"user_id"`
+			UserID               string   `json:"user_id"`
 			SystemTransactionIDs []string `json:"system_transaction_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.SystemTransactionIDs) == 0 || req.UserID == "" {
@@ -192,16 +193,56 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
 			valPtrs := make([]interface{}, len(cols))
-			for i := range vals { valPtrs[i] = &vals[i] }
-			if err := rows.Scan(valPtrs...); err != nil { continue }
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			if err := rows.Scan(valPtrs...); err != nil {
+				continue
+			}
 			rowMap := map[string]interface{}{}
-			for i, col := range cols { rowMap[col] = vals[i] }
+			for i, col := range cols {
+				v := vals[i]
+				switch col {
+				case "total_open_amount", "total_original_amount":
+					switch val := v.(type) {
+					case float64:
+						rowMap[col] = val
+					case []byte:
+						s := string(val)
+						if f, err := strconv.ParseFloat(s, 64); err == nil {
+							rowMap[col] = f
+						} else {
+							rowMap[col] = s
+						}
+					case string:
+						if f, err := strconv.ParseFloat(val, 64); err == nil {
+							rowMap[col] = f
+						} else {
+							rowMap[col] = val
+						}
+					default:
+						rowMap[col] = v
+					}
+				case "currency":
+					switch val := v.(type) {
+					case string:
+						rowMap[col] = val
+					case []byte:
+						rowMap[col] = string(val)
+					default:
+						rowMap[col] = v
+					}
+				default:
+					rowMap[col] = v
+				}
+			}
 			data = append(data, rowMap)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
 	}
 }
+
 
 // Helper: DeactivateExposureHedgeLinks
 func DeactivateExposureHedgeLinks(db *sql.DB, bookingIDs []string) error {
@@ -324,4 +365,5 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 
