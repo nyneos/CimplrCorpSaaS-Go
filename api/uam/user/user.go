@@ -2,6 +2,7 @@ package user
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
 
@@ -33,11 +34,23 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			Mobile                 string `json:"mobile"`
 			Address                string `json:"address"`
 			BusinessUnitName       string `json:"business_unit_name"`
-			CreatedBy              string `json:"created_by"`
 			UserID                 string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		// Get created_by from session
+		created_by := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				created_by = s.Email
+				break
+			}
+		}
+		if created_by == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		tx, err := db.Begin()
@@ -65,7 +78,7 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			req.Mobile,
 			req.Address,
 			req.BusinessUnitName,
-			req.CreatedBy,
+			created_by,
 		).Scan(&userId)
 		if err != nil {
 			respondWithError(w, http.StatusBadRequest, err.Error())
@@ -195,85 +208,67 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 // Handler: Update user
 func UpdateUser(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
-        // Parse request body
         var req map[string]interface{}
         if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
             respondWithError(w, http.StatusBadRequest, "Invalid request body")
             return
         }
-
-        // Extract id and user_id safely
-        idVal, ok := req["id"]
-        if !ok {
-            respondWithError(w, http.StatusBadRequest, "Missing id in request body")
+        id, idOk := req["id"].(string)
+        userID, userIDOk := req["user_id"].(string)
+        if !idOk || !userIDOk || id == "" || userID == "" {
+            respondWithError(w, http.StatusBadRequest, "Missing id or user_id")
             return
         }
-        id := fmt.Sprint(idVal)
-
-        userIDVal, ok := req["user_id"]
-        if !ok {
-            respondWithError(w, http.StatusBadRequest, "Missing user_id in request body")
-            return
-        }
-        userID := fmt.Sprint(userIDVal)
-
-        if id == "" || userID == "" {
-            respondWithError(w, http.StatusBadRequest, "Invalid id or user_id")
-            return
-        }
-
-        // Middleware: check business units
         buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
         if !ok || len(buNames) == 0 {
             respondWithError(w, http.StatusNotFound, "No accessible business units found")
             return
         }
-
-        // Key mapping
-        keyMap := map[string]string{
-            "username":            "username_or_employee_id",
-            "createdDate":         "created_at",
-            "createdBy":           "created_by",
-            "businessUnitName":    "business_unit_name",
-            "authenticationType":  "authentication_type",
-            "employeeName":        "employee_name",
-            "statusChangeRequest": "", // skipped
-            "role":                "", // skipped
-        }
-
-        // Prepare fields for update
-        fields := map[string]interface{}{}
-        for k, v := range req {
-            if k == "user_id" || k == "id" {
-                continue
-            }
-            mappedKey, exists := keyMap[k]
-            finalKey := k
-            if exists && mappedKey != "" {
-                finalKey = mappedKey
-            } else if exists && mappedKey == "" {
-                continue // skip null-mapped keys
-            }
-            // Convert camelCase to snake_case
-            snakeKey := toSnakeCase(finalKey)
-            if v != nil && fmt.Sprint(v) != "" {
-                fields[snakeKey] = v
+        // Get updated_by from session
+        updatedBy := ""
+        sessions := auth.GetActiveSessions()
+        for _, s := range sessions {
+            if s.UserID == userID {
+                updatedBy = s.Email
+                break
             }
         }
-
-        // Always set status to Awaiting-Approval
-        fields["status"] = "Awaiting-Approval"
-
-        if len(fields) == 0 {
-            respondWithError(w, http.StatusBadRequest, "No fields to update")
+        if updatedBy == "" {
+            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
             return
         }
-
+        // Allowed fields to update
+        allowed := map[string]bool{
+            "authentication_type": true,
+            "employee_name": true,
+            "username_or_employee_id": true,
+            "email": true,
+            "mobile": true,
+            "address": true,
+            "business_unit_name": true,
+            "status": true,
+            "approved_by": true,
+            "approved_at": true,
+            "rejected_by": true,
+            "rejected_at": true,
+            "approval_comment": true,
+            "password": true,
+        }
+        fields := map[string]interface{}{}
+        for k, v := range req {
+            if allowed[k] {
+                fields[k] = v
+            }
+        }
+        fields["updated_by"] = updatedBy
+        if len(fields) == 0 {
+            respondWithError(w, http.StatusBadRequest, "No valid fields to update")
+            return
+        }
         // Build query
         keys := make([]string, 0, len(fields))
         values := make([]interface{}, 0, len(fields))
         setClause := ""
-
         for k := range fields {
             keys = append(keys, k)
         }
@@ -284,75 +279,49 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
             setClause += k + " = $" + fmt.Sprint(idx+1)
             values = append(values, fields[k])
         }
-
-        // WHERE clause for id and business_unit_name
         query := fmt.Sprintf(
             "UPDATE users SET %s WHERE id = $%d AND business_unit_name = ANY($%d) RETURNING *",
             setClause, len(keys)+1, len(keys)+2,
         )
         values = append(values, id, pq.Array(buNames))
-
-        // Execute query and fetch row(s)
         rows, err := db.Query(query, values...)
         if err != nil {
             respondWithError(w, http.StatusInternalServerError, err.Error())
             return
         }
         defer rows.Close()
-
-        // Get column names
-        cols, err := rows.Columns()
-        if err != nil {
-            respondWithError(w, http.StatusInternalServerError, err.Error())
+        cols, _ := rows.Columns()
+        if !rows.Next() {
+            respondWithError(w, http.StatusNotFound, "User not found or not accessible")
             return
         }
-
-        // Prepare scan targets
         vals := make([]interface{}, len(cols))
         valPtrs := make([]interface{}, len(cols))
         for i := range vals {
             valPtrs[i] = &vals[i]
         }
-
-        // Make sure a row exists
-        if !rows.Next() {
-            respondWithError(w, http.StatusNotFound, "User not found or not accessible")
-            return
-        }
-
-        // Scan into valPtrs
-        if err := rows.Scan(valPtrs...); err != nil {
-            respondWithError(w, http.StatusInternalServerError, err.Error())
-            return
-        }
-
-        // Build user map
-        userMap := make(map[string]interface{})
+        rows.Scan(valPtrs...)
+        userMap := map[string]interface{}{}
         for i, col := range cols {
             userMap[col] = vals[i]
         }
-
-        // Respond
         w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(map[string]interface{}{
-            "success": true,
-            "user":    userMap,
-        })
+        json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
     }
 }
 
 // Helper: convert camelCase to snake_case
-func toSnakeCase(str string) string {
-    var result []rune
-    for i, r := range str {
-        if i > 0 && r >= 'A' && r <= 'Z' {
-            result = append(result, '_', r+'a'-'A')
-        } else {
-            result = append(result, r)
-        }
-    }
-    return string(result)
-}
+// func toSnakeCase(str string) string {
+//     var result []rune
+//     for i, r := range str {
+//         if i > 0 && r >= 'A' && r <= 'Z' {
+//             result = append(result, '_', r+'a'-'A')
+//         } else {
+//             result = append(result, r)
+//         }
+//     }
+//     return string(result)
+// }
 
 // Handler: Delete user (soft delete)
 func DeleteUser(db *sql.DB) http.HandlerFunc {
@@ -407,11 +376,11 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID         string   `json:"user_id"` // for middleware
 			Ids            []string `json:"ids"`     // users to approve/delete
-			ApprovedBy     string   `json:"approved_by"`
+			// ApprovedBy     string   `json:"approved_by"`
 			ApprovalComment string  `json:"approval_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0 || req.ApprovedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "ids and approved_by are required")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0 || req.ApprovalComment == "" {
+			respondWithError(w, http.StatusBadRequest, "ids and approval_comment are required")
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -477,11 +446,24 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				   }
 			   }
 		   }
+		// Get approved_by from session
+        approvedBy := ""
+        sessions := auth.GetActiveSessions()
+        for _, s := range sessions {
+            if s.UserID == req.UserID {
+                approvedBy = s.Email
+                break
+            }
+        }
+        if approvedBy == "" {
+            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+            return
+        }
 		// Approve users
 		if len(toApprove) > 0 {
 			appRows, err := db.Query(
 				"UPDATE users SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4) RETURNING *",
-				req.ApprovedBy, req.ApprovalComment, pq.Array(toApprove), pq.Array(buNames),
+				approvedBy, req.ApprovalComment, pq.Array(toApprove), pq.Array(buNames),
 			)
 			if err == nil {
 				defer appRows.Close()
@@ -511,10 +493,10 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID           string   `json:"user_id"` // for middleware
 			Ids              []string `json:"ids"`     // users to reject
-			RejectedBy       string   `json:"rejected_by"`
+			// RejectedBy       string   `json:"rejected_by"`
 			RejectionComment string   `json:"rejection_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0 || req.RejectedBy == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0  {
 			respondWithError(w, http.StatusBadRequest, "ids and rejected_by are required")
 			return
 		}
@@ -523,9 +505,22 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
+		// Get rejected_by from session
+        rejectedBy := ""
+        sessions := auth.GetActiveSessions()
+        for _, s := range sessions {
+            if s.UserID == req.UserID {
+                rejectedBy = s.Email
+                break
+            }
+        }
+        if rejectedBy == "" {
+            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+            return
+        }
 		rows, err := db.Query(
-			"UPDATE users SET status = 'Rejected', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4) RETURNING *",
-			req.RejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(buNames),
+			"UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4) RETURNING *",
+			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(buNames),
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
