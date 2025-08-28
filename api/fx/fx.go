@@ -20,7 +20,7 @@ func StartFXService(db *sql.DB) {
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
 	/*-------------     exposures    ;)      --------------------*/
 	/*upload */
-	mux.Handle("/fx/exposures/upload-exposure", api.BusinessUnitMiddleware(db)(http.HandlerFunc(exposures.UploadExposure)))
+
 	mux.Handle("/fx/exposures/edit", api.BusinessUnitMiddleware(db)(exposures.EditExposureHeadersLineItemsJoined(db)))
 	mux.Handle("/fx/exposures/headers-line-items", api.BusinessUnitMiddleware(db)(exposures.GetExposureHeadersLineItems(db)))
 	mux.Handle("/fx/exposures/pending-headers-line-items", api.BusinessUnitMiddleware(db)(exposures.GetPendingApprovalHeadersLineItems(db)))
@@ -35,13 +35,13 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/exposures/reject-bucketing-status", api.BusinessUnitMiddleware(db)(exposures.RejectBucketingStatus(db)))
 	/*hedging-proposals */
 	mux.Handle("/fx/exposures/get-hedging-proposals", api.BusinessUnitMiddleware(db)(exposures.GetHedgingProposalsAggregated(db)))
-/*linkage */
+	/*linkage */
 	mux.Handle("/fx/exposures/hedge-links-details", api.BusinessUnitMiddleware(db)(exposures.HedgeLinksDetails(db)))
 	mux.Handle("/fx/exposures/expfwd-linking-bookings", api.BusinessUnitMiddleware(db)(exposures.ExpFwdLinkingBookings(db)))
 	mux.Handle("/fx/exposures/expfwd-linking", api.BusinessUnitMiddleware(db)(exposures.ExpFwdLinking(db)))
 	mux.Handle("/fx/exposures/link-exposure-hedge", api.BusinessUnitMiddleware(db)(exposures.LinkExposureHedge(db)))
 
-// Settlement endpoints
+	// Settlement endpoints
 	mux.Handle("/fx/exposures/filter-forward-bookings-for-settlement", api.BusinessUnitMiddleware(db)(exposures.FilterForwardBookingsForSettlement(db)))
 	mux.Handle("/fx/exposures/get-forward-bookings-by-entity-currency", api.BusinessUnitMiddleware(db)(exposures.GetForwardBookingsByEntityAndCurrency(db)))
 
@@ -55,11 +55,20 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/forwards/exposures-by-booking-ids", api.BusinessUnitMiddleware(db)(forwards.GetExposuresByBookingIds(db)))
 	mux.Handle("/fx/forwards/create-forward-cancellations", api.BusinessUnitMiddleware(db)(forwards.CreateForwardCancellations(db)))
 
+	// New Forward Booking & Confirmation routes
+	mux.Handle("/fx/forwards/manual-entry", api.BusinessUnitMiddleware(db)(forwards.AddForwardBookingManualEntry(db)))
+	mux.Handle("/fx/forwards/entity-relevant-list", api.BusinessUnitMiddleware(db)(forwards.GetEntityRelevantForwardBookings(db)))
+	// mux.Handle("/fx/forwards/update-processing-status", api.BusinessUnitMiddleware(db)(forwards.UpdateForwardBookingProcessingStatus(db)))
+	mux.Handle("/fx/forwards/bulk-update-processing-status", api.BusinessUnitMiddleware(db)(forwards.BulkUpdateForwardBookingProcessingStatus(db)))
+	mux.Handle("/fx/forwards/bulk-delete", api.BusinessUnitMiddleware(db)(forwards.BulkDeleteForwardBookings(db)))
+	mux.Handle("/fx/forwards/manual-confirmation-entry", api.BusinessUnitMiddleware(db)(forwards.AddForwardConfirmationManualEntry(db)))
+	mux.Handle("/fx/forwards/upload-multi", api.BusinessUnitMiddleware(db)(forwards.UploadForwardBookingsMulti(db)))
+	mux.Handle("/fx/forwards/upload-confirmations-multi", api.BusinessUnitMiddleware(db)(forwards.UploadForwardConfirmationsMulti(db)))
+	mux.Handle("/fx/forwards/upload-bank-multi", api.BusinessUnitMiddleware(db)(forwards.UploadBankForwardBookingsMulti(db)))
+
 	log.Println("FX Service started on :3143")
 	err := http.ListenAndServe(":3143", mux)
 	if err != nil {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
-
-

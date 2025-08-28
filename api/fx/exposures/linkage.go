@@ -58,8 +58,10 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			for i, col := range cols { rowMap[col] = vals[i] }
 			data = append(data, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": data,
+		})
 	}
 }
 
@@ -145,7 +147,11 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		// json.NewEncoder(w).Encode(response)
+		 json.NewEncoder(w).Encode(map[string]interface{}{
+			   "success": true,
+			   "data": response,
+		   })
 	}
 }
 
@@ -233,8 +239,11 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		   w.Header().Set("Content-Type", "application/json")
+		   json.NewEncoder(w).Encode(map[string]interface{}{
+			   "success": true,
+			   "data": response,
+		   })
 	}
 }
 

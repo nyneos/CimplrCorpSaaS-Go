@@ -1,11 +1,11 @@
 package permissions
 
 import (
+	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"CimplrCorpSaas/api/auth"
 )
 
 // Helper: send JSON error response
@@ -360,7 +360,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		// Collect updated permissions
 		updatedPermissions := []map[string]interface{}{}
 		for rows.Next() {
-			var  roleID, permissionID int
+			var roleID, permissionID int
 			var allowed bool
 			var status string
 			if err := rows.Scan(&roleID, &permissionID, &allowed, &status); err != nil {
@@ -376,7 +376,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":           true,
+			"success": true,
 			// "user_id":           req.UserID,
 			"updatedPermissions": updatedPermissions,
 		})
@@ -435,7 +435,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
+			"success": true,
 			// "user_id":    req.UserID,
 			"rolesStatus": rolesStatus,
 		})

@@ -60,7 +60,6 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 	w.Write(responseNames)
 }
 
-
 // Helper: send JSON error response and log
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
@@ -95,11 +94,11 @@ func parseDBValue(col string, val interface{}) interface{} {
 		// Numeric fields
 		numericFields := map[string]bool{
 			"amount_in_local_currency": true,
-			"line_item_amount": true,
-			"quantity": true,
-			"total_open_amount": true,
-			"total_original_amount": true,
-			"unit_price": true,
+			"line_item_amount":         true,
+			"quantity":                 true,
+			"total_open_amount":        true,
+			"total_original_amount":    true,
+			"unit_price":               true,
 		}
 		if numericFields[col] {
 			s := string(b)
@@ -270,8 +269,6 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-
-
 // Handler: GetExposureHeadersLineItems - returns joined exposure_headers and exposure_line_items filtered by entity
 func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -407,7 +404,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 
 		resp := map[string]interface{}{
 			"buAccessible": buNames,
-			"pageData": joinData,
+			"pageData":     joinData,
 		}
 		if perms, ok := exposureUploadPerms["exposure-upload"]; ok {
 			resp["exposure-upload"] = perms
@@ -566,7 +563,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 
 		resp := map[string]interface{}{
 			"buAccessible": buNames,
-			"pageData": joinData,
+			"pageData":     joinData,
 		}
 		if perms, ok := exposureUploadPerms["exposure-upload"]; ok {
 			resp["exposure-upload"] = perms
@@ -962,6 +959,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 // Handler: BatchUploadStagingData - handles batch upload for staging tables
 func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1111,8 +1109,8 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 					}
 					if len(invalidRows) > 0 {
 						results = append(results, map[string]interface{}{
-							"filename": filename,
-							"error": "Some rows have business_unit not allowed for this user.",
+							"filename":            filename,
+							"error":               "Some rows have business_unit not allowed for this user.",
 							"invalidReferenceNos": invalidRows,
 						})
 						os.Remove(tempFile.Name())
@@ -1148,7 +1146,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 					if err == nil {
 						defer mappingRows.Close()
 						var mappings []struct {
-							SourceCol string
+							SourceCol   string
 							TargetTable string
 							TargetField string
 						}
@@ -1156,7 +1154,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 							var src, tgtTable, tgtField string
 							mappingRows.Scan(&src, &tgtTable, &tgtField)
 							mappings = append(mappings, struct {
-								SourceCol string
+								SourceCol   string
 								TargetTable string
 								TargetField string
 							}{src, tgtTable, tgtField})
@@ -1321,11 +1319,11 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 						msg = "Batch absorbed into exposures"
 					}
 					results = append(results, map[string]interface{}{
-						"success": success,
-						"filename": filename,
-						"message": msg,
-						"uploadBatchId": uploadBatchId,
-						"insertedRows": insertedRows,
+						"success":           success,
+						"filename":          filename,
+						"message":           msg,
+						"uploadBatchId":     uploadBatchId,
+						"insertedRows":      insertedRows,
 						"insertedFinalRows": insertedFinalRows,
 					})
 					os.Remove(tempFile.Name())
@@ -1357,7 +1355,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
-				"error": strings.Join(allErrors, "; "),
+				"error":   strings.Join(allErrors, "; "),
 			})
 			return
 		}
@@ -1365,7 +1363,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data": results,
+			"data":    results,
 		})
 
 	}
