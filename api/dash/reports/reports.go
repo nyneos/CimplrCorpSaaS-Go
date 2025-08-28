@@ -10,10 +10,48 @@ import (
 	"github.com/lib/pq"
 )
 
+type Summary struct {
+	ExposureHeaderID    string  `json:"exposure_header_id"`
+	CompanyCode         string  `json:"company_code"`
+	Entity              string  `json:"entity"`
+	Entity1             string  `json:"entity1"`
+	Entity2             string  `json:"entity2"`
+	Entity3             string  `json:"entity3"`
+	ExposureType        string  `json:"exposure_type"`
+	DocumentID          string  `json:"document_id"`
+	DocumentDate        string  `json:"document_date"`
+	MaturityMonth       string  `json:"maturity_month"`
+	CounterpartyName    string  `json:"counterparty_name"`
+	Currency            string  `json:"currency"`
+	TotalOriginalAmount float64 `json:"total_original_amount"`
+	TotalOpenAmount     float64 `json:"total_open_amount"`
+	ValueDate           string  `json:"value_date"`
+	HedgedValue         float64 `json:"hedged_value"`
+	UnhedgedValue       float64 `json:"unhedged_value"`
+}
+type Exposure struct {
+	ExposureHeaderID    string
+	CompanyCode         string
+	Entity              string
+	Entity1             sql.NullString
+	Entity2             sql.NullString
+	Entity3             sql.NullString
+	ExposureType        string
+	DocumentID          string
+	DocumentDate        string
+	CounterpartyName    string
+	Currency            string
+	TotalOriginalAmount float64
+	TotalOpenAmount     float64
+	ValueDate           string
+}
+
 // Handler: GetExposureSummary
 func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
@@ -26,29 +64,14 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
 			return
 		}
-		
+
 		expRows, err := db.Query(`SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to fetch exposures"})
 			return
 		}
-		type Exposure struct {
-			ExposureHeaderID string
-			CompanyCode string
-			Entity string
-			Entity1 string
-			Entity2 string
-			Entity3 string
-			ExposureType string
-			DocumentID string
-			DocumentDate string
-			CounterpartyName string
-			Currency string
-			TotalOriginalAmount float64
-			TotalOpenAmount float64
-			ValueDate string
-		}
+
 		var exposures []Exposure
 		var exposureIds []string
 		for expRows.Next() {
@@ -76,25 +99,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		// 5. Build summary
-		type Summary struct {
-			ExposureHeaderID string `json:"exposure_header_id"`
-			CompanyCode string `json:"company_code"`
-			Entity string `json:"entity"`
-			Entity1 string `json:"entity1"`
-			Entity2 string `json:"entity2"`
-			Entity3 string `json:"entity3"`
-			ExposureType string `json:"exposure_type"`
-			DocumentID string `json:"document_id"`
-			DocumentDate string `json:"document_date"`
-			MaturityMonth string `json:"maturity_month"`
-			CounterpartyName string `json:"counterparty_name"`
-			Currency string `json:"currency"`
-			TotalOriginalAmount float64 `json:"total_original_amount"`
-			TotalOpenAmount float64 `json:"total_open_amount"`
-			ValueDate string `json:"value_date"`
-			HedgedValue float64 `json:"hedged_value"`
-			UnhedgedValue float64 `json:"unhedged_value"`
-		}
+
 		var summary []Summary
 		for _, exp := range exposures {
 			hedgedValue := hedgeMap[exp.ExposureHeaderID]
@@ -115,22 +120,40 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			}
 			summary = append(summary, Summary{
 				ExposureHeaderID: exp.ExposureHeaderID,
-				CompanyCode: exp.CompanyCode,
-				Entity: exp.Entity,
-				Entity1: exp.Entity1,
-				Entity2: exp.Entity2,
-				Entity3: exp.Entity3,
-				ExposureType: exp.ExposureType,
-				DocumentID: exp.DocumentID,
-				DocumentDate: exp.DocumentDate,
-				MaturityMonth: maturityMonth,
-				CounterpartyName: exp.CounterpartyName,
-				Currency: exp.Currency,
+				CompanyCode:      exp.CompanyCode,
+				Entity:           exp.Entity,
+				Entity1: func() string {
+					if exp.Entity1.Valid {
+						return exp.Entity1.String
+					} else {
+						return ""
+					}
+				}(),
+				Entity2: func() string {
+					if exp.Entity2.Valid {
+						return exp.Entity2.String
+					} else {
+						return ""
+					}
+				}(),
+				Entity3: func() string {
+					if exp.Entity3.Valid {
+						return exp.Entity3.String
+					} else {
+						return ""
+					}
+				}(),
+				ExposureType:        exp.ExposureType,
+				DocumentID:          exp.DocumentID,
+				DocumentDate:        exp.DocumentDate,
+				MaturityMonth:       maturityMonth,
+				CounterpartyName:    exp.CounterpartyName,
+				Currency:            exp.Currency,
 				TotalOriginalAmount: exp.TotalOriginalAmount,
-				TotalOpenAmount: exp.TotalOpenAmount,
-				ValueDate: exp.ValueDate,
-				HedgedValue: hedgedValue,
-				UnhedgedValue: unhedgedValue,
+				TotalOpenAmount:     exp.TotalOpenAmount,
+				ValueDate:           exp.ValueDate,
+				HedgedValue:         hedgedValue,
+				UnhedgedValue:       unhedgedValue,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -141,7 +164,9 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 // Handler: GetLinkedSummaryByCategory
 func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
@@ -231,8 +256,8 @@ func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"Fwd Booking": fwdBooking,
-			"Fwd Rollovers": fwdRollovers,
+			"Fwd Booking":      fwdBooking,
+			"Fwd Rollovers":    fwdRollovers,
 			"Fwd Cancellation": fwdCancellation,
 		})
 	}
