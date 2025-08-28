@@ -5,14 +5,219 @@ import (
 	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
-
+	"strings"
+	"time"
+	"math/rand"
 	"github.com/lib/pq"
+	// "github.com/lib/pq"
 )
 
-// Handler for forward cancel/roll
+func GenerateFXRef() string {
+	rand.Seed(time.Now().UnixNano())
+	randomPart := rand.Intn(900000) + 100000 
+	return fmt.Sprintf("FX-TACO-%d", randomPart)
+}
+// Handler: RolloverForwardBooking
+func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		parseDate := func(dateStr string) (string, error) {
+			if strings.TrimSpace(dateStr) == "" {
+				return "", fmt.Errorf("empty date string")
+			}
+			t, err := time.Parse("2006-01-02", dateStr)
+			if err != nil {
+				// Try parsing as RFC3339 or other common formats
+				t2, err2 := time.Parse("2006-01-02T15:04:05Z07:00", dateStr)
+				if err2 != nil {
+					return "", fmt.Errorf("invalid date format: %s", dateStr)
+				}
+				t = t2
+			}
+			return t.Format("2006-01-02"), nil
+		}
+
+
+		var req struct {
+			UserID             string             `json:"user_id"`
+			BookingAmounts     map[string]float64 `json:"booking_amounts"`
+			CancellationDate   string             `json:"cancellation_date"`
+			CancellationRate   float64            `json:"cancellation_rate"`
+			RealizedGainLoss   float64            `json:"realized_gain_loss"`
+			CancellationReason string             `json:"cancellation_reason"`
+			NewForward         struct {
+				FXPair          string `json:"fxPair"`
+				OrderType       string `json:"orderType"`
+				MaturityDate    string `json:"maturityDate"`
+				Amount          string `json:"amount"`
+				SpotRate        string `json:"spotRate"`
+				PremiumDiscount string `json:"premiumDiscount"`
+				MarginRate      string `json:"marginRate"`
+				NetRate         string `json:"netRate"`
+			} `json:"new_forward"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationDate == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+
+		addDate, err := parseDate(req.CancellationDate)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid cancellation_date: "+err.Error())
+			return
+		}
+		settlementDate, err := parseDate(req.CancellationDate)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid settlement_date: "+err.Error())
+			return
+		}
+		maturityDate, err := parseDate(req.NewForward.MaturityDate)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid maturity_date: "+err.Error())
+			return
+		}
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !ok || len(buNames) == 0 {
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			return
+		}
+
+		cancelledBookingIDs := []string{}
+		var origBookingID string
+		var origBookingAmount float64
+		for bid, amtCancelled := range req.BookingAmounts {
+			origBookingID = bid
+			
+			if b, ok := any(origBookingID).([]byte); ok {
+				origBookingID = string(b)
+			}
+			origBookingID = strings.TrimSpace(origBookingID)
+			
+			var openAmount float64
+			var ledgerSeq int
+			err := db.QueryRow(`SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
+			if err == sql.ErrNoRows {
+				
+				err = db.QueryRow(`SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
+				if err != nil {
+					respondWithError(w, http.StatusNotFound, "Booking not found for cancellation")
+					return
+				}
+				ledgerSeq = 0
+			} else if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to fetch ledger for cancellation")
+				return
+			}
+			origBookingAmount = openAmount
+			ledgerSeq++
+			newOpenAmount := math.Abs(openAmount) - amtCancelled
+			actionType := "Partial Cancellation"
+			if newOpenAmount <= 0.0001 {
+				newOpenAmount = 0
+				actionType = "Cancellation"
+			}
+			
+			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+				bid, ledgerSeq, actionType, bid, req.CancellationDate, -amtCancelled, newOpenAmount)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to insert cancellation ledger entry")
+				return
+			}
+			
+			_, err = db.Exec(`INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason) VALUES ($1, $2, $3, $4, $5, $6)`,
+				bid, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to insert cancellation record")
+				return
+			}
+			if newOpenAmount == 0 {
+				cancelledBookingIDs = append(cancelledBookingIDs, bid)
+			}
+		}
+		
+		if len(cancelledBookingIDs) > 0 {
+			_, err := db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = ANY($1)`, pq.Array(cancelledBookingIDs))
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to update forward bookings status")
+				return
+			}
+			
+			err = DeactivateExposureHedgeLinks(db, cancelledBookingIDs)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to deactivate exposure hedge links")
+				return
+			}
+		}
+
+		
+		randomRef := strconv.FormatInt(int64(100000+int64((1000000-100000)*int64((1+int64(origBookingAmount))%10000))), 10)
+		
+		var entityLevel0, localCurrency, counterparty string
+		var entityLevel1, entityLevel2, entityLevel3 sql.NullString
+		err = db.QueryRow(`SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, origBookingID).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to fetch original booking details for rollover: "+err.Error())
+			return
+		}
+		
+		var entityLevel1Val, entityLevel2Val, entityLevel3Val *string
+		if entityLevel1.Valid {
+			entityLevel1Val = &entityLevel1.String
+		}
+		if entityLevel2.Valid {
+			entityLevel2Val = &entityLevel2.String
+		}
+		if entityLevel3.Valid {
+			entityLevel3Val = &entityLevel3.String
+		}
+		
+		var newBookingID string
+		err = db.QueryRow(`INSERT INTO forward_bookings (
+		      internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
+	      ) VALUES (
+		      $1,$2,$3,$4,$5,$6,$7,NULL,$8,NULL,NULL,$9,$10,$11,NULL,$12,NULL,$13,$14,NULL,NULL,$15,$16,$17,$18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'Pending Confirmation','pending'
+	      ) RETURNING system_transaction_id`,
+			randomRef, entityLevel0, entityLevel1Val, entityLevel2Val, entityLevel3Val, localCurrency, req.NewForward.OrderType, counterparty, addDate, settlementDate, maturityDate, req.NewForward.FXPair, localCurrency, req.NewForward.Amount, req.NewForward.SpotRate, req.NewForward.PremiumDiscount, req.NewForward.MarginRate, req.NewForward.NetRate,
+		).Scan(&newBookingID)
+		if err != nil {
+			fmt.Printf("Error inserting new forward booking for rollover: %v\n", err)
+			respondWithError(w, http.StatusInternalServerError, "Failed to insert new forward booking for rollover: "+err.Error())
+			return
+		}
+
+
+		var newLedgerSeq int
+		_ = db.QueryRow(`SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
+		newLedgerSeq++
+		_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			newBookingID, newLedgerSeq, "Rollover", newBookingID, req.CancellationDate, req.NewForward.Amount, req.NewForward.Amount)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to insert rollover ledger entry")
+			return
+		}
+
+		_, err = db.Exec(`INSERT INTO forward_rollovers (booking_id, amount_rolled_over, rollover_date, original_maturity_date, new_maturity_date, rollover_cost) VALUES ($1, $2, $3, $4, $5, $6)`,
+			origBookingID, req.NewForward.Amount, req.CancellationDate, req.CancellationDate, req.NewForward.MaturityDate, req.RealizedGainLoss)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to insert forward rollover record")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"message":        "Rollover completed successfully",
+			"new_booking_id": newBookingID,
+		})
+	}
+}
 
 // Handler: GetForwardBookingList
 func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
@@ -365,5 +570,6 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 
 
