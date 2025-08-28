@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"fmt"
 )
 
 // Global reference to AuthService (set from main or manager)
@@ -72,23 +73,37 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // LogoutHandler handles POST /auth/logout
+// LogoutHandler handles POST /auth/logout
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	userID := ""
+	if v, ok := raw["user_id"]; ok {
+		switch val := v.(type) {
+		case string:
+			userID = val
+		case float64:
+			userID = fmt.Sprintf("%.0f", val)
+		default:
+			http.Error(w, "Invalid user_id type", http.StatusBadRequest)
+			return
+		}
+	} else {
+		http.Error(w, "user_id required", http.StatusBadRequest)
 		return
 	}
 	if authService == nil {
 		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
 		return
 	}
-	err := authService.Logout(req.SessionID)
+	err := authService.Logout(userID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -96,6 +111,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"message":"logout successful"}`))
 }
+
 
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
