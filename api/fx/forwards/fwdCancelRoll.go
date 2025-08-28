@@ -1,26 +1,27 @@
 package forwards
 
-
 import (
 	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"math/rand"
+
 	"github.com/lib/pq"
 	// "github.com/lib/pq"
 )
 
 func GenerateFXRef() string {
 	rand.Seed(time.Now().UnixNano())
-	randomPart := rand.Intn(900000) + 100000 
+	randomPart := rand.Intn(900000) + 100000
 	return fmt.Sprintf("FX-TACO-%d", randomPart)
 }
+
 // Handler: RolloverForwardBooking
 func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 
@@ -41,7 +42,6 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 			}
 			return t.Format("2006-01-02"), nil
 		}
-
 
 		var req struct {
 			UserID             string             `json:"user_id"`
@@ -67,7 +67,6 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-
 		addDate, err := parseDate(req.CancellationDate)
 		if err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid cancellation_date: "+err.Error())
@@ -91,20 +90,19 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 
 		cancelledBookingIDs := []string{}
 		var origBookingID string
-		var origBookingAmount float64
 		for bid, amtCancelled := range req.BookingAmounts {
 			origBookingID = bid
-			
+
 			if b, ok := any(origBookingID).([]byte); ok {
 				origBookingID = string(b)
 			}
 			origBookingID = strings.TrimSpace(origBookingID)
-			
+
 			var openAmount float64
 			var ledgerSeq int
 			err := db.QueryRow(`SELECT running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bid).Scan(&openAmount, &ledgerSeq)
 			if err == sql.ErrNoRows {
-				
+
 				err = db.QueryRow(`SELECT booking_amount FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&openAmount)
 				if err != nil {
 					respondWithError(w, http.StatusNotFound, "Booking not found for cancellation")
@@ -115,7 +113,6 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				respondWithError(w, http.StatusInternalServerError, "Failed to fetch ledger for cancellation")
 				return
 			}
-			origBookingAmount = openAmount
 			ledgerSeq++
 			newOpenAmount := math.Abs(openAmount) - amtCancelled
 			actionType := "Partial Cancellation"
@@ -123,14 +120,14 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				newOpenAmount = 0
 				actionType = "Cancellation"
 			}
-			
+
 			_, err = db.Exec(`INSERT INTO forward_booking_ledger (booking_id, ledger_sequence, action_type, action_id, action_date, amount_changed, running_open_amount) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 				bid, ledgerSeq, actionType, bid, req.CancellationDate, -amtCancelled, newOpenAmount)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to insert cancellation ledger entry")
 				return
 			}
-			
+
 			_, err = db.Exec(`INSERT INTO forward_cancellations (booking_id, amount_cancelled, cancellation_date, cancellation_rate, realized_gain_loss, cancellation_reason) VALUES ($1, $2, $3, $4, $5, $6)`,
 				bid, amtCancelled, req.CancellationDate, req.CancellationRate, req.RealizedGainLoss, req.CancellationReason)
 			if err != nil {
@@ -141,14 +138,14 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				cancelledBookingIDs = append(cancelledBookingIDs, bid)
 			}
 		}
-		
+
 		if len(cancelledBookingIDs) > 0 {
 			_, err := db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = ANY($1)`, pq.Array(cancelledBookingIDs))
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to update forward bookings status")
 				return
 			}
-			
+
 			err = DeactivateExposureHedgeLinks(db, cancelledBookingIDs)
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "Failed to deactivate exposure hedge links")
@@ -156,9 +153,8 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		
 		randomRef := GenerateFXRef()
-		
+
 		var entityLevel0, localCurrency, counterparty string
 		var entityLevel1, entityLevel2, entityLevel3 sql.NullString
 		err = db.QueryRow(`SELECT entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, counterparty FROM forward_bookings WHERE system_transaction_id::text = $1`, origBookingID).Scan(&entityLevel0, &entityLevel1, &entityLevel2, &entityLevel3, &localCurrency, &counterparty)
@@ -166,7 +162,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch original booking details for rollover: "+err.Error())
 			return
 		}
-		
+
 		var entityLevel1Val, entityLevel2Val, entityLevel3Val *string
 		if entityLevel1.Valid {
 			entityLevel1Val = &entityLevel1.String
@@ -177,7 +173,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 		if entityLevel3.Valid {
 			entityLevel3Val = &entityLevel3.String
 		}
-		
+
 		var newBookingID string
 		err = db.QueryRow(`INSERT INTO forward_bookings (
 		      internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, status, processing_status
@@ -191,7 +187,6 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "Failed to insert new forward booking for rollover: "+err.Error())
 			return
 		}
-
 
 		var newLedgerSeq int
 		_ = db.QueryRow(`SELECT COALESCE(MAX(ledger_sequence),0) FROM forward_booking_ledger WHERE booking_id = $1`, newBookingID).Scan(&newLedgerSeq)
@@ -570,6 +565,7 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 
 
 
