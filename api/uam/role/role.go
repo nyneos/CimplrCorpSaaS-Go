@@ -21,7 +21,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 		"error":   errMsg,
 	})
 }
-
+ 
 // Handler: Create role
 func CreateRole(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
