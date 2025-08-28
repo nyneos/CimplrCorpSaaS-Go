@@ -157,7 +157,7 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 		}
 
 		
-		randomRef := strconv.FormatInt(int64(100000+int64((1000000-100000)*int64((1+int64(origBookingAmount))%10000))), 10)
+		randomRef := GenerateFXRef()
 		
 		var entityLevel0, localCurrency, counterparty string
 		var entityLevel1, entityLevel2, entityLevel3 sql.NullString
@@ -570,6 +570,7 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 
 
 
