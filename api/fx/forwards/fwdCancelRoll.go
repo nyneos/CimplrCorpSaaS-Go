@@ -1,11 +1,13 @@
 package forwards
 
+
 import (
 	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
 	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/lib/pq"
 )
@@ -41,6 +43,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
 				AND status NOT IN ('Cancelled', 'Pending Confirmation')
+				AND processing_status = 'Approved'
 		`
 		rows, err := db.Query(query, pq.Array(buNames))
 		if err != nil {
@@ -60,8 +63,85 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			rowMap := map[string]interface{}{}
+			var bookingID string
+			var origBookingAmount float64
 			for i, col := range cols {
-				rowMap[col] = vals[i]
+				v := vals[i]
+				// decode and parse as needed
+				switch col {
+				case "system_transaction_id":
+					switch val := v.(type) {
+					case string:
+						bookingID = val
+						rowMap[col] = val
+					case []byte:
+						s := string(val)
+						bookingID = s
+						rowMap[col] = s
+					default:
+						rowMap[col] = v
+					}
+				case "booking_amount":
+					switch val := v.(type) {
+					case float64:
+						origBookingAmount = val
+						rowMap[col] = val
+					case []byte:
+						s := string(val)
+						if f, err := strconv.ParseFloat(s, 64); err == nil {
+							origBookingAmount = f
+							rowMap[col] = f
+						} else {
+							rowMap[col] = s
+						}
+					case string:
+						if f, err := strconv.ParseFloat(val, 64); err == nil {
+							origBookingAmount = f
+							rowMap[col] = f
+						} else {
+							rowMap[col] = val
+						}
+					default:
+						rowMap[col] = v
+					}
+				case "spot_rate":
+					switch val := v.(type) {
+					case float64:
+						rowMap[col] = val
+					case []byte:
+						s := string(val)
+						if f, err := strconv.ParseFloat(s, 64); err == nil {
+							rowMap[col] = f
+						} else {
+							rowMap[col] = s
+						}
+					case string:
+						if f, err := strconv.ParseFloat(val, 64); err == nil {
+							rowMap[col] = f
+						} else {
+							rowMap[col] = val
+						}
+					default:
+						rowMap[col] = v
+					}
+				default:
+					rowMap[col] = v
+				}
+			}
+			// Try to get running_open_amount from ledger
+			var openAmount float64
+			var found bool
+			if bookingID != "" {
+				err := db.QueryRow(`SELECT running_open_amount FROM forward_booking_ledger WHERE booking_id = $1 ORDER BY ledger_sequence DESC LIMIT 1`, bookingID).Scan(&openAmount)
+				if err == nil {
+					found = true
+				}
+			}
+			// Set booking_amount to running_open_amount if present, else original booking_amount
+			if found {
+				rowMap["booking_amount"] = openAmount
+			} else {
+				rowMap["booking_amount"] = origBookingAmount
 			}
 			data = append(data, rowMap)
 		}
@@ -244,3 +324,4 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
