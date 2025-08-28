@@ -54,6 +54,7 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/forwards/forward-booking-list", api.BusinessUnitMiddleware(db)(forwards.GetForwardBookingList(db)))
 	mux.Handle("/fx/forwards/exposures-by-booking-ids", api.BusinessUnitMiddleware(db)(forwards.GetExposuresByBookingIds(db)))
 	mux.Handle("/fx/forwards/create-forward-cancellations", api.BusinessUnitMiddleware(db)(forwards.CreateForwardCancellations(db)))
+	mux.Handle("/fx/forwards/create-forward-rollover", api.BusinessUnitMiddleware(db)(forwards.RolloverForwardBooking(db)))
 
 	// New Forward Booking & Confirmation routes
 	mux.Handle("/fx/forwards/manual-entry", api.BusinessUnitMiddleware(db)(forwards.AddForwardBookingManualEntry(db)))
@@ -72,3 +73,4 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
+
