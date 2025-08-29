@@ -43,16 +43,16 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// userID := getUserID(r)
 		// if userID == "" {
-		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		// 	return
+		//     http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		//     return
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE user_id = $1 AND entity = ANY($2) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, userID, pq.Array(buNames))
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
 			return
@@ -90,8 +90,8 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND user_id = $1 AND entity = ANY($2) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, userID, pq.Array(buNames))
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
 			return
@@ -133,8 +133,8 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND user_id = $1 AND entity = ANY($2) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, userID, pq.Array(buNames))
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
 			return
@@ -176,8 +176,8 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE user_id = $1 AND entity = ANY($2) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, userID, pq.Array(buNames))
+		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
 			return
@@ -219,8 +219,8 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE user_id = $1 AND entity = ANY($2) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, userID, pq.Array(buNames))
+		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
 			return
@@ -284,8 +284,8 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency, document_date FROM exposure_headers WHERE document_date IS NOT NULL AND user_id = $1 AND entity = ANY($2) AND (approval_status = 'Approved' OR approval_status = 'approved')`
-		rows, err := db.QueryContext(r.Context(), query, userID, pq.Array(buNames))
+		query := `SELECT total_open_amount, currency, document_date FROM exposure_headers WHERE document_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
 			return
