@@ -288,11 +288,11 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			InternalReferenceID string `json:"internal_reference_id"`
-			EntityLevel0 string `json:"entity_level_0"`
-			BankTransactionID string `json:"bank_transaction_id"`
-			SwiftUniqueID string `json:"swift_unique_id"`
+			UserID               string `json:"user_id"`
+			InternalReferenceID  string `json:"internal_reference_id"`
+			EntityLevel0         string `json:"entity_level_0"`
+			BankTransactionID    string `json:"bank_transaction_id"`
+			SwiftUniqueID        string `json:"swift_unique_id"`
 			BankConfirmationDate string `json:"bank_confirmation_date"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
@@ -318,23 +318,34 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "You do not have access to this business unit"})
 			return
 		}
+		// Convert empty string date fields to nil
+		bankConfirmationDate := req.BankConfirmationDate
+		if bankConfirmationDate == "" {
+			bankConfirmationDate = "1970-01-01" // or set to nil if you want NULL
+		}
 		updateQuery := `UPDATE forward_bookings SET
-			status = 'Confirmed',
-			bank_transaction_id = $1,
-			swift_unique_id = $2,
-			bank_confirmation_date = $3,
-			processing_status = 'pending'
-		WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5
-		RETURNING *`
+		       status = 'Confirmed',
+		       bank_transaction_id = $1,
+		       swift_unique_id = $2,
+		       bank_confirmation_date = $3,
+		       processing_status = 'pending'
+	       WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5
+	       RETURNING internal_reference_id, entity_level_0, bank_transaction_id, swift_unique_id, bank_confirmation_date, status, processing_status`
+		var bankConfirmationDateVal interface{}
+		if bankConfirmationDate == "" {
+			bankConfirmationDateVal = nil
+		} else {
+			bankConfirmationDateVal = bankConfirmationDate
+		}
 		updateValues := []interface{}{
 			req.BankTransactionID,
 			req.SwiftUniqueID,
-			req.BankConfirmationDate,
+			bankConfirmationDateVal,
 			req.InternalReferenceID,
 			req.EntityLevel0,
 		}
 		row := db.QueryRow(updateQuery, updateValues...)
-		cols := []string{"internal_reference_id","entity_level_0","bank_transaction_id","swift_unique_id","bank_confirmation_date","status","processing_status"}
+		cols := []string{"internal_reference_id", "entity_level_0", "bank_transaction_id", "swift_unique_id", "bank_confirmation_date", "status", "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
 		for i := range vals {
@@ -354,3 +365,4 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": result})
 	}
 }
+
