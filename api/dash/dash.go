@@ -55,9 +55,10 @@ func StartDashService(db *sql.DB) {
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
 	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
-
+	mux.Handle("/dash/hedge/fwd/forward-bookings", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingsDashboard(db)))
 	// Exposure Dashboard
 	mux.Handle("/dash/hedge/exp/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetBuMaturityCurrencySummaryJoinedFromHeaders(db)))
+	mux.Handle("/dash/hedge/exp/exposure-rows", api.BusinessUnitMiddleware(db)(hedgeproposal.GetExposureRowsDashboard(db)))
 
 	// --- Reports Dashboard Routes ---
 	mux.Handle("/dash/reports/exposure-summary", api.BusinessUnitMiddleware(db)(reports.GetExposureSummary(db)))

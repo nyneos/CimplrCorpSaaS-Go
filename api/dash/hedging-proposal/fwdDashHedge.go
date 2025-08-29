@@ -77,7 +77,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(`
 			SELECT 
 				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
-				fb.quote_currency,
+				fb.base_currency,
 				fb.delivery_period
 			FROM forward_bookings fb
 			LEFT JOIN LATERAL (
@@ -187,4 +187,104 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 // Helper: format2f
 func format2f(x float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.4f", x), "0"), ".")
+}
+
+// Handler: GetForwardBookingsDashboard
+func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !ok || len(buNames) == 0 {
+			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			return
+		}
+
+		rows, err := db.Query(`
+			SELECT 
+				internal_reference_id, counterparty, entity_level_0, base_currency, local_currency,
+				value_quote_currency, spot_rate, total_rate, bank_margin, value_local_currency,
+				maturity_date, add_date
+			FROM forward_bookings
+			WHERE entity_level_0 = ANY($1)
+			  AND (processing_status = 'Approved' OR processing_status = 'approved')
+		`, pq.Array(buNames))
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "DB error")
+			return
+		}
+		defer rows.Close()
+
+		type ForwardRow struct {
+			DealID       interface{} `json:"dealId"`
+			Bank         interface{} `json:"bank"`
+			BU           interface{} `json:"bu"`
+			FCY          interface{} `json:"fcy"`
+			LCY          interface{} `json:"lcy"`
+			FCYAmount    interface{} `json:"fcyAmount"`
+			SpotRate     interface{} `json:"spotRate"`
+			ForwardRate  interface{} `json:"forwardRate"`
+			MarginBps    interface{} `json:"marginBps"`
+			LCYValue     interface{} `json:"lcyValue"`
+			MaturityDate interface{} `json:"maturityDate"`
+			DealDate     interface{} `json:"dealDate"`
+		}
+
+		var result []ForwardRow
+
+		for rows.Next() {
+			var (
+				dealId, bank, bu, fcy, lcy                            sql.NullString
+				fcyAmount, spotRate, forwardRate, marginBps, lcyValue sql.NullFloat64
+				maturityDate, dealDate                                sql.NullTime
+			)
+
+			if err := rows.Scan(
+				&dealId, &bank, &bu, &fcy, &lcy,
+				&fcyAmount, &spotRate, &forwardRate, &marginBps, &lcyValue,
+				&maturityDate, &dealDate,
+			); err != nil {
+				continue
+			}
+
+			// Helper for NullString → interface{}
+			strOrNil := func(ns sql.NullString) interface{} {
+				if ns.Valid {
+					return ns.String
+				}
+				return nil
+			}
+			// Helper for NullFloat64 → interface{}
+			floatOrNil := func(nf sql.NullFloat64) interface{} {
+				if nf.Valid {
+					return nf.Float64
+				}
+				return nil
+			}
+			// Helper for NullTime → interface{} (formatted as d/m/yyyy)
+			dateOrNil := func(nt sql.NullTime) interface{} {
+				if nt.Valid {
+					return nt.Time.Format("2/1/2006")
+				}
+				return nil
+			}
+
+			row := ForwardRow{
+				DealID:       strOrNil(dealId),
+				Bank:         strOrNil(bank),
+				BU:           strOrNil(bu),
+				FCY:          strOrNil(fcy),
+				LCY:          strOrNil(lcy),
+				FCYAmount:    floatOrNil(fcyAmount),
+				SpotRate:     floatOrNil(spotRate),
+				ForwardRate:  floatOrNil(forwardRate),
+				MarginBps:    floatOrNil(marginBps),
+				LCYValue:     floatOrNil(lcyValue),
+				MaturityDate: dateOrNil(maturityDate),
+				DealDate:     dateOrNil(dealDate),
+			}
+			result = append(result, row)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	}
 }

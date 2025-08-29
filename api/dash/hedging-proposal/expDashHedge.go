@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -110,6 +111,125 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 				}
 			}
 		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			return
+		}
+
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !ok || len(buNames) == 0 {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			return
+		}
+
+		rows, err := db.Query(`
+			SELECT 
+				entity, currency, exposure_type, document_id, counterparty_name, 
+				total_open_amount, document_date
+			FROM exposure_headers
+			WHERE entity = ANY($1)
+			  AND LOWER(approval_status) = 'approved'
+		`, pq.Array(buNames))
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "DB error"})
+			return
+		}
+		defer rows.Close()
+
+		now := time.Now()
+		response := []map[string]interface{}{}
+
+		for rows.Next() {
+			var (
+				bu, currency, exposureType, documentID, client sql.NullString
+				amount                                         sql.NullFloat64
+				maturityDate                                   sql.NullTime
+			)
+
+			if err := rows.Scan(&bu, &currency, &exposureType, &documentID, &client, &amount, &maturityDate); err != nil {
+				continue
+			}
+
+			// helpers
+			strOrNil := func(ns sql.NullString) string {
+				if ns.Valid {
+					return strings.TrimSpace(ns.String)
+				}
+				return "Unknown"
+			}
+			floatOrNil := func(nf sql.NullFloat64) float64 {
+				if nf.Valid {
+					return nf.Float64
+				}
+				return 0
+			}
+			dateOrNil := func(nt sql.NullTime) (string, int) {
+				if nt.Valid {
+					diffDays := int(math.Ceil(nt.Time.Sub(now).Hours() / 24))
+					return nt.Time.Format("2/1/2006"), diffDays
+				}
+				return "", -1
+			}
+
+			// normalize values
+			buVal := strOrNil(bu)
+			if buVal == "" {
+				buVal = "Unknown"
+			}
+			currencyVal := strings.ToUpper(strOrNil(currency))
+			exposureTypeVal := strings.ToUpper(strOrNil(exposureType))
+			clientVal := strOrNil(client)
+			if clientVal == "" {
+				clientVal = "Unknown"
+			}
+			amountVal := floatOrNil(amount)
+
+			dateStr, diffDays := dateOrNil(maturityDate)
+
+			// bucket logic
+			maturityBucket := "Unknown"
+			if diffDays >= 0 {
+				switch {
+				case diffDays <= 30:
+					maturityBucket = "Month 1"
+				case diffDays <= 60:
+					maturityBucket = "Month 2"
+				case diffDays <= 90:
+					maturityBucket = "Month 3"
+				case diffDays <= 120:
+					maturityBucket = "Month 4"
+				case diffDays <= 180:
+					maturityBucket = "4-6 Months"
+				default:
+					maturityBucket = "6+ Months"
+				}
+			}
+
+			response = append(response, map[string]interface{}{
+				"bu":             buVal,
+				"currency":       currencyVal,
+				"type":           exposureTypeVal,
+				"id":             strOrNil(documentID),
+				"client":         clientVal,
+				"amount":         amountVal,
+				"maturityDate":   dateStr,
+				"maturityBucket": maturityBucket,
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
 	}
