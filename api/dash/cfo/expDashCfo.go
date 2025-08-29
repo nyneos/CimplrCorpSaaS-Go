@@ -41,11 +41,11 @@ func getUserID(r *http.Request) string {
 // 1. Total Open Amount USD Sum
 func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
@@ -80,11 +80,11 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 // 2. Payables By Currency
 func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
@@ -123,11 +123,11 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 // 3. Receivables By Currency
 func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
@@ -166,11 +166,11 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 // 4. Amount By Currency
 func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
@@ -209,11 +209,11 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 // 5. Business Unit Currency Summary
 func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
@@ -274,11 +274,11 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 // 6. Maturity Expiry Summary
 func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
@@ -348,11 +348,11 @@ func formatK(val float64) string {
 // 7. Average Exposure Maturity
 func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		userID := getUserID(r)
-		if userID == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+		// userID := getUserID(r)
+		// if userID == "" {
+		// 	http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// 	return
+		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
