@@ -38,6 +38,7 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/permissions/permissions-json", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJson(db))))
 	mux.Handle("/uam/permissions/status", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.UpdateRolePermissionsStatusByName(db))))
 	mux.Handle("/uam/permissions/approve-reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolesStatus(db))))
+	mux.Handle("/uam/permissions/get-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
 
 	log.Println("UAM Service started on :5143")
 	err := http.ListenAndServe(":5143", mux)
@@ -45,3 +46,4 @@ func StartUAMService(db *sql.DB) {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
 }
+
