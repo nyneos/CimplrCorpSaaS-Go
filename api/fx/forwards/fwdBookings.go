@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"fmt"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -148,7 +149,9 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 // Handler: GetEntityRelevantForwardBookings
 func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
@@ -177,7 +180,30 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			if err := rows.Scan(valPtrs...); err == nil {
 				rowMap := make(map[string]interface{})
 				for i, col := range cols {
-					rowMap[col] = vals[i]
+					v := vals[i]
+					switch val := v.(type) {
+					case nil:
+						rowMap[col] = nil
+					case []byte:
+						// Try to convert []byte to string, float, or UUID
+						s := string(val)
+						// Try float
+						if f, err := strconv.ParseFloat(s, 64); err == nil {
+							rowMap[col] = f
+						} else {
+							rowMap[col] = s
+						}
+					case int64:
+						rowMap[col] = val
+					case float64:
+						rowMap[col] = val
+					case bool:
+						rowMap[col] = val
+					case string:
+						rowMap[col] = val
+					default:
+						rowMap[col] = fmt.Sprintf("%v", val)
+					}
 				}
 				data = append(data, rowMap)
 			}
@@ -188,7 +214,6 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
 	}
 }
-
 // Example Forward Booking handler
 func ForwardBooking(w http.ResponseWriter, r *http.Request) {
 	var req struct {
