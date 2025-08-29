@@ -22,40 +22,40 @@ import (
 func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			InternalReferenceID string `json:"internal_reference_id"`
-			EntityLevel0 string `json:"entity_level_0"`
-			EntityLevel1 string `json:"entity_level_1"`
-			EntityLevel2 string `json:"entity_level_2"`
-			EntityLevel3 string `json:"entity_level_3"`
-			LocalCurrency string `json:"local_currency"`
-			OrderType string `json:"order_type"`
-			TransactionType string `json:"transaction_type"`
-			Counterparty string `json:"counterparty"`
-			ModeOfDelivery string `json:"mode_of_delivery"`
-			DeliveryPeriod string `json:"delivery_period"`
-			AddDate string `json:"add_date"`
-			SettlementDate string `json:"settlement_date"`
-			MaturityDate string `json:"maturity_date"`
-			DeliveryDate string `json:"delivery_date"`
-			CurrencyPair string `json:"currency_pair"`
-			BaseCurrency string `json:"base_currency"`
-			QuoteCurrency string `json:"quote_currency"`
-			BookingAmount float64 `json:"booking_amount"`
-			ValueType string `json:"value_type"`
-			ActualValueBaseCurrency float64 `json:"actual_value_base_currency"`
-			SpotRate float64 `json:"spot_rate"`
-			ForwardPoints float64 `json:"forward_points"`
-			BankMargin float64 `json:"bank_margin"`
-			TotalRate float64 `json:"total_rate"`
-			ValueQuoteCurrency float64 `json:"value_quote_currency"`
+			UserID                      string  `json:"user_id"`
+			InternalReferenceID         string  `json:"internal_reference_id"`
+			EntityLevel0                string  `json:"entity_level_0"`
+			EntityLevel1                string  `json:"entity_level_1"`
+			EntityLevel2                string  `json:"entity_level_2"`
+			EntityLevel3                string  `json:"entity_level_3"`
+			LocalCurrency               string  `json:"local_currency"`
+			OrderType                   string  `json:"order_type"`
+			TransactionType             string  `json:"transaction_type"`
+			Counterparty                string  `json:"counterparty"`
+			ModeOfDelivery              string  `json:"mode_of_delivery"`
+			DeliveryPeriod              string  `json:"delivery_period"`
+			AddDate                     string  `json:"add_date"`
+			SettlementDate              string  `json:"settlement_date"`
+			MaturityDate                string  `json:"maturity_date"`
+			DeliveryDate                string  `json:"delivery_date"`
+			CurrencyPair                string  `json:"currency_pair"`
+			BaseCurrency                string  `json:"base_currency"`
+			QuoteCurrency               string  `json:"quote_currency"`
+			BookingAmount               float64 `json:"booking_amount"`
+			ValueType                   string  `json:"value_type"`
+			ActualValueBaseCurrency     float64 `json:"actual_value_base_currency"`
+			SpotRate                    float64 `json:"spot_rate"`
+			ForwardPoints               float64 `json:"forward_points"`
+			BankMargin                  float64 `json:"bank_margin"`
+			TotalRate                   float64 `json:"total_rate"`
+			ValueQuoteCurrency          float64 `json:"value_quote_currency"`
 			InterveningRateQuoteToLocal float64 `json:"intervening_rate_quote_to_local"`
-			ValueLocalCurrency float64 `json:"value_local_currency"`
-			InternalDealer string `json:"internal_dealer"`
-			CounterpartyDealer string `json:"counterparty_dealer"`
-			Remarks string `json:"remarks"`
-			Narration string `json:"narration"`
-			TransactionTimestamp string `json:"transaction_timestamp"`
+			ValueLocalCurrency          float64 `json:"value_local_currency"`
+			InternalDealer              string  `json:"internal_dealer"`
+			CounterpartyDealer          string  `json:"counterparty_dealer"`
+			Remarks                     string  `json:"remarks"`
+			Narration                   string  `json:"narration"`
+			TransactionTimestamp        string  `json:"transaction_timestamp"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -82,10 +82,10 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		query := `INSERT INTO forward_bookings (
-			internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
-		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
-		) RETURNING *`
+		       internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
+	       ) VALUES (
+		       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
+	       ) RETURNING internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status`
 		values := []interface{}{
 			req.InternalReferenceID,
 			req.EntityLevel0,
@@ -123,7 +123,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			"pending",
 		}
 		row := db.QueryRow(query, values...)
-		cols := []string{"internal_reference_id","entity_level_0","entity_level_1","entity_level_2","entity_level_3","local_currency","order_type","transaction_type","counterparty","mode_of_delivery","delivery_period","add_date","settlement_date","maturity_date","delivery_date","currency_pair","base_currency","quote_currency","booking_amount","value_type","actual_value_base_currency","spot_rate","forward_points","bank_margin","total_rate","value_quote_currency","intervening_rate_quote_to_local","value_local_currency","internal_dealer","counterparty_dealer","remarks","narration","transaction_timestamp","processing_status"}
+		cols := []string{"internal_reference_id", "entity_level_0", "entity_level_1", "entity_level_2", "entity_level_3", "local_currency", "order_type", "transaction_type", "counterparty", "mode_of_delivery", "delivery_period", "add_date", "settlement_date", "maturity_date", "delivery_date", "currency_pair", "base_currency", "quote_currency", "booking_amount", "value_type", "actual_value_base_currency", "spot_rate", "forward_points", "bank_margin", "total_rate", "value_quote_currency", "intervening_rate_quote_to_local", "value_local_currency", "internal_dealer", "counterparty_dealer", "remarks", "narration", "transaction_timestamp", "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
 		for i := range vals {
