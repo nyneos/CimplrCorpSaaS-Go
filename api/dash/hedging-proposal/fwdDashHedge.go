@@ -4,17 +4,31 @@ import (
 	"database/sql"
 	"encoding/json"
 
-	// "fmt"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
-	// "time"
+	"math"
 
 	"CimplrCorpSaas/api"
 
 	"github.com/lib/pq"
 )
+
+var rates = map[string]float64{
+	"USD": 1.0,
+	"AUD": 0.68,
+	"CAD": 0.75,
+	"CHF": 1.1,
+	"CNY": 0.14,
+	"RMB": 0.14,
+	"EUR": 1.09,
+	"GBP": 1.28,
+	"JPY": 0.0067,
+	"SEK": 0.095,
+	"INR": 0.0117,
+}
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
@@ -41,34 +55,57 @@ func contains(arr []string, s string) bool {
 	}
 	return false
 }
+
 // Handler for forward dashboard for Hedging Proposal
 // Handler: GetBuMaturityCurrencySummaryJoined
-func GetBuMaturityCurrencySummaryJoined(db *sql.DB) http.HandlerFunc {
+func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, "user_id required")
 			return
 		}
+
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			respondWithError(w, http.StatusForbidden, "No accessible business units found")
 			return
 		}
-		rows, err := db.Query(`SELECT entity_level_0, delivery_period, quote_currency, order_type, booking_amount FROM forward_bookings WHERE entity_level_0 = ANY($1)  AND (processing_status = 'Approved' OR processing_status = 'approved')`, pq.Array(buNames))
+
+		rows, err := db.Query(`
+			SELECT 
+				COALESCE(fbl.running_open_amount, fb.booking_amount) AS effective_amount,
+				fb.quote_currency,
+				fb.delivery_period
+			FROM forward_bookings fb
+			LEFT JOIN LATERAL (
+				SELECT fbl.running_open_amount
+				FROM forward_booking_ledger fbl
+				WHERE fbl.booking_id = fb.system_transaction_id
+				ORDER BY fbl.ledger_sequence DESC
+				LIMIT 1
+			) fbl ON TRUE
+			WHERE fb.entity_level_0 = ANY($1)
+			  AND LOWER(fb.processing_status) = 'approved'
+		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "DB error")
 			return
 		}
 		defer rows.Close()
+
+		// Map: internal keys -> human-readable labels
 		bucketLabels := map[string]string{
-			"month_1":  "1 Month",
-			"month_2":  "2 Month",
-			"month_3":  "3 Month",
-			"month_4":  "4 Month",
-			"month_4_6": "4-6 Month",
+			"month_1":     "1 Month",
+			"month_2":     "2 Month",
+			"month_3":     "3 Month",
+			"month_4":     "4 Month",
+			"month_4_6":   "4-6 Month",
 			"month_6plus": "6 Month +",
 		}
+
 		normalizeDeliveryPeriod := func(period string) string {
 			if period == "" {
 				return "month_1"
@@ -77,24 +114,23 @@ func GetBuMaturityCurrencySummaryJoined(db *sql.DB) http.HandlerFunc {
 			p = strings.ReplaceAll(p, " ", "")
 			p = strings.ReplaceAll(p, "-", "")
 			p = strings.ReplaceAll(p, "_", "")
-			if contains([]string{"1m", "1month", "month1", "m1", "mon1"}, p) {
+
+			switch {
+			case contains([]string{"1m", "1month", "month1", "m1", "mon1"}, p):
 				return "month_1"
-			}
-			if contains([]string{"2m", "2month", "month2", "m2", "mon2"}, p) {
+			case contains([]string{"2m", "2month", "month2", "m2", "mon2"}, p):
 				return "month_2"
-			}
-			if contains([]string{"3m", "3month", "month3", "m3", "mon3"}, p) {
+			case contains([]string{"3m", "3month", "month3", "m3", "mon3"}, p):
 				return "month_3"
-			}
-			if contains([]string{"4m", "4month", "month4", "m4", "mon4"}, p) {
+			case contains([]string{"4m", "4month", "month4", "m4", "mon4"}, p):
 				return "month_4"
-			}
-			if contains([]string{"46m", "4to6month", "month46", "month4to6", "m46", "mon46", "4_6month", "4_6m", "4-6m", "4-6month"}, p) {
+			case contains([]string{"46m", "4to6month", "month46", "month4to6", "m46", "mon46", "4_6month", "4_6m", "4-6m", "4-6month"}, p):
 				return "month_4_6"
-			}
-			if contains([]string{"6mplus", "6monthplus", "month6plus", "6plus", "m6plus", "mon6plus", "6m+", "6month+", "month6+"}, p) {
+			case contains([]string{"6mplus", "6monthplus", "month6plus", "6plus", "m6plus", "mon6plus", "6m+", "6month+", "month6+"}, p):
 				return "month_6plus"
 			}
+
+			// fallback heuristics
 			if strings.Contains(p, "6") {
 				return "month_6plus"
 			}
@@ -109,45 +145,46 @@ func GetBuMaturityCurrencySummaryJoined(db *sql.DB) http.HandlerFunc {
 			}
 			return "month_1"
 		}
-		summary := map[string]map[string]interface{}{}
+
+		// Totals by bucket
+		bucketTotals := map[string]float64{}
 		for rows.Next() {
-			var bu, deliveryPeriod, currency, orderType string
-			var bookingAmount float64
-			if err := rows.Scan(&bu, &deliveryPeriod, &currency, &orderType, &bookingAmount); err != nil {
+			var amount float64
+			var currency, deliveryPeriod string
+			if err := rows.Scan(&amount, &currency, &deliveryPeriod); err != nil {
 				continue
 			}
-			bucketKey := normalizeDeliveryPeriod(deliveryPeriod)
-			maturity := bucketLabels[bucketKey]
-			if maturity == "" {
-				maturity = "1 Month"
-				// Route: dash/cfo/fwd/avg-forward-maturity
-			}
+
 			currency = strings.ToUpper(currency)
-			orderType = strings.ToLower(orderType)
-			amount := abs(bookingAmount)
-			key := bu + "__" + maturity + "__" + currency
-			if _, exists := summary[key]; !exists {
-				summary[key] = map[string]interface{}{
-					"bu":       bu,
-					"maturity": maturity,
-					"currency": currency,
-					"forwardBuy":  0.0,
-					"forwardSell": 0.0,
-				// Route: dash/cfo/fwd/buy-sell-totals
-				}
+			rate := rates[currency]
+			if rate == 0 {
+				rate = 1.0
 			}
-			if orderType == "buy" {
-				summary[key]["forwardBuy"] = summary[key]["forwardBuy"].(float64) + amount
-			} else {
-				summary[key]["forwardSell"] = summary[key]["forwardSell"].(float64) + amount
-			}
+
+			usdAmount := math.Abs(amount) * rate
+			bucketKey := normalizeDeliveryPeriod(deliveryPeriod)
+			bucketTotals[bucketKey] += usdAmount
 		}
+
+		// Prepare response
 		result := []map[string]interface{}{}
-		for _, v := range summary {
-			result = append(result, v)
+		for bucket, total := range bucketTotals {
+			label := bucketLabels[bucket]
+			if label == "" {
+				label = "1 Month"
+			}
+			result = append(result, map[string]interface{}{
+				"maturityBucket": label,
+				"totalUsd":       format2f(total),
+			})
 		}
-				// Route: dash/cfo/fwd/user-currency
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	}
+}
+
+// Helper: format2f
+func format2f(x float64) string {
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.4f", x), "0"), ".")
 }
