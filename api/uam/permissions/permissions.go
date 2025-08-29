@@ -8,6 +8,96 @@ import (
 	"net/http"
 )
 
+// Handler: Get role permissions JSON by role name from request body
+func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			RoleName string `json:"roleName"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"success":false,"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.UserID == "" || req.RoleName == "" {
+			http.Error(w, `{"success":false,"error":"user_id and roleName required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Find role
+		var roleID int
+		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
+		if err == sql.ErrNoRows {
+			http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
+			return
+		} else if err != nil {
+			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Query permissions (same as before)
+		rows, err := db.Query(`
+		      SELECT p.page_name, p.tab_name, p.action, rp.allowed
+		      FROM role_permissions rp
+		      JOIN permissions p ON rp.permission_id = p.id
+		      WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')`,
+			roleID)
+		if err != nil {
+			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		// Build pages structure (same as before)
+		pages := make(map[string]interface{})
+		for rows.Next() {
+			var page, action string
+			var tab sql.NullString
+			var allowed bool
+
+			if err := rows.Scan(&page, &tab, &action, &allowed); err != nil {
+				http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+				return
+			}
+
+			// Ensure page object
+			if _, ok := pages[page]; !ok {
+				pages[page] = make(map[string]interface{})
+			}
+			pageObj := pages[page].(map[string]interface{})
+
+			if !tab.Valid { // tab is NULL
+				if _, ok := pageObj["pagePermissions"]; !ok {
+					pageObj["pagePermissions"] = make(map[string]interface{})
+				}
+				pageObj["pagePermissions"].(map[string]interface{})[action] = allowed
+			} else {
+				if _, ok := pageObj["tabs"]; !ok {
+					pageObj["tabs"] = make(map[string]interface{})
+				}
+				if _, ok := pageObj["tabs"].(map[string]interface{})[tab.String]; !ok {
+					pageObj["tabs"].(map[string]interface{})[tab.String] = make(map[string]interface{})
+				}
+				pageObj["tabs"].(map[string]interface{})[tab.String].(map[string]interface{})[action] = allowed
+			}
+		}
+
+		// Final response
+		resp := struct {
+			RoleName string                 `json:"roleName"`
+			Pages    map[string]interface{} `json:"pages"`
+		}{
+			RoleName: req.RoleName,
+			Pages:    pages,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		}
+	}
+}
+
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -441,3 +531,4 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
