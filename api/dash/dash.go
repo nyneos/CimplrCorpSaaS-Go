@@ -19,7 +19,8 @@ func StartDashService(db *sql.DB) {
 	})
 
 	// Business Unit/Currency Exposure Dashboard
-	mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))
+	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))
+	mux.Handle("/dash/bu-curr-exp-dashboard", api.BusinessUnitMiddleware(db)(buCurrExpDash.GetDashboard(db)))
 
 	// CFO Dashboard Endpoints
 	// --- Forward Dashboard Routes ---
@@ -71,4 +72,5 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
