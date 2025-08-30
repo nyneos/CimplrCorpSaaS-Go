@@ -34,6 +34,19 @@ func extractClientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+func withCORS(h http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Access-Control-Allow-Origin", "*")
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        if r.Method == "OPTIONS" {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+        h(w, r)
+    }
+}
+
 func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	if authService == nil {
 		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
@@ -194,10 +207,10 @@ func StartGateway() {
 	mux := http.NewServeMux()
 
 	// Auth endpoints
-	mux.HandleFunc("/auth/login", createReverseProxy(LoginHandler))
-	mux.HandleFunc("/auth/logout", createReverseProxy(LogoutHandler))
-	mux.HandleFunc("/get-sessions", createReverseProxy(GetSessionsHandler))
-	mux.HandleFunc("/auth/session", createReverseProxy(GetSessionByUserIDHandler))
+	mux.HandleFunc("/auth/login", withCORS(LoginHandler))
+	mux.HandleFunc("/auth/logout", withCORS(LogoutHandler))
+	mux.HandleFunc("/get-sessions", withCORS(GetSessionsHandler))
+	mux.HandleFunc("/auth/session", withCORS(GetSessionByUserIDHandler))
 	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
 	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
 	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
