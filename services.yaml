@@ -18,7 +18,7 @@ services:
   - name: auth
     start_order: 4
     config:
-      max_users: 2
+      max_users: 10
   - name: dashboard
     start_order: 5
     config:
@@ -44,4 +44,5 @@ services:
   - name: master
     start_order: 11
     config:
+
       port: 2143
