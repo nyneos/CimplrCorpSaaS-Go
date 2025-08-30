@@ -43,6 +43,34 @@ func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sessions)
 }
+// GetSessionByUserIDHandler returns session info for a specific user_id
+func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Missing user_id in body"})
+		return
+	}
+	if authService == nil {
+		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
+		return
+	}
+	sessions := authService.GetActiveSessions()
+	var found []interface{}
+	for _, s := range sessions {
+		if s.UserID == req.UserID {
+			found = append(found, s)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "sessions": found})
+}
 
 // LoginHandler handles POST /auth/login
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +197,7 @@ func StartGateway() {
 	mux.HandleFunc("/auth/login", LoginHandler)
 	mux.HandleFunc("/auth/logout", LogoutHandler)
 	mux.HandleFunc("/get-sessions", GetSessionsHandler)
+	mux.HandleFunc("/auth/session", GetSessionByUserIDHandler)
 	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
 	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
 	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
