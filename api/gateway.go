@@ -201,6 +201,27 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	rw.body.Write(b)
 	return rw.ResponseWriter.Write(b)
 }
+// LoggingMiddleware is a middleware for logging HTTP requests
+func LoggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
+		var body string
+		if r.Method == "POST" || r.Method == "PUT" {
+			b, _ := io.ReadAll(r.Body)
+			body = string(b)
+			r.Body = io.NopCloser(bytes.NewBuffer(b))
+		}
+		next.ServeHTTP(rw, r)
+		duration := time.Since(start)
+		clientIP := extractClientIP(r)
+		userAgent := r.Header.Get("User-Agent")
+		fmt.Printf(
+			"[REQ] %s %s | Status: %d | IP: %s | UA: %s | Duration: %v | Body: %s | RespSize: %d\n",
+			r.Method, r.URL.Path, rw.statusCode, clientIP, userAgent, duration, body, rw.body.Len(),
+		)
+	})
+}
 
 // StartGateway starts the API gateway server
 func StartGateway() {
@@ -240,7 +261,8 @@ func StartGateway() {
 		port = "8081"
 	}
 	log.Printf("API Gateway started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	// err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, LoggingMiddleware(mux))
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
