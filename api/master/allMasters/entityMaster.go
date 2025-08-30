@@ -426,13 +426,13 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 		args := []interface{}{}
 		i := 1
 		for k, v := range req.Fields {
-			setClause += k + " = $" + string(rune(i)) + ", "
+			setClause += k + " = $" + strconv.Itoa(i) + ", "
 			args = append(args, v)
 			i++
 		}
 		setClause += "approval_status = 'Pending'"
 		args = append(args, req.ID)
-		query := "UPDATE masterentity SET " + setClause + " WHERE entity_id = $" + string(rune(i)) + " RETURNING *"
+		query := "UPDATE masterentity SET " + setClause + " WHERE entity_id = $" + strconv.Itoa(i) + " RETURNING *"
 	       rows, err := db.Query(query, args...)
 	       if err != nil {
 		       w.WriteHeader(http.StatusInternalServerError)
