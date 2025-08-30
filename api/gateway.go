@@ -12,6 +12,8 @@ import (
 	"os"
 	"sync"
 	"fmt"
+	"io"
+	"time"
 )
 
 // Global reference to AuthService (set from main or manager)
