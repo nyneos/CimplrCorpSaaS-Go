@@ -53,7 +53,9 @@ func StartDashService(db *sql.DB) {
 	// --- FX Ops Dashboard Routes ---
 	// Top Currencies
 	mux.Handle("/dash/fx-ops/top-currencies-from-headers", api.BusinessUnitMiddleware(db)(fxops.GetTopCurrenciesFromHeaders(db)))
-
+	mux.Handle("/dash/fx-ops/ready-for-settlement", api.BusinessUnitMiddleware(db)(fxops.GetForwardBookingsMaturingTodayCount(db)))
+	mux.Handle("/dash/fx-ops/daily-traded-volume", api.BusinessUnitMiddleware(db)(fxops.GetTodayBookingAmountSum(db)))
+	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", api.BusinessUnitMiddleware(db)(fxops.GetMaturityBucketsByCurrencyPair(db)))
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
 	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
@@ -72,5 +74,6 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
 
