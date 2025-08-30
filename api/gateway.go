@@ -194,10 +194,10 @@ func StartGateway() {
 	mux := http.NewServeMux()
 
 	// Auth endpoints
-	mux.HandleFunc("/auth/login", LoginHandler)
-	mux.HandleFunc("/auth/logout", LogoutHandler)
-	mux.HandleFunc("/get-sessions", GetSessionsHandler)
-	mux.HandleFunc("/auth/session", GetSessionByUserIDHandler)
+	mux.HandleFunc("/auth/login", createReverseProxy(LoginHandler))
+	mux.HandleFunc("/auth/logout", createReverseProxy(LogoutHandler))
+	mux.HandleFunc("/get-sessions", createReverseProxy(GetSessionsHandler))
+	mux.HandleFunc("/auth/session", createReverseProxy(GetSessionByUserIDHandler))
 	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
 	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
 	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
