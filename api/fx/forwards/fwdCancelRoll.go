@@ -69,13 +69,13 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			_, err = db.Exec(`UPDATE forward_cancellations SET status = 'Approved' WHERE booking_id = $1 AND cancellation_date = $2`, bid, req.CancellationDate)
 			// If fully cancelled, update booking status to Cancelled and processing_status to Approved
 			if newOpenAmount == 0 {
-				_, err = db.Exec(`UPDATE forward_bookings SET status = 'Cancelled', processing_status = 'Approved' WHERE system_transaction_id = $1`, bid)
+				_, err = db.Exec(`UPDATE forward_bookings SET status = 'Cancelled' WHERE system_transaction_id = $1`, bid)
 				if err == nil {
 					_ = DeactivateExposureHedgeLinks(db, []string{bid})
 				}
 			} else {
 				// If partial, just update processing_status
-				_, _ = db.Exec(`UPDATE forward_bookings SET processing_status = 'Approved' WHERE system_transaction_id = $1`, bid)
+				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -577,10 +577,10 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 			_, err = db.Exec(`UPDATE forward_rollovers SET status = 'Approved' WHERE booking_id = $1 AND rollover_date = $2`, bid, cancellationDate)
 			// If fully rolled over, update booking status to Rolled Over and processing_status to Approved
 			if newOpenAmount == 0 {
-				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Rolled Over', processing_status = 'Approved' WHERE system_transaction_id = $1`, bid)
+				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Rolled Over' WHERE system_transaction_id = $1`, bid)
 			} else {
 				// If partial, just update processing_status
-				_, _ = db.Exec(`UPDATE forward_bookings SET processing_status = 'Approved' WHERE system_transaction_id = $1`, bid)
+				_, _ = db.Exec(`UPDATE forward_bookings SET processing_status = 'Partially Rollovered' WHERE system_transaction_id = $1`, bid)
 			}
 			// Insert new forward booking for the rollover using fetched details
 			randomRef := GenerateFXRef()
@@ -716,3 +716,4 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
