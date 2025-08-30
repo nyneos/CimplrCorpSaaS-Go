@@ -83,7 +83,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			// Find root entity id
 			var rootEntityId string
 			err = db.QueryRow(
-				"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)",
+				"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (is_deleted = false OR is_deleted IS NULL) AND (is_top_level_entity = TRUE OR (approval_status = 'Approved' OR approval_status = 'approved'))",
 				userBu,
 			).Scan(&rootEntityId)
 			if err != nil {
@@ -98,7 +98,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			// Find all descendant business units using recursive CTE
 			rows, err := db.Query(`
-                WITH RECURSIVE descendants AS (
+               WITH RECURSIVE descendants AS (
                     SELECT entity_id, entity_name FROM masterEntity WHERE entity_id = $1
                     UNION ALL
                     SELECT me.entity_id, me.entity_name
@@ -142,3 +142,4 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 		})
 	}
 }
+
