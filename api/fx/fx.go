@@ -49,12 +49,17 @@ func StartFXService(db *sql.DB) {
 	/*mtm upload */
 	mux.Handle("/fx/forwards/upload-mtm", api.BusinessUnitMiddleware(db)(forwards.UploadMTMFiles(db)))
 	mux.Handle("/fx/forwards/get-mtm", api.BusinessUnitMiddleware(db)(forwards.GetMTMData(db)))
-
+	
 	// Forward cancel/roll endpoints
 	mux.Handle("/fx/forwards/forward-booking-list", api.BusinessUnitMiddleware(db)(forwards.GetForwardBookingList(db)))
 	mux.Handle("/fx/forwards/exposures-by-booking-ids", api.BusinessUnitMiddleware(db)(forwards.GetExposuresByBookingIds(db)))
 	mux.Handle("/fx/forwards/create-forward-cancellations", api.BusinessUnitMiddleware(db)(forwards.CreateForwardCancellations(db)))
 	mux.Handle("/fx/forwards/create-forward-rollover", api.BusinessUnitMiddleware(db)(forwards.RolloverForwardBooking(db)))
+	mux.Handle("/fx/forwards/pending-cancellations", api.BusinessUnitMiddleware(db)(forwards.GetPendingCancellations(db)))
+	mux.Handle("/fx/forwards/pending-rollovers", api.BusinessUnitMiddleware(db)(forwards.GetPendingRollovers(db)))
+	// Checker (approval) routes
+	mux.Handle("/fx/forwards/cancellation-status-request", api.BusinessUnitMiddleware(db)(forwards.CancellationStatusRequest(db)))
+	mux.Handle("/fx/forwards/rollover-status-request", api.BusinessUnitMiddleware(db)(forwards.RolloverStatusRequest(db)))
 
 	// New Forward Booking & Confirmation routes
 	mux.Handle("/fx/forwards/manual-entry", api.BusinessUnitMiddleware(db)(forwards.AddForwardBookingManualEntry(db)))
@@ -74,5 +79,6 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
+
 
 
