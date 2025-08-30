@@ -1,10 +1,22 @@
 package buCurrExpDash
 
 import (
+	"CimplrCorpSaas/api"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 )
+
+func respondWithError(w http.ResponseWriter, status int, errMsg string) {
+	log.Println("[ERROR]", errMsg)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   errMsg,
+	})
+}
 
 // Handler: GetDashboard
 func GetDashboard(db *sql.DB) http.HandlerFunc {
@@ -62,10 +74,9 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
 			return
 		}
-		buNames, ok := r.Context().Value("BusinessUnitsKey").([]string)
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 			return
 		}
 		rows, err := db.Query(query)
@@ -75,16 +86,28 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		cols, _ := rows.Columns()
 		var dashboards []map[string]interface{}
 		idx := 1
 		for rows.Next() {
-			vals := make([]interface{}, len(cols))
-			valPtrs := make([]interface{}, len(cols))
-			for i := range vals { valPtrs[i] = &vals[i] }
-			if err := rows.Scan(valPtrs...); err != nil { continue }
-			rowMap := map[string]interface{}{"id": idx}
-			for i, col := range cols { rowMap[col] = vals[i] }
+			var bu, currency string
+			var debitors, creditors, lc, grn, totalPayableExposure, coverTakenExport, coverTakenImport, outstandingCoverExport, outstandingCoverImport sql.NullFloat64
+			if err := rows.Scan(&bu, &currency, &debitors, &creditors, &lc, &grn, &totalPayableExposure, &coverTakenExport, &coverTakenImport, &outstandingCoverExport, &outstandingCoverImport); err != nil {
+				continue
+			}
+			rowMap := map[string]interface{}{
+				"id":                       idx,
+				"bu":                       bu,
+				"currency":                 currency,
+				"debitors":                 debitors.Float64,
+				"creditors":                creditors.Float64,
+				"lc":                       lc.Float64,
+				"grn":                      grn.Float64,
+				"total_payable_exposure":   totalPayableExposure.Float64,
+				"cover_taken_export":       coverTakenExport.Float64,
+				"cover_taken_import":       coverTakenImport.Float64,
+				"outstanding_cover_export": outstandingCoverExport.Float64,
+				"outstanding_cover_import": outstandingCoverImport.Float64,
+			}
 			// Only include if bu (entity) is in allowed buNames
 			if bu, ok := rowMap["bu"].(string); ok && containsString(buNames, bu) {
 				dashboards = append(dashboards, rowMap)
@@ -92,7 +115,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(dashboards)
+		json.NewEncoder(w).Encode(map[string]any{"dashboards": dashboards})
 	}
 }
 
@@ -105,5 +128,3 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
-
-// TODO: Implement other dashboard logic.
