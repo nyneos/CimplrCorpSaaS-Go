@@ -601,11 +601,11 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
 		// Get user_id from body
 		var req struct { UserID string `json:"user_id"` }
-		// if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-		// 	w.WriteHeader(http.StatusBadRequest)
-		// 	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Missing user_id in body"})
-		// 	return
-		// }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Missing user_id in body"})
+			return
+		}
 		// Get role_id from user_roles
 		var roleId int
 		errRole := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
