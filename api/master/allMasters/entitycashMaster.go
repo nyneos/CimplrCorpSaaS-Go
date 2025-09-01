@@ -5,8 +5,11 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
+
+	// "fmt"
 	"net/http"
-	"strconv"
+
+	// "strconv"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -900,38 +903,102 @@ func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// Find parent cash entities at a given level
 func FindParentCashEntityAtLevel(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// Parse request
 		var req struct {
-			Level string `json:"level"`
+			UserID string `json:"user_id"`
+			Level  int    `json:"level"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Level == "" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode([]string{})
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Missing or invalid user_id/level",
+			})
 			return
 		}
-		numericLevel, err := strconv.Atoi(req.Level)
-		if err != nil || numericLevel <= 1 {
-			json.NewEncoder(w).Encode([]string{})
+
+		// Validate user session
+		validUser := false
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				validUser = true
+				break
+			}
+		}
+		if !validUser {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Invalid user_id or session",
+			})
 			return
 		}
-		parentLevel := numericLevel - 1
-		query := `SELECT entity_name FROM masterentitycash WHERE entity_level = $1 AND (is_deleted = false OR is_deleted IS NULL)`
+
+		parentLevel := req.Level - 1
+		query := `
+			SELECT m.entity_name, m.entity_id
+			FROM masterentitycash m
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM auditactionentity a
+				WHERE a.entity_id = m.entity_id
+				  AND a.processing_status = 'APPROVED'
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) a ON TRUE
+			WHERE m.entity_level = $1
+			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
+			  AND LOWER(m.active_status) = 'active'
+		`
+
 		rows, err := db.Query(query, parentLevel)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
 			return
 		}
 		defer rows.Close()
-		var names []string
+
+		var results []map[string]interface{}
 		for rows.Next() {
-			var name string
-			rows.Scan(&name)
-			names = append(names, name)
+			var name, id string
+			if err := rows.Scan(&name, &id); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   err.Error(),
+				})
+				return
+			}
+			results = append(results, map[string]interface{}{
+				"name": name,
+				"id":   id,
+			})
 		}
-		json.NewEncoder(w).Encode(names)
+
+		// Check for iteration errors
+		if err := rows.Err(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		// Success response
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"results": results,
+		})
 	}
 }
 
