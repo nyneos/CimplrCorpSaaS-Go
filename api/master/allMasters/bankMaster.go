@@ -1,11 +1,12 @@
 package allMaster
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
 
-	// "log"
+	"log"
 	"net/http"
 
 	"github.com/lib/pq"
@@ -154,7 +155,6 @@ func CreateBankMaster(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// GET handler to fetch all bank records
 func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := `
@@ -163,17 +163,10 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 				   m.state_province, m.postal_code,
 				   m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
 				   m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
-				   m.old_state_province, m.old_postal_code,
-				   a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id, a.checker_by, a.checker_at, a.checker_comment, a.reason
+				   m.old_state_province, m.old_postal_code
 			FROM masterbank m
-			LEFT JOIN LATERAL (
-				SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
-				FROM auditactionbank a
-				WHERE a.bank_id = m.bank_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) a ON TRUE
 		`
+
 		rows, err := db.Query(query)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -184,51 +177,92 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 		var banks []map[string]interface{}
 		for rows.Next() {
 			var (
-				bankID, bankName, bankShortName, swiftBicCode, countryOfHQ, connectivityType, activeStatus, contactPersonName, contactPersonEmail, contactPersonPhone string
-				addressLine1, addressLine2, city, stateProvince, postalCode                                                                                           string
-				oldBankName, oldBankShortName, oldSwiftBicCode, oldCountryOfHQ, oldConnectivityType, oldActiveStatus                                                  string
-				oldContactPersonName, oldContactPersonEmail, oldContactPersonPhone, oldAddressLine1, oldAddressLine2, oldCity, oldStateProvince, oldPostalCode        string
-				processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason                                                                sql.NullString
-				requestedAt, checkerAt                                                                                                                                sql.NullTime
+				bankID, bankName, countryOfHQ, connectivityType, activeStatus string
+				bankShortName, swiftBicCode                                   sql.NullString
+				contactPersonName, contactPersonEmail, contactPersonPhone     sql.NullString
+				addressLine1, addressLine2, city, stateProvince, postalCode   sql.NullString
+				oldBankName, oldBankShortName, oldSwiftBicCode                sql.NullString
+				oldCountryOfHQ, oldConnectivityType, oldActiveStatus          sql.NullString
+				oldContactPersonName, oldContactPersonEmail                   sql.NullString
+				oldContactPersonPhone, oldAddressLine1, oldAddressLine2       sql.NullString
+				oldCity, oldStateProvince, oldPostalCode                      sql.NullString
 			)
-			err := rows.Scan(&bankID, &bankName, &bankShortName, &swiftBicCode, &countryOfHQ, &connectivityType, &activeStatus,
+
+			if err := rows.Scan(
+				&bankID, &bankName, &bankShortName, &swiftBicCode, &countryOfHQ, &connectivityType, &activeStatus,
 				&contactPersonName, &contactPersonEmail, &contactPersonPhone, &addressLine1, &addressLine2, &city, &stateProvince, &postalCode,
 				&oldBankName, &oldBankShortName, &oldSwiftBicCode, &oldCountryOfHQ, &oldConnectivityType, &oldActiveStatus,
 				&oldContactPersonName, &oldContactPersonEmail, &oldContactPersonPhone, &oldAddressLine1, &oldAddressLine2, &oldCity, &oldStateProvince, &oldPostalCode,
-				&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
-			if err != nil {
+			); err != nil {
+				log.Printf("row scan error for bank_id=%s: %v", bankID, err)
 				continue
 			}
+
+			// fetch latest audit record
+			auditQuery := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason 
+						   FROM auditactionbank WHERE bank_id = $1 ORDER BY requested_at DESC LIMIT 1`
+			var processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason sql.NullString
+			var requestedAt, checkerAt sql.NullTime
+			_ = db.QueryRow(auditQuery, bankID).Scan(&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
+
+			// fetch CREATE/EDIT/DELETE history
+			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactionbank 
+								  WHERE bank_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') 
+								  ORDER BY requested_at DESC`
+			auditRows, auditErr := db.Query(auditDetailsQuery, bankID)
+			var createdBy, createdAt, editedBy, editedAt, deletedBy, deletedAt string
+			if auditErr == nil {
+				defer auditRows.Close()
+				for auditRows.Next() {
+					var atype string
+					var rby sql.NullString
+					var rat sql.NullTime
+					if err := auditRows.Scan(&atype, &rby, &rat); err == nil {
+						auditInfo := api.GetAuditInfo(atype, rby, rat)
+						if atype == "CREATE" && createdBy == "" {
+							createdBy = auditInfo.CreatedBy
+							createdAt = auditInfo.CreatedAt
+						} else if atype == "EDIT" && editedBy == "" {
+							editedBy = auditInfo.EditedBy
+							editedAt = auditInfo.EditedAt
+						} else if atype == "DELETE" && deletedBy == "" {
+							deletedBy = auditInfo.DeletedBy
+							deletedAt = auditInfo.DeletedAt
+						}
+					}
+				}
+			}
+
 			banks = append(banks, map[string]interface{}{
 				"bank_id":                     bankID,
 				"bank_name":                   bankName,
-				"bank_short_name":             getNullString(sql.NullString{String: bankShortName, Valid: bankShortName != ""}),
-				"swift_bic_code":              getNullString(sql.NullString{String: swiftBicCode, Valid: swiftBicCode != ""}),
+				"bank_short_name":             getNullString(bankShortName),
+				"swift_bic_code":              getNullString(swiftBicCode),
 				"country_of_headquarters":     countryOfHQ,
 				"connectivity_type":           connectivityType,
 				"active_status":               activeStatus,
-				"contact_person_name":         getNullString(sql.NullString{String: contactPersonName, Valid: contactPersonName != ""}),
-				"contact_person_email":        getNullString(sql.NullString{String: contactPersonEmail, Valid: contactPersonEmail != ""}),
-				"contact_person_phone":        getNullString(sql.NullString{String: contactPersonPhone, Valid: contactPersonPhone != ""}),
-				"address_line1":               getNullString(sql.NullString{String: addressLine1, Valid: addressLine1 != ""}),
-				"address_line2":               getNullString(sql.NullString{String: addressLine2, Valid: addressLine2 != ""}),
-				"city":                        getNullString(sql.NullString{String: city, Valid: city != ""}),
-				"state_province":              getNullString(sql.NullString{String: stateProvince, Valid: stateProvince != ""}),
-				"postal_code":                 getNullString(sql.NullString{String: postalCode, Valid: postalCode != ""}),
-				"old_bank_name":               getNullString(sql.NullString{String: oldBankName, Valid: oldBankName != ""}),
-				"old_bank_short_name":         getNullString(sql.NullString{String: oldBankShortName, Valid: oldBankShortName != ""}),
-				"old_swift_bic_code":          getNullString(sql.NullString{String: oldSwiftBicCode, Valid: oldSwiftBicCode != ""}),
-				"old_country_of_headquarters": getNullString(sql.NullString{String: oldCountryOfHQ, Valid: oldCountryOfHQ != ""}),
-				"old_connectivity_type":       getNullString(sql.NullString{String: oldConnectivityType, Valid: oldConnectivityType != ""}),
-				"old_active_status":           getNullString(sql.NullString{String: oldActiveStatus, Valid: oldActiveStatus != ""}),
-				"old_contact_person_name":     getNullString(sql.NullString{String: oldContactPersonName, Valid: oldContactPersonName != ""}),
-				"old_contact_person_email":    getNullString(sql.NullString{String: oldContactPersonEmail, Valid: oldContactPersonEmail != ""}),
-				"old_contact_person_phone":    getNullString(sql.NullString{String: oldContactPersonPhone, Valid: oldContactPersonPhone != ""}),
-				"old_address_line1":           getNullString(sql.NullString{String: oldAddressLine1, Valid: oldAddressLine1 != ""}),
-				"old_address_line2":           getNullString(sql.NullString{String: oldAddressLine2, Valid: oldAddressLine2 != ""}),
-				"old_city":                    getNullString(sql.NullString{String: oldCity, Valid: oldCity != ""}),
-				"old_state_province":          getNullString(sql.NullString{String: oldStateProvince, Valid: oldStateProvince != ""}),
-				"old_postal_code":             getNullString(sql.NullString{String: oldPostalCode, Valid: oldPostalCode != ""}),
+				"contact_person_name":         getNullString(contactPersonName),
+				"contact_person_email":        getNullString(contactPersonEmail),
+				"contact_person_phone":        getNullString(contactPersonPhone),
+				"address_line1":               getNullString(addressLine1),
+				"address_line2":               getNullString(addressLine2),
+				"city":                        getNullString(city),
+				"state_province":              getNullString(stateProvince),
+				"postal_code":                 getNullString(postalCode),
+				"old_bank_name":               getNullString(oldBankName),
+				"old_bank_short_name":         getNullString(oldBankShortName),
+				"old_swift_bic_code":          getNullString(oldSwiftBicCode),
+				"old_country_of_headquarters": getNullString(oldCountryOfHQ),
+				"old_connectivity_type":       getNullString(oldConnectivityType),
+				"old_active_status":           getNullString(oldActiveStatus),
+				"old_contact_person_name":     getNullString(oldContactPersonName),
+				"old_contact_person_email":    getNullString(oldContactPersonEmail),
+				"old_contact_person_phone":    getNullString(oldContactPersonPhone),
+				"old_address_line1":           getNullString(oldAddressLine1),
+				"old_address_line2":           getNullString(oldAddressLine2),
+				"old_city":                    getNullString(oldCity),
+				"old_state_province":          getNullString(oldStateProvince),
+				"old_postal_code":             getNullString(oldPostalCode),
 				"processing_status":           getNullString(processingStatus),
 				"requested_by":                getNullString(requestedBy),
 				"requested_at":                getNullTime(requestedAt),
@@ -238,8 +272,15 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 				"checker_by":                  getNullString(checkerBy),
 				"checker_comment":             getNullString(checkerComment),
 				"reason":                      getNullString(reason),
+				"created_by":                  createdBy,
+				"created_at":                  createdAt,
+				"edited_by":                   editedBy,
+				"edited_at":                   editedAt,
+				"deleted_by":                  deletedBy,
+				"deleted_at":                  deletedAt,
 			})
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		if banks == nil {
 			banks = make([]map[string]interface{}, 0)
