@@ -2,22 +2,40 @@ package dash
 
 import (
 	"CimplrCorpSaas/api"
+	bankbalance "CimplrCorpSaas/api/dash/bank-balance"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
 	"CimplrCorpSaas/api/dash/cfo"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
 	reports "CimplrCorpSaas/api/dash/reports"
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func StartDashService(db *sql.DB) {
 	mux := http.NewServeMux()
+	user := os.Getenv("DB_USER")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+
+	pgxPool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		log.Fatalf("failed to connect to pgxpool DB: %v", err)
+	}
 	mux.HandleFunc("/dash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Dashboard Service"))
 	})
-
+	mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
+	mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
 	// Business Unit/Currency Exposure Dashboard
 	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))
 	mux.Handle("/dash/bu-curr-exp-dashboard", api.BusinessUnitMiddleware(db)(buCurrExpDash.GetDashboard(db)))
@@ -69,11 +87,8 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/reports/linked-summary-by-category", api.BusinessUnitMiddleware(db)(reports.GetLinkedSummaryByCategory(db)))
 
 	log.Println("Dashboard Service started on :4143")
-	err := http.ListenAndServe(":4143", mux)
+	err = http.ListenAndServe(":4143", mux)
 	if err != nil {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
-
-
-
