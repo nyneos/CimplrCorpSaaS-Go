@@ -68,13 +68,15 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 // Handler: ExpFwdLinkingBookings
 func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct { UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/json") {
 			_ = json.NewDecoder(r.Body).Decode(&req)
-		// } else if strings.HasPrefix(ct, "multipart/form-data") {
-		// 	r.ParseMultipartForm(32 << 20)
-		// 	req.UserID = r.FormValue("user_id")
+			// } else if strings.HasPrefix(ct, "multipart/form-data") {
+			// 	r.ParseMultipartForm(32 << 20)
+			// 	req.UserID = r.FormValue("user_id")
 		}
 		if req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
@@ -85,7 +87,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
-		bookRows, err := db.Query(`SELECT system_transaction_id, entity_level_0, order_type, quote_currency, maturity_date, booking_amount, counterparty_dealer FROM forward_bookings WHERE processing_status = 'approved' OR processing_status = 'Approved'`)
+		bookRows, err := db.Query(`SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency FROM forward_bookings WHERE processing_status = 'approved' OR processing_status = 'Approved'`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch bookings")
 			return
@@ -96,17 +98,35 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 		for bookRows.Next() {
 			vals := make([]interface{}, len(bookCols))
 			valPtrs := make([]interface{}, len(bookCols))
-			for i := range vals { valPtrs[i] = &vals[i] }
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
 			bookRows.Scan(valPtrs...)
 			row := map[string]interface{}{}
-			for i, col := range bookCols { row[col] = vals[i] }
-			if containsString(buNames, row["entity_level_0"].(string)) {
+			for i, col := range bookCols {
+				// Convert []uint8 to string for keys we use as map keys or for lookups
+				if b, ok := vals[i].([]uint8); ok {
+					row[col] = string(b)
+				} else {
+					row[col] = vals[i]
+				}
+			}
+			entityStr, _ := row["entity_level_0"].(string)
+			if containsString(buNames, entityStr) {
 				bookings = append(bookings, row)
 			}
 		}
 		bookingIds := []interface{}{}
 		for _, b := range bookings {
-			bookingIds = append(bookingIds, b["system_transaction_id"])
+			// Always use string for bookingIds
+			var bookingIDStr string
+			switch v := b["system_transaction_id"].(type) {
+			case string:
+				bookingIDStr = v
+			case []uint8:
+				bookingIDStr = string(v)
+			}
+			bookingIds = append(bookingIds, bookingIDStr)
 		}
 		hedgeMap := map[interface{}]float64{}
 		if len(bookingIds) > 0 {
@@ -116,7 +136,15 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 					var booking_id interface{}
 					var linked_amount float64
 					hedgeRows.Scan(&booking_id, &linked_amount)
-					hedgeMap[booking_id] = linked_amount
+					// Convert booking_id to string for map key
+					var bookingIDStr string
+					switch v := booking_id.(type) {
+					case string:
+						bookingIDStr = v
+					case []uint8:
+						bookingIDStr = string(v)
+					}
+					hedgeMap[bookingIDStr] = linked_amount
 				}
 				hedgeRows.Close()
 			}
@@ -133,25 +161,73 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 		}
 		response := []map[string]interface{}{}
 		for _, b := range bookings {
-			linkedAmount := hedgeMap[b["system_transaction_id"]]
+			// Use string for lookup
+			var bookingIDStr string
+			switch v := b["system_transaction_id"].(type) {
+			case string:
+				bookingIDStr = v
+			case []uint8:
+				bookingIDStr = string(v)
+			}
+			linkedAmount := hedgeMap[bookingIDStr]
+			entityStr, _ := b["entity_level_0"].(string)
+			// Format numbers as required
+			// booking_amount: 2 decimals
+			var bookingAmount float64
+			switch v := b["booking_amount"].(type) {
+			case float64:
+				bookingAmount = v
+			case string:
+				bookingAmount, _ = strconv.ParseFloat(v, 64)
+			case []uint8:
+				bookingAmount, _ = strconv.ParseFloat(string(v), 64)
+			}
+			// linkedAmount: 2 decimals
+			linkedAmountF := linkedAmount
+			// total_rate: 6 decimals
+			var totalRate float64
+			switch v := b["total_rate"].(type) {
+			case float64:
+				totalRate = v
+			case string:
+				totalRate, _ = strconv.ParseFloat(v, 64)
+			case []uint8:
+				totalRate, _ = strconv.ParseFloat(string(v), 64)
+			}
+			// value_local_currency: 2 decimals
+			var lcyAmount float64
+			switch v := b["value_local_currency"].(type) {
+			case float64:
+				lcyAmount = v
+			case string:
+				lcyAmount, _ = strconv.ParseFloat(v, 64)
+			case []uint8:
+				lcyAmount, _ = strconv.ParseFloat(string(v), 64)
+			}
+			// currency_pair
+			currencyPair, _ := b["currency_pair"].(string)
+			// bank name
+			bankName, _ := b["counterparty_dealer"].(string)
 			response = append(response, map[string]interface{}{
-				"bu": b["entity_level_0"],
-				"system_transaction_id": b["system_transaction_id"],
-				"type": b["order_type"],
-				"currency": b["quote_currency"],
-				"maturity_date": b["maturity_date"],
-				"amount": b["booking_amount"],
-				"linked_amount": linkedAmount,
-				"bu_unit_compliance": buCompliance[b["entity_level_0"].(string)],
-				"Bank": b["counterparty_dealer"],
+				"bu":                    entityStr,
+				"system_transaction_id": bookingIDStr,
+				"type":                  b["order_type"],
+				"currency_pair":         currencyPair,
+				"maturity_date":         b["maturity_date"],
+				"amount":                strconv.FormatFloat(bookingAmount, 'f', 2, 64),
+				"linked_amount":         strconv.FormatFloat(linkedAmountF, 'f', 2, 64),
+				"rate":                  strconv.FormatFloat(totalRate, 'f', 6, 64),
+				"lcy_amount":            strconv.FormatFloat(lcyAmount, 'f', 2, 64),
+				"bu_unit_compliance":    buCompliance[entityStr],
+				"bank":                  bankName,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// json.NewEncoder(w).Encode(response)
-		 json.NewEncoder(w).Encode(map[string]interface{}{
-			   "success": true,
-			   "data": response,
-		   })
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data":    response,
+		})
 	}
 }
 
@@ -314,3 +390,4 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
+
