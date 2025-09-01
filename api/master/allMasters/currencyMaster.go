@@ -5,25 +5,13 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
-	"log"
+
+	// "log"
 	"net/http"
 	"strings"
 
 	"github.com/lib/pq"
 )
-
-// "database/sql"
-
-// Error response helper
-func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	log.Println("[ERROR]", errMsg)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
-	})
-}
 
 type CurrencyMasterRequest struct {
 	Status        string `json:"status"`
@@ -32,7 +20,7 @@ type CurrencyMasterRequest struct {
 	Country       string `json:"country"`
 	Symbol        string `json:"symbol"`
 	DecimalPlaces int    `json:"decimal_places"`
-	UserID        string `json:"user_id"`
+	// UserID        string `json:"user_id"`
 }
 type CurrencyMasterUpdateRequest struct {
 	CurrencyID string `json:"currency_id"`
@@ -70,7 +58,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			Currency []CurrencyMasterRequest `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 		userID := req.UserID
@@ -83,7 +71,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		var results []map[string]interface{}
@@ -162,8 +150,9 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
+		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": finalSuccess,
 			"results": results,
 		})
 	}
@@ -178,12 +167,17 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 		`
 		rows, err := db.Query(query)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
 			return
 		}
 		defer rows.Close()
 
 		var currencies []map[string]interface{}
+		var anyError error
 		for rows.Next() {
 			var (
 				currencyID, currencyCode, currencyName, country, symbol, status, oldStatus string
@@ -191,15 +185,15 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			)
 			err := rows.Scan(&currencyID, &currencyCode, &currencyName, &country, &symbol, &decimalPlaces, &status, &oldDecimalPlaces, &oldStatus)
 			if err != nil {
-				continue
+				anyError = err
+				break
 			}
-			// Fetch latest audit record for this currency (for status, checker, etc.)
+			// ...existing code...
 			auditQuery := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactioncurrency WHERE currency_id = $1 ORDER BY requested_at DESC LIMIT 1`
 			var processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 			_ = db.QueryRow(auditQuery, currencyID).Scan(&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
 
-			// Fetch CREATE, EDIT, DELETE audit records for created/edited/deleted info
 			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactioncurrency WHERE currency_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
 			auditRows, auditErr := db.Query(auditDetailsQuery, currencyID)
 			var createdBy, createdAt, editedBy, editedAt, deletedBy, deletedAt string
@@ -234,23 +228,28 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				"status":             status,
 				"old_status":         oldStatus,
 				"processing_status":  getNullString(processingStatus),
-				// "requested_by":       getNullString(requestedBy),
-				// "requested_at":       getNullTime(requestedAt),
-				"action_type":     getNullString(actionType),
-				"action_id":       getNullString(actionID),
-				"checker_at":      getNullTime(checkerAt),
-				"checker_by":      getNullString(checkerBy),
-				"checker_comment": getNullString(checkerComment),
-				"reason":          getNullString(reason),
-				"created_by":      createdBy,
-				"created_at":      createdAt,
-				"edited_by":       editedBy,
-				"edited_at":       editedAt,
-				"deleted_by":      deletedBy,
-				"deleted_at":      deletedAt,
+				"action_type":        getNullString(actionType),
+				"action_id":          getNullString(actionID),
+				"checker_at":         getNullTime(checkerAt),
+				"checker_by":         getNullString(checkerBy),
+				"checker_comment":    getNullString(checkerComment),
+				"reason":             getNullString(reason),
+				"created_by":         createdBy,
+				"created_at":         createdAt,
+				"edited_by":          editedBy,
+				"edited_at":          editedAt,
+				"deleted_by":         deletedBy,
+				"deleted_at":         deletedAt,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if anyError != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   anyError.Error(),
+			})
+			return
+		}
 		if currencies == nil {
 			currencies = make([]map[string]interface{}, 0)
 		}
@@ -268,7 +267,7 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 			Currency []CurrencyMasterUpdateRequest `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 		userID := req.UserID
@@ -281,7 +280,7 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		var results []map[string]interface{}
@@ -351,8 +350,9 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
+		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": finalSuccess,
 			"results": results,
 		})
 	}
@@ -365,7 +365,7 @@ func BulkRejectAuditActions(db *sql.DB) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -377,13 +377,13 @@ func BulkRejectAuditActions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,currency_id`
 		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -410,7 +410,7 @@ func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -422,7 +422,7 @@ func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
@@ -449,7 +449,7 @@ func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
 		query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
 		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -476,7 +476,7 @@ func BulkDeleteCurrencyAudit(db *sql.DB) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -488,7 +488,7 @@ func BulkDeleteCurrencyAudit(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		var results []string
@@ -527,23 +527,33 @@ func GetActiveApprovedCurrencyCodes(db *sql.DB) http.HandlerFunc {
 		`
 		rows, err := db.Query(query)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
 
 		var results []map[string]interface{}
+		var anyError error
 		for rows.Next() {
 			var code string
 			var decimalPlace int
-			if err := rows.Scan(&code, &decimalPlace); err == nil {
-				results = append(results, map[string]interface{}{
-					"currency_code": code,
-					"decimal_place": decimalPlace,
-				})
+			if err := rows.Scan(&code, &decimalPlace); err != nil {
+				anyError = err
+				break
 			}
+			results = append(results, map[string]interface{}{
+				"currency_code": code,
+				"decimal_place": decimalPlace,
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if anyError != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   anyError.Error(),
+			})
+			return
+		}
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
