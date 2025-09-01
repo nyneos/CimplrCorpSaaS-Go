@@ -1,6 +1,11 @@
 package api
 
-import "database/sql"
+import (
+	"database/sql"
+	"encoding/json"
+	"log"
+	"net/http"
+)
 
 // ActionAuditInfo holds audit info for a record
 type ActionAuditInfo struct {
@@ -43,4 +48,25 @@ func getNullTime(nt sql.NullTime) string {
 		return nt.Time.Format("2006-01-02 15:04:05")
 	}
 	return ""
+}
+
+// Helper to determine overall success for bulk operations
+func IsBulkSuccess(results []map[string]interface{}) bool {
+	for _, r := range results {
+		if success, ok := r["success"].(bool); !ok || !success {
+			return false
+		}
+	}
+	return true
+}
+
+// Error response helper
+func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
+	log.Println("[ERROR]", errMsg)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   errMsg,
+	})
 }
