@@ -234,13 +234,15 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 // Handler: ExpFwdLinking
 func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct { UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/json") {
 			_ = json.NewDecoder(r.Body).Decode(&req)
-		// } else if strings.HasPrefix(ct, "multipart/form-data") {
-		// 	r.ParseMultipartForm(32 << 20)
-		// 	req.UserID = r.FormValue("user_id")
+			// } else if strings.HasPrefix(ct, "multipart/form-data") {
+			// 	r.ParseMultipartForm(32 << 20)
+			// 	req.UserID = r.FormValue("user_id")
 		}
 		if req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
@@ -262,11 +264,22 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		for headRows.Next() {
 			vals := make([]interface{}, len(headCols))
 			valPtrs := make([]interface{}, len(headCols))
-			for i := range vals { valPtrs[i] = &vals[i] }
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
 			headRows.Scan(valPtrs...)
 			row := map[string]interface{}{}
-			for i, col := range headCols { row[col] = vals[i] }
-			if containsString(buNames, row["entity"].(string)) {
+			for i, col := range headCols {
+				// Convert []uint8 to string for all string fields
+				if b, ok := vals[i].([]uint8); ok {
+					row[col] = string(b)
+				} else {
+					row[col] = vals[i]
+				}
+			}
+			// Safe entity string
+			entityStr, _ := row["entity"].(string)
+			if containsString(buNames, entityStr) {
 				headers = append(headers, row)
 			}
 		}
@@ -300,29 +313,38 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		response := []map[string]interface{}{}
 		for _, h := range headers {
 			hedgeAmount := hedgeMap[h["exposure_header_id"]]
-			if hedgeAmount < float64(h["total_open_amount"].(float64)) {
-				// Only show if hedgeAmount < total_open_amount
+			// Safe total_open_amount conversion
+			var totalOpen float64
+			switch v := h["total_open_amount"].(type) {
+			case float64:
+				totalOpen = v
+			case string:
+				totalOpen, _ = strconv.ParseFloat(v, 64)
+			case []uint8:
+				totalOpen, _ = strconv.ParseFloat(string(v), 64)
+			}
+			entityStr, _ := h["entity"].(string)
+			if hedgeAmount < totalOpen {
 				response = append(response, map[string]interface{}{
-					"bu": h["entity"],
+					"bu":                 entityStr,
 					"exposure_header_id": h["exposure_header_id"],
-					"type": h["exposure_type"],
-					"currency": h["currency"],
-					"maturity_date": h["document_date"],
-					"amount": h["total_open_amount"],
-					"hedge_amount": hedgeAmount,
-					"bu_unit_compliance": buCompliance[h["entity"].(string)],
-					"Bank": h["counterparty_name"],
+					"type":               h["exposure_type"],
+					"currency":           h["currency"],
+					"maturity_date":      h["document_date"],
+					"amount":             totalOpen,
+					"hedge_amount":       hedgeAmount,
+					"bu_unit_compliance": buCompliance[entityStr],
+					"Bank":               h["counterparty_name"],
 				})
 			}
 		}
-		   w.Header().Set("Content-Type", "application/json")
-		   json.NewEncoder(w).Encode(map[string]interface{}{
-			   "success": true,
-			   "data": response,
-		   })
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data":    response,
+		})
 	}
 }
-
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
 func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -390,6 +412,7 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
+
 
 
 
