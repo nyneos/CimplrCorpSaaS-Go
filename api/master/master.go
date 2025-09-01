@@ -42,6 +42,16 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/entitycash/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCashEntityActions(db)))
 	mux.Handle("/master/entitycash/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityNamesWithID(db)))	
 
+	// Bank Account Master routes
+	mux.Handle("/master/bankaccount/create", api.BusinessUnitMiddleware(db)(allMaster.CreateBankAccountMaster(db)))
+	mux.Handle("/master/bankaccount/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllBankAccountMaster(db)))
+	mux.Handle("/master/bankaccount/update", api.BusinessUnitMiddleware(db)(allMaster.UpdateBankAccountMasterBulk(db)))
+	mux.Handle("/master/bankaccount/bulk-delete", api.BusinessUnitMiddleware(db)(allMaster.BulkDeleteBankAccountAudit(db)))
+	mux.Handle("/master/bankaccount/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectBankAccountAuditActions(db)))
+	mux.Handle("/master/bankaccount/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveBankAccountAuditActions(db)))
+	mux.Handle("/master/bankaccount/names", api.BusinessUnitMiddleware(db)(allMaster.GetBankNamesWithIDForAccount(db)))
+	mux.Handle("/master/bankaccount/approved-with-entity", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedBankAccountsWithBankEntity(db)))
+
 	mux.Handle("/master/entity/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncEntities(db)))
 	mux.Handle("/master/entity/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetEntityHierarchy(db)))
 	mux.Handle("/master/entity/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteEntity(db)))
@@ -57,5 +67,6 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
