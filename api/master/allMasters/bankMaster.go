@@ -1,12 +1,10 @@
 package allMaster
 
 import (
-	"CimplrCorpSaas/api"
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
-
-	"log"
 	"net/http"
 
 	"github.com/lib/pq"
@@ -69,12 +67,12 @@ func CreateBankMaster(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BankMasterRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 		userID := req.UserID
 		if userID == "" {
-			respondWithError(w, http.StatusBadRequest, "Missing user_id in body")
+			api.RespondWithError(w, http.StatusBadRequest, "Missing user_id in body")
 			return
 		}
 		createdBy := ""
@@ -86,17 +84,17 @@ func CreateBankMaster(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			respondWithError(w, http.StatusBadRequest, "User session not found or email missing")
+			api.RespondWithError(w, http.StatusBadRequest, "User session not found or email missing")
 			return
 		}
 		// Basic validation (add more as needed)
 		if req.BankName == "" || req.CountryOfHeadquarters == "" || req.ConnectivityType == "" {
-			respondWithError(w, http.StatusBadRequest, "Missing required bank details")
+			api.RespondWithError(w, http.StatusBadRequest, "Missing required bank details")
 			return
 		}
 		tx, txErr := db.Begin()
 		if txErr != nil {
-			respondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+txErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+txErr.Error())
 			return
 		}
 		var bankID string
@@ -126,7 +124,7 @@ func CreateBankMaster(db *sql.DB) http.HandlerFunc {
 		).Scan(&bankID)
 		if err != nil {
 			tx.Rollback()
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		auditQuery := `INSERT INTO auditactionbank (
@@ -141,11 +139,11 @@ func CreateBankMaster(db *sql.DB) http.HandlerFunc {
 		)
 		if auditErr != nil {
 			tx.Rollback()
-			respondWithError(w, http.StatusInternalServerError, "Bank created but audit log failed: "+auditErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Bank created but audit log failed: "+auditErr.Error())
 			return
 		}
 		if commitErr := tx.Commit(); commitErr != nil {
-			respondWithError(w, http.StatusInternalServerError, "Transaction commit failed: "+commitErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Transaction commit failed: "+commitErr.Error())
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -169,12 +167,13 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.Query(query)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
 
 		var banks []map[string]interface{}
+		var anyError error
 		for rows.Next() {
 			var (
 				bankID, bankName, countryOfHQ, connectivityType, activeStatus string
@@ -194,18 +193,17 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 				&oldBankName, &oldBankShortName, &oldSwiftBicCode, &oldCountryOfHQ, &oldConnectivityType, &oldActiveStatus,
 				&oldContactPersonName, &oldContactPersonEmail, &oldContactPersonPhone, &oldAddressLine1, &oldAddressLine2, &oldCity, &oldStateProvince, &oldPostalCode,
 			); err != nil {
-				log.Printf("row scan error for bank_id=%s: %v", bankID, err)
-				continue
+				anyError = err
+				break
 			}
 
-			// fetch latest audit record
+			// ...existing code...
 			auditQuery := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason 
 						   FROM auditactionbank WHERE bank_id = $1 ORDER BY requested_at DESC LIMIT 1`
 			var processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 			_ = db.QueryRow(auditQuery, bankID).Scan(&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
 
-			// fetch CREATE/EDIT/DELETE history
 			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactionbank 
 								  WHERE bank_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') 
 								  ORDER BY requested_at DESC`
@@ -264,8 +262,6 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 				"old_state_province":          getNullString(oldStateProvince),
 				"old_postal_code":             getNullString(oldPostalCode),
 				"processing_status":           getNullString(processingStatus),
-				// "requested_by":                getNullString(requestedBy),
-				// "requested_at":                getNullTime(requestedAt),
 				"action_type":                 getNullString(actionType),
 				"action_id":                   getNullString(actionID),
 				"checker_at":                  getNullTime(checkerAt),
@@ -280,8 +276,11 @@ func GetAllBankMaster(db *sql.DB) http.HandlerFunc {
 				"deleted_at":                  deletedAt,
 			})
 		}
-
 		w.Header().Set("Content-Type", "application/json")
+		if anyError != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			return
+		}
 		if banks == nil {
 			banks = make([]map[string]interface{}, 0)
 		}
@@ -299,7 +298,7 @@ func GetBankNamesWithID(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 		query := `
@@ -316,23 +315,30 @@ func GetBankNamesWithID(db *sql.DB) http.HandlerFunc {
 		`
 		rows, err := db.Query(query)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
 
 		var results []map[string]interface{}
+		var anyError error
 		for rows.Next() {
 			var bankID, bankName, bankShortName string
-			if err := rows.Scan(&bankID, &bankName, &bankShortName); err == nil {
-				results = append(results, map[string]interface{}{
-					"bank_id":         bankID,
-					"bank_name":       bankName,
-					"bank_short_name": getNullString(sql.NullString{String: bankShortName, Valid: bankShortName != ""}),
-				})
+			if err := rows.Scan(&bankID, &bankName, &bankShortName); err != nil {
+				anyError = err
+				break
 			}
+			results = append(results, map[string]interface{}{
+				"bank_id":         bankID,
+				"bank_name":       bankName,
+				"bank_short_name": getNullString(sql.NullString{String: bankShortName, Valid: bankShortName != ""}),
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if anyError != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			return
+		}
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
@@ -351,7 +357,7 @@ func UpdateBankMasterBulk(db *sql.DB) http.HandlerFunc {
 			Banks  []BankMasterUpdateRequest `json:"banks"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 		userID := req.UserID
@@ -364,7 +370,7 @@ func UpdateBankMasterBulk(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		var results []map[string]interface{}
@@ -454,8 +460,9 @@ func UpdateBankMasterBulk(db *sql.DB) http.HandlerFunc {
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
+		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success": finalSuccess,
 			"results": results,
 		})
 	}
@@ -470,7 +477,7 @@ func BulkDeleteBankAudit(db *sql.DB) http.HandlerFunc {
 			Reason  string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -482,7 +489,7 @@ func BulkDeleteBankAudit(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		var results []string
@@ -513,7 +520,7 @@ func BulkRejectBankAuditActions(db *sql.DB) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -525,13 +532,13 @@ func BulkRejectBankAuditActions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		query := `UPDATE auditactionbank SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,bank_id`
 		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -558,7 +565,7 @@ func BulkApproveBankAuditActions(db *sql.DB) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -570,7 +577,7 @@ func BulkApproveBankAuditActions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
@@ -597,7 +604,7 @@ func BulkApproveBankAuditActions(db *sql.DB) http.HandlerFunc {
 		query := `UPDATE auditactionbank SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,bank_id`
 		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
