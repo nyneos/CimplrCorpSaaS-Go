@@ -207,7 +207,7 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			// currency_pair
 			currencyPair, _ := b["currency_pair"].(string)
 			// bank name
-			bankName, _ := b["counterparty_dealer"].(string)
+			bankName, _ := b["counterparty"].(string)
 			response = append(response, map[string]interface{}{
 				"bu":                    entityStr,
 				"system_transaction_id": bookingIDStr,
@@ -390,5 +390,6 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
+
 
 
