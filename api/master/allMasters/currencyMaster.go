@@ -1,6 +1,7 @@
 package allMaster
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
@@ -172,16 +173,8 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := `
-			SELECT m.currency_id, m.currency_code, m.currency_name, m.country, m.symbol, m.decimal_places, m.status, m.old_decimal_places,m.old_status,
-				   a.processing_status, a.requested_by, a.requested_at ,a.actiontype,a.action_id ,a.checker_by,a.checker_at,a.checker_comment,a.reason
+			SELECT m.currency_id, m.currency_code, m.currency_name, m.country, m.symbol, m.decimal_places, m.status, m.old_decimal_places, m.old_status
 			FROM mastercurrency m
-			LEFT JOIN LATERAL (
-				SELECT processing_status, requested_by, requested_at, actiontype, action_id ,checker_by, checker_at, checker_comment, reason
-				FROM auditactioncurrency a
-				WHERE a.currency_id = m.currency_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) a ON TRUE
 		`
 		rows, err := db.Query(query)
 		if err != nil {
@@ -193,16 +186,42 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 		var currencies []map[string]interface{}
 		for rows.Next() {
 			var (
-				currencyID, actionID                                                         string // uuid
-				currencyCode, currencyName, country, symbol, status, oldStatus               string
-				decimalPlaces, oldDecimalPlaces                                              int
-				processingStatus, requestedBy, actionType, checkerBy, checkerComment, reason sql.NullString
-				requestedAt, checkerAt                                                       sql.NullTime
+				currencyID, currencyCode, currencyName, country, symbol, status, oldStatus string
+				decimalPlaces, oldDecimalPlaces                                            int
 			)
-			err := rows.Scan(&currencyID, &currencyCode, &currencyName, &country, &symbol, &decimalPlaces, &status, &oldDecimalPlaces, &oldStatus,
-				&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
+			err := rows.Scan(&currencyID, &currencyCode, &currencyName, &country, &symbol, &decimalPlaces, &status, &oldDecimalPlaces, &oldStatus)
 			if err != nil {
 				continue
+			}
+			// Fetch latest audit record for this currency (for status, checker, etc.)
+			auditQuery := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactioncurrency WHERE currency_id = $1 ORDER BY requested_at DESC LIMIT 1`
+			var processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason sql.NullString
+			var requestedAt, checkerAt sql.NullTime
+			_ = db.QueryRow(auditQuery, currencyID).Scan(&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
+
+			// Fetch CREATE, EDIT, DELETE audit records for created/edited/deleted info
+			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactioncurrency WHERE currency_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
+			auditRows, auditErr := db.Query(auditDetailsQuery, currencyID)
+			var createdBy, createdAt, editedBy, editedAt, deletedBy, deletedAt string
+			if auditErr == nil {
+				defer auditRows.Close()
+				for auditRows.Next() {
+					var actionType string
+					var requestedBy sql.NullString
+					var requestedAt sql.NullTime
+					auditRows.Scan(&actionType, &requestedBy, &requestedAt)
+					auditInfo := api.GetAuditInfo(actionType, requestedBy, requestedAt)
+					if actionType == "CREATE" && createdBy == "" {
+						createdBy = auditInfo.CreatedBy
+						createdAt = auditInfo.CreatedAt
+					} else if actionType == "EDIT" && editedBy == "" {
+						editedBy = auditInfo.EditedBy
+						editedAt = auditInfo.EditedAt
+					} else if actionType == "DELETE" && deletedBy == "" {
+						deletedBy = auditInfo.DeletedBy
+						deletedAt = auditInfo.DeletedAt
+					}
+				}
 			}
 			currencies = append(currencies, map[string]interface{}{
 				"currency_id":        currencyID,
@@ -215,14 +234,20 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				"status":             status,
 				"old_status":         oldStatus,
 				"processing_status":  getNullString(processingStatus),
-				"requested_by":       getNullString(requestedBy),
-				"requested_at":       getNullTime(requestedAt),
-				"action_type":        getNullString(actionType),
-				"action_id":          actionID,
-				"checker_at":         getNullTime(checkerAt),
-				"checker_by":         getNullString(checkerBy),
-				"checker_comment":    getNullString(checkerComment),
-				"reason":             getNullString(reason),
+				// "requested_by":       getNullString(requestedBy),
+				// "requested_at":       getNullTime(requestedAt),
+				"action_type":     getNullString(actionType),
+				"action_id":       getNullString(actionID),
+				"checker_at":      getNullTime(checkerAt),
+				"checker_by":      getNullString(checkerBy),
+				"checker_comment": getNullString(checkerComment),
+				"reason":          getNullString(reason),
+				"created_by":      createdBy,
+				"created_at":      createdAt,
+				"edited_by":       editedBy,
+				"edited_at":       editedAt,
+				"deleted_by":      deletedBy,
+				"deleted_at":      deletedAt,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
