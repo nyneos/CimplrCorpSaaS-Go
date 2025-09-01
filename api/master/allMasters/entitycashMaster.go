@@ -5,9 +5,9 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
-
-	// "fmt"
+	"fmt"
 	"net/http"
+	"strings"
 
 	// "strconv"
 
@@ -451,8 +451,12 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string                    `json:"user_id"`
-			Entities []CashEntityUpdateRequest `json:"entities"`
+			UserID   string `json:"user_id"`
+			Entities []struct {
+				EntityID string                 `json:"entity_id"`
+				Fields   map[string]interface{} `json:"fields"`
+				Reason   string                 `json:"reason"`
+			} `json:"entities"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -480,89 +484,206 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "Missing entity_id"})
 				continue
 			}
-			updateQuery := `UPDATE masterentitycash SET 
-				entity_name=$1, old_entity_name=$2,
-				entity_short_name=$3, old_entity_short_name=$4,
-				entity_level=$5, old_entity_level=$6,
-				parent_entity_id=$7, old_parent_entity_id=$8,
-				entity_registration_number=$9, old_entity_registration_number=$10,
-				country=$11, old_country=$12,
-				base_operating_currency=$13, old_base_operating_currency=$14,
-				tax_identification_number=$15, old_tax_identification_number=$16,
-				address_line1=$17, old_address_line1=$18,
-				address_line2=$19, old_address_line2=$20,
-				city=$21, old_city=$22,
-				state_province=$23, old_state_province=$24,
-				postal_code=$25, old_postal_code=$26,
-				contact_person_name=$27, old_contact_person_name=$28,
-				contact_person_email=$29, old_contact_person_email=$30,
-				contact_person_phone=$31, old_contact_person_phone=$32,
-				active_status=$33, old_active_status=$34,
-				is_top_level_entity=$35, is_deleted=$36
-				WHERE entity_id=$37 RETURNING entity_id`
-			var updatedEntityID string
-			err := db.QueryRow(updateQuery,
-				entity.EntityName, entity.OldEntityName,
-				entity.EntityShortName, entity.OldEntityShortName,
-				entity.EntityLevel, entity.OldEntityLevel,
-				entity.ParentEntityID, entity.OldParentEntityID,
-				entity.EntityRegistrationNumber, entity.OldEntityRegistrationNumber,
-				entity.Country, entity.OldCountry,
-				entity.BaseOperatingCurrency, entity.OldBaseOperatingCurrency,
-				entity.TaxIdentificationNumber, entity.OldTaxIdentificationNumber,
-				entity.AddressLine1, entity.OldAddressLine1,
-				entity.AddressLine2, entity.OldAddressLine2,
-				entity.City, entity.OldCity,
-				entity.StateProvince, entity.OldStateProvince,
-				entity.PostalCode, entity.OldPostalCode,
-				entity.ContactPersonName, entity.OldContactPersonName,
-				entity.ContactPersonEmail, entity.OldContactPersonEmail,
-				entity.ContactPersonPhone, entity.OldContactPersonPhone,
-				entity.ActiveStatus, entity.OldActiveStatus,
-				entity.IsTopLevelEntity, entity.IsDeleted,
-				entity.EntityID,
-			).Scan(&updatedEntityID)
-			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "entity_id": entity.EntityID})
+			tx, txErr := db.Begin()
+			if txErr != nil {
+				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "entity_id": entity.EntityID})
 				continue
 			}
-			// Insert audit action
-			auditQuery := `INSERT INTO auditactionentity (
-				entity_id, actiontype, processing_status, reason, requested_by, requested_at
-			) VALUES ($1, $2, $3, $4, $5, now())`
-			_, auditErr := db.Exec(auditQuery,
-				updatedEntityID,
-				"EDIT",
-				"PENDING_EDIT_APPROVAL",
-				entity.Reason,
-				updatedBy,
-			)
-			if auditErr != nil {
-				results = append(results, map[string]interface{}{
-					"success":   false,
-					"error":     "Entity updated but audit log failed: " + auditErr.Error(),
-					"entity_id": updatedEntityID,
-				})
-				continue
-			}
-			// Sync relationships if parent_entity_id is present
-			parentId := entity.ParentEntityID
-			if parentId != "" {
-				var exists int
-				err := db.QueryRow(`SELECT 1 FROM cashentityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, updatedEntityID).Scan(&exists)
-				if err == sql.ErrNoRows {
-					relQuery := `INSERT INTO cashentityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`
-					var relID int
-					relErr := db.QueryRow(relQuery, parentId, updatedEntityID).Scan(&relID)
-					if relErr == nil {
-						relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_id": parentId, "child_entity_id": updatedEntityID})
+			committed := false
+			func() {
+				defer func() {
+					if !committed {
+						tx.Rollback()
+					}
+					if p := recover(); p != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "entity_id": entity.EntityID})
+					}
+				}()
+
+				// fetch existing values for old_*
+				var exEntityName, exEntityShortName, exParentEntityID, exEntityRegistrationNumber, exCountry, exBaseCurrency, exTaxID, exAddress1, exAddress2, exCity, exState, exPostal, exContactName, exContactEmail, exContactPhone, exActiveStatus sql.NullString
+				var exEntityLevel sql.NullInt64
+				var exIsTopLevel, exIsDeleted sql.NullBool
+				sel := `SELECT entity_name, entity_short_name, entity_level, parent_entity_id, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, is_top_level_entity, is_deleted FROM masterentitycash WHERE entity_id=$1 FOR UPDATE`
+				if err := tx.QueryRow(sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityID, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing entity: " + err.Error(), "entity_id": entity.EntityID})
+					return
+				}
+
+				// build dynamic update
+				var sets []string
+				var args []interface{}
+				pos := 1
+				var parentProvided string
+				for k, v := range entity.Fields {
+					switch k {
+					case "entity_name":
+						sets = append(sets, fmt.Sprintf("entity_name=$%d, old_entity_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exEntityName.String)
+						pos += 2
+					case "entity_short_name":
+						sets = append(sets, fmt.Sprintf("entity_short_name=$%d, old_entity_short_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exEntityShortName.String)
+						pos += 2
+					case "entity_level":
+						var newLevel int64
+						switch t := v.(type) {
+						case float64:
+							newLevel = int64(t)
+						case int:
+							newLevel = int64(t)
+						case int64:
+							newLevel = t
+						case string:
+							fmt.Sscan(t, &newLevel)
+						default:
+							newLevel = 0
+						}
+						sets = append(sets, fmt.Sprintf("entity_level=$%d, old_entity_level=$%d", pos, pos+1))
+						args = append(args, newLevel, exEntityLevel.Int64)
+						pos += 2
+					case "parent_entity_id":
+						newParent := fmt.Sprint(v)
+						parentProvided = newParent
+						sets = append(sets, fmt.Sprintf("parent_entity_id=$%d, old_parent_entity_id=$%d", pos, pos+1))
+						args = append(args, newParent, exParentEntityID.String)
+						pos += 2
+					case "entity_registration_number":
+						sets = append(sets, fmt.Sprintf("entity_registration_number=$%d, old_entity_registration_number=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exEntityRegistrationNumber.String)
+						pos += 2
+					case "country":
+						sets = append(sets, fmt.Sprintf("country=$%d, old_country=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exCountry.String)
+						pos += 2
+					case "base_operating_currency":
+						sets = append(sets, fmt.Sprintf("base_operating_currency=$%d, old_base_operating_currency=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exBaseCurrency.String)
+						pos += 2
+					case "tax_identification_number":
+						sets = append(sets, fmt.Sprintf("tax_identification_number=$%d, old_tax_identification_number=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exTaxID.String)
+						pos += 2
+					case "address_line1":
+						sets = append(sets, fmt.Sprintf("address_line1=$%d, old_address_line1=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exAddress1.String)
+						pos += 2
+					case "address_line2":
+						sets = append(sets, fmt.Sprintf("address_line2=$%d, old_address_line2=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exAddress2.String)
+						pos += 2
+					case "city":
+						sets = append(sets, fmt.Sprintf("city=$%d, old_city=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exCity.String)
+						pos += 2
+					case "state_province":
+						sets = append(sets, fmt.Sprintf("state_province=$%d, old_state_province=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exState.String)
+						pos += 2
+					case "postal_code":
+						sets = append(sets, fmt.Sprintf("postal_code=$%d, old_postal_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exPostal.String)
+						pos += 2
+					case "contact_person_name":
+						sets = append(sets, fmt.Sprintf("contact_person_name=$%d, old_contact_person_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exContactName.String)
+						pos += 2
+					case "contact_person_email":
+						sets = append(sets, fmt.Sprintf("contact_person_email=$%d, old_contact_person_email=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exContactEmail.String)
+						pos += 2
+					case "contact_person_phone":
+						sets = append(sets, fmt.Sprintf("contact_person_phone=$%d, old_contact_person_phone=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exContactPhone.String)
+						pos += 2
+					case "active_status":
+						sets = append(sets, fmt.Sprintf("active_status=$%d, old_active_status=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exActiveStatus.String)
+						pos += 2
+					case "is_top_level_entity":
+						var newBool bool
+						switch t := v.(type) {
+						case bool:
+							newBool = t
+						case string:
+							if strings.ToLower(t) == "true" {
+								newBool = true
+							} else {
+								newBool = false
+							}
+						default:
+							newBool = false
+						}
+						sets = append(sets, fmt.Sprintf("is_top_level_entity=$%d", pos))
+						args = append(args, newBool)
+						pos++
+					case "is_deleted":
+						var newBool bool
+						switch t := v.(type) {
+						case bool:
+							newBool = t
+						case string:
+							if strings.ToLower(t) == "true" {
+								newBool = true
+							} else {
+								newBool = false
+							}
+						default:
+							newBool = false
+						}
+						sets = append(sets, fmt.Sprintf("is_deleted=$%d", pos))
+						args = append(args, newBool)
+						pos++
+					default:
+						// ignore unknown keys
 					}
 				}
-			}
-			results = append(results, map[string]interface{}{
-				"success":   true,
-				"entity_id": updatedEntityID,
-			})
+
+				var updatedEntityID string
+				if len(sets) > 0 {
+					q := "UPDATE masterentitycash SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE entity_id=$%d RETURNING entity_id", pos)
+					args = append(args, entity.EntityID)
+					if err := tx.QueryRow(q, args...).Scan(&updatedEntityID); err != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "entity_id": entity.EntityID})
+						return
+					}
+				} else {
+					updatedEntityID = entity.EntityID
+				}
+
+				// Insert audit action
+				auditQuery := `INSERT INTO auditactionentity (
+					entity_id, actiontype, processing_status, reason, requested_by, requested_at
+				) VALUES ($1, $2, $3, $4, $5, now())`
+				if _, err := tx.Exec(auditQuery, updatedEntityID, "EDIT", "PENDING_EDIT_APPROVAL", entity.Reason, updatedBy); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Entity updated but audit log failed: " + err.Error(), "entity_id": updatedEntityID})
+					return
+				}
+
+				// Sync relationships if parent_entity_id provided
+				if parentProvided != "" {
+					parentId := parentProvided
+					if parentId != "" {
+						var exists int
+						err := db.QueryRow(`SELECT 1 FROM cashentityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, updatedEntityID).Scan(&exists)
+						if err == sql.ErrNoRows {
+							relQuery := `INSERT INTO cashentityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`
+							var relID int
+							relErr := db.QueryRow(relQuery, parentId, updatedEntityID).Scan(&relID)
+							if relErr == nil {
+								relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_id": parentId, "child_entity_id": updatedEntityID})
+							}
+						}
+					}
+				}
+
+				if err := tx.Commit(); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "entity_id": updatedEntityID})
+					return
+				}
+				committed = true
+				results = append(results, map[string]interface{}{"success": true, "entity_id": updatedEntityID})
+			}()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
