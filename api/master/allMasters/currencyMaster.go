@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 
 	// "log"
 	"net/http"
@@ -263,8 +264,12 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string                        `json:"user_id"`
-			Currency []CurrencyMasterUpdateRequest `json:"currency"`
+			UserID   string `json:"user_id"`
+			Currency []struct {
+				CurrencyID string                 `json:"currency_id"`
+				Fields     map[string]interface{} `json:"fields"`
+				Reason     string                 `json:"reason"`
+			} `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
@@ -287,67 +292,110 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 		for _, cur := range req.Currency {
 			tx, txErr := db.Begin()
 			if txErr != nil {
-				results = append(results, map[string]interface{}{
-					"success": false,
-					"error":   "Failed to start transaction: " + txErr.Error(),
-					// "currency_code": cur.CurrencyCode,
-				})
+				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "currency_id": cur.CurrencyID})
 				continue
 			}
-			query := `UPDATE mastercurrency SET old_decimal_places=$1, old_status=$2, status=$3, decimal_places=$4 WHERE currency_id=$5 RETURNING currency_id, currency_code`
-			var currencyID, currencyCode string
-			err := tx.QueryRow(query,
-				cur.OldDecimalPlaces,
-				cur.OLDStatus,
-				cur.Status,
-				cur.DecimalPlaces,
-				// updatedBy,
-				// strings.ToUpper(cur.CurrencyCode),
-				cur.CurrencyID,
-			).Scan(&currencyID, &currencyCode)
-			if err != nil {
-				tx.Rollback()
-				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         err.Error(),
-					"currency_code": currencyCode,
-				})
-				continue
-			}
-			auditQuery := `INSERT INTO auditactioncurrency (
-				currency_id, actiontype, processing_status, reason, requested_by, requested_at
-			) VALUES ($1, $2, $3, $4, $5, now())`
-			_, auditErr := tx.Exec(auditQuery,
-				currencyID,
-				"EDIT",
-				"PENDING_EDIT_APPROVAL",
-				cur.Reason,
-				updatedBy,
-			)
-			if auditErr != nil {
-				tx.Rollback()
-				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         "Currency updated but audit log failed: " + auditErr.Error(),
-					"currency_id":   currencyID,
-					"currency_code": currencyCode,
-				})
-				continue
-			}
-			if commitErr := tx.Commit(); commitErr != nil {
-				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         "Transaction commit failed: " + commitErr.Error(),
-					"currency_id":   currencyID,
-					"currency_code": currencyCode,
-				})
-				continue
-			}
-			results = append(results, map[string]interface{}{
-				"success":       true,
-				"currency_id":   currencyID,
-				"currency_code": currencyCode,
-			})
+			committed := false
+			func() {
+				defer func() {
+					if !committed {
+						tx.Rollback()
+					}
+					if p := recover(); p != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "currency_id": cur.CurrencyID})
+					}
+				}()
+
+				// fetch existing values (for old_* capture)
+				var exDecimal sql.NullInt64
+				var exStatus sql.NullString
+				sel := `SELECT decimal_places, status FROM mastercurrency WHERE currency_id=$1 FOR UPDATE`
+				if err := tx.QueryRow(sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing currency: " + err.Error(), "currency_id": cur.CurrencyID})
+					return
+				}
+
+				// build dynamic update
+				var sets []string
+				var args []interface{}
+				pos := 1
+				for k, v := range cur.Fields {
+					switch k {
+					case "decimal_places":
+						// JSON numbers decode as float64
+						var newDec int64
+						switch t := v.(type) {
+						case float64:
+							newDec = int64(t)
+						case int:
+							newDec = int64(t)
+						case int64:
+							newDec = t
+						case string:
+							// attempt parse
+							// ignore parse errors and treat as 0
+							var tmp int64
+							fmt.Sscan(t, &tmp)
+							newDec = tmp
+						default:
+							newDec = 0
+						}
+						sets = append(sets, fmt.Sprintf("decimal_places=$%d, old_decimal_places=$%d", pos, pos+1))
+						args = append(args, newDec, exDecimal.Int64)
+						pos += 2
+					case "status":
+						newStatus := fmt.Sprint(v)
+						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
+						args = append(args, newStatus, exStatus.String)
+						pos += 2
+					case "currency_code":
+						sets = append(sets, fmt.Sprintf("currency_code=$%d", pos))
+						args = append(args, strings.ToUpper(fmt.Sprint(v)))
+						pos++
+					case "currency_name":
+						sets = append(sets, fmt.Sprintf("currency_name=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos++
+					case "country":
+						sets = append(sets, fmt.Sprintf("country=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos++
+					case "symbol":
+						sets = append(sets, fmt.Sprintf("symbol=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos++
+					default:
+						// ignore unknown
+					}
+				}
+
+				var currencyID, currencyCode string
+				if len(sets) > 0 {
+					q := "UPDATE mastercurrency SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE currency_id=$%d RETURNING currency_id, currency_code", pos)
+					args = append(args, cur.CurrencyID)
+					if err := tx.QueryRow(q, args...).Scan(&currencyID, &currencyCode); err != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "currency_id": cur.CurrencyID})
+						return
+					}
+				} else {
+					currencyID = cur.CurrencyID
+				}
+
+				auditQuery := `INSERT INTO auditactioncurrency (
+					currency_id, actiontype, processing_status, reason, requested_by, requested_at
+				) VALUES ($1, $2, $3, $4, $5, now())`
+				if _, err := tx.Exec(auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Currency updated but audit log failed: " + err.Error(), "currency_id": currencyID})
+					return
+				}
+
+				if err := tx.Commit(); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "currency_id": currencyID})
+					return
+				}
+				committed = true
+				results = append(results, map[string]interface{}{"success": true, "currency_id": currencyID, "currency_code": currencyCode})
+			}()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		finalSuccess := api.IsBulkSuccess(results)
