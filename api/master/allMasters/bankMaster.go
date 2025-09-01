@@ -5,7 +5,9 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/lib/pq"
 )
@@ -26,41 +28,6 @@ type BankMasterRequest struct {
 	StateProvince         string `json:"state_province"`
 	PostalCode            string `json:"postal_code"`
 	UserID                string `json:"user_id"`
-}
-
-// Request type for bulk bank master update
-type BankMasterUpdateRequest struct {
-	BankID                   string `json:"bank_id"`
-	BankName                 string `json:"bank_name"`
-	OldBankName              string `json:"old_bank_name"`
-	BankShortName            string `json:"bank_short_name"`
-	OldBankShortName         string `json:"old_bank_short_name"`
-	SwiftBicCode             string `json:"swift_bic_code"`
-	OldSwiftBicCode          string `json:"old_swift_bic_code"`
-	CountryOfHeadquarters    string `json:"country_of_headquarters"`
-	OldCountryOfHeadquarters string `json:"old_country_of_headquarters"`
-	ConnectivityType         string `json:"connectivity_type"`
-	OldConnectivityType      string `json:"old_connectivity_type"`
-	ActiveStatus             string `json:"active_status"`
-	OldActiveStatus          string `json:"old_active_status"`
-	ContactPersonName        string `json:"contact_person_name"`
-	OldContactPersonName     string `json:"old_contact_person_name"`
-	ContactPersonEmail       string `json:"contact_person_email"`
-	OldContactPersonEmail    string `json:"old_contact_person_email"`
-	ContactPersonPhone       string `json:"contact_person_phone"`
-	OldContactPersonPhone    string `json:"old_contact_person_phone"`
-	AddressLine1             string `json:"address_line1"`
-	OldAddressLine1          string `json:"old_address_line1"`
-	AddressLine2             string `json:"address_line2"`
-	OldAddressLine2          string `json:"old_address_line2"`
-	City                     string `json:"city"`
-	OldCity                  string `json:"old_city"`
-	StateProvince            string `json:"state_province"`
-	OldStateProvince         string `json:"old_state_province"`
-	PostalCode               string `json:"postal_code"`
-	OldPostalCode            string `json:"old_postal_code"`
-	Reason                   string `json:"reason"`
-	UserID                   string `json:"user_id"`
 }
 
 func CreateBankMaster(db *sql.DB) http.HandlerFunc {
@@ -353,8 +320,11 @@ func GetBankNamesWithID(db *sql.DB) http.HandlerFunc {
 func UpdateBankMasterBulk(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string                    `json:"user_id"`
-			Banks  []BankMasterUpdateRequest `json:"banks"`
+			UserID string `json:"user_id"`
+			Banks  []struct {
+				BankID string                 `json:"bank_id"`
+				Fields map[string]interface{} `json:"fields"`
+			} `json:"banks"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
@@ -377,87 +347,125 @@ func UpdateBankMasterBulk(db *sql.DB) http.HandlerFunc {
 		for _, bank := range req.Banks {
 			tx, txErr := db.Begin()
 			if txErr != nil {
-				results = append(results, map[string]interface{}{
-					"success": false,
-					"error":   "Failed to start transaction: " + txErr.Error(),
-					"bank_id": bank.BankID,
-				})
+				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "bank_id": bank.BankID})
 				continue
 			}
-			updateQuery := `UPDATE masterbank SET 
-				bank_name=$1, old_bank_name=$2,
-				bank_short_name=$3, old_bank_short_name=$4,
-				swift_bic_code=$5, old_swift_bic_code=$6,
-				country_of_headquarters=$7, old_country_of_headquarters=$8,
-				connectivity_type=$9, old_connectivity_type=$10,
-				active_status=$11, old_active_status=$12,
-				contact_person_name=$13, old_contact_person_name=$14,
-				contact_person_email=$15, old_contact_person_email=$16,
-				contact_person_phone=$17, old_contact_person_phone=$18,
-				address_line1=$19, old_address_line1=$20,
-				address_line2=$21, old_address_line2=$22,
-				city=$23, old_city=$24,
-				state_province=$25, old_state_province=$26,
-				postal_code=$27, old_postal_code=$28
-				WHERE bank_id=$29 RETURNING bank_id`
-			var bankID string
-			err := tx.QueryRow(updateQuery,
-				bank.BankName, bank.OldBankName,
-				bank.BankShortName, bank.OldBankShortName,
-				bank.SwiftBicCode, bank.OldSwiftBicCode,
-				bank.CountryOfHeadquarters, bank.OldCountryOfHeadquarters,
-				bank.ConnectivityType, bank.OldConnectivityType,
-				bank.ActiveStatus, bank.OldActiveStatus,
-				bank.ContactPersonName, bank.OldContactPersonName,
-				bank.ContactPersonEmail, bank.OldContactPersonEmail,
-				bank.ContactPersonPhone, bank.OldContactPersonPhone,
-				bank.AddressLine1, bank.OldAddressLine1,
-				bank.AddressLine2, bank.OldAddressLine2,
-				bank.City, bank.OldCity,
-				bank.StateProvince, bank.OldStateProvince,
-				bank.PostalCode, bank.OldPostalCode,
-				bank.BankID,
-			).Scan(&bankID)
-			if err != nil {
-				tx.Rollback()
-				results = append(results, map[string]interface{}{
-					"success": false,
-					"error":   err.Error(),
-					"bank_id": bank.BankID,
-				})
-				continue
-			}
-			auditQuery := `INSERT INTO auditactionbank (
-				bank_id, actiontype, processing_status, reason, requested_by, requested_at
-			) VALUES ($1, $2, $3, $4, $5, now())`
-			_, auditErr := tx.Exec(auditQuery,
-				bankID,
-				"EDIT",
-				"PENDING_EDIT_APPROVAL",
-				bank.Reason,
-				updatedBy,
-			)
-			if auditErr != nil {
-				tx.Rollback()
-				results = append(results, map[string]interface{}{
-					"success": false,
-					"error":   "Bank updated but audit log failed: " + auditErr.Error(),
-					"bank_id": bankID,
-				})
-				continue
-			}
-			if commitErr := tx.Commit(); commitErr != nil {
-				results = append(results, map[string]interface{}{
-					"success": false,
-					"error":   "Transaction commit failed: " + commitErr.Error(),
-					"bank_id": bankID,
-				})
-				continue
-			}
-			results = append(results, map[string]interface{}{
-				"success": true,
-				"bank_id": bankID,
-			})
+			committed := false
+			func() {
+				defer func() {
+					if !committed {
+						tx.Rollback()
+					}
+					if p := recover(); p != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "bank_id": bank.BankID})
+					}
+				}()
+
+				// fetch existing values
+				var exBankName, exBankShortName, exSwift, exCountry, exConnectivity, exActive sql.NullString
+				var exContactName, exContactEmail, exContactPhone sql.NullString
+				var exAddr1, exAddr2, exCity, exState, exPostal sql.NullString
+				sel := `SELECT bank_name, bank_short_name, swift_bic_code, country_of_headquarters, connectivity_type, active_status, contact_person_name, contact_person_email, contact_person_phone, address_line1, address_line2, city, state_province, postal_code FROM masterbank WHERE bank_id=$1 FOR UPDATE`
+				if err := tx.QueryRow(sel, bank.BankID).Scan(&exBankName, &exBankShortName, &exSwift, &exCountry, &exConnectivity, &exActive, &exContactName, &exContactEmail, &exContactPhone, &exAddr1, &exAddr2, &exCity, &exState, &exPostal); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing bank: " + err.Error(), "bank_id": bank.BankID})
+					return
+				}
+
+				// build dynamic update
+				var sets []string
+				var args []interface{}
+				pos := 1
+				for k, v := range bank.Fields {
+					switch k {
+					case "bank_name":
+						sets = append(sets, fmt.Sprintf("bank_name=$%d, old_bank_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exBankName.String)
+						pos += 2
+					case "bank_short_name":
+						sets = append(sets, fmt.Sprintf("bank_short_name=$%d, old_bank_short_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exBankShortName.String)
+						pos += 2
+					case "swift_bic_code":
+						sets = append(sets, fmt.Sprintf("swift_bic_code=$%d, old_swift_bic_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exSwift.String)
+						pos += 2
+					case "country_of_headquarters":
+						sets = append(sets, fmt.Sprintf("country_of_headquarters=$%d, old_country_of_headquarters=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exCountry.String)
+						pos += 2
+					case "connectivity_type":
+						sets = append(sets, fmt.Sprintf("connectivity_type=$%d, old_connectivity_type=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exConnectivity.String)
+						pos += 2
+					case "active_status":
+						sets = append(sets, fmt.Sprintf("active_status=$%d, old_active_status=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exActive.String)
+						pos += 2
+					case "contact_person_name":
+						sets = append(sets, fmt.Sprintf("contact_person_name=$%d, old_contact_person_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exContactName.String)
+						pos += 2
+					case "contact_person_email":
+						sets = append(sets, fmt.Sprintf("contact_person_email=$%d, old_contact_person_email=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exContactEmail.String)
+						pos += 2
+					case "contact_person_phone":
+						sets = append(sets, fmt.Sprintf("contact_person_phone=$%d, old_contact_person_phone=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exContactPhone.String)
+						pos += 2
+					case "address_line1":
+						sets = append(sets, fmt.Sprintf("address_line1=$%d, old_address_line1=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exAddr1.String)
+						pos += 2
+					case "address_line2":
+						sets = append(sets, fmt.Sprintf("address_line2=$%d, old_address_line2=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exAddr2.String)
+						pos += 2
+					case "city":
+						sets = append(sets, fmt.Sprintf("city=$%d, old_city=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exCity.String)
+						pos += 2
+					case "state_province":
+						sets = append(sets, fmt.Sprintf("state_province=$%d, old_state_province=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exState.String)
+						pos += 2
+					case "postal_code":
+						sets = append(sets, fmt.Sprintf("postal_code=$%d, old_postal_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), exPostal.String)
+						pos += 2
+					default:
+						// ignore unknown
+					}
+				}
+
+				var updatedBankID string
+				if len(sets) > 0 {
+					q := "UPDATE masterbank SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE bank_id=$%d RETURNING bank_id", pos)
+					args = append(args, bank.BankID)
+					if err := tx.QueryRow(q, args...).Scan(&updatedBankID); err != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "bank_id": bank.BankID})
+						return
+					}
+				} else {
+					updatedBankID = bank.BankID
+				}
+
+				// audit
+				auditQuery := `INSERT INTO auditactionbank (
+					bank_id, actiontype, processing_status, reason, requested_by, requested_at
+				) VALUES ($1, $2, $3, $4, $5, now())`
+				if _, err := tx.Exec(auditQuery, updatedBankID, "EDIT", "PENDING_EDIT_APPROVAL", nil, updatedBy); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Bank updated but audit log failed: " + err.Error(), "bank_id": updatedBankID})
+					return
+				}
+
+				if err := tx.Commit(); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "bank_id": updatedBankID})
+					return
+				}
+				committed = true
+				results = append(results, map[string]interface{}{"success": true, "bank_id": updatedBankID})
+			}()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		finalSuccess := api.IsBulkSuccess(results)
