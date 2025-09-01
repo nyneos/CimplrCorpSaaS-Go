@@ -14,6 +14,23 @@ func StartMasterService(db *sql.DB) {
 	mux.HandleFunc("/master/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Master Service"))
 	})
+	// Currency Master routes
+	mux.Handle("/master/currency/create", api.BusinessUnitMiddleware(db)(allMaster.CreateCurrencyMaster(db)))
+	mux.Handle("/master/currency/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllCurrencyMaster(db)))
+	mux.Handle("/master/currency/update", api.BusinessUnitMiddleware(db)(allMaster.UpdateCurrencyMasterBulk(db)))
+	mux.Handle("/master/currency/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveAuditActions(db)))
+	mux.Handle("/master/currency/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectAuditActions(db)))
+	mux.Handle("/master/currency/bulk-delete", api.BusinessUnitMiddleware(db)(allMaster.BulkDeleteCurrencyAudit(db)))
+	mux.Handle("/master/currency/active-approved", api.BusinessUnitMiddleware(db)(allMaster.GetActiveApprovedCurrencyCodes(db)))
+
+	// Bank Master routes
+	mux.Handle("/master/bank/create", api.BusinessUnitMiddleware(db)(allMaster.CreateBankMaster(db)))
+	mux.Handle("/master/bank/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllBankMaster(db)))
+	mux.Handle("/master/bank/names", api.BusinessUnitMiddleware(db)(allMaster.GetBankNamesWithID(db)))
+	mux.Handle("/master/bank/update", api.BusinessUnitMiddleware(db)(allMaster.UpdateBankMasterBulk(db)))
+	mux.Handle("/master/bank/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveBankAuditActions(db)))
+	mux.Handle("/master/bank/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectBankAuditActions(db)))
+	mux.Handle("/master/bank/bulk-delete", api.BusinessUnitMiddleware(db)(allMaster.BulkDeleteBankAudit(db)))
 
 	mux.Handle("/master/entity/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncEntities(db)))
 	mux.Handle("/master/entity/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetEntityHierarchy(db)))
@@ -30,3 +47,4 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
