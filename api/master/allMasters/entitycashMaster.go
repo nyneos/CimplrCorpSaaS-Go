@@ -232,6 +232,7 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 
 		entityMap := map[string]map[string]interface{}{}
 		deletedIds := map[string]bool{}
+		hideIds := map[string]bool{}
 		for rows.Next() {
 			var (
 				entityID                                                                               string
@@ -367,6 +368,9 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 			if isDeleted {
 				deletedIds[entityID] = true
 			}
+			if isDeleted && strings.ToUpper(getNullString(processingStatus)) == "APPROVED" {
+				hideIds[entityID] = true
+			}
 		}
 		// Fetch relationships
 		relRows, err := db.Query("SELECT parent_entity_id, child_entity_id FROM cashentityrelationships")
@@ -407,6 +411,9 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 		}
 		deletedList := []string{}
 		for id := range deletedIds {
+			deletedList = append(deletedList, id)
+		}	
+		for id := range hideIds {
 			deletedList = append(deletedList, id)
 		}
 		allDeleted := getAllDescendants(deletedList)
