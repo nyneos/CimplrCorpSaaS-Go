@@ -1,19 +1,47 @@
 package master
 
 import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/master/allMaster"
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 
-	"CimplrCorpSaas/api"
-	allMaster "CimplrCorpSaas/api/master/allMasters"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func StartMasterService(db *sql.DB) {
 	mux := http.NewServeMux()
+	// create a pgx pool for handlers that prefer pgx (bulk uploads/syncs)
+	user := os.Getenv("DB_USER")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	pgxPool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		log.Fatalf("failed to connect to pgxpool DB: %v", err)
+	}
+	// ensure pool is closed when service exits
+	defer pgxPool.Close()
+	
 	mux.HandleFunc("/master/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Master Service"))
 	})
+	// Cash Flow Category Master routes
+	mux.Handle("/master/cashflow-category/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
+	mux.Handle("/master/cashflow-category/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashFlowCategory(pgxPool)))
+	mux.Handle("/master/cashflow-category/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetCashFlowCategoryHierarchyPGX(pgxPool)))
+	mux.Handle("/master/cashflow-category/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCashFlowCategoryAtLevel(pgxPool)))
+	mux.Handle("/master/cashflow-category/names", api.BusinessUnitMiddleware(db)(allMaster.GetCashFlowCategoryNamesWithID(pgxPool)))
+	mux.Handle("/master/cashflow-category/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateCashFlowCategoryBulk(pgxPool)))
+	mux.Handle("/master/cashflow-category/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCashFlowCategoryActions(pgxPool)))
+	mux.Handle("/master/cashflow-category/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCashFlowCategoryActions(pgxPool)))
+
 	// Currency Master routes
 	mux.Handle("/master/currency/create", api.BusinessUnitMiddleware(db)(allMaster.CreateCurrencyMaster(db)))
 	mux.Handle("/master/currency/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllCurrencyMaster(db)))
@@ -32,16 +60,6 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/bank/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectBankAuditActions(db)))
 	mux.Handle("/master/bank/bulk-delete", api.BusinessUnitMiddleware(db)(allMaster.BulkDeleteBankAudit(db)))
 
-	// Entity Cash Master routes
-	mux.Handle("/master/entitycash/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashEntities(db)))
-	mux.Handle("/master/entitycash/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityHierarchy(db)))
-	mux.Handle("/master/entitycash/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateCashEntityBulk(db)))
-	mux.Handle("/master/entitycash/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCashEntityAtLevel(db)))
-	mux.Handle("/master/entitycash/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashEntity(db)))
-	mux.Handle("/master/entitycash/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCashEntityActions(db)))
-	mux.Handle("/master/entitycash/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCashEntityActions(db)))
-	mux.Handle("/master/entitycash/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityNamesWithID(db)))	
-
 	// Bank Account Master routes
 	mux.Handle("/master/bankaccount/create", api.BusinessUnitMiddleware(db)(allMaster.CreateBankAccountMaster(db)))
 	mux.Handle("/master/bankaccount/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllBankAccountMaster(db)))
@@ -52,21 +70,28 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/bankaccount/names", api.BusinessUnitMiddleware(db)(allMaster.GetBankNamesWithIDForAccount(db)))
 	mux.Handle("/master/bankaccount/approved-with-entity", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedBankAccountsWithBankEntity(db)))
 
+	// Entity Master routes
 	mux.Handle("/master/entity/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncEntities(db)))
 	mux.Handle("/master/entity/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetEntityHierarchy(db)))
 	mux.Handle("/master/entity/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteEntity(db)))
-	mux.Handle("/master/entity/findParentAtLevel", api.BusinessUnitMiddleware(db)(allMaster.FindParentAtLevel(db)))
+	mux.Handle("/master/entity/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentAtLevel(db)))
 	mux.Handle("/master/entity/approve", api.BusinessUnitMiddleware(db)(allMaster.ApproveEntity(db)))
 	mux.Handle("/master/entity/reject-bulk", api.BusinessUnitMiddleware(db)(allMaster.RejectEntitiesBulk(db)))
 	mux.Handle("/master/entity/update", api.BusinessUnitMiddleware(db)(allMaster.UpdateEntity(db)))
 	mux.Handle("/master/entity/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetAllEntityNames(db)))
-	mux.Handle("/master/entity/render-vars-hierarchical", api.BusinessUnitMiddleware(db)(allMaster.GetRenderVarsHierarchical(db)))
-	log.Println("Master Service started on :2143")
-	err := http.ListenAndServe(":2143", mux)
+	mux.Handle("/master/entity/render-vars-hierarchical", api.BusinessUnitMiddleware(db)(allMaster.GetRenderVarsHierarchical(db, nil)))
+
+	// Entity Cash Master routes
+	mux.Handle("/master/entitycash/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashEntities(db)))
+	mux.Handle("/master/entitycash/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityHierarchy(db)))
+	mux.Handle("/master/entitycash/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateCashEntityBulk(db)))
+	mux.Handle("/master/entitycash/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCashEntityAtLevel(db)))
+	mux.Handle("/master/entitycash/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashEntity(db)))
+	mux.Handle("/master/entitycash/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCashEntityActions(db)))
+	mux.Handle("/master/entitycash/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCashEntityActions(db)))
+	mux.Handle("/master/entitycash/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityNamesWithID(db)))
+	err = http.ListenAndServe(":2143", mux)
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
-
-
-
