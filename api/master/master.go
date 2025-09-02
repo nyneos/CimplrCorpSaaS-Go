@@ -2,7 +2,7 @@ package master
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/master/allMaster"
+	allMaster "CimplrCorpSaas/api/master/allMasters"
 	"context"
 	"database/sql"
 	"fmt"
@@ -95,3 +95,4 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
