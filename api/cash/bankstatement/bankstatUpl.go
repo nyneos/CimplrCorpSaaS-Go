@@ -177,3 +177,212 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+
+// Handler: GetBankStatements
+// Returns all columns from bank_statement plus entity_name and bank_name joined
+func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		query := `
+			SELECT 
+				s.bankstatementid,
+				s.entityid,
+				s.account_number,
+				s.statementdate,
+				s.openingbalance,
+				s.closingbalance,
+				s.currencycode,
+				s.transactiondate,
+				s.description,
+				s.debitamount,
+				s.creditamount,
+				s.balanceaftertxn,
+				s.createdby,
+				s.createdat,
+				s.status,
+				e.entity_name,
+				b.bank_name
+			FROM bank_statement s
+			JOIN masterbankaccount mba ON s.account_number = mba.account_number
+			JOIN masterentity e ON mba.entity_id = e.entity_id
+			JOIN masterbank b ON mba.bank_id = b.bank_id
+		`
+
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		type Item struct {
+			BankStatementID string    `json:"bankstatementid"`
+			EntityID        string    `json:"entityid"`
+			AccountNumber   string    `json:"account_number"`
+			StatementDate   time.Time `json:"statementdate"`
+			OpeningBalance  *float64  `json:"openingbalance"`
+			ClosingBalance  *float64  `json:"closingbalance"`
+			CurrencyCode    string    `json:"currencycode"`
+			TransactionDate time.Time `json:"transactiondate"`
+			Description     *string   `json:"description"`
+			DebitAmount     *float64  `json:"debitamount"`
+			CreditAmount    *float64  `json:"creditamount"`
+			BalanceAfterTxn *float64  `json:"balanceaftertxn"`
+			CreatedBy       *string   `json:"createdby"`
+			CreatedAt       time.Time `json:"createdat"`
+			Status          string    `json:"status"`
+			EntityName      string    `json:"entity_name"`
+			BankName        string    `json:"bank_name"`
+		}
+
+		results := make([]Item, 0)
+		for rows.Next() {
+			var it Item
+			if err := rows.Scan(
+				&it.BankStatementID,
+				&it.EntityID,
+				&it.AccountNumber,
+				&it.StatementDate,
+				&it.OpeningBalance,
+				&it.ClosingBalance,
+				&it.CurrencyCode,
+				&it.TransactionDate,
+				&it.Description,
+				&it.DebitAmount,
+				&it.CreditAmount,
+				&it.BalanceAfterTxn,
+				&it.CreatedBy,
+				&it.CreatedAt,
+				&it.Status,
+				&it.EntityName,
+				&it.BankName,
+			); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+				return
+			}
+			results = append(results, it)
+		}
+		if rows.Err() != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": rows.Err().Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": results})
+	}
+}
+
+// Bulk approve handler for bank statements
+func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID           string   `json:"user_id"`
+			BankStatementIDs []string `json:"bankstatement_ids"`
+			// Comment          string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankStatementIDs) == 0 {
+			http.Error(w, "Invalid JSON or missing fields", http.StatusBadRequest)
+			return
+		}
+		// Approve: if status is PENDING_DELETE_APPROVAL, delete; else set status to APPROVED
+		// Delete records with PENDING_DELETE_APPROVAL
+		delSQL := `DELETE FROM bank_statement WHERE bankstatementid = ANY($1) AND status = 'PENDING_DELETE_APPROVAL' RETURNING bankstatementid`
+		delRows, delErr := pgxPool.Query(ctx, delSQL, req.BankStatementIDs)
+		var deleted []string
+		if delErr == nil {
+			defer delRows.Close()
+			for delRows.Next() {
+				var id string
+				delRows.Scan(&id)
+				deleted = append(deleted, id)
+			}
+		}
+		// Approve remaining (not deleted)
+		approveSQL := `UPDATE bank_statement SET status = 'Approved' WHERE bankstatementid = ANY($1) AND status != 'PENDING_DELETE_APPROVAL' RETURNING bankstatementid`
+		approveRows, approveErr := pgxPool.Query(ctx, approveSQL, req.BankStatementIDs)
+		var approved []string
+		if approveErr == nil {
+			defer approveRows.Close()
+			for approveRows.Next() {
+				var id string
+				approveRows.Scan(&id)
+				approved = append(approved, id)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"approved": approved,
+			"deleted":  deleted,
+		})
+	}
+}
+
+// Bulk reject handler for bank statements
+func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID           string   `json:"user_id"`
+			BankStatementIDs []string `json:"bankstatement_ids"`
+			// Comment          string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankStatementIDs) == 0 {
+			http.Error(w, "Invalid JSON or missing fields", http.StatusBadRequest)
+			return
+		}
+		rejectSQL := `UPDATE bank_statement SET status = 'REJECTED' WHERE bankstatementid = ANY($1) RETURNING bankstatementid`
+		rows, err := pgxPool.Query(ctx, rejectSQL, req.BankStatementIDs)
+		var rejected []string
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id string
+				rows.Scan(&id)
+				rejected = append(rejected, id)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"rejected": rejected,
+		})
+	}
+}
+
+// Bulk delete handler for bank statements (set status to PENDING_DELETE_APPROVAL)
+func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID           string   `json:"user_id"`
+			BankStatementIDs []string `json:"bankstatement_ids"`
+			// Comment          string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankStatementIDs) == 0 {
+			http.Error(w, "Invalid JSON or missing fields", http.StatusBadRequest)
+			return
+		}
+		delSQL := `UPDATE bank_statement SET status = 'PENDING_DELETE_APPROVAL' WHERE bankstatementid = ANY($1) RETURNING bankstatementid`
+		rows, err := pgxPool.Query(ctx, delSQL, req.BankStatementIDs)
+		var updated []string
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id string
+				rows.Scan(&id)
+				updated = append(updated, id)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"pending_delete": updated,
+		})
+	}
+}
