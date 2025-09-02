@@ -289,8 +289,8 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var categoryID string
 			// Insert into master table and return generated category_id
 			insertSQL := `INSERT INTO mastercashflowcategory (
-					category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, category_level, created_by
-				) VALUES ($1,$2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10) RETURNING category_id`
+					category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, category_level
+				) VALUES ($1,$2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9) RETURNING category_id`
 			err = tx.QueryRow(ctx, insertSQL,
 				cat.CategoryName,
 				cat.CategoryType,
@@ -301,8 +301,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cat.Description,
 				cat.Status,
 				cat.CategoryLevel,
-				createdBy,
-			).Scan(&categoryID)
+				// createdBy,
 			if err != nil {
 				tx.Rollback(ctx)
 				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "category_name": cat.CategoryName})
