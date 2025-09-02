@@ -79,7 +79,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/entity/reject-bulk", api.BusinessUnitMiddleware(db)(allMaster.RejectEntitiesBulk(db)))
 	mux.Handle("/master/entity/update", api.BusinessUnitMiddleware(db)(allMaster.UpdateEntity(db)))
 	mux.Handle("/master/entity/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetAllEntityNames(db)))
-	mux.Handle("/master/entity/render-vars-hierarchical", api.BusinessUnitMiddleware(db)(allMaster.GetRenderVarsHierarchical(db, nil)))
+	mux.Handle("/master/entity/render-vars-hierarchical", api.BusinessUnitMiddleware(db)(allMaster.GetRenderVarsHierarchical(db)))
 
 	// Entity Cash Master routes
 	mux.Handle("/master/entitycash/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashEntities(db)))
@@ -95,4 +95,5 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
