@@ -25,6 +25,11 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
 	mux.Handle("/cash/upload-bank-statement", bankstatement.UploadBankStatement(pgxPool))
+
+	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
+	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
+	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
+	mux.Handle("/cash/bank-statements/bulk-delete", bankstatement.BulkDeleteBankStatements(pgxPool))
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))
 	})
@@ -34,3 +39,4 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
