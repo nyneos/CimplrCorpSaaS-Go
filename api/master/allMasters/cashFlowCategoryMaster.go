@@ -302,6 +302,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cat.Status,
 				cat.CategoryLevel,
 				// createdBy,
+				).Scan(&categoryID)
 			if err != nil {
 				tx.Rollback(ctx)
 				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "category_name": cat.CategoryName})
