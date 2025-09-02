@@ -34,11 +34,11 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get allowed business units from context (set by BU middleware)
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusNotFound)
-			return
-		}
+		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		// if !ok || len(buNames) == 0 {
+		// 	http.Error(w, "No accessible business units found", http.StatusNotFound)
+		// 	return
+		// }
 
 		// Query: fetch entity, bank, account number, currency, balance for status=Approved, filtered by allowed BUs
 		ctx := context.Background()
@@ -53,9 +53,9 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		       JOIN masterbankaccount mba ON s.account_number = mba.account_number
 		       JOIN masterentity e ON mba.entity_id = e.entity_id
 		       JOIN masterbank b ON mba.bank_id = b.bank_id
-		       WHERE s.status = 'Approved' AND e.entity_name = ANY($1)
+		       WHERE s.status = 'Approved'
 		       GROUP BY e.entity_name, b.bank_name, mba.account_number, s.currencycode;
-	       `, buNames)
+	       `)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 			return
