@@ -1,10 +1,10 @@
 package api
 
 import (
-	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 )
 
 // ActionAuditInfo holds audit info for a record
@@ -18,34 +18,34 @@ type ActionAuditInfo struct {
 }
 
 // GetAuditInfo parses audit action fields and returns audit info for create/edit
-func GetAuditInfo(actionType string, requestedBy sql.NullString, requestedAt sql.NullTime) ActionAuditInfo {
+func GetAuditInfo(actionType string, requestedBy *string, requestedAt *time.Time) ActionAuditInfo {
 	info := ActionAuditInfo{}
 	switch actionType {
 	case "CREATE":
-		info.CreatedBy = getNullString(requestedBy)
-		info.CreatedAt = getNullTime(requestedAt)
+		info.CreatedBy = getPtrString(requestedBy)
+		info.CreatedAt = getPtrTime(requestedAt)
 	case "EDIT":
-		info.EditedBy = getNullString(requestedBy)
-		info.EditedAt = getNullTime(requestedAt)
+		info.EditedBy = getPtrString(requestedBy)
+		info.EditedAt = getPtrTime(requestedAt)
 	case "DELETE":
-		info.DeletedBy = getNullString(requestedBy)
-		info.DeletedAt = getNullTime(requestedAt)
+		info.DeletedBy = getPtrString(requestedBy)
+		info.DeletedAt = getPtrTime(requestedAt)
 	}
 	return info
 }
 
-// getNullString returns empty string for invalid sql.NullString
-func getNullString(ns sql.NullString) string {
-	if ns.Valid {
-		return ns.String
+// getPtrString returns empty string for nil pointer
+func getPtrString(s *string) string {
+	if s != nil {
+		return *s
 	}
 	return ""
 }
 
-// getNullTime returns formatted time for valid sql.NullTime
-func getNullTime(nt sql.NullTime) string {
-	if nt.Valid {
-		return nt.Time.Format("2006-01-02 15:04:05")
+// getPtrTime returns formatted time for non-nil pointer
+func getPtrTime(t *time.Time) string {
+	if t != nil {
+		return t.Format("2006-01-02 15:04:05")
 	}
 	return ""
 }
