@@ -32,6 +32,25 @@ func StartMasterService(db *sql.DB) {
 	mux.HandleFunc("/master/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Master Service"))
 	})
+	// Counterparty Master routes (pgx-backed handlers)
+	mux.Handle("/master/counterparty/create", api.BusinessUnitMiddleware(db)(allMaster.CreateCounterparties(pgxPool)))
+	mux.Handle("/master/counterparty/names", api.BusinessUnitMiddleware(db)(allMaster.GetCounterpartyNamesWithID(pgxPool)))
+	mux.Handle("/master/counterparty/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateCounterpartyBulk(pgxPool)))
+	mux.Handle("/master/counterparty/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCounterparty(pgxPool)))
+	mux.Handle("/master/counterparty/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCounterpartyActions(pgxPool)))
+	mux.Handle("/master/counterparty/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCounterpartyActions(pgxPool)))
+	mux.Handle("/master/counterparty/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterparty(pgxPool)))
+	mux.Handle("/master/counterparty/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveCounterparties(pgxPool)))
+
+	// GL Account Master routes (pgx-backed handlers)
+	mux.Handle("/master/glaccount/create", api.BusinessUnitMiddleware(db)(allMaster.CreateGLAccounts(pgxPool)))
+	mux.Handle("/master/glaccount/names", api.BusinessUnitMiddleware(db)(allMaster.GetGLAccountNamesWithID(pgxPool)))
+	mux.Handle("/master/glaccount/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateGLAccountBulk(pgxPool)))
+	mux.Handle("/master/glaccount/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteGLAccount(pgxPool)))
+	mux.Handle("/master/glaccount/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveGLAccountActions(pgxPool)))
+	mux.Handle("/master/glaccount/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectGLAccountActions(pgxPool)))
+	mux.Handle("/master/glaccount/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccount(pgxPool)))
+	mux.Handle("/master/glaccount/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	// Payable/Receivable Master routes
 	mux.Handle("/master/payablereceivable/create", api.BusinessUnitMiddleware(db)(allMaster.CreatePayableReceivableTypes(pgxPool)))
 	mux.Handle("/master/payablereceivable/all", api.BusinessUnitMiddleware(db)(allMaster.GetPayableReceivableNamesWithID(pgxPool)))
@@ -106,6 +125,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
