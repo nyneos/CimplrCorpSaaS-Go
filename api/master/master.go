@@ -32,6 +32,16 @@ func StartMasterService(db *sql.DB) {
 	mux.HandleFunc("/master/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Master Service"))
 	})
+	// Payable/Receivable Master routes
+	mux.Handle("/master/payablereceivable/create", api.BusinessUnitMiddleware(db)(allMaster.CreatePayableReceivableTypes(pgxPool)))
+	mux.Handle("/master/payablereceivable/all", api.BusinessUnitMiddleware(db)(allMaster.GetPayableReceivableNamesWithID(pgxPool)))
+	mux.Handle("/master/payablereceivable/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdatePayableReceivableBulk(pgxPool)))
+	mux.Handle("/master/payablereceivable/delete", api.BusinessUnitMiddleware(db)(allMaster.DeletePayableReceivable(pgxPool)))
+	mux.Handle("/master/payablereceivable/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApprovePayableReceivableActions(pgxPool)))
+	mux.Handle("/master/payablereceivable/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectPayableReceivableActions(pgxPool)))
+	mux.Handle("/master/payablereceivable/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadPayableReceivable(pgxPool)))
+	mux.Handle("/master/payablereceivable/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActivePayableReceivable(pgxPool)))
+
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -96,6 +106,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
