@@ -3,16 +3,19 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
-	"database/sql"
+
+	// "context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	// "strconv"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type CashEntityMasterRequest struct {
@@ -37,59 +40,16 @@ type CashEntityMasterRequest struct {
 	IsDeleted                bool   `json:"is_deleted"`
 }
 
-// Request type for bulk entity cash update
-type CashEntityUpdateRequest struct {
-	EntityID                    string `json:"entity_id"`
-	EntityName                  string `json:"entity_name"`
-	OldEntityName               string `json:"old_entity_name"`
-	EntityShortName             string `json:"entity_short_name"`
-	OldEntityShortName          string `json:"old_entity_short_name"`
-	EntityLevel                 int    `json:"entity_level"`
-	OldEntityLevel              int    `json:"old_entity_level"`
-	ParentEntityID              string `json:"parent_entity_id"`
-	OldParentEntityID           string `json:"old_parent_entity_id"`
-	EntityRegistrationNumber    string `json:"entity_registration_number"`
-	OldEntityRegistrationNumber string `json:"old_entity_registration_number"`
-	Country                     string `json:"country"`
-	OldCountry                  string `json:"old_country"`
-	BaseOperatingCurrency       string `json:"base_operating_currency"`
-	OldBaseOperatingCurrency    string `json:"old_base_operating_currency"`
-	TaxIdentificationNumber     string `json:"tax_identification_number"`
-	OldTaxIdentificationNumber  string `json:"old_tax_identification_number"`
-	AddressLine1                string `json:"address_line1"`
-	OldAddressLine1             string `json:"old_address_line1"`
-	AddressLine2                string `json:"address_line2"`
-	OldAddressLine2             string `json:"old_address_line2"`
-	City                        string `json:"city"`
-	OldCity                     string `json:"old_city"`
-	StateProvince               string `json:"state_province"`
-	OldStateProvince            string `json:"old_state_province"`
-	PostalCode                  string `json:"postal_code"`
-	OldPostalCode               string `json:"old_postal_code"`
-	ContactPersonName           string `json:"contact_person_name"`
-	OldContactPersonName        string `json:"old_contact_person_name"`
-	ContactPersonEmail          string `json:"contact_person_email"`
-	OldContactPersonEmail       string `json:"old_contact_person_email"`
-	ContactPersonPhone          string `json:"contact_person_phone"`
-	OldContactPersonPhone       string `json:"old_contact_person_phone"`
-	ActiveStatus                string `json:"active_status"`
-	OldActiveStatus             string `json:"old_active_status"`
-	IsTopLevelEntity            bool   `json:"is_top_level_entity"`
-	IsDeleted                   bool   `json:"is_deleted"`
-	Reason                      string `json:"reason"`
-}
-
 type CashEntityBulkRequest struct {
 	Entities []CashEntityMasterRequest `json:"entities"`
 	UserID   string                    `json:"user_id"`
 }
 
-func CreateAndSyncCashEntities(db *sql.DB) http.HandlerFunc {
+func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CashEntityBulkRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid JSON"})
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
 		// Get created_by from session
@@ -102,8 +62,7 @@ func CreateAndSyncCashEntities(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid user_id or session"})
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		// Insert entities
@@ -128,7 +87,7 @@ func CreateAndSyncCashEntities(db *sql.DB) http.HandlerFunc {
 	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE(NULLIF($18, ''), 'Inactive'), $19, $20
 ) RETURNING entity_id`
 			var newEntityID string
-			err := db.QueryRow(query,
+			err := pgxPool.QueryRow(r.Context(), query,
 				entityId,
 				entity.EntityName,
 				entity.EntityShortName,
@@ -160,14 +119,13 @@ func CreateAndSyncCashEntities(db *sql.DB) http.HandlerFunc {
 			auditQuery := `INSERT INTO auditactionentity (
 				entity_id, actiontype, processing_status, reason, requested_by, requested_at
 			) VALUES ($1, $2, $3, $4, $5, now())`
-			_, auditErr := db.Exec(auditQuery,
+			if _, auditErr := pgxPool.Exec(r.Context(), auditQuery,
 				newEntityID,
 				"CREATE",
 				"PENDING_APPROVAL",
 				nil,
 				createdBy,
-			)
-			if auditErr != nil {
+			); auditErr != nil {
 				inserted = append(inserted, map[string]interface{}{
 					"success":     false,
 					"error":       "Entity created but audit log failed: " + auditErr.Error(),
@@ -186,11 +144,11 @@ func CreateAndSyncCashEntities(db *sql.DB) http.HandlerFunc {
 			childId := entityIDs[entity.EntityName]
 			// Insert relationship if not exists
 			var exists int
-			err := db.QueryRow(`SELECT 1 FROM cashentityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, childId).Scan(&exists)
-			if err == sql.ErrNoRows {
+			err := pgxPool.QueryRow(r.Context(), `SELECT 1 FROM cashentityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, childId).Scan(&exists)
+			if err == pgx.ErrNoRows {
 				relQuery := `INSERT INTO cashentityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`
 				var relID int
-				relErr := db.QueryRow(relQuery, parentId, childId).Scan(&relID)
+				relErr := pgxPool.QueryRow(r.Context(), relQuery, parentId, childId).Scan(&relID)
 				if relErr == nil {
 					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_id": parentId, "child_entity_id": childId})
 				}
@@ -207,7 +165,7 @@ func CreateAndSyncCashEntities(db *sql.DB) http.HandlerFunc {
 }
 
 // GET handler to return cash entity hierarchy, excluding deleted entities and their descendants, with audit join
-func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
+func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Fetch all entities with audit join
 		query := `
@@ -222,7 +180,8 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 				LIMIT 1
 			) a ON TRUE
 		`
-		rows, err := db.Query(query)
+		ctx := r.Context()
+		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
@@ -232,67 +191,68 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 
 		entityMap := map[string]map[string]interface{}{}
 		deletedIds := map[string]bool{}
+		// hideIds holds entities that are deleted AND have processing_status = 'APPROVED'
 		hideIds := map[string]bool{}
 		for rows.Next() {
 			var (
-				entityID                                                                               string
-				entityName                                                                             sql.NullString
-				entityShortName                                                                        sql.NullString
-				entityLevel                                                                            sql.NullInt64
-				parentEntityID                                                                         sql.NullString
-				entityRegistrationNumber                                                               sql.NullString
-				country                                                                                sql.NullString
-				baseOperatingCurrency                                                                  sql.NullString
-				taxIdentificationNumber                                                                sql.NullString
-				addressLine1                                                                           sql.NullString
-				addressLine2                                                                           sql.NullString
-				city                                                                                   sql.NullString
-				stateProvince                                                                          sql.NullString
-				postalCode                                                                             sql.NullString
-				contactPersonName                                                                      sql.NullString
-				contactPersonEmail                                                                     sql.NullString
-				contactPersonPhone                                                                     sql.NullString
-				activeStatus                                                                           sql.NullString
-				oldEntityName                                                                          sql.NullString
-				oldEntityShortName                                                                     sql.NullString
-				oldEntityLevel                                                                         sql.NullInt64
-				oldParentEntityID                                                                      sql.NullString
-				oldEntityRegistrationNumber                                                            sql.NullString
-				oldCountry                                                                             sql.NullString
-				oldBaseOperatingCurrency                                                               sql.NullString
-				oldTaxIdentificationNumber                                                             sql.NullString
-				oldAddressLine1                                                                        sql.NullString
-				oldAddressLine2                                                                        sql.NullString
-				oldCity                                                                                sql.NullString
-				oldStateProvince                                                                       sql.NullString
-				oldPostalCode                                                                          sql.NullString
-				oldContactPersonName                                                                   sql.NullString
-				oldContactPersonEmail                                                                  sql.NullString
-				oldContactPersonPhone                                                                  sql.NullString
-				oldActiveStatus                                                                        sql.NullString
-				isTopLevelEntity, isDeleted                                                            bool
-				processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason sql.NullString
-				requestedAt, checkerAt                                                                 sql.NullTime
+				entityID                                                                                                    string
+				entityName                                                                                                  *string
+				entityShortName                                                                                             *string
+				entityLevel                                                                                                 *int64
+				parentEntityID                                                                                              *string
+				entityRegistrationNumber                                                                                    *string
+				country                                                                                                     *string
+				baseOperatingCurrency                                                                                       *string
+				taxIdentificationNumber                                                                                     *string
+				addressLine1                                                                                                *string
+				addressLine2                                                                                                *string
+				city                                                                                                        *string
+				stateProvince                                                                                               *string
+				postalCode                                                                                                  *string
+				contactPersonName                                                                                           *string
+				contactPersonEmail                                                                                          *string
+				contactPersonPhone                                                                                          *string
+				activeStatus                                                                                                *string
+				oldEntityName                                                                                               *string
+				oldEntityShortName                                                                                          *string
+				oldEntityLevel                                                                                              *int64
+				oldParentEntityID                                                                                           *string
+				oldEntityRegistrationNumber                                                                                 *string
+				oldCountry                                                                                                  *string
+				oldBaseOperatingCurrency                                                                                    *string
+				oldTaxIdentificationNumber                                                                                  *string
+				oldAddressLine1                                                                                             *string
+				oldAddressLine2                                                                                             *string
+				oldCity                                                                                                     *string
+				oldStateProvince                                                                                            *string
+				oldPostalCode                                                                                               *string
+				oldContactPersonName                                                                                        *string
+				oldContactPersonEmail                                                                                       *string
+				oldContactPersonPhone                                                                                       *string
+				oldActiveStatus                                                                                             *string
+				isTopLevelEntity, isDeleted                                                                                 bool
+				processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
+				requestedAtPtr, checkerAtPtr                                                                                *time.Time
 			)
 			err := rows.Scan(&entityID, &entityName, &entityShortName, &entityLevel, &parentEntityID, &entityRegistrationNumber, &country, &baseOperatingCurrency, &taxIdentificationNumber, &addressLine1, &addressLine2, &city, &stateProvince, &postalCode, &contactPersonName, &contactPersonEmail, &contactPersonPhone, &activeStatus, &oldEntityName, &oldEntityShortName, &oldEntityLevel, &oldParentEntityID, &oldEntityRegistrationNumber, &oldCountry, &oldBaseOperatingCurrency, &oldTaxIdentificationNumber, &oldAddressLine1, &oldAddressLine2, &oldCity, &oldStateProvince, &oldPostalCode, &oldContactPersonName, &oldContactPersonEmail, &oldContactPersonPhone, &oldActiveStatus, &isTopLevelEntity, &isDeleted,
-				&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
+				&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr)
 			if err != nil {
 				continue
 			}
 			// fetch CREATE/EDIT/DELETE history for audit info
 			var createdBy, createdAt, editedBy, editedAt, deletedBy, deletedAt string
-			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactionentity 
-								  WHERE entity_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') 
-								  ORDER BY requested_at DESC`
-			auditRows, auditErr := db.Query(auditDetailsQuery, entityID)
+			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactionentity
+				  WHERE entity_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
+				  ORDER BY requested_at DESC`
+			auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, entityID)
 			if auditErr == nil {
 				defer auditRows.Close()
 				for auditRows.Next() {
 					var atype string
-					var rby sql.NullString
-					var rat sql.NullTime
-					if err := auditRows.Scan(&atype, &rby, &rat); err == nil {
-						auditInfo := api.GetAuditInfo(atype, rby, rat)
+					var rbyPtr *string
+					var ratPtr *time.Time
+					if err := auditRows.Scan(&atype, &rbyPtr, &ratPtr); err == nil {
+						auditInfo := api.GetAuditInfo(atype, rbyPtr, ratPtr)
 						if atype == "CREATE" && createdBy == "" {
 							createdBy = auditInfo.CreatedBy
 							createdAt = auditInfo.CreatedAt
@@ -307,73 +267,289 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 				}
 			}
 			entityMap[entityID] = map[string]interface{}{
-				"id":   entityID,
-				"name": getNullString(entityName),
+				"id": entityID,
+				"name": func() string {
+					if entityName != nil {
+						return *entityName
+					}
+					return ""
+				}(),
 				"data": map[string]interface{}{
-					"entity_id":                      entityID,
-					"entity_name":                    getNullString(entityName),
-					"entity_short_name":              getNullString(entityShortName),
-					"entity_level":                   entityLevel.Int64,
-					"parent_entity_id":               getNullString(parentEntityID),
-					"entity_registration_number":     getNullString(entityRegistrationNumber),
-					"country":                        getNullString(country),
-					"base_operating_currency":        getNullString(baseOperatingCurrency),
-					"tax_identification_number":      getNullString(taxIdentificationNumber),
-					"address_line1":                  getNullString(addressLine1),
-					"address_line2":                  getNullString(addressLine2),
-					"city":                           getNullString(city),
-					"state_province":                 getNullString(stateProvince),
-					"postal_code":                    getNullString(postalCode),
-					"contact_person_name":            getNullString(contactPersonName),
-					"contact_person_email":           getNullString(contactPersonEmail),
-					"contact_person_phone":           getNullString(contactPersonPhone),
-					"active_status":                  getNullString(activeStatus),
-					"old_entity_name":                getNullString(oldEntityName),
-					"old_entity_short_name":          getNullString(oldEntityShortName),
-					"old_entity_level":               oldEntityLevel.Int64,
-					"old_parent_entity_id":           getNullString(oldParentEntityID),
-					"old_entity_registration_number": getNullString(oldEntityRegistrationNumber),
-					"old_country":                    getNullString(oldCountry),
-					"old_base_operating_currency":    getNullString(oldBaseOperatingCurrency),
-					"old_tax_identification_number":  getNullString(oldTaxIdentificationNumber),
-					"old_address_line1":              getNullString(oldAddressLine1),
-					"old_address_line2":              getNullString(oldAddressLine2),
-					"old_city":                       getNullString(oldCity),
-					"old_state_province":             getNullString(oldStateProvince),
-					"old_postal_code":                getNullString(oldPostalCode),
-					"old_contact_person_name":        getNullString(oldContactPersonName),
-					"old_contact_person_email":       getNullString(oldContactPersonEmail),
-					"old_contact_person_phone":       getNullString(oldContactPersonPhone),
-					"old_active_status":              getNullString(oldActiveStatus),
-					"is_top_level_entity":            isTopLevelEntity,
-					"is_deleted":                     isDeleted,
-					"processing_status":              getNullString(processingStatus),
-					// "requested_by":                   getNullString(requestedBy),
-					// "requested_at":                   getNullTime(requestedAt),
-					"action_type":     getNullString(actionType),
-					"action_id":       getNullString(actionID),
-					"checker_at":      getNullTime(checkerAt),
-					"checker_by":      getNullString(checkerBy),
-					"checker_comment": getNullString(checkerComment),
-					"reason":          getNullString(reason),
-					"created_by":      createdBy,
-					"created_at":      createdAt,
-					"edited_by":       editedBy,
-					"edited_at":       editedAt,
-					"deleted_by":      deletedBy,
-					"deleted_at":      deletedAt,
+					"entity_id": entityID,
+					"entity_name": func() string {
+						if entityName != nil {
+							return *entityName
+						}
+						return ""
+					}(),
+					"entity_short_name": func() string {
+						if entityShortName != nil {
+							return *entityShortName
+						}
+						return ""
+					}(),
+					"entity_level": func() int64 {
+						if entityLevel != nil {
+							return *entityLevel
+						}
+						return 0
+					}(),
+					"parent_entity_id": func() string {
+						if parentEntityID != nil {
+							return *parentEntityID
+						}
+						return ""
+					}(),
+					"entity_registration_number": func() string {
+						if entityRegistrationNumber != nil {
+							return *entityRegistrationNumber
+						}
+						return ""
+					}(),
+					"country": func() string {
+						if country != nil {
+							return *country
+						}
+						return ""
+					}(),
+					"base_operating_currency": func() string {
+						if baseOperatingCurrency != nil {
+							return *baseOperatingCurrency
+						}
+						return ""
+					}(),
+					"tax_identification_number": func() string {
+						if taxIdentificationNumber != nil {
+							return *taxIdentificationNumber
+						}
+						return ""
+					}(),
+					"address_line1": func() string {
+						if addressLine1 != nil {
+							return *addressLine1
+						}
+						return ""
+					}(),
+					"address_line2": func() string {
+						if addressLine2 != nil {
+							return *addressLine2
+						}
+						return ""
+					}(),
+					"city": func() string {
+						if city != nil {
+							return *city
+						}
+						return ""
+					}(),
+					"state_province": func() string {
+						if stateProvince != nil {
+							return *stateProvince
+						}
+						return ""
+					}(),
+					"postal_code": func() string {
+						if postalCode != nil {
+							return *postalCode
+						}
+						return ""
+					}(),
+					"contact_person_name": func() string {
+						if contactPersonName != nil {
+							return *contactPersonName
+						}
+						return ""
+					}(),
+					"contact_person_email": func() string {
+						if contactPersonEmail != nil {
+							return *contactPersonEmail
+						}
+						return ""
+					}(),
+					"contact_person_phone": func() string {
+						if contactPersonPhone != nil {
+							return *contactPersonPhone
+						}
+						return ""
+					}(),
+					"active_status": func() string {
+						if activeStatus != nil {
+							return *activeStatus
+						}
+						return ""
+					}(),
+					"old_entity_name": func() string {
+						if oldEntityName != nil {
+							return *oldEntityName
+						}
+						return ""
+					}(),
+					"old_entity_short_name": func() string {
+						if oldEntityShortName != nil {
+							return *oldEntityShortName
+						}
+						return ""
+					}(),
+					"old_entity_level": func() int64 {
+						if oldEntityLevel != nil {
+							return *oldEntityLevel
+						}
+						return 0
+					}(),
+					"old_parent_entity_id": func() string {
+						if oldParentEntityID != nil {
+							return *oldParentEntityID
+						}
+						return ""
+					}(),
+					"old_entity_registration_number": func() string {
+						if oldEntityRegistrationNumber != nil {
+							return *oldEntityRegistrationNumber
+						}
+						return ""
+					}(),
+					"old_country": func() string {
+						if oldCountry != nil {
+							return *oldCountry
+						}
+						return ""
+					}(),
+					"old_base_operating_currency": func() string {
+						if oldBaseOperatingCurrency != nil {
+							return *oldBaseOperatingCurrency
+						}
+						return ""
+					}(),
+					"old_tax_identification_number": func() string {
+						if oldTaxIdentificationNumber != nil {
+							return *oldTaxIdentificationNumber
+						}
+						return ""
+					}(),
+					"old_address_line1": func() string {
+						if oldAddressLine1 != nil {
+							return *oldAddressLine1
+						}
+						return ""
+					}(),
+					"old_address_line2": func() string {
+						if oldAddressLine2 != nil {
+							return *oldAddressLine2
+						}
+						return ""
+					}(),
+					"old_city": func() string {
+						if oldCity != nil {
+							return *oldCity
+						}
+						return ""
+					}(),
+					"old_state_province": func() string {
+						if oldStateProvince != nil {
+							return *oldStateProvince
+						}
+						return ""
+					}(),
+					"old_postal_code": func() string {
+						if oldPostalCode != nil {
+							return *oldPostalCode
+						}
+						return ""
+					}(),
+					"old_contact_person_name": func() string {
+						if oldContactPersonName != nil {
+							return *oldContactPersonName
+						}
+						return ""
+					}(),
+					"old_contact_person_email": func() string {
+						if oldContactPersonEmail != nil {
+							return *oldContactPersonEmail
+						}
+						return ""
+					}(),
+					"old_contact_person_phone": func() string {
+						if oldContactPersonPhone != nil {
+							return *oldContactPersonPhone
+						}
+						return ""
+					}(),
+					"old_active_status": func() string {
+						if oldActiveStatus != nil {
+							return *oldActiveStatus
+						}
+						return ""
+					}(),
+					"is_top_level_entity": isTopLevelEntity,
+					"is_deleted":          isDeleted,
+					"processing_status": func() string {
+						if processingStatusPtr != nil {
+							return *processingStatusPtr
+						}
+						return ""
+					}(),
+					// "requested_by":                   func() string { if requestedByPtr != nil { return *requestedByPtr }; return "" }(),
+					// "requested_at":                   func() string { if requestedAtPtr != nil { return requestedAtPtr.Format("2006-01-02 15:04:05") }; return "" }(),
+					"action_type": func() string {
+						if actionTypePtr != nil {
+							return *actionTypePtr
+						}
+						return ""
+					}(),
+					"action_id": func() string {
+						if actionIDPtr != nil {
+							return *actionIDPtr
+						}
+						return ""
+					}(),
+					"checker_at": func() string {
+						if checkerAtPtr != nil {
+							return checkerAtPtr.Format("2006-01-02 15:04:05")
+						}
+						return ""
+					}(),
+					"checker_by": func() string {
+						if checkerByPtr != nil {
+							return *checkerByPtr
+						}
+						return ""
+					}(),
+					"checker_comment": func() string {
+						if checkerCommentPtr != nil {
+							return *checkerCommentPtr
+						}
+						return ""
+					}(),
+					"reason": func() string {
+						if reasonPtr != nil {
+							return *reasonPtr
+						}
+						return ""
+					}(),
+					"created_by": createdBy,
+					"created_at": createdAt,
+					"edited_by":  editedBy,
+					"edited_at":  editedAt,
+					"deleted_by": deletedBy,
+					"deleted_at": deletedAt,
 				},
 				"children": []interface{}{},
 			}
 			if isDeleted {
 				deletedIds[entityID] = true
-			}
-			if isDeleted && strings.ToUpper(getNullString(processingStatus)) == "APPROVED" {
-				hideIds[entityID] = true
+				// hide when deleted and processing_status is APPROVED
+				if strings.ToUpper(func() string {
+					if processingStatusPtr != nil {
+						return *processingStatusPtr
+					}
+					return ""
+				}()) == "APPROVED" {
+					hideIds[entityID] = true
+				}
 			}
 		}
 		// Fetch relationships
-		relRows, err := db.Query("SELECT parent_entity_id, child_entity_id FROM cashentityrelationships")
+		relRows, err := pgxPool.Query(ctx, "SELECT parent_entity_id, child_entity_id FROM cashentityrelationships")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
@@ -412,7 +588,8 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 		deletedList := []string{}
 		for id := range deletedIds {
 			deletedList = append(deletedList, id)
-		}	
+		}
+		// include hideIds as well (they are a subset of deletedIds but include for safety)
 		for id := range hideIds {
 			deletedList = append(deletedList, id)
 		}
@@ -455,7 +632,7 @@ func GetCashEntityHierarchy(db *sql.DB) http.HandlerFunc {
 }
 
 // Bulk update handler for entity cash master
-func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
+func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID   string `json:"user_id"`
@@ -491,7 +668,8 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "Missing entity_id"})
 				continue
 			}
-			tx, txErr := db.Begin()
+			ctx := r.Context()
+			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
 				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "entity_id": entity.EntityID})
 				continue
@@ -500,19 +678,19 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 			func() {
 				defer func() {
 					if !committed {
-						tx.Rollback()
+						tx.Rollback(ctx)
 					}
 					if p := recover(); p != nil {
 						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "entity_id": entity.EntityID})
 					}
 				}()
 
-				// fetch existing values for old_*
-				var exEntityName, exEntityShortName, exParentEntityID, exEntityRegistrationNumber, exCountry, exBaseCurrency, exTaxID, exAddress1, exAddress2, exCity, exState, exPostal, exContactName, exContactEmail, exContactPhone, exActiveStatus sql.NullString
-				var exEntityLevel sql.NullInt64
-				var exIsTopLevel, exIsDeleted sql.NullBool
+				// fetch existing values for old_* (use pointer types instead of sql.Null*)
+				var exEntityName, exEntityShortName, exParentEntityID, exEntityRegistrationNumber, exCountry, exBaseCurrency, exTaxID, exAddress1, exAddress2, exCity, exState, exPostal, exContactName, exContactEmail, exContactPhone, exActiveStatus *string
+				var exEntityLevel *int64
+				var exIsTopLevel, exIsDeleted *bool
 				sel := `SELECT entity_name, entity_short_name, entity_level, parent_entity_id, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, is_top_level_entity, is_deleted FROM masterentitycash WHERE entity_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityID, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted); err != nil {
+				if err := tx.QueryRow(ctx, sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityID, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing entity: " + err.Error(), "entity_id": entity.EntityID})
 					return
 				}
@@ -526,11 +704,21 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 					switch k {
 					case "entity_name":
 						sets = append(sets, fmt.Sprintf("entity_name=$%d, old_entity_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exEntityName.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exEntityName != nil {
+								return *exEntityName
+							}
+							return ""
+						}())
 						pos += 2
 					case "entity_short_name":
 						sets = append(sets, fmt.Sprintf("entity_short_name=$%d, old_entity_short_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exEntityShortName.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exEntityShortName != nil {
+								return *exEntityShortName
+							}
+							return ""
+						}())
 						pos += 2
 					case "entity_level":
 						var newLevel int64
@@ -547,65 +735,140 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 							newLevel = 0
 						}
 						sets = append(sets, fmt.Sprintf("entity_level=$%d, old_entity_level=$%d", pos, pos+1))
-						args = append(args, newLevel, exEntityLevel.Int64)
+						args = append(args, newLevel, func() int64 {
+							if exEntityLevel != nil {
+								return *exEntityLevel
+							}
+							return int64(0)
+						}())
 						pos += 2
 					case "parent_entity_id":
 						newParent := fmt.Sprint(v)
 						parentProvided = newParent
 						sets = append(sets, fmt.Sprintf("parent_entity_id=$%d, old_parent_entity_id=$%d", pos, pos+1))
-						args = append(args, newParent, exParentEntityID.String)
+						args = append(args, newParent, func() string {
+							if exParentEntityID != nil {
+								return *exParentEntityID
+							}
+							return ""
+						}())
 						pos += 2
 					case "entity_registration_number":
 						sets = append(sets, fmt.Sprintf("entity_registration_number=$%d, old_entity_registration_number=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exEntityRegistrationNumber.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exEntityRegistrationNumber != nil {
+								return *exEntityRegistrationNumber
+							}
+							return ""
+						}())
 						pos += 2
 					case "country":
 						sets = append(sets, fmt.Sprintf("country=$%d, old_country=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exCountry.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exCountry != nil {
+								return *exCountry
+							}
+							return ""
+						}())
 						pos += 2
 					case "base_operating_currency":
 						sets = append(sets, fmt.Sprintf("base_operating_currency=$%d, old_base_operating_currency=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exBaseCurrency.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exBaseCurrency != nil {
+								return *exBaseCurrency
+							}
+							return ""
+						}())
 						pos += 2
 					case "tax_identification_number":
 						sets = append(sets, fmt.Sprintf("tax_identification_number=$%d, old_tax_identification_number=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exTaxID.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exTaxID != nil {
+								return *exTaxID
+							}
+							return ""
+						}())
 						pos += 2
 					case "address_line1":
 						sets = append(sets, fmt.Sprintf("address_line1=$%d, old_address_line1=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exAddress1.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exAddress1 != nil {
+								return *exAddress1
+							}
+							return ""
+						}())
 						pos += 2
 					case "address_line2":
 						sets = append(sets, fmt.Sprintf("address_line2=$%d, old_address_line2=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exAddress2.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exAddress2 != nil {
+								return *exAddress2
+							}
+							return ""
+						}())
 						pos += 2
 					case "city":
 						sets = append(sets, fmt.Sprintf("city=$%d, old_city=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exCity.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exCity != nil {
+								return *exCity
+							}
+							return ""
+						}())
 						pos += 2
 					case "state_province":
 						sets = append(sets, fmt.Sprintf("state_province=$%d, old_state_province=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exState.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exState != nil {
+								return *exState
+							}
+							return ""
+						}())
 						pos += 2
 					case "postal_code":
 						sets = append(sets, fmt.Sprintf("postal_code=$%d, old_postal_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exPostal.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exPostal != nil {
+								return *exPostal
+							}
+							return ""
+						}())
 						pos += 2
 					case "contact_person_name":
 						sets = append(sets, fmt.Sprintf("contact_person_name=$%d, old_contact_person_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exContactName.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exContactName != nil {
+								return *exContactName
+							}
+							return ""
+						}())
 						pos += 2
 					case "contact_person_email":
 						sets = append(sets, fmt.Sprintf("contact_person_email=$%d, old_contact_person_email=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exContactEmail.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exContactEmail != nil {
+								return *exContactEmail
+							}
+							return ""
+						}())
 						pos += 2
 					case "contact_person_phone":
 						sets = append(sets, fmt.Sprintf("contact_person_phone=$%d, old_contact_person_phone=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exContactPhone.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exContactPhone != nil {
+								return *exContactPhone
+							}
+							return ""
+						}())
 						pos += 2
 					case "active_status":
 						sets = append(sets, fmt.Sprintf("active_status=$%d, old_active_status=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), exActiveStatus.String)
+						args = append(args, fmt.Sprint(v), func() string {
+							if exActiveStatus != nil {
+								return *exActiveStatus
+							}
+							return ""
+						}())
 						pos += 2
 					case "is_top_level_entity":
 						var newBool bool
@@ -650,7 +913,7 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 				if len(sets) > 0 {
 					q := "UPDATE masterentitycash SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE entity_id=$%d RETURNING entity_id", pos)
 					args = append(args, entity.EntityID)
-					if err := tx.QueryRow(q, args...).Scan(&updatedEntityID); err != nil {
+					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedEntityID); err != nil {
 						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "entity_id": entity.EntityID})
 						return
 					}
@@ -662,7 +925,7 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 				auditQuery := `INSERT INTO auditactionentity (
 					entity_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(auditQuery, updatedEntityID, "EDIT", "PENDING_EDIT_APPROVAL", entity.Reason, updatedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQuery, updatedEntityID, "EDIT", "PENDING_EDIT_APPROVAL", entity.Reason, updatedBy); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Entity updated but audit log failed: " + err.Error(), "entity_id": updatedEntityID})
 					return
 				}
@@ -672,11 +935,11 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 					parentId := parentProvided
 					if parentId != "" {
 						var exists int
-						err := db.QueryRow(`SELECT 1 FROM cashentityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, updatedEntityID).Scan(&exists)
-						if err == sql.ErrNoRows {
+						err := pgxPool.QueryRow(ctx, `SELECT 1 FROM cashentityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, updatedEntityID).Scan(&exists)
+						if err == pgx.ErrNoRows {
 							relQuery := `INSERT INTO cashentityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`
 							var relID int
-							relErr := db.QueryRow(relQuery, parentId, updatedEntityID).Scan(&relID)
+							relErr := pgxPool.QueryRow(ctx, relQuery, parentId, updatedEntityID).Scan(&relID)
 							if relErr == nil {
 								relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_id": parentId, "child_entity_id": updatedEntityID})
 							}
@@ -684,7 +947,7 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 					}
 				}
 
-				if err := tx.Commit(); err != nil {
+				if err := tx.Commit(ctx); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "entity_id": updatedEntityID})
 					return
 				}
@@ -703,8 +966,9 @@ func UpdateCashEntityBulk(db *sql.DB) http.HandlerFunc {
 }
 
 // Delete cash entity (and descendants if Delete-Approval)
-func DeleteCashEntity(db *sql.DB) http.HandlerFunc {
+func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var req struct {
 			EntityID string `json:"entity_id"`
 			Reason   string `json:"reason"`
@@ -728,7 +992,7 @@ func DeleteCashEntity(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Fetch all relationships
-		relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM cashentityrelationships`)
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM cashentityrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -766,10 +1030,7 @@ func DeleteCashEntity(db *sql.DB) http.HandlerFunc {
 		}
 		allToDelete := getAllDescendants([]string{req.EntityID})
 		// Mark all for delete approval
-		rows, err := db.Query(
-			`UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`,
-			pq.Array(allToDelete),
-		)
+		rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, allToDelete)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -788,7 +1049,7 @@ func DeleteCashEntity(db *sql.DB) http.HandlerFunc {
 			auditQuery := `INSERT INTO auditactionentity (
 					entity_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`
-			_, auditErr := db.Exec(auditQuery, eid, req.Reason, requestedBy)
+			_, auditErr := pgxPool.Exec(ctx, auditQuery, eid, req.Reason, requestedBy)
 			if auditErr != nil {
 				auditErrors = append(auditErrors, eid+":"+auditErr.Error())
 			}
@@ -810,7 +1071,7 @@ func DeleteCashEntity(db *sql.DB) http.HandlerFunc {
 }
 
 // Bulk reject cash entity actions (and descendants)
-func BulkRejectCashEntityActions(db *sql.DB) http.HandlerFunc {
+func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID    string   `json:"user_id"`
@@ -834,8 +1095,9 @@ func BulkRejectCashEntityActions(db *sql.DB) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
+		ctx := r.Context()
 		// Fetch all relationships
-		relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM cashentityrelationships`)
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM cashentityrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -874,7 +1136,7 @@ func BulkRejectCashEntityActions(db *sql.DB) http.HandlerFunc {
 		allToReject := getAllDescendants(req.EntityIDs)
 		// Update processing_status to 'REJECTED' in auditactionentity for all
 		query := `UPDATE auditactionentity SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) RETURNING action_id, entity_id`
-		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(allToReject))
+		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -904,7 +1166,7 @@ func BulkRejectCashEntityActions(db *sql.DB) http.HandlerFunc {
 }
 
 // Bulk approve cash entity actions (and descendants)
-func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
+func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID    string   `json:"user_id"`
@@ -928,8 +1190,9 @@ func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
+		ctx := r.Context()
 		// Fetch all relationships
-		relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM cashentityrelationships`)
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_id, child_entity_id FROM cashentityrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -970,8 +1233,8 @@ func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
 		var anyError error
 		for _, eid := range req.EntityIDs {
 			var status string
-			err := db.QueryRow(`SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
-			if err == sql.ErrNoRows {
+			err := pgxPool.QueryRow(ctx, `SELECT processing_status FROM auditactionentity WHERE entity_id = $1 ORDER BY requested_at DESC LIMIT 1`, eid).Scan(&status)
+			if err == pgx.ErrNoRows {
 				continue
 			} else if err != nil {
 				anyError = err
@@ -980,7 +1243,7 @@ func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
 			if status == "PENDING_DELETE_APPROVAL" {
 				// Mark all descendants as deleted (do not approve them)
 				descendants := getAllDescendants([]string{eid})
-				rows, err := db.Query(`UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, pq.Array(descendants))
+				rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
 					anyError = err
 					break
@@ -997,7 +1260,7 @@ func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
 				}
 			} else {
 				// Approve only this entity: update auditactionentity processing_status
-				rows, err := db.Query(`UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
+				rows, err := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
 				if err != nil {
 					anyError = err
 					break
@@ -1031,7 +1294,7 @@ func BulkApproveCashEntityActions(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func FindParentCashEntityAtLevel(db *sql.DB) http.HandlerFunc {
+func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1066,6 +1329,7 @@ func FindParentCashEntityAtLevel(db *sql.DB) http.HandlerFunc {
 			})
 			return
 		}
+		ctx := r.Context()
 
 		parentLevel := req.Level - 1
 		query := `
@@ -1084,7 +1348,7 @@ func FindParentCashEntityAtLevel(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(m.active_status) = 'active'
 		`
 
-		rows, err := db.Query(query, parentLevel)
+		rows, err := pgxPool.Query(ctx, query, parentLevel)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1131,7 +1395,7 @@ func FindParentCashEntityAtLevel(db *sql.DB) http.HandlerFunc {
 }
 
 // GET handler to fetch all entity_id, entity_name, entity_short_name for all cash entities, requiring user_id in body
-func GetCashEntityNamesWithID(db *sql.DB) http.HandlerFunc {
+func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
@@ -1140,6 +1404,7 @@ func GetCashEntityNamesWithID(db *sql.DB) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
+		ctx := r.Context()
 		query := `
 			SELECT m.entity_id, m.entity_name, m.entity_short_name
 			FROM masterentitycash m
@@ -1152,7 +1417,7 @@ func GetCashEntityNamesWithID(db *sql.DB) http.HandlerFunc {
 			) a ON TRUE
 			WHERE m.active_status = 'Active' AND (m.is_deleted = false OR m.is_deleted IS NULL) AND a.processing_status = 'APPROVED'
 		`
-		rows, err := db.Query(query)
+		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1185,5 +1450,225 @@ func GetCashEntityNamesWithID(db *sql.DB) http.HandlerFunc {
 			"success": true,
 			"results": results,
 		})
+	}
+}
+
+// UploadEntityCash handles staging and mapping for masterentitycash using pgxpool (no database/sql usage)
+func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		userID := ""
+		if r.Header.Get("Content-Type") == "application/json" {
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
+				return
+			}
+			userID = req.UserID
+		} else {
+			userID = r.FormValue("user_id")
+			if userID == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				return
+			}
+		}
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			return
+		}
+
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			return
+		}
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			return
+		}
+		batchIDs := make([]string, 0, len(files))
+		// collect relationships created across all batches
+		relationshipsAdded := []map[string]interface{}{}
+
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
+				return
+			}
+			ext := getFileExt(fh.Filename)
+			// reuse parseCashFlowCategoryFile for CSV/XLSX parsing which returns [][]string
+			records, err := parseCashFlowCategoryFile(f, ext)
+			f.Close()
+			if err != nil || len(records) < 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+				return
+			}
+			headerRow := records[0]
+			dataRows := records[1:]
+			batchID := uuid.New().String()
+			batchIDs = append(batchIDs, batchID)
+
+			colCount := len(headerRow)
+			copyRows := make([][]interface{}, len(dataRows))
+			for i, row := range dataRows {
+				vals := make([]interface{}, colCount+1)
+				vals[0] = batchID
+				for j := 0; j < colCount; j++ {
+					if j < len(row) {
+						cell := strings.TrimSpace(row[j])
+						if cell == "" {
+							vals[j+1] = nil
+						} else {
+							vals[j+1] = cell
+						}
+					} else {
+						vals[j+1] = nil
+					}
+				}
+				copyRows[i] = vals
+			}
+
+			headerNorm := make([]string, len(headerRow))
+			for i, h := range headerRow {
+				hn := strings.TrimSpace(h)
+				hn = strings.Trim(hn, ", ")
+				hn = strings.ToLower(hn)
+				hn = strings.ReplaceAll(hn, " ", "_")
+				hn = strings.Trim(hn, "\"'`")
+				headerNorm[i] = hn
+			}
+			columns := append([]string{"upload_batch_id"}, headerNorm...)
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				return
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"input_entitycash"}, columns, pgx.CopyFromRows(copyRows)); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				return
+			}
+
+			// read mapping from upload_mapping_entity
+			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_entity`)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
+				return
+			}
+			mapping := make(map[string]string)
+			for mapRows.Next() {
+				var src, tgt string
+				if err := mapRows.Scan(&src, &tgt); err == nil {
+					key := strings.ToLower(strings.TrimSpace(src))
+					key = strings.ReplaceAll(key, " ", "_")
+					tt := strings.TrimSpace(tgt)
+					tt = strings.Trim(tt, ", \"'`")
+					tt = strings.ReplaceAll(tt, " ", "_")
+					mapping[key] = tt
+				}
+			}
+			mapRows.Close()
+
+			var srcCols []string
+			var tgtCols []string
+			for i, h := range headerRow {
+				key := headerNorm[i]
+				if t, ok := mapping[key]; ok {
+					srcCols = append(srcCols, key)
+					tgtCols = append(tgtCols, t)
+				} else {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
+					return
+				}
+			}
+
+			tgtColsStr := strings.Join(tgtCols, ", ")
+			var selectExprs []string
+			for i, src := range srcCols {
+				tgt := tgtCols[i]
+				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+			}
+			srcColsStr := strings.Join(selectExprs, ", ")
+
+			insertSQL := fmt.Sprintf(`INSERT INTO masterentitycash (%s) SELECT %s FROM input_entitycash s WHERE s.upload_batch_id = $1 RETURNING entity_id`, tgtColsStr, srcColsStr)
+			rows2, err := tx.Query(ctx, insertSQL, batchID)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				return
+			}
+			var newIDs []string
+			for rows2.Next() {
+				var id string
+				if err := rows2.Scan(&id); err == nil {
+					newIDs = append(newIDs, id)
+				}
+			}
+			rows2.Close()
+
+			// Insert audit actions for created entities
+			if len(newIDs) > 0 {
+				auditSQL := `INSERT INTO auditactionentity (entity_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT entity_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterentitycash WHERE entity_id = ANY($2)`
+				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					return
+				}
+			}
+
+			// Sync parent-child relationships for newly created entities (if parent_entity_id set)
+			if len(newIDs) > 0 {
+				relRows2, err := tx.Query(ctx, `SELECT entity_id, parent_entity_id FROM masterentitycash WHERE entity_id = ANY($1)`, newIDs)
+				if err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch parent info: "+err.Error())
+					return
+				}
+				for relRows2.Next() {
+					var eid, parent string
+					if err := relRows2.Scan(&eid, &parent); err != nil {
+						continue
+					}
+					if parent == "" {
+						continue
+					}
+					// check existence
+					var exists int
+					err = tx.QueryRow(ctx, `SELECT 1 FROM cashentityrelationships WHERE parent_entity_id=$1 AND child_entity_id=$2`, parent, eid).Scan(&exists)
+					if err == pgx.ErrNoRows {
+						var relID int
+						err2 := tx.QueryRow(ctx, `INSERT INTO cashentityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`, parent, eid).Scan(&relID)
+						if err2 == nil {
+							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_id": parent, "child_entity_id": eid})
+						}
+					}
+				}
+				relRows2.Close()
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+			committed = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs, "relationships_added": len(relationshipsAdded), "relationship_details": relationshipsAdded})
 	}
 }
