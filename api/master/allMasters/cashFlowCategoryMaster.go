@@ -550,7 +550,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": rowsOut})
+		json.NewEncoder(w).Encode(rowsOut)
 	}
 }
 
