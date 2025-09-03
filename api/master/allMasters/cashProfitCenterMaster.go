@@ -331,14 +331,14 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				http.Error(w, "user_id required in body", http.StatusBadRequest)
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue("user_id")
 			if userID == "" {
-				http.Error(w, "user_id required in form", http.StatusBadRequest)
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
 			}
 		}
@@ -350,7 +350,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			http.Error(w, "User not found in active sessions", http.StatusUnauthorized)
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
 			return
 		}
 
@@ -882,9 +882,9 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string `json:"user_id"`
-			CentreID string `json:"centre_id"`
-			Reason   string `json:"reason"`
+			UserID    string   `json:"user_id"`
+			CentreIDs []string `json:"centre_ids"`
+			Reason    string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
@@ -901,12 +901,15 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
-		if strings.TrimSpace(req.CentreID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "centre_id required")
+		if len(req.CentreIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "centre_ids required")
 			return
 		}
-		q := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
-		if _, err := pgxPool.Exec(r.Context(), q, req.CentreID, req.Reason, requestedBy); err != nil {
+
+		// Bulk insert audit actions for all provided centre ids. Use unnest on the text[] parameter.
+		q := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
+			  SELECT cid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS cid`
+		if _, err := pgxPool.Exec(r.Context(), q, req.Reason, requestedBy, req.CentreIDs); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
