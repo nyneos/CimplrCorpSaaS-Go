@@ -429,15 +429,17 @@ func UpdateGLAccountBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // DeleteGLAccount inserts a DELETE audit action
 func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// accept bulk gl_account_ids for delete audit actions
 		var body struct {
-			UserID      string `json:"user_id"`
-			GLAccountID string `json:"gl_account_id"`
-			Reason      string `json:"reason"`
+			UserID       string   `json:"user_id"`
+			GLAccountIDs []string `json:"gl_account_ids"`
+			Reason       string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
+
 		requestedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == body.UserID {
@@ -449,17 +451,41 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
+
+		if len(body.GLAccountIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "gl_account_ids required")
+			return
+		}
+
 		ctx := r.Context()
-		if body.GLAccountID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "gl_account_id required")
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
 			return
 		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
 		q := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
-		if _, err := pgxPool.Exec(ctx, q, body.GLAccountID, body.Reason, requestedBy); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+		for _, id := range body.GLAccountIDs {
+			if _, err := tx.Exec(ctx, q, id, body.Reason, requestedBy); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		committed = true
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "gl_account_ids": body.GLAccountIDs})
 	}
 }
 
@@ -688,14 +714,14 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				http.Error(w, "user_id required in body", http.StatusBadRequest)
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue("user_id")
 			if userID == "" {
-				http.Error(w, "user_id required in form", http.StatusBadRequest)
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
 			}
 		}
@@ -707,7 +733,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			http.Error(w, "User not found in active sessions", http.StatusUnauthorized)
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
 			return
 		}
 
