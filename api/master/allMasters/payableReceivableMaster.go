@@ -503,18 +503,19 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // DeletePayableReceivable inserts a DELETE audit action (no hard delete)
+// DeletePayableReceivable inserts DELETE audit actions for one or more type_ids (bulk, all-or-nothing)
 func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			TypeID string `json:"type_id"`
-			Reason string `json:"reason"`
+			UserID  string   `json:"user_id"`
+			TypeIDs []string `json:"type_ids"`
+			Reason  string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-		// validate
+		// validate session / user
 		requestedBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -527,17 +528,48 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
+
+		if len(req.TypeIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "type_ids required")
+			return
+		}
+
 		ctx := r.Context()
-		if req.TypeID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "type_id required")
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
 			return
 		}
-		// Insert audit action
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		// Insert an audit action per type_id; all-or-nothing
 		q := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
-		if _, err := pgxPool.Exec(ctx, q, req.TypeID, req.Reason, requestedBy); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+		for _, tid := range req.TypeIDs {
+			if strings.TrimSpace(tid) == "" {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, "empty type_id provided")
+				return
+			}
+			if _, err := tx.Exec(ctx, q, tid, req.Reason, requestedBy); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			tx.Rollback(ctx)
+			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
 			return
 		}
+		committed = true
+
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 	}
 }
@@ -796,14 +828,14 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-				http.Error(w, "user_id required in body", http.StatusBadRequest)
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
 			userID = req.UserID
 		} else {
 			userID = r.FormValue("user_id")
 			if userID == "" {
-				http.Error(w, "user_id required in form", http.StatusBadRequest)
+				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
 			}
 		}
@@ -817,7 +849,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			http.Error(w, "User not found in active sessions", http.StatusUnauthorized)
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
 			return
 		}
 
@@ -871,6 +903,8 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			headerNorm := make([]string, len(headerRow))
 			for i, h := range headerRow {
 				hn := strings.TrimSpace(h)
+				// remove stray trailing commas or punctuation from CSV headers
+				hn = strings.Trim(hn, ", ")
 				hn = strings.ToLower(hn)
 				hn = strings.ReplaceAll(hn, " ", "_")
 				// ensure no surrounding quotes
@@ -911,7 +945,11 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := mapRows.Scan(&src, &tgt); err == nil {
 					key := strings.ToLower(strings.TrimSpace(src))
 					key = strings.ReplaceAll(key, " ", "_")
-					mapping[key] = tgt
+					// sanitize target field name: trim spaces, trailing commas and quotes
+					tt := strings.TrimSpace(tgt)
+					tt = strings.Trim(tt, ", \"'`")
+					tt = strings.ReplaceAll(tt, " ", "_")
+					mapping[key] = tt
 				}
 			}
 			mapRows.Close()
