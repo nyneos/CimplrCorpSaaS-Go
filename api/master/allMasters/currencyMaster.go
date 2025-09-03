@@ -3,14 +3,15 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	// "log"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
 
@@ -26,10 +27,6 @@ type CurrencyMasterRequest struct {
 type CurrencyMasterUpdateRequest struct {
 	CurrencyID string `json:"currency_id"`
 	Status     string `json:"status"`
-	// CurrencyCode  string `json:"currency_code"`
-	// CurrencyName  string `json:"currency_name"`
-	// Country       string `json:"country"`
-	// Symbol        string `json:"symbol"`
 	DecimalPlaces    int    `json:"decimal_places"`
 	UserID           string `json:"user_id"`
 	OLDStatus        string `json:"old_status"`
@@ -37,22 +34,8 @@ type CurrencyMasterUpdateRequest struct {
 	Reason           string `json:"reason"`
 }
 
-// Helper functions for handling sql.NullString and sql.NullTime
-
-func getNullString(ns sql.NullString) string {
-	if ns.Valid {
-		return ns.String
-	}
-	return ""
-}
-
-func getNullTime(nt sql.NullTime) string {
-	if nt.Valid {
-		return nt.Time.Format("2006-01-02 15:04:05")
-	}
-	return ""
-}
-func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
+// helper usage in this file expects pointer types from query results when possible
+func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID   string                  `json:"user_id"`
@@ -85,7 +68,8 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				})
 				continue
 			}
-			tx, txErr := db.Begin()
+			ctx := r.Context()
+			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
 				results = append(results, map[string]interface{}{
 					"success":       false,
@@ -98,7 +82,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			query := `INSERT INTO mastercurrency (
 				currency_code, currency_name, country, symbol, decimal_places, status
 			) VALUES ($1, $2, $3, $4, $5, $6) RETURNING currency_id`
-			err := tx.QueryRow(query,
+			err := tx.QueryRow(ctx, query,
 				strings.ToUpper(cur.CurrencyCode),
 				cur.CurrencyName,
 				cur.Country,
@@ -107,7 +91,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				cur.Status,
 			).Scan(&currencyID)
 			if err != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
 					"success":       false,
 					"error":         err.Error(),
@@ -118,7 +102,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			auditQuery := `INSERT INTO auditactioncurrency (
 				currency_id, actiontype, processing_status, reason, requested_by, requested_at
 			) VALUES ($1, $2, $3, $4, $5, now())`
-			_, auditErr := tx.Exec(auditQuery,
+			_, auditErr := tx.Exec(ctx, auditQuery,
 				currencyID,
 				"CREATE",
 				"PENDING_APPROVAL",
@@ -126,7 +110,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				createdBy,
 			)
 			if auditErr != nil {
-				tx.Rollback()
+				tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
 					"success":       false,
 					"error":         "Currency created but audit log failed: " + auditErr.Error(),
@@ -135,7 +119,7 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				})
 				continue
 			}
-			if commitErr := tx.Commit(); commitErr != nil {
+			if commitErr := tx.Commit(ctx); commitErr != nil {
 				results = append(results, map[string]interface{}{
 					"success":       false,
 					"error":         "Transaction commit failed: " + commitErr.Error(),
@@ -160,19 +144,16 @@ func CreateCurrencyMaster(db *sql.DB) http.HandlerFunc {
 }
 
 // GET handler to fetch all currency records
-func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
+func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		query := `
 			SELECT m.currency_id, m.currency_code, m.currency_name, m.country, m.symbol, m.decimal_places, m.status, m.old_decimal_places, m.old_status
 			FROM mastercurrency m
 		`
-		rows, err := db.Query(query)
+		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
-			})
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer rows.Close()
@@ -191,21 +172,21 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 			}
 			// ...existing code...
 			auditQuery := `SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactioncurrency WHERE currency_id = $1 ORDER BY requested_at DESC LIMIT 1`
-			var processingStatus, requestedBy, actionType, actionID, checkerBy, checkerComment, reason sql.NullString
-			var requestedAt, checkerAt sql.NullTime
-			_ = db.QueryRow(auditQuery, currencyID).Scan(&processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason)
+			var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
+			var requestedAtPtr, checkerAtPtr *time.Time
+			_ = pgxPool.QueryRow(ctx, auditQuery, currencyID).Scan(&processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr)
 
 			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactioncurrency WHERE currency_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
-			auditRows, auditErr := db.Query(auditDetailsQuery, currencyID)
+			auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, currencyID)
 			var createdBy, createdAt, editedBy, editedAt, deletedBy, deletedAt string
 			if auditErr == nil {
 				defer auditRows.Close()
 				for auditRows.Next() {
 					var actionType string
-					var requestedBy sql.NullString
-					var requestedAt sql.NullTime
-					auditRows.Scan(&actionType, &requestedBy, &requestedAt)
-					auditInfo := api.GetAuditInfo(actionType, requestedBy, requestedAt)
+					var requestedByPtr *string
+					var requestedAtPtr *time.Time
+					auditRows.Scan(&actionType, &requestedByPtr, &requestedAtPtr)
+					auditInfo := api.GetAuditInfo(actionType, requestedByPtr, requestedAtPtr)
 					if actionType == "CREATE" && createdBy == "" {
 						createdBy = auditInfo.CreatedBy
 						createdAt = auditInfo.CreatedAt
@@ -228,13 +209,13 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 				"old_decimal_places": oldDecimalPlaces,
 				"status":             status,
 				"old_status":         oldStatus,
-				"processing_status":  getNullString(processingStatus),
-				"action_type":        getNullString(actionType),
-				"action_id":          getNullString(actionID),
-				"checker_at":         getNullTime(checkerAt),
-				"checker_by":         getNullString(checkerBy),
-				"checker_comment":    getNullString(checkerComment),
-				"reason":             getNullString(reason),
+				"processing_status":  api.GetAuditInfo("", requestedByPtr, requestedAtPtr).CreatedBy,
+				"action_type":        api.GetAuditInfo("", actionTypePtr, nil).CreatedBy,
+				"action_id":          api.GetAuditInfo("", actionIDPtr, nil).CreatedBy,
+				"checker_at":         api.GetAuditInfo("", checkerByPtr, checkerAtPtr).CreatedAt,
+				"checker_by":         api.GetAuditInfo("", checkerByPtr, nil).CreatedBy,
+				"checker_comment":    api.GetAuditInfo("", checkerCommentPtr, nil).CreatedBy,
+				"reason":             api.GetAuditInfo("", reasonPtr, nil).CreatedBy,
 				"created_by":         createdBy,
 				"created_at":         createdAt,
 				"edited_by":          editedBy,
@@ -245,10 +226,7 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if anyError != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   anyError.Error(),
-			})
+			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
 		}
 		if currencies == nil {
@@ -261,7 +239,7 @@ func GetAllCurrencyMaster(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
+func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID   string `json:"user_id"`
@@ -290,7 +268,8 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 		}
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
-			tx, txErr := db.Begin()
+			ctx := r.Context()
+			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
 				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "currency_id": cur.CurrencyID})
 				continue
@@ -299,7 +278,7 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 			func() {
 				defer func() {
 					if !committed {
-						tx.Rollback()
+						tx.Rollback(ctx)
 					}
 					if p := recover(); p != nil {
 						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "currency_id": cur.CurrencyID})
@@ -307,10 +286,10 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 				}()
 
 				// fetch existing values (for old_* capture)
-				var exDecimal sql.NullInt64
-				var exStatus sql.NullString
+				var exDecimal *int64
+				var exStatus *string
 				sel := `SELECT decimal_places, status FROM mastercurrency WHERE currency_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
+				if err := tx.QueryRow(ctx, sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing currency: " + err.Error(), "currency_id": cur.CurrencyID})
 					return
 				}
@@ -340,13 +319,21 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 						default:
 							newDec = 0
 						}
+						oldVal := int64(0)
+						if exDecimal != nil {
+							oldVal = *exDecimal
+						}
 						sets = append(sets, fmt.Sprintf("decimal_places=$%d, old_decimal_places=$%d", pos, pos+1))
-						args = append(args, newDec, exDecimal.Int64)
+						args = append(args, newDec, oldVal)
 						pos += 2
 					case "status":
 						newStatus := fmt.Sprint(v)
+						oldVal := ""
+						if exStatus != nil {
+							oldVal = *exStatus
+						}
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
-						args = append(args, newStatus, exStatus.String)
+						args = append(args, newStatus, oldVal)
 						pos += 2
 					case "currency_code":
 						sets = append(sets, fmt.Sprintf("currency_code=$%d", pos))
@@ -373,7 +360,7 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 				if len(sets) > 0 {
 					q := "UPDATE mastercurrency SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE currency_id=$%d RETURNING currency_id, currency_code", pos)
 					args = append(args, cur.CurrencyID)
-					if err := tx.QueryRow(q, args...).Scan(&currencyID, &currencyCode); err != nil {
+					if err := tx.QueryRow(ctx, q, args...).Scan(&currencyID, &currencyCode); err != nil {
 						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "currency_id": cur.CurrencyID})
 						return
 					}
@@ -384,12 +371,12 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 				auditQuery := `INSERT INTO auditactioncurrency (
 					currency_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
-				if _, err := tx.Exec(auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
+				if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Currency updated but audit log failed: " + err.Error(), "currency_id": currencyID})
 					return
 				}
 
-				if err := tx.Commit(); err != nil {
+				if err := tx.Commit(ctx); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "currency_id": currencyID})
 					return
 				}
@@ -405,7 +392,7 @@ func UpdateCurrencyMasterBulk(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
-func BulkRejectAuditActions(db *sql.DB) http.HandlerFunc {
+func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID    string   `json:"user_id"`
@@ -429,7 +416,7 @@ func BulkRejectAuditActions(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,currency_id`
-		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -450,7 +437,7 @@ func BulkRejectAuditActions(db *sql.DB) http.HandlerFunc {
 }
 
 // BulkApproveAuditActions sets processing_status to APPROVED for multiple actions
-func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
+func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID    string   `json:"user_id"`
@@ -475,7 +462,7 @@ func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
 		}
 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
 		delQuery := `DELETE FROM auditactioncurrency WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, currency_id`
-		delRows, delErr := db.Query(delQuery, pq.Array(req.ActionIDs))
+		delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.ActionIDs))
 		var deleted []string
 		var currencyIDsToDelete []string
 		if delErr == nil {
@@ -490,12 +477,12 @@ func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
 		// Delete corresponding currencies from mastercurrency
 		if len(currencyIDsToDelete) > 0 {
 			delCurQuery := `DELETE FROM mastercurrency WHERE currency_id = ANY($1)`
-			_, _ = db.Exec(delCurQuery, pq.Array(currencyIDsToDelete))
+			_, _ = pgxPool.Exec(r.Context(), delCurQuery, pq.Array(currencyIDsToDelete))
 		}
 
 		// Then, approve the rest
 		query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
-		rows, err := db.Query(query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -516,7 +503,7 @@ func BulkApproveAuditActions(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func BulkDeleteCurrencyAudit(db *sql.DB) http.HandlerFunc {
+func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
@@ -539,13 +526,14 @@ func BulkDeleteCurrencyAudit(db *sql.DB) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
+		ctx := r.Context()
 		var results []string
 		for _, currencyID := range req.CurrencyIDs {
 			query := `INSERT INTO auditactioncurrency (
-                currency_id, actiontype, processing_status, reason, requested_by, requested_at
-            ) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()) RETURNING action_id`
+				currency_id, actiontype, processing_status, reason, requested_by, requested_at
+			) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()) RETURNING action_id`
 			var actionID string
-			err := db.QueryRow(query, currencyID, req.Reason, requestedBy).Scan(&actionID)
+			err := pgxPool.QueryRow(ctx, query, currencyID, req.Reason, requestedBy).Scan(&actionID)
 			if err == nil {
 				results = append(results, actionID)
 			}
@@ -559,8 +547,9 @@ func BulkDeleteCurrencyAudit(db *sql.DB) http.HandlerFunc {
 }
 
 // GET handler to fetch currency_code where status is 'Active' and processing_status is 'APPROVED'
-func GetActiveApprovedCurrencyCodes(db *sql.DB) http.HandlerFunc {
+func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		query := `
 			SELECT m.currency_code ,m.decimal_places
 			FROM mastercurrency m
@@ -573,7 +562,7 @@ func GetActiveApprovedCurrencyCodes(db *sql.DB) http.HandlerFunc {
 			) a ON TRUE
 			WHERE m.status = 'Active' AND a.processing_status = 'APPROVED'
 		`
-		rows, err := db.Query(query)
+		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -596,10 +585,7 @@ func GetActiveApprovedCurrencyCodes(db *sql.DB) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if anyError != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   anyError.Error(),
-			})
+			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
 		}
 		if results == nil {
