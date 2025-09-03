@@ -271,21 +271,26 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // pgx-based hierarchy for cashflow categories
 func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 
+		// Step 1: fetch categories with latest audit info
 		query := `
-				SELECT m.category_id, m.category_name, m.category_type, m.parent_category_id, m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status,
-				   m.old_category_name, m.old_category_type, m.old_parent_category_id, m.old_default_mapping, m.old_cashflow_nature, m.old_usage_flag, m.old_description, m.old_status,
-				   m.is_top_level_category, m.is_deleted, m.category_level, m.old_category_level,
-				   a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id, a.checker_by, a.checker_at, a.checker_comment, a.reason
+			SELECT m.category_id, m.category_name, m.category_type, m.parent_category_id,
+			       m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status,
+			       m.old_category_name, m.old_category_type, m.old_parent_category_id,
+			       m.old_default_mapping, m.old_cashflow_nature, m.old_usage_flag, m.old_description, m.old_status,
+			       m.is_top_level_category, m.is_deleted, m.category_level, m.old_category_level,
+			       a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
+			       a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM mastercashflowcategory m
 			LEFT JOIN LATERAL (
-				SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
+				SELECT processing_status, requested_by, requested_at, actiontype, action_id,
+				       checker_by, checker_at, checker_comment, reason
 				FROM auditactioncashflowcategory a
 				WHERE a.category_id = m.category_id
 				ORDER BY requested_at DESC
 				LIMIT 1
-			) a ON TRUE
+			) a ON TRUE;
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -296,182 +301,158 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		entityMap := map[string]map[string]interface{}{}
-		deletedIds := map[string]bool{}
-		// hideIds holds categories that are deleted AND have processing_status = 'APPROVED'
+		typeIDs := []string{}
 		hideIds := map[string]bool{}
+
 		for rows.Next() {
 			var (
-				categoryID           string
-				categoryNameI        interface{}
-				categoryTypeI        interface{}
-				parentCategoryIDI    interface{}
-				defaultMappingI      interface{}
-				cashflowNatureI      interface{}
-				usageFlagI           interface{}
-				descriptionI         interface{}
-				statusI              interface{}
-				oldCategoryNameI     interface{}
-				oldCategoryTypeI     interface{}
-				oldParentCategoryIDI interface{}
-				oldDefaultMappingI   interface{}
-				oldCashflowNatureI   interface{}
-				oldUsageFlagI        interface{}
-				oldDescriptionI      interface{}
-				oldStatusI           interface{}
-				isTopLevelCategory   bool
-				isDeleted            bool
-				categoryLevelI       interface{}
-				oldCategoryLevelI    interface{}
-				processingStatusI    interface{}
-				requestedByI         interface{}
-				requestedAtI         interface{}
-				actionTypeI          interface{}
-				actionIDI            interface{}
-				checkerByI           interface{}
-				checkerAtI           interface{}
-				checkerCommentI      interface{}
-				reasonI              interface{}
+				categoryID string
+				// all scanned as interface{} then converted
+				categoryNameI, categoryTypeI, parentCategoryIDI,
+				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI,
+				oldCategoryNameI, oldCategoryTypeI, oldParentCategoryIDI, oldDefaultMappingI,
+				oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI,
+				categoryLevelI, oldCategoryLevelI, processingStatusI,
+				requestedByI, requestedAtI, actionTypeI, actionIDI,
+				checkerByI, checkerAtI, checkerCommentI, reasonI interface{}
+				isTopLevelCategory, isDeleted bool
 			)
 
-			if err := rows.Scan(&categoryID, &categoryNameI, &categoryTypeI, &parentCategoryIDI, &defaultMappingI, &cashflowNatureI, &usageFlagI, &descriptionI, &statusI, &oldCategoryNameI, &oldCategoryTypeI, &oldParentCategoryIDI, &oldDefaultMappingI, &oldCashflowNatureI, &oldUsageFlagI, &oldDescriptionI, &oldStatusI, &isTopLevelCategory, &isDeleted, &categoryLevelI, &oldCategoryLevelI, &processingStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI, &checkerByI, &checkerAtI, &checkerCommentI, &reasonI); err != nil {
+			if err := rows.Scan(
+				&categoryID, &categoryNameI, &categoryTypeI, &parentCategoryIDI,
+				&defaultMappingI, &cashflowNatureI, &usageFlagI, &descriptionI, &statusI,
+				&oldCategoryNameI, &oldCategoryTypeI, &oldParentCategoryIDI,
+				&oldDefaultMappingI, &oldCashflowNatureI, &oldUsageFlagI,
+				&oldDescriptionI, &oldStatusI,
+				&isTopLevelCategory, &isDeleted, &categoryLevelI, &oldCategoryLevelI,
+				&processingStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI,
+				&checkerByI, &checkerAtI, &checkerCommentI, &reasonI,
+			); err != nil {
 				continue
-			}
-
-			// fetch CREATE/EDIT/DELETE history for audit info
-			var createdBy, createdAt, editedBy, editedAt, deletedBy, deletedAt string
-			auditDetailsQuery := `SELECT actiontype, requested_by, requested_at FROM auditactioncashflowcategory
-								  WHERE category_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE')
-								  ORDER BY requested_at DESC`
-			auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, categoryID)
-			if auditErr == nil {
-				defer auditRows.Close()
-				for auditRows.Next() {
-					var atype string
-					var rbyI interface{}
-					var ratI interface{}
-					if err := auditRows.Scan(&atype, &rbyI, &ratI); err == nil {
-						// map CREATE/EDIT/DELETE to created/edited/deleted
-						if atype == "CREATE" && createdBy == "" {
-							createdBy = ifaceToString(rbyI)
-							createdAt = ifaceToTimeString(ratI)
-						} else if atype == "EDIT" && editedBy == "" {
-							editedBy = ifaceToString(rbyI)
-							editedAt = ifaceToTimeString(ratI)
-						} else if atype == "DELETE" && deletedBy == "" {
-							deletedBy = ifaceToString(rbyI)
-							deletedAt = ifaceToTimeString(ratI)
-						}
-					}
-				}
 			}
 
 			entityMap[categoryID] = map[string]interface{}{
 				"id":   categoryID,
-				"name": api.GetAuditInfo, // placeholder to keep shape; replaced below
+				"name": ifaceToString(categoryNameI),
 				"data": map[string]interface{}{
 					"category_id":            categoryID,
-					"category_name":          api.GetAuditInfo, // replaced below
-					"category_type":          api.GetAuditInfo,
-					"parent_category_id":     api.GetAuditInfo,
-					"default_mapping":        api.GetAuditInfo,
-					"cashflow_nature":        api.GetAuditInfo,
-					"usage_flag":             api.GetAuditInfo,
-					"description":            api.GetAuditInfo,
-					"status":                 api.GetAuditInfo,
-					"old_category_name":      api.GetAuditInfo,
-					"old_category_type":      api.GetAuditInfo,
-					"old_parent_category_id": api.GetAuditInfo,
-					"old_default_mapping":    api.GetAuditInfo,
-					"old_cashflow_nature":    api.GetAuditInfo,
-					"old_usage_flag":         api.GetAuditInfo,
-					"old_description":        api.GetAuditInfo,
-					"old_status":             api.GetAuditInfo,
+					"category_name":          ifaceToString(categoryNameI),
+					"category_type":          ifaceToString(categoryTypeI),
+					"parent_category_id":     ifaceToString(parentCategoryIDI),
+					"default_mapping":        ifaceToString(defaultMappingI),
+					"cashflow_nature":        ifaceToString(cashflowNatureI),
+					"usage_flag":             ifaceToString(usageFlagI),
+					"description":            ifaceToString(descriptionI),
+					"status":                 ifaceToString(statusI),
+					"old_category_name":      ifaceToString(oldCategoryNameI),
+					"old_category_type":      ifaceToString(oldCategoryTypeI),
+					"old_parent_category_id": ifaceToString(oldParentCategoryIDI),
+					"old_default_mapping":    ifaceToString(oldDefaultMappingI),
+					"old_cashflow_nature":    ifaceToString(oldCashflowNatureI),
+					"old_usage_flag":         ifaceToString(oldUsageFlagI),
+					"old_description":        ifaceToString(oldDescriptionI),
+					"old_status":             ifaceToString(oldStatusI),
 					"is_top_level_category":  isTopLevelCategory,
 					"is_deleted":             isDeleted,
 					"category_level":         ifaceToInt(categoryLevelI),
 					"old_category_level":     ifaceToInt(oldCategoryLevelI),
-					"processing_status":      api.GetAuditInfo,
-					"action_type":            api.GetAuditInfo,
-					"action_id":              api.GetAuditInfo,
-					"checker_at":             api.GetAuditInfo,
-					"checker_by":             api.GetAuditInfo,
-					"checker_comment":        api.GetAuditInfo,
-					"reason":                 api.GetAuditInfo,
-					"created_by":             createdBy,
-					"created_at":             createdAt,
-					"edited_by":              editedBy,
-					"edited_at":              editedAt,
-					"deleted_by":             deletedBy,
-					"deleted_at":             deletedAt,
+					"processing_status":      ifaceToString(processingStatusI),
+					"action_type":            ifaceToString(actionTypeI),
+					"action_id":              ifaceToString(actionIDI),
+					"checker_by":             ifaceToString(checkerByI),
+					"checker_at":             ifaceToTimeString(checkerAtI),
+					"checker_comment":        ifaceToString(checkerCommentI),
+					"reason":                 ifaceToString(reasonI),
 				},
 				"children": []interface{}{},
 			}
-			if isDeleted {
-				deletedIds[categoryID] = true
-			}
-			// if category is deleted and the latest processing_status is APPROVED, hide it and descendants
+
+			typeIDs = append(typeIDs, categoryID)
+
 			if isDeleted && strings.ToUpper(ifaceToString(processingStatusI)) == "APPROVED" {
 				hideIds[categoryID] = true
 			}
-			// replace placeholders with actual values using pgx helpers
-			data := entityMap[categoryID]["data"].(map[string]interface{})
-			data["category_name"] = ifaceToString(categoryNameI)
-			data["category_type"] = ifaceToString(categoryTypeI)
-			data["parent_category_id"] = ifaceToString(parentCategoryIDI)
-			data["default_mapping"] = ifaceToString(defaultMappingI)
-			data["cashflow_nature"] = ifaceToString(cashflowNatureI)
-			data["usage_flag"] = ifaceToString(usageFlagI)
-			data["description"] = ifaceToString(descriptionI)
-			data["status"] = ifaceToString(statusI)
-			data["old_category_name"] = ifaceToString(oldCategoryNameI)
-			data["old_category_type"] = ifaceToString(oldCategoryTypeI)
-			data["old_parent_category_id"] = ifaceToString(oldParentCategoryIDI)
-			data["old_default_mapping"] = ifaceToString(oldDefaultMappingI)
-			data["old_cashflow_nature"] = ifaceToString(oldCashflowNatureI)
-			data["old_usage_flag"] = ifaceToString(oldUsageFlagI)
-			data["old_description"] = ifaceToString(oldDescriptionI)
-			data["old_status"] = ifaceToString(oldStatusI)
-			data["category_level"] = ifaceToInt(categoryLevelI)
-			data["old_category_level"] = ifaceToInt(oldCategoryLevelI)
-			data["processing_status"] = ifaceToString(processingStatusI)
-			data["action_type"] = ifaceToString(actionTypeI)
-			data["action_id"] = ifaceToString(actionIDI)
-			data["checker_at"] = ifaceToTimeString(checkerAtI)
-			data["checker_by"] = ifaceToString(checkerByI)
-			data["checker_comment"] = ifaceToString(checkerCommentI)
-			data["reason"] = ifaceToString(reasonI)
-			// set name at top level
-			entityMap[categoryID]["name"] = ifaceToString(categoryNameI)
 		}
 
-		// Fetch relationships
-		relRows2, err := pgxPool.Query(ctx, "SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships")
+		// Step 2: fetch CREATE/EDIT/DELETE audit history in bulk
+		if len(typeIDs) > 0 {
+			auditQuery := `
+				SELECT category_id, actiontype, requested_by, requested_at
+				FROM auditactioncashflowcategory
+				WHERE category_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE')
+				ORDER BY requested_at DESC;
+			`
+			auditRows, err := pgxPool.Query(ctx, auditQuery, typeIDs)
+			if err == nil {
+				defer auditRows.Close()
+				auditMap := make(map[string]map[string]string)
+				for auditRows.Next() {
+					var cid, atype string
+					var rbyI, ratI interface{}
+					if err := auditRows.Scan(&cid, &atype, &rbyI, &ratI); err == nil {
+						if auditMap[cid] == nil {
+							auditMap[cid] = map[string]string{}
+						}
+						switch atype {
+						case "CREATE":
+							if auditMap[cid]["created_by"] == "" {
+								auditMap[cid]["created_by"] = ifaceToString(rbyI)
+								auditMap[cid]["created_at"] = ifaceToTimeString(ratI)
+							}
+						case "EDIT":
+							if auditMap[cid]["edited_by"] == "" {
+								auditMap[cid]["edited_by"] = ifaceToString(rbyI)
+								auditMap[cid]["edited_at"] = ifaceToTimeString(ratI)
+							}
+						case "DELETE":
+							if auditMap[cid]["deleted_by"] == "" {
+								auditMap[cid]["deleted_by"] = ifaceToString(rbyI)
+								auditMap[cid]["deleted_at"] = ifaceToTimeString(ratI)
+							}
+						}
+					}
+				}
+
+				// merge into entityMap
+				for cid, info := range auditMap {
+					if entity, ok := entityMap[cid]; ok {
+						data := entity["data"].(map[string]interface{})
+						for k, v := range info {
+							data[k] = v
+						}
+					}
+				}
+			}
+		}
+
+		// Step 3: fetch relationships
+		relRows, err := pgxPool.Query(ctx, "SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships")
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		defer relRows2.Close()
+		defer relRows.Close()
+
 		parentMap := map[string][]string{}
-		for relRows2.Next() {
+		for relRows.Next() {
 			var parentID, childID string
-			if err := relRows2.Scan(&parentID, &childID); err == nil {
+			if err := relRows.Scan(&parentID, &childID); err == nil {
 				parentMap[parentID] = append(parentMap[parentID], childID)
 			}
 		}
 
-		// If there are any hideIds (deleted & approved), compute their descendants and remove them from entityMap
+		// Step 4: hide deleted+approved categories (and descendants)
 		if len(hideIds) > 0 {
-			// helper to gather all descendants using parentMap
-			getAllDescendants := func(ids []string) []string {
+			getAllDescendants := func(start []string) []string {
 				all := map[string]bool{}
-				queue := append([]string{}, ids...)
-				for _, id := range ids {
+				queue := append([]string{}, start...)
+				for _, id := range start {
 					all[id] = true
 				}
 				for len(queue) > 0 {
-					current := queue[0]
+					cur := queue[0]
 					queue = queue[1:]
-					for _, child := range parentMap[current] {
+					for _, child := range parentMap[cur] {
 						if !all[child] {
 							all[child] = true
 							queue = append(queue, child)
@@ -484,20 +465,21 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				return res
 			}
-
+			// toHide := getAllDescendants(maps.Keys(hideIds))
 			start := []string{}
 			for id := range hideIds {
 				start = append(start, id)
 			}
 			toHide := getAllDescendants(start)
+
 			for _, id := range toHide {
 				delete(entityMap, id)
 			}
 		}
 
-		// Rebuild children arrays for remaining entities
-		for _, entity := range entityMap {
-			entity["children"] = []interface{}{}
+		// Step 5: rebuild children arrays
+		for _, e := range entityMap {
+			e["children"] = []interface{}{}
 		}
 		for parentID, children := range parentMap {
 			if entityMap[parentID] != nil {
@@ -509,23 +491,67 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Find top-level categories (no parent)
-		topLevel := []interface{}{}
-		childSet := map[string]bool{}
-		for _, children := range parentMap {
-			for _, childID := range children {
-				childSet[childID] = true
+		// Step 6: build final rows (preserve query order via typeIDs)
+		rowsOut := []map[string]interface{}{}
+		// children map: only include children that still exist in entityMap
+		for _, id := range typeIDs {
+			if entityMap[id] == nil {
+				continue
 			}
-		}
-		for _, e := range entityMap {
-			isChild := childSet[e["id"].(string)]
-			if !isChild {
-				topLevel = append(topLevel, e)
+			data := entityMap[id]["data"].(map[string]interface{})
+			// build children id slice
+			childrenIDs := []string{}
+			for _, c := range parentMap[id] {
+				if entityMap[c] != nil {
+					childrenIDs = append(childrenIDs, c)
+				}
 			}
+
+			rec := map[string]interface{}{
+				"category_id":            ifaceToString(data["category_id"]),
+				"category_name":          ifaceToString(data["category_name"]),
+				"category_type":          ifaceToString(data["category_type"]),
+				"parent_category_id":     ifaceToString(data["parent_category_id"]),
+				"default_mapping":        ifaceToString(data["default_mapping"]),
+				"cashflow_nature":        ifaceToString(data["cashflow_nature"]),
+				"usage_flag":             ifaceToString(data["usage_flag"]),
+				"description":            ifaceToString(data["description"]),
+				"status":                 ifaceToString(data["status"]),
+				"old_category_name":      ifaceToString(data["old_category_name"]),
+				"old_category_type":      ifaceToString(data["old_category_type"]),
+				"old_parent_category_id": ifaceToString(data["old_parent_category_id"]),
+				"old_default_mapping":    ifaceToString(data["old_default_mapping"]),
+				"old_cashflow_nature":    ifaceToString(data["old_cashflow_nature"]),
+				"old_usage_flag":         ifaceToString(data["old_usage_flag"]),
+				"old_description":        ifaceToString(data["old_description"]),
+				"old_status":             ifaceToString(data["old_status"]),
+				"category_level":         ifaceToInt(data["category_level"]),
+				"old_category_level":     ifaceToInt(data["old_category_level"]),
+				"is_top_level_category":  data["is_top_level_category"],
+				"is_deleted":             data["is_deleted"],
+				"processing_status":      ifaceToString(data["processing_status"]),
+				"requested_by":           ifaceToString(data["requested_by"]),
+				"requested_at":           ifaceToTimeString(data["requested_at"]),
+				"action_type":            ifaceToString(data["action_type"]),
+				"action_id":              ifaceToString(data["action_id"]),
+				"checker_by":             ifaceToString(data["checker_by"]),
+				"checker_at":             ifaceToTimeString(data["checker_at"]),
+				"checker_comment":        ifaceToString(data["checker_comment"]),
+				"reason":                 ifaceToString(data["reason"]),
+				// audit summary fields merged earlier (if present)
+				"created_by":             ifaceToString(data["created_by"]),
+				"created_at":             ifaceToString(data["created_at"]),
+				"edited_by":              ifaceToString(data["edited_by"]),
+				"edited_at":              ifaceToString(data["edited_at"]),
+				"deleted_by":             ifaceToString(data["deleted_by"]),
+				"deleted_at":             ifaceToString(data["deleted_at"]),
+				"children":               childrenIDs,
+			}
+			rowsOut = append(rowsOut, rec)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(topLevel)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": rowsOut})
 	}
 }
 
