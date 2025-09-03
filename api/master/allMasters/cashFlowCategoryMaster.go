@@ -4,13 +4,20 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
+	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/xuri/excelize/v2"
 )
 
 type CashFlowCategoryRequest struct {
@@ -23,139 +30,6 @@ type CashFlowCategoryRequest struct {
 	Description      string `json:"description"`
 	Status           string `json:"status"`
 	CategoryLevel    int    `json:"category_level"`
-}
-
-// DeleteCashFlowCategory marks a category and its descendants as deleted and creates audit actions (pgx-only)
-func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			CategoryID string `json:"category_id"`
-			Reason     string `json:"reason"`
-			UserID     string `json:"user_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
-			return
-		}
-
-		// get requested_by from session
-		requestedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Email
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
-			return
-		}
-
-		ctx := context.Background()
-
-		// Fetch relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships`)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
-			}
-		}
-
-		// Traverse descendants
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
-			for len(queue) > 0 {
-				current := queue[0]
-				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
-						queue = append(queue, child)
-					}
-				}
-			}
-			result := []string{}
-			for id := range all {
-				result = append(result, id)
-			}
-			return result
-		}
-
-		allToDelete := getAllDescendants([]string{req.CategoryID})
-		if len(allToDelete) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No category found to delete")
-			return
-		}
-
-		// Start transaction
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
-			return
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback(ctx)
-			}
-		}()
-
-		// Mark as deleted and RETURNING category_id
-		rows, err := tx.Query(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1) RETURNING category_id`, allToDelete)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer rows.Close()
-		updated := []string{}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				updated = append(updated, id)
-			}
-		}
-
-		// Insert audit actions for each updated id
-		var auditErrors []string
-		for _, cid := range updated {
-			if _, err := tx.Exec(ctx, `INSERT INTO auditactioncashflowcategory (category_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`, cid, req.Reason, requestedBy); err != nil {
-				auditErrors = append(auditErrors, fmt.Sprintf("%s:%v", cid, err))
-			}
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
-			return
-		}
-		committed = true
-
-		success := len(auditErrors) == 0 && len(updated) > 0
-		resp := map[string]interface{}{
-			"success": success,
-			"updated": updated,
-		}
-		if len(auditErrors) > 0 {
-			resp["audit_errors"] = auditErrors
-		}
-		if len(updated) == 0 {
-			resp["message"] = "No rows updated"
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}
 }
 
 // ifaceToString converts a scanned pgx value (interface{}) to string safely
@@ -241,6 +115,32 @@ func ifaceToInt(v interface{}) int {
 	}
 }
 
+// Helper: get file extension
+func getFileExt(filename string) string {
+	return strings.ToLower(filepath.Ext(filename))
+}
+
+// Helper: parse uploaded file into [][]string
+func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, error) {
+	if ext == ".csv" {
+		r := csv.NewReader(file)
+		return r.ReadAll()
+	}
+	if ext == ".xlsx" || ext == ".xls" {
+		f, err := excelize.OpenReader(file)
+		if err != nil {
+			return nil, err
+		}
+		sheet := f.GetSheetName(0)
+		rows, err := f.GetRows(sheet)
+		if err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+	return nil, errors.New("unsupported file type")
+}
+
 // CreateAndSyncCashFlowCategories inserts categories into mastercashflowcategory and creates relationships
 // Request shape: { "user_id": "...", "categories": [ { ... } ] }
 func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -290,7 +190,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Insert into master table and return generated category_id
 			insertSQL := `INSERT INTO mastercashflowcategory (
 					category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, category_level
-				) VALUES ($1,$2, NULLIF($3, ''), $4, $5, $6, $7, $8, $9) RETURNING category_id`
+				) VALUES ($1,$2, NULLIF($3, '')::uuid, $4, $5, $6, $7, $8, $9) RETURNING category_id`
 			err = tx.QueryRow(ctx, insertSQL,
 				cat.CategoryName,
 				cat.CategoryType,
@@ -302,7 +202,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cat.Status,
 				cat.CategoryLevel,
 				// createdBy,
-				).Scan(&categoryID)
+			).Scan(&categoryID)
 			if err != nil {
 				tx.Rollback(ctx)
 				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "category_name": cat.CategoryName})
@@ -988,6 +888,139 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// DeleteCashFlowCategory marks a category and its descendants as deleted and creates audit actions (pgx-only)
+func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CategoryID string `json:"category_id"`
+			Reason     string `json:"reason"`
+			UserID     string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+
+		// get requested_by from session
+		requestedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				requestedBy = s.Email
+				break
+			}
+		}
+		if requestedBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
+
+		ctx := context.Background()
+
+		// Fetch relationships
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships`)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer relRows.Close()
+		parentMap := map[string][]string{}
+		for relRows.Next() {
+			var parentID, childID string
+			if err := relRows.Scan(&parentID, &childID); err == nil {
+				parentMap[parentID] = append(parentMap[parentID], childID)
+			}
+		}
+
+		// Traverse descendants
+		getAllDescendants := func(ids []string) []string {
+			all := map[string]bool{}
+			queue := append([]string{}, ids...)
+			for _, id := range ids {
+				all[id] = true
+			}
+			for len(queue) > 0 {
+				current := queue[0]
+				queue = queue[1:]
+				for _, child := range parentMap[current] {
+					if !all[child] {
+						all[child] = true
+						queue = append(queue, child)
+					}
+				}
+			}
+			result := []string{}
+			for id := range all {
+				result = append(result, id)
+			}
+			return result
+		}
+
+		allToDelete := getAllDescendants([]string{req.CategoryID})
+		if len(allToDelete) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No category found to delete")
+			return
+		}
+
+		// Start transaction
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		// Mark as deleted and RETURNING category_id
+		rows, err := tx.Query(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1) RETURNING category_id`, allToDelete)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		updated := []string{}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				updated = append(updated, id)
+			}
+		}
+
+		// Insert audit actions for each updated id
+		var auditErrors []string
+		for _, cid := range updated {
+			if _, err := tx.Exec(ctx, `INSERT INTO auditactioncashflowcategory (category_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`, cid, req.Reason, requestedBy); err != nil {
+				auditErrors = append(auditErrors, fmt.Sprintf("%s:%v", cid, err))
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			return
+		}
+		committed = true
+
+		success := len(auditErrors) == 0 && len(updated) > 0
+		resp := map[string]interface{}{
+			"success": success,
+			"updated": updated,
+		}
+		if len(auditErrors) > 0 {
+			resp["audit_errors"] = auditErrors
+		}
+		if len(updated) == 0 {
+			resp["message"] = "No rows updated"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
 // BulkRejectCashFlowCategoryActions rejects audit actions for categories (and their descendants)
 // using pgx: updates processing_status='REJECTED', sets checker_by, checker_at and checker_comment
 func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -1190,5 +1223,220 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			resp["message"] = "No rows updated"
 		}
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// Handler: UploadCashFlowCategory (staging + mapping)
+func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		userID := ""
+		if r.Header.Get("Content-Type") == "application/json" {
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+				http.Error(w, "user_id required in body", http.StatusBadRequest)
+				return
+			}
+			userID = req.UserID
+		} else {
+			userID = r.FormValue("user_id")
+			if userID == "" {
+				http.Error(w, "user_id required in form", http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Fetch user name from active sessions
+		userName := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			http.Error(w, "User not found in active sessions", http.StatusUnauthorized)
+			return
+		}
+
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, "Failed to parse multipart form", http.StatusBadRequest)
+			return
+		}
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
+			http.Error(w, "No files uploaded", http.StatusBadRequest)
+			return
+		}
+		batchIDs := make([]string, 0, len(files))
+		for _, fileHeader := range files {
+			file, err := fileHeader.Open()
+			if err != nil {
+				http.Error(w, "Failed to open file: "+fileHeader.Filename, http.StatusBadRequest)
+				return
+			}
+			ext := getFileExt(fileHeader.Filename)
+			records, err := parseCashFlowCategoryFile(file, ext)
+			file.Close()
+			if err != nil || len(records) < 2 {
+				http.Error(w, "Invalid or empty file: "+fileHeader.Filename, http.StatusBadRequest)
+				return
+			}
+			headerRow := records[0]
+			dataRows := records[1:]
+			batchID := uuid.New().String()
+			batchIDs = append(batchIDs, batchID)
+			colCount := len(headerRow)
+			copyRows := make([][]interface{}, len(dataRows))
+			for i, row := range dataRows {
+				vals := make([]interface{}, colCount+1)
+				vals[0] = batchID
+				for j := 0; j < colCount; j++ {
+					if j < len(row) {
+						vals[j+1] = row[j]
+					} else {
+						vals[j+1] = nil
+					}
+				}
+				copyRows[i] = vals
+			}
+			columns := append([]string{"upload_batch_id"}, headerRow...)
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				http.Error(w, "Failed to start transaction: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			// Stage to input table
+			_, err = tx.CopyFrom(
+				ctx,
+				pgx.Identifier{"input_cashflow_category"},
+				columns,
+				pgx.CopyFromRows(copyRows),
+			)
+			if err != nil {
+				http.Error(w, "Failed to stage data: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			// Read mapping
+			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_cashflow_category`)
+			if err != nil {
+				http.Error(w, "Mapping error", http.StatusInternalServerError)
+				return
+			}
+			mapping := make(map[string]string)
+			for mapRows.Next() {
+				var src, tgt string
+				if err := mapRows.Scan(&src, &tgt); err == nil {
+					mapping[src] = tgt
+				}
+			}
+			mapRows.Close()
+			var srcCols []string
+			var tgtCols []string
+			// build columns in CSV header order so SELECT columns align with INSERT columns
+			for _, h := range headerRow {
+				if tgt, ok := mapping[h]; ok {
+					srcCols = append(srcCols, h)
+					tgtCols = append(tgtCols, tgt)
+				} else {
+					// missing mapping for a header column -> fail
+					tx.Rollback(ctx)
+					http.Error(w, fmt.Sprintf("No mapping for source column: %s", h), http.StatusBadRequest)
+					return
+				}
+			}
+			tgtColsStr := strings.Join(tgtCols, ", ")
+
+			// Build SELECT expressions in order and handle parent_category_id (text -> uuid)
+			var selectExprs []string
+			for i, src := range srcCols {
+				tgt := tgtCols[i]
+				if strings.ToLower(tgt) == "parent_category_id" {
+					// convert empty string to NULL and cast to uuid
+					selectExprs = append(selectExprs, fmt.Sprintf("NULLIF(s.%s, '')::uuid AS %s", src, tgt))
+				} else {
+					selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+				}
+			}
+			srcColsStr := strings.Join(selectExprs, ", ")
+
+			// Move to final table (resolve FKs via join)
+			insertSQL := fmt.Sprintf(`
+				INSERT INTO mastercashflowcategory (%s)
+				SELECT %s
+				FROM input_cashflow_category s
+				WHERE s.upload_batch_id = $1
+				RETURNING category_id
+			`, tgtColsStr, srcColsStr)
+			rows, err := tx.Query(ctx, insertSQL, batchID)
+			if err != nil {
+				http.Error(w, "Final insert error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			var newCategoryIDs []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err == nil {
+					newCategoryIDs = append(newCategoryIDs, id)
+				}
+			}
+			rows.Close()
+
+			// Bulk insert audit actions
+			if len(newCategoryIDs) > 0 {
+				auditSQL := `
+					INSERT INTO auditactioncashflowcategory (
+						category_id, actiontype, processing_status, reason, requested_by, requested_at
+					)
+					SELECT category_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now()
+					FROM mastercashflowcategory
+					WHERE category_id = ANY($2)
+				`
+				_, err = tx.Exec(ctx, auditSQL, userName, newCategoryIDs)
+				if err != nil {
+					http.Error(w, "Failed to insert audit actions: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+
+			// Bulk insert relationships (if parent_category_id is present)
+			if len(newCategoryIDs) > 0 {
+				relSQL := `
+					INSERT INTO cashflowcategoryrelationships (parent_category_id, child_category_id, status)
+					SELECT parent_category_id, category_id, 'Active'
+					FROM mastercashflowcategory
+					WHERE category_id = ANY($1) AND parent_category_id IS NOT NULL
+				`
+				_, err = tx.Exec(ctx, relSQL, newCategoryIDs)
+				if err != nil {
+					http.Error(w, "Failed to insert relationships: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				http.Error(w, "Commit failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			committed = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"batch_ids": batchIDs,
+			"message":   "All cash flow categories uploaded, mapped, synced, and audited",
+		})
 	}
 }
