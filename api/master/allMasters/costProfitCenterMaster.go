@@ -1111,11 +1111,23 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		defer rows.Close()
 
-		var updated []map[string]interface{}
+		var deleteIDs []string
 		for rows.Next() {
 			var actionID, centreID, actionType string
 			if err := rows.Scan(&actionID, &centreID, &actionType); err == nil {
 				updated = append(updated, map[string]interface{}{"action_id": actionID, "centre_id": centreID, "action_type": actionType})
+				if strings.ToUpper(strings.TrimSpace(actionType)) == "DELETE" {
+					deleteIDs = append(deleteIDs, centreID)
+				}
+			}
+		}
+
+		// Set is_deleted=true for approved DELETE actions
+		if len(deleteIDs) > 0 {
+			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
+			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
+				return
 			}
 		}
 
