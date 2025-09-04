@@ -469,7 +469,11 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var selectExprs []string
 			for i, src := range srcCols {
 				tgt := tgtCols[i]
-				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+				if strings.ToLower(tgt) == "parent_centre_id" {
+					selectExprs = append(selectExprs, "NULL AS parent_centre_id")
+				} else {
+					selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+				}
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
@@ -488,29 +492,43 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rows2.Close()
 
-			// create relationships from input rows where parent_centre_code column exists
-			relRows, err := tx.Query(ctx, `SELECT centre_code, parent_centre_code FROM input_costprofitcenter WHERE upload_batch_id=$1`, batchID)
-			if err == nil {
-				defer relRows.Close()
-				for relRows.Next() {
-					var childCode, parentCode interface{}
-					if err := relRows.Scan(&childCode, &parentCode); err == nil {
-						cc := strings.TrimSpace(ifaceToString(childCode))
-						pc := strings.TrimSpace(ifaceToString(parentCode))
-						if cc == "" || pc == "" {
+			// create relationships from input rows where parent_centre_id column exists
+			relRows, err := tx.Query(ctx, `SELECT centre_code, parent_centre_id FROM input_costprofitcenter WHERE upload_batch_id=$1`, batchID)
+			if err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read relationship inputs: "+err.Error())
+				return
+			}
+			defer relRows.Close()
+			for relRows.Next() {
+				var childCode, parentCode interface{}
+				if err := relRows.Scan(&childCode, &parentCode); err == nil {
+					cc := strings.TrimSpace(ifaceToString(childCode))
+					pc := strings.TrimSpace(ifaceToString(parentCode))
+					if cc == "" || pc == "" {
+						continue
+					}
+					// find child id and parent id by centre_code / parent centre identifier
+					var childID, parentID string
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, cc).Scan(&childID); err != nil {
+						// skip if child not found
+						continue
+					}
+					// if parent value looks like a UUID, try to resolve directly; otherwise try as centre_code
+					if _, perr := uuid.Parse(pc); perr == nil {
+						if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_id=$1`, pc).Scan(&parentID); err != nil {
 							continue
 						}
-						// find child id (must be in createdCodes) and parent id
-						var childID, parentID string
-						if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, cc).Scan(&childID); err != nil {
-							continue
-						}
+					} else {
 						if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentID); err != nil {
 							continue
 						}
-						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM costprofitcenterrelationships WHERE parent_centre_id=$1 AND child_centre_id=$2)`
-						if _, err := tx.Exec(ctx, relQ, parentID, childID); err != nil { /* ignore relationship errors per-row */
-						}
+					}
+					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM costprofitcenterrelationships WHERE parent_centre_id=$1 AND child_centre_id=$2)`
+					if _, err := tx.Exec(ctx, relQ, parentID, childID); err != nil {
+						tx.Rollback(ctx)
+						api.RespondWithError(w, http.StatusInternalServerError, "relationship insert failed: "+err.Error())
+						return
 					}
 				}
 			}
