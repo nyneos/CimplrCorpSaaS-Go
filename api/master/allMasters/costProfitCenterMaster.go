@@ -639,10 +639,10 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var (
-				centreID string
+				centreID,actionIDI string
 				centreCodeI, centreNameI, centreTypeI, parentCentreIDI, entityNameI, statusI,
 				oldCodeI, oldNameI, oldTypeI, oldParentI, oldEntityI, oldStatusI,
-				centreLevelI, oldCentreLevelI, procStatusI, requestedByI, requestedAtI, actionTypeI, actionIDI,
+				centreLevelI, oldCentreLevelI, procStatusI, requestedByI, requestedAtI, actionTypeI,
 				checkerByI, checkerAtI, checkerCommentI, reasonI interface{}
 				isTopLevel, isDeleted bool
 			)
@@ -678,7 +678,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"is_deleted":           isDeleted,
 					"processing_status":    ifaceToString(procStatusI),
 					"action_type":          ifaceToString(actionTypeI),
-					"action_id":            ifaceToString(actionIDI),
+					"action_id":            actionIDI,
 					"checker_by":           ifaceToString(checkerByI),
 					"checker_at":           ifaceToTimeString(checkerAtI),
 					"checker_comment":      ifaceToString(checkerCommentI),
