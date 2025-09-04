@@ -305,14 +305,13 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var (
-				categoryID string
-				// all scanned as interface{} then converted
+				categoryID, actionIDI string
 				categoryNameI, categoryTypeI, parentCategoryIDI,
 				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI,
 				oldCategoryNameI, oldCategoryTypeI, oldParentCategoryIDI, oldDefaultMappingI,
 				oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI,
 				categoryLevelI, oldCategoryLevelI, processingStatusI,
-				requestedByI, requestedAtI, actionTypeI, actionIDI,
+				requestedByI, requestedAtI, actionTypeI,
 				checkerByI, checkerAtI, checkerCommentI, reasonI interface{}
 				isTopLevelCategory, isDeleted bool
 			)
@@ -356,8 +355,10 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"category_level":         ifaceToInt(categoryLevelI),
 					"old_category_level":     ifaceToInt(oldCategoryLevelI),
 					"processing_status":      ifaceToString(processingStatusI),
+					"requested_by":           ifaceToString(requestedByI),
+					"requested_at":           ifaceToTimeString(requestedAtI),
 					"action_type":            ifaceToString(actionTypeI),
-					"action_id":              ifaceToString(actionIDI),
+					"action_id":              actionIDI,
 					"checker_by":             ifaceToString(checkerByI),
 					"checker_at":             ifaceToTimeString(checkerAtI),
 					"checker_comment":        ifaceToString(checkerCommentI),
@@ -368,12 +369,13 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			typeIDs = append(typeIDs, categoryID)
 
+			// Mark for hiding if is_deleted=true and processing_status=APPROVED
 			if isDeleted && strings.ToUpper(ifaceToString(processingStatusI)) == "APPROVED" {
 				hideIds[categoryID] = true
 			}
 		}
 
-		// Step 2: fetch CREATE/EDIT/DELETE audit history in bulk
+		// Step 2: fetch audit history (CREATE/EDIT/DELETE) in bulk
 		if len(typeIDs) > 0 {
 			auditQuery := `
 				SELECT category_id, actiontype, requested_by, requested_at
@@ -440,7 +442,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 4: hide deleted+approved categories (and descendants)
+		// Step 4: hide deleted+approved categories and descendants
 		if len(hideIds) > 0 {
 			getAllDescendants := func(start []string) []string {
 				all := map[string]bool{}
@@ -464,13 +466,11 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				return res
 			}
-			// toHide := getAllDescendants(maps.Keys(hideIds))
 			start := []string{}
 			for id := range hideIds {
 				start = append(start, id)
 			}
 			toHide := getAllDescendants(start)
-
 			for _, id := range toHide {
 				delete(entityMap, id)
 			}
@@ -484,69 +484,24 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if entityMap[parentID] != nil {
 				for _, childID := range children {
 					if entityMap[childID] != nil {
-						entityMap[parentID]["children"] = append(entityMap[parentID]["children"].([]interface{}), entityMap[childID])
+						entityMap[parentID]["children"] = append(
+							entityMap[parentID]["children"].([]interface{}),
+							entityMap[childID],
+						)
 					}
 				}
 			}
 		}
 
-		// Step 6: build final rows (preserve query order via typeIDs)
+		// Step 6: build final hierarchy
 		rowsOut := []map[string]interface{}{}
-		// children map: only include children that still exist in entityMap
 		for _, id := range typeIDs {
-			if entityMap[id] == nil {
-				continue
-			}
-			data := entityMap[id]["data"].(map[string]interface{})
-			// build children id slice
-			childrenIDs := []string{}
-			for _, c := range parentMap[id] {
-				if entityMap[c] != nil {
-					childrenIDs = append(childrenIDs, c)
+			if entity, ok := entityMap[id]; ok {
+				parentID := ifaceToString(entity["data"].(map[string]interface{})["parent_category_id"])
+				if parentID == "" || entityMap[parentID] == nil {
+					rowsOut = append(rowsOut, entity)
 				}
 			}
-
-			rec := map[string]interface{}{
-				"category_id":            ifaceToString(data["category_id"]),
-				"category_name":          ifaceToString(data["category_name"]),
-				"category_type":          ifaceToString(data["category_type"]),
-				"parent_category_id":     ifaceToString(data["parent_category_id"]),
-				"default_mapping":        ifaceToString(data["default_mapping"]),
-				"cashflow_nature":        ifaceToString(data["cashflow_nature"]),
-				"usage_flag":             ifaceToString(data["usage_flag"]),
-				"description":            ifaceToString(data["description"]),
-				"status":                 ifaceToString(data["status"]),
-				"old_category_name":      ifaceToString(data["old_category_name"]),
-				"old_category_type":      ifaceToString(data["old_category_type"]),
-				"old_parent_category_id": ifaceToString(data["old_parent_category_id"]),
-				"old_default_mapping":    ifaceToString(data["old_default_mapping"]),
-				"old_cashflow_nature":    ifaceToString(data["old_cashflow_nature"]),
-				"old_usage_flag":         ifaceToString(data["old_usage_flag"]),
-				"old_description":        ifaceToString(data["old_description"]),
-				"old_status":             ifaceToString(data["old_status"]),
-				"category_level":         ifaceToInt(data["category_level"]),
-				"old_category_level":     ifaceToInt(data["old_category_level"]),
-				"is_top_level_category":  data["is_top_level_category"],
-				"is_deleted":             data["is_deleted"],
-				"processing_status":      ifaceToString(data["processing_status"]),
-				"requested_by":           ifaceToString(data["requested_by"]),
-				"requested_at":           ifaceToTimeString(data["requested_at"]),
-				"action_type":            ifaceToString(data["action_type"]),
-				"action_id":              ifaceToString(data["action_id"]),
-				"checker_by":             ifaceToString(data["checker_by"]),
-				"checker_at":             ifaceToTimeString(data["checker_at"]),
-				"checker_comment":        ifaceToString(data["checker_comment"]),
-				"reason":                 ifaceToString(data["reason"]),
-				// audit summary fields merged earlier (if present)
-				"created_by": ifaceToString(data["created_by"]),
-				"created_at": ifaceToString(data["created_at"]),
-				"edited_by":  ifaceToString(data["edited_by"]),
-				"edited_at":  ifaceToString(data["edited_at"]),
-				"deleted_by": ifaceToString(data["deleted_by"]),
-				"deleted_at": ifaceToString(data["deleted_at"]),
-				"children":   childrenIDs,
-			}
-			rowsOut = append(rowsOut, rec)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -606,7 +561,8 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		var results []map[string]interface{}
+		// var results []map[string]interface{}
+		results := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var name, id string
 			if err := rows.Scan(&name, &id); err != nil {
@@ -666,7 +622,8 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var out []map[string]interface{}
 		for rows.Next() {
-			var id, name, ctype interface{}
+			var id string
+			var name, ctype interface{}
 			var isDeleted bool
 			var processingStatus interface{}
 			if err := rows.Scan(&id, &name, &ctype, &isDeleted, &processingStatus); err == nil {
