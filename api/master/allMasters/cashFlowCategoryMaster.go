@@ -40,6 +40,11 @@ func ifaceToString(v interface{}) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	case *string:
+		if t == nil {
+			return ""
+		}
+		return *t
 	case []byte:
 		return string(t)
 	case fmt.Stringer:
@@ -64,6 +69,11 @@ func ifaceToTimeString(v interface{}) string {
 		return t.Format("2006-01-02 15:04:05")
 	case string:
 		return t
+	case *string:
+		if t == nil {
+			return ""
+		}
+		return *t
 	case []byte:
 		return string(t)
 	default:
