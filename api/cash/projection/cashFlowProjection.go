@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,24 @@ func ifaceToTimeString(v interface{}) string {
 	default:
 		return fmt.Sprint(t)
 	}
+}
+
+// Capitalize capitalizes first letter and lowercases the rest (ASCII-safe)
+func Capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	b := []rune(s)
+	if len(b) == 1 {
+		return strings.ToUpper(s)
+	}
+	first := string(b[0])
+	rest := string(b[1:])
+	return strings.ToUpper(first) + strings.ToLower(rest)
 }
 
 // Request structures
@@ -668,5 +687,414 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		committed = true
 		api.RespondWithResult(w, true, "")
+	}
+}
+
+
+func CreateFromFlattened(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string `json:"user_id"`
+			Projections []struct {
+				Entry struct {
+					Type           string  `json:"type"`
+					CategoryName   string  `json:"categoryName"`
+					Entity         string  `json:"entity"`
+					Department     string  `json:"department"`
+					ExpectedAmount float64 `json:"expectedAmount"`
+					Recurring      bool    `json:"recurring"`
+					Frequency      string  `json:"frequency"`
+				} `json:"entry"`
+				Projection map[string]interface{} `json:"projection"`
+			} `json:"projections"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		createdBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				createdBy = s.Email
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithResult(w, false, "Invalid user_id or session")
+			return
+		}
+		if len(req.Projections) == 0 {
+			api.RespondWithResult(w, false, "No projections provided")
+			return
+		}
+
+		// month abbrev map
+		monthMap := map[string]int{"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+
+		ctx := context.Background()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		createdCount := 0
+
+		for _, p := range req.Projections {
+			entry := p.Entry
+			// basic validation
+			if strings.TrimSpace(entry.Type) == "" || strings.TrimSpace(entry.CategoryName) == "" || strings.TrimSpace(entry.Entity) == "" || strings.TrimSpace(entry.Department) == "" {
+				api.RespondWithResult(w, false, "Missing required fields in entry")
+				return
+			}
+			tUpper := Capitalize(strings.ToLower(strings.TrimSpace(entry.Type)))
+			if tUpper != "Inflow" && tUpper != "Outflow" {
+				api.RespondWithResult(w, false, "Invalid cashflow type: "+entry.Type)
+				return
+			}
+
+			// create proposal
+			proposalID := fmt.Sprintf("PROP-%06d", time.Now().UnixNano()%1000000)
+			proposalName := fmt.Sprintf("%s - %s - %d", entry.CategoryName, entry.Frequency, time.Now().Unix())
+			currencyCode := "USD" // assumption
+			effectiveDate := time.Now().Format("2006-01-02")
+			insProp := `INSERT INTO cashflow_proposal (proposal_id, proposal_name, entity_name, department_id, currency_code, effective_date, recurrence_type, recurrence_frequency, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
+			if _, err := tx.Exec(ctx, insProp, proposalID, proposalName, entry.Entity, entry.Department, currencyCode, effectiveDate, entry.Frequency, entry.Frequency, "Active"); err != nil {
+				api.RespondWithResult(w, false, "Failed to create proposal: "+err.Error())
+				return
+			}
+
+			// create item
+			// verify category exists in master table to avoid FK violation
+			var existingCat string
+			if err := tx.QueryRow(ctx, `SELECT category_name FROM mastercashflowcategory WHERE category_name=$1`, entry.CategoryName).Scan(&existingCat); err != nil {
+				api.RespondWithResult(w, false, "Master category not found: "+entry.CategoryName+". Create the category or use a valid category_id before importing.")
+				return
+			}
+
+			itemID := fmt.Sprintf("ITEM-%06d", time.Now().UnixNano()%1000000)
+			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`
+			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, entry.CategoryName, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effectiveDate, nil); err != nil {
+				api.RespondWithResult(w, false, "Failed to create item: "+err.Error())
+				return
+			}
+
+			// insert monthly projections parsed from projection map
+			for k, v := range p.Projection {
+				if strings.ToLower(k) == "total" {
+					continue
+				}
+				// expect keys like Jan-25 or Jan-2025
+				parts := strings.Split(k, "-")
+				if len(parts) < 2 {
+					// skip unknown keys
+					continue
+				}
+				mStr := parts[0]
+				yStr := parts[1]
+				mInt, ok := monthMap[mStr]
+				if !ok {
+					// try full month name parse
+					if len(mStr) >= 3 {
+						mStrShort := Capitalize(strings.ToLower(mStr[:3]))
+						if mm, ok2 := monthMap[mStrShort]; ok2 {
+							mInt = mm
+							ok = true
+						}
+					}
+				}
+				if !ok {
+					continue
+				}
+				// year handling: 2-digit -> 2000+, else parse
+				year := 0
+				if len(yStr) == 2 {
+					if yi, err := strconv.Atoi(yStr); err == nil {
+						year = 2000 + yi
+					}
+				} else {
+					if yi, err := strconv.Atoi(yStr); err == nil {
+						year = yi
+					}
+				}
+				if year == 0 {
+					continue
+				}
+
+				// convert projected amount to float64 from various possible types
+				var amt float64
+				switch tv := v.(type) {
+				case float64:
+					amt = tv
+				case float32:
+					amt = float64(tv)
+				case int:
+					amt = float64(tv)
+				case int64:
+					amt = float64(tv)
+				case json.Number:
+					if f, err := tv.Float64(); err == nil {
+						amt = f
+					} else {
+						continue
+					}
+				case string:
+					s := strings.TrimSpace(tv)
+					if s == "" {
+						continue
+					}
+					if f, err := strconv.ParseFloat(s, 64); err == nil {
+						amt = f
+					} else {
+						continue
+					}
+				default:
+					// unsupported type, skip
+					continue
+				}
+
+				projID := fmt.Sprintf("PROJ-%06d", time.Now().UnixNano()%1000000)
+				insMonthly := `INSERT INTO cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`
+				if _, err := tx.Exec(ctx, insMonthly, projID, itemID, year, mInt, amt); err != nil {
+					api.RespondWithResult(w, false, "Failed to create monthly projection: "+err.Error())
+					return
+				}
+			}
+
+			// create audit action
+			auditQ := `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
+			if _, err := tx.Exec(ctx, auditQ, proposalID, nil, createdBy); err != nil {
+				api.RespondWithResult(w, false, "Failed to create audit for proposal: "+err.Error())
+				return
+			}
+
+			createdCount++
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "Failed to commit transaction: "+err.Error())
+			return
+		}
+		committed = true
+
+		api.RespondWithResult(w, true, fmt.Sprintf("Successfully created %d projections", createdCount))
+	}
+}
+
+func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string `json:"user_id"`
+			Projections []struct {
+				Entry struct {
+					Currency       string  `json:"currency"`
+					Type           string  `json:"type"`
+					ProposalName   string  `json:"proposal_name"`
+					EffectiveDate  string  `json:"effective_date"`
+					CategoryName   string  `json:"categoryName"`
+					Entity         string  `json:"entity"`
+					Department     string  `json:"department"`
+					ExpectedAmount float64 `json:"expectedAmount"`
+					Recurring      bool    `json:"recurring"`
+					Frequency      string  `json:"frequency"`
+				} `json:"entry"`
+				Projection map[string]interface{} `json:"projection"`
+			} `json:"projections"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		createdBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				createdBy = s.Email
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithResult(w, false, "Invalid user_id or session")
+			return
+		}
+		if len(req.Projections) == 0 {
+			api.RespondWithResult(w, false, "No projections provided")
+			return
+		}
+
+		monthMap := map[string]int{"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+
+		ctx := context.Background()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		created := 0
+
+		for idx, p := range req.Projections {
+			entry := p.Entry
+			// normalize and validate
+			if strings.TrimSpace(entry.Type) == "" || strings.TrimSpace(entry.CategoryName) == "" || strings.TrimSpace(entry.Entity) == "" || strings.TrimSpace(entry.Department) == "" {
+				api.RespondWithResult(w, false, fmt.Sprintf("Missing required fields in projection index %d", idx))
+				return
+			}
+			tUpper := Capitalize(strings.ToLower(strings.TrimSpace(entry.Type)))
+			if tUpper != "Inflow" && tUpper != "Outflow" {
+				api.RespondWithResult(w, false, "Invalid cashflow type: "+entry.Type)
+				return
+			}
+
+			// verify master records: category, department, entity
+			var tmp string
+			if err := tx.QueryRow(ctx, `SELECT category_name FROM mastercashflowcategory WHERE category_name=$1`, entry.CategoryName).Scan(&tmp); err != nil {
+				api.RespondWithResult(w, false, "Master category not found: "+entry.CategoryName)
+				return
+			}
+			if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_code=$1`, entry.Department).Scan(&tmp); err != nil {
+				api.RespondWithResult(w, false, "Master department not found: "+entry.Department)
+				return
+			}
+			if err := tx.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_name=$1`, entry.Entity).Scan(&tmp); err != nil {
+				api.RespondWithResult(w, false, "Master entity not found: "+entry.Entity)
+				return
+			}
+
+			// create proposal
+			proposalID := fmt.Sprintf("PROP-%06d", time.Now().UnixNano()%1000000)
+			propName := strings.TrimSpace(entry.ProposalName)
+			if propName == "" {
+				propName = fmt.Sprintf("%s - %s", entry.CategoryName, entry.Entity)
+			}
+			currency := entry.Currency
+			if strings.TrimSpace(currency) == "" {
+				currency = "USD"
+			}
+			effDate := entry.EffectiveDate
+			if strings.TrimSpace(effDate) == "" {
+				effDate = time.Now().Format("2006-01-02")
+			}
+
+			insProp := `INSERT INTO cashflow_proposal (proposal_id, proposal_name, entity_name, department_id, currency_code, effective_date, recurrence_type, recurrence_frequency, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
+			if _, err := tx.Exec(ctx, insProp, proposalID, propName, entry.Entity, entry.Department, currency, effDate, entry.Frequency, entry.Frequency, "Active"); err != nil {
+				api.RespondWithResult(w, false, "Failed to create proposal: "+err.Error())
+				return
+			}
+
+			// create item
+			itemID := fmt.Sprintf("ITEM-%06d", time.Now().UnixNano()%1000000)
+			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`
+			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, entry.CategoryName, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effDate, nil); err != nil {
+				api.RespondWithResult(w, false, "Failed to create item: "+err.Error())
+				return
+			}
+
+			// monthly projections
+			for k, v := range p.Projection {
+				if strings.ToLower(k) == "total" || k == "type" || k == "categoryName" {
+					continue
+				}
+				parts := strings.Split(k, "-")
+				if len(parts) < 2 {
+					continue
+				}
+				mStr := parts[0]
+				yStr := parts[1]
+				mInt, ok := monthMap[mStr]
+				if !ok {
+					if len(mStr) >= 3 {
+						mStrShort := Capitalize(strings.ToLower(mStr[:3]))
+						if mm, ok2 := monthMap[mStrShort]; ok2 {
+							mInt = mm
+							ok = true
+						}
+					}
+				}
+				if !ok {
+					continue
+				}
+				year := 0
+				if len(yStr) == 2 {
+					if yi, err := strconv.Atoi(yStr); err == nil {
+						year = 2000 + yi
+					}
+				} else {
+					if yi, err := strconv.Atoi(yStr); err == nil {
+						year = yi
+					}
+				}
+				if year == 0 {
+					continue
+				}
+
+				var amt float64
+				switch tv := v.(type) {
+				case float64:
+					amt = tv
+				case float32:
+					amt = float64(tv)
+				case int:
+					amt = float64(tv)
+				case int64:
+					amt = float64(tv)
+				case json.Number:
+					if f, err := tv.Float64(); err == nil {
+						amt = f
+					} else {
+						continue
+					}
+				case string:
+					s := strings.TrimSpace(tv)
+					if s == "" {
+						continue
+					}
+					if f, err := strconv.ParseFloat(s, 64); err == nil {
+						amt = f
+					} else {
+						continue
+					}
+				default:
+					continue
+				}
+
+				projID := fmt.Sprintf("PROJ-%06d", time.Now().UnixNano()%1000000)
+				insMonthly := `INSERT INTO cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`
+				if _, err := tx.Exec(ctx, insMonthly, projID, itemID, year, mInt, amt); err != nil {
+					api.RespondWithResult(w, false, "Failed to create monthly projection: "+err.Error())
+					return
+				}
+			}
+
+			// audit
+			auditQ := `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
+			if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy); err != nil {
+				api.RespondWithResult(w, false, "Failed to create audit: "+err.Error())
+				return
+			}
+
+			created++
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "Failed to commit transaction: "+err.Error())
+			return
+		}
+		committed = true
+
+		api.RespondWithResult(w, true, fmt.Sprintf("Successfully imported %d projections", created))
 	}
 }
