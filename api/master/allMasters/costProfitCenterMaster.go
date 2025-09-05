@@ -1111,6 +1111,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		defer rows.Close()
 
+		var updated []map[string]interface{}
 		var deleteIDs []string
 		for rows.Next() {
 			var actionID, centreID, actionType string
