@@ -82,38 +82,78 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-type EntityCurrencyBalance struct {
-	TotalBalance float64 `json:"total_balance"`
-	CurrencyCode string  `json:"currency_code"`
-	EntityName   string  `json:"entity_name"`
+type CurrencyBalance struct {
+	Currency string  `json:"currency"`
+	Balance  float64 `json:"balance"`
 }
 
-func TotalCashBalanceByEntity(pgxPool *pgxpool.Pool) ([]EntityCurrencyBalance, error) {
-	var results []EntityCurrencyBalance
+type BankBalance struct {
+	Bank       string            `json:"bank"`
+	Currencies []CurrencyBalance `json:"currencies"`
+}
+
+type EntityBankBalance struct {
+	Entity string        `json:"entity"`
+	Banks  []BankBalance `json:"banks"`
+}
+
+func TotalCashBalanceByEntity(pgxPool *pgxpool.Pool) ([]EntityBankBalance, error) {
+	// Query for entity, bank, currency, balance
 	query := `SELECT 
-		COALESCE(SUM(bs.closingbalance), 0) AS total_balance,
+		m.entity_name,
+		mb.bank_name,
 		bs.currencycode,
-		m.entity_name
+		COALESCE(SUM(bs.closingbalance), 0) AS balance
 	FROM bank_statement bs
 	JOIN masterentity m ON bs.entityid = m.entity_id
+	JOIN masterbankaccount mba ON bs.account_number = mba.account_number
+	JOIN masterbank mb ON mba.bank_id = mb.bank_id
 	WHERE bs.status = 'Approved'
-	GROUP BY bs.currencycode, m.entity_name;`
+	GROUP BY m.entity_name, mb.bank_name, bs.currencycode;`
 	rows, err := pgxPool.Query(context.Background(), query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	// Build nested response
+	entityMap := make(map[string]map[string]map[string]float64) // entity -> bank -> currency -> balance
 	for rows.Next() {
-		var rec EntityCurrencyBalance
-		if err := rows.Scan(&rec.TotalBalance, &rec.CurrencyCode, &rec.EntityName); err != nil {
+		var entity, bank, currency string
+		var balance float64
+		if err := rows.Scan(&entity, &bank, &currency, &balance); err != nil {
 			return nil, err
 		}
-		results = append(results, rec)
+		if _, ok := entityMap[entity]; !ok {
+			entityMap[entity] = make(map[string]map[string]float64)
+		}
+		if _, ok := entityMap[entity][bank]; !ok {
+			entityMap[entity][bank] = make(map[string]float64)
+		}
+		entityMap[entity][bank][currency] += balance
 	}
-	if rows.Err() != nil {
-		return nil, rows.Err()
+	// Convert to response struct
+	var response []EntityBankBalance
+	for entity, banks := range entityMap {
+		var bankList []BankBalance
+		for bank, currencies := range banks {
+			var currencyList []CurrencyBalance
+			for currency, balance := range currencies {
+				currencyList = append(currencyList, CurrencyBalance{
+					Currency: currency,
+					Balance:  balance,
+				})
+			}
+			bankList = append(bankList, BankBalance{
+				Bank:       bank,
+				Currencies: currencyList,
+			})
+		}
+		response = append(response, EntityBankBalance{
+			Entity: entity,
+			Banks:  bankList,
+		})
 	}
-	return results, nil
+	return response, nil
 }
 
 func LiquidityCoverageRatio(pgxPool *pgxpool.Pool) (float64, error) {
