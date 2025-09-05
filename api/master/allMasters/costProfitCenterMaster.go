@@ -657,7 +657,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var (
-				centreID,actionIDI string
+				centreID, actionIDI string
 				centreCodeI, centreNameI, centreTypeI, parentCentreIDI, entityNameI, statusI,
 				oldCodeI, oldNameI, oldTypeI, oldParentI, oldEntityI, oldStatusI,
 				centreLevelI, oldCentreLevelI, procStatusI, requestedByI, requestedAtI, actionTypeI,
