@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/cash/payablerecievable"
+	"CimplrCorpSaas/api/cash/projection"
 	"context"
 	"database/sql"
 	"fmt"
@@ -43,6 +44,15 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/receivable/bulk-delete", payablerecievable.BulkDeleteReceivableAudit(pgxPool))
 	mux.Handle("/cash/receivable/bulk-reject", payablerecievable.BulkRejectReceivableAuditActions(pgxPool))
 	mux.Handle("/cash/receivable/bulk-approve", payablerecievable.BulkApproveReceivableAuditActions(pgxPool))
+
+	
+	// Cash flow projection routes
+	mux.Handle("/cash/cashflow-projection/create", api.BusinessUnitMiddleware(db)(projection.CreateAndSyncCashFlowProposals(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/all", api.BusinessUnitMiddleware(db)(projection.GetCashFlowProposals(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/bulk-approve", api.BusinessUnitMiddleware(db)(projection.BulkApproveCashFlowProposalActions(pgxPool)))
+
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))
 	})
@@ -52,3 +62,4 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
