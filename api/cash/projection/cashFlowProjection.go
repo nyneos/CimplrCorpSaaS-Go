@@ -1098,3 +1098,412 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithResult(w, true, fmt.Sprintf("Successfully imported %d projections", created))
 	}
 }
+
+func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req struct {
+			UserID     string `json:"user_id"`
+			ProposalID string `json:"proposal_id,omitempty"`
+			Entity     string `json:"entity,omitempty"`
+			Department string `json:"department,omitempty"`
+			Category   string `json:"category,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		// Verify user session
+		createdBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				createdBy = s.Email
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithResult(w, false, "Invalid user_id or session")
+			return
+		}
+
+		ctx := context.Background()
+
+		// Build base query
+		baseQuery := `
+			SELECT 
+				cp.proposal_id,
+				cp.proposal_name,
+				cp.entity_name,
+				cp.department_id,
+				cp.currency_code,
+				cp.effective_date,
+				cp.recurrence_type,
+				cp.recurrence_frequency,
+				cp.status,
+				cpi.item_id,
+				cpi.description,
+				cpi.cashflow_type,
+				cpi.category_id,
+				cpi.expected_amount,
+				cpi.is_recurring,
+				cpi.recurrence_pattern,
+				cpi.start_date,
+				cpi.end_date
+			FROM cashflow_proposal cp
+			JOIN cashflow_proposal_item cpi ON cp.proposal_id = cpi.proposal_id
+			WHERE 1=1
+		`
+
+		params := []interface{}{}
+		paramCount := 0
+
+		if req.ProposalID != "" {
+			paramCount++
+			baseQuery += fmt.Sprintf(" AND cp.proposal_id = $%d", paramCount)
+			params = append(params, req.ProposalID)
+		}
+		if req.Entity != "" {
+			paramCount++
+			baseQuery += fmt.Sprintf(" AND cp.entity_name = $%d", paramCount)
+			params = append(params, req.Entity)
+		}
+		if req.Department != "" {
+			paramCount++
+			baseQuery += fmt.Sprintf(" AND cp.department_id = $%d", paramCount)
+			params = append(params, req.Department)
+		}
+		if req.Category != "" {
+			paramCount++
+			baseQuery += fmt.Sprintf(" AND cpi.category_id = $%d", paramCount)
+			params = append(params, req.Category)
+		}
+
+		// Add order by
+		baseQuery += " ORDER BY cp.effective_date DESC, cp.proposal_id"
+
+		rows, err := pgxPool.Query(ctx, baseQuery, params...)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to query proposals: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		type ProposalItem struct {
+			ProposalID          string
+			ProposalName        string
+			EntityName          string
+			DepartmentID        string
+			CurrencyCode        string
+			EffectiveDate       time.Time
+			RecurrenceType      string
+			RecurrenceFrequency string
+			Status              string
+			ItemID              string
+			Description         string
+			CashflowType        string
+			CategoryID          string
+			ExpectedAmount      float64
+			IsRecurring         bool
+			RecurrencePattern   string
+			StartDate           time.Time
+			EndDate             *time.Time
+		}
+
+		var proposals []ProposalItem
+		proposalMap := make(map[string][]ProposalItem)
+
+		for rows.Next() {
+			var pi ProposalItem
+			err := rows.Scan(
+				&pi.ProposalID,
+				&pi.ProposalName,
+				&pi.EntityName,
+				&pi.DepartmentID,
+				&pi.CurrencyCode,
+				&pi.EffectiveDate,
+				&pi.RecurrenceType,
+				&pi.RecurrenceFrequency,
+				&pi.Status,
+				&pi.ItemID,
+				&pi.Description,
+				&pi.CashflowType,
+				&pi.CategoryID,
+				&pi.ExpectedAmount,
+				&pi.IsRecurring,
+				&pi.RecurrencePattern,
+				&pi.StartDate,
+				&pi.EndDate,
+			)
+			if err != nil {
+				api.RespondWithResult(w, false, "Failed to scan proposal: "+err.Error())
+				return
+			}
+			proposals = append(proposals, pi)
+			proposalMap[pi.ProposalID] = append(proposalMap[pi.ProposalID], pi)
+		}
+
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, "Error reading proposals: "+err.Error())
+			return
+		}
+
+		if len(proposals) == 0 {
+			api.RespondWithResult(w, false, "No projections found")
+			return
+		}
+
+		// Get monthly projections for all items
+		itemIDs := make([]string, 0, len(proposals))
+		for _, pi := range proposals {
+			itemIDs = append(itemIDs, pi.ItemID)
+		}
+
+		monthlyQuery := `
+			SELECT 
+				item_id,
+				year,
+				month,
+				projected_amount
+			FROM cashflow_projection_monthly
+			WHERE item_id = ANY($1)
+			ORDER BY item_id, year, month
+		`
+
+		monthlyRows, err := pgxPool.Query(ctx, monthlyQuery, itemIDs)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to query monthly projections: "+err.Error())
+			return
+		}
+		defer monthlyRows.Close()
+
+		monthlyMap := make(map[string]map[string]interface{})
+		monthNames := map[int]string{
+			1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+			7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+		}
+
+		for monthlyRows.Next() {
+			var itemID string
+			var year, month int
+			var amount float64
+
+			err := monthlyRows.Scan(&itemID, &year, &month, &amount)
+			if err != nil {
+				api.RespondWithResult(w, false, "Failed to scan monthly projection: "+err.Error())
+				return
+			}
+
+			monthName, exists := monthNames[month]
+			if !exists {
+				continue
+			}
+
+			key := fmt.Sprintf("%s-%d", monthName, year%100) // Use 2-digit year
+
+			if monthlyMap[itemID] == nil {
+				monthlyMap[itemID] = make(map[string]interface{})
+			}
+			monthlyMap[itemID][key] = amount
+		}
+
+		if err := monthlyRows.Err(); err != nil {
+			api.RespondWithResult(w, false, "Error reading monthly projections: "+err.Error())
+			return
+		}
+
+		// Build response
+		response := struct {
+			UserID      string                   `json:"user_id"`
+			ProposalID  string                   `json:"proposal_id,omitempty"`
+			Projections []map[string]interface{} `json:"projections"`
+		}{
+			UserID:      req.UserID,
+			Projections: make([]map[string]interface{}, 0),
+		}
+
+		// If a specific proposal ID was requested, include it in response
+		if req.ProposalID != "" {
+			response.ProposalID = req.ProposalID
+		}
+
+		for proposalID, items := range proposalMap {
+			for _, item := range items {
+				projection := make(map[string]interface{})
+
+				// Entry section
+				entry := map[string]interface{}{
+					"currency":       item.CurrencyCode,
+					"type":           item.CashflowType,
+					"proposal_name":  item.ProposalName,
+					"effective_date": item.EffectiveDate.Format("2006-01-02"),
+					"categoryName":   item.CategoryID,
+					"entity":         item.EntityName,
+					"department":     item.DepartmentID,
+					"expectedAmount": item.ExpectedAmount,
+					"recurring":      item.IsRecurring,
+					"frequency":      item.RecurrencePattern,
+					"proposal_id":    proposalID, // Add proposal_id to entry
+				}
+				projection["entry"] = entry
+
+				// Monthly projections section
+				monthlyProj := make(map[string]interface{})
+				if itemMonthly, exists := monthlyMap[item.ItemID]; exists {
+					for k, v := range itemMonthly {
+						monthlyProj[k] = v
+					}
+				}
+				// Add type and categoryName to projection for consistency with input format
+				monthlyProj["type"] = item.CashflowType
+				monthlyProj["categoryName"] = item.CategoryID
+				projection["projection"] = monthlyProj
+
+				response.Projections = append(response.Projections, projection)
+			}
+		}
+
+		// Return JSON response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+
+func GetAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID           string   `json:"user_id"`
+			ProposalIDs      []string `json:"proposal_ids"`
+			ActionID         string   `json:"action_id"`
+			ActionType       string   `json:"action_type"`
+			ProcessingStatus string   `json:"processing_status"`
+			RequestedBy      string   `json:"requested_by"`
+			Since            string   `json:"since"`
+			Until            string   `json:"until"`
+			Limit            int      `json:"limit"`
+			Offset           int      `json:"offset"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		// validate session
+		valid := false
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			api.RespondWithResult(w, false, "Invalid user_id or session")
+			return
+		}
+
+		ctx := r.Context()
+
+		base := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment FROM audit_action_cashflow_proposal WHERE 1=1`
+		params := []interface{}{}
+		pc := 0
+
+		if len(req.ProposalIDs) > 0 {
+			pc++
+			base += fmt.Sprintf(" AND proposal_id = ANY($%d)", pc)
+			params = append(params, req.ProposalIDs)
+		}
+		if strings.TrimSpace(req.ActionID) != "" {
+			pc++
+			base += fmt.Sprintf(" AND action_id = $%d", pc)
+			params = append(params, req.ActionID)
+		}
+		if strings.TrimSpace(req.ActionType) != "" {
+			pc++
+			base += fmt.Sprintf(" AND action_type = $%d", pc)
+			params = append(params, req.ActionType)
+		}
+		if strings.TrimSpace(req.ProcessingStatus) != "" {
+			pc++
+			base += fmt.Sprintf(" AND processing_status = $%d", pc)
+			params = append(params, req.ProcessingStatus)
+		}
+		if strings.TrimSpace(req.RequestedBy) != "" {
+			pc++
+			base += fmt.Sprintf(" AND requested_by = $%d", pc)
+			params = append(params, req.RequestedBy)
+		}
+		// date filters
+		if strings.TrimSpace(req.Since) != "" {
+			if t, err := time.Parse("2006-01-02", req.Since); err == nil {
+				pc++
+				base += fmt.Sprintf(" AND requested_at >= $%d", pc)
+				params = append(params, t)
+			}
+		}
+		if strings.TrimSpace(req.Until) != "" {
+			if t, err := time.Parse("2006-01-02", req.Until); err == nil {
+				// include whole day
+				t = t.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+				pc++
+				base += fmt.Sprintf(" AND requested_at <= $%d", pc)
+				params = append(params, t)
+			}
+		}
+
+		// ordering and limit
+		base += " ORDER BY requested_at DESC"
+		if req.Limit <= 0 || req.Limit > 1000 {
+			req.Limit = 100
+		}
+		pc++
+		base += fmt.Sprintf(" LIMIT $%d", pc)
+		params = append(params, req.Limit)
+		if req.Offset > 0 {
+			pc++
+			base += fmt.Sprintf(" OFFSET $%d", pc)
+			params = append(params, req.Offset)
+		}
+
+		rows, err := pgxPool.Query(ctx, base, params...)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to query audit actions: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		actions := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var (
+				actionID                                                                                                         string
+				proposalID, actionType, processingStatus, reason, requestedBy, requestedAt, checkerBy, checkerAt, checkerComment interface{}
+			)
+			if err := rows.Scan(&actionID, &proposalID, &actionType, &processingStatus, &reason, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment); err != nil {
+				continue
+			}
+			a := map[string]interface{}{
+				"action_id":         ifaceToString(actionID),
+				"proposal_id":       ifaceToString(proposalID),
+				"action_type":       ifaceToString(actionType),
+				"processing_status": ifaceToString(processingStatus),
+				"reason":            ifaceToString(reason),
+				"requested_by":      ifaceToString(requestedBy),
+				"requested_at":      ifaceToTimeString(requestedAt),
+				"checker_by":        ifaceToString(checkerBy),
+				"checker_at":        ifaceToTimeString(checkerAt),
+				"checker_comment":   ifaceToString(checkerComment),
+			}
+			actions = append(actions, a)
+		}
+
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, "Error reading audit rows: "+err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "actions": actions})
+	}
+}
