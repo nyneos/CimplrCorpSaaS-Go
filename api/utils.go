@@ -70,3 +70,13 @@ func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
 		"error":   errMsg,
 	})
 }
+
+// RespondWithResult sends a consistent JSON response for success or error
+func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
+	w.Header().Set("Content-Type", "application/json")
+	if success {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+	}
+}
