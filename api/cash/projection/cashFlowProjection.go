@@ -1356,6 +1356,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				// Add type and categoryName to projection for consistency with input format
+				monthlyProj["proposal_id"] = proposalID
 				monthlyProj["type"] = item.CashflowType
 				monthlyProj["categoryName"] = item.CategoryID
 				projection["projection"] = monthlyProj
