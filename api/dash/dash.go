@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/dash/cfo"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
+	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
 	reports "CimplrCorpSaas/api/dash/reports"
 	"context"
 	"database/sql"
@@ -81,6 +82,11 @@ func StartDashService(db *sql.DB) {
 	// Exposure Dashboard
 	mux.Handle("/dash/hedge/exp/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetBuMaturityCurrencySummaryJoinedFromHeaders(db)))
 	mux.Handle("/dash/hedge/exp/exposure-rows", api.BusinessUnitMiddleware(db)(hedgeproposal.GetExposureRowsDashboard(db)))
+
+	//Liquidity Snapshot
+	mux.Handle("/dash/liquidity/total-cash-balance-by-entity", api.BusinessUnitMiddleware(db)(liqsnap.TotalCashBalanceByEntityHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/liquidity-coverage-ratio", api.BusinessUnitMiddleware(db)(liqsnap.LiquidityCoverageRatioHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/entity-currency-wise-cash", api.BusinessUnitMiddleware(db)(liqsnap.EntityCurrencyWiseCashHandler(pgxPool)))
 
 	// --- Reports Dashboard Routes ---
 	mux.Handle("/dash/reports/exposure-summary", api.BusinessUnitMiddleware(db)(reports.GetExposureSummary(db)))
