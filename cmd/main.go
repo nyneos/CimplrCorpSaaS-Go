@@ -32,7 +32,7 @@ func InitDB() (*sql.DB, error) {
 
 func main() {
 	// Load .env for local dev (ignored on Render)
-	_ = godotenv.Load()
+	_ = godotenv.Load("../.env")
 
 	// Initialize DB for Auth
 	db, err := InitDB()

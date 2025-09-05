@@ -32,6 +32,17 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-delete", bankstatement.BulkDeleteBankStatements(pgxPool))
+	mux.Handle("/cash/payrec/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
+
+	// Bulk audit action routes for payables
+	mux.Handle("/cash/payable/bulk-delete", payablerecievable.BulkDeletePayableAudit(pgxPool))
+	mux.Handle("/cash/payable/bulk-reject", payablerecievable.BulkRejectPayableAuditActions(pgxPool))
+	mux.Handle("/cash/payable/bulk-approve", payablerecievable.BulkApprovePayableAuditActions(pgxPool))
+
+	// Bulk audit action routes for receivables
+	mux.Handle("/cash/receivable/bulk-delete", payablerecievable.BulkDeleteReceivableAudit(pgxPool))
+	mux.Handle("/cash/receivable/bulk-reject", payablerecievable.BulkRejectReceivableAuditActions(pgxPool))
+	mux.Handle("/cash/receivable/bulk-approve", payablerecievable.BulkApproveReceivableAuditActions(pgxPool))
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))
 	})
