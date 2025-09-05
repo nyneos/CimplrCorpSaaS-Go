@@ -54,6 +54,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/cashflow-projection/bulk-approve", api.BusinessUnitMiddleware(db)(projection.BulkApproveCashFlowProposalActions(pgxPool)))
 
 	mux.Handle("/cash/cashflow-projection/make", api.BusinessUnitMiddleware(db)(projection.AbsorbFlattenedProjections(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/get", api.BusinessUnitMiddleware(db)(projection.GetFlattenedProjections(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/audit", api.BusinessUnitMiddleware(db)(projection.GetAuditActions(pgxPool)))
 
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))
@@ -64,5 +66,6 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
