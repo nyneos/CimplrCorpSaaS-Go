@@ -331,44 +331,38 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		type Payable struct {
-			PayableID     string  `json:"payable_id"`
-			EntityID      string  `json:"entity_id"`
-			VendorID      string  `json:"vendor_id"`
-			InvoiceNo     string  `json:"invoice_number"`
-			InvoiceDate   string  `json:"invoice_date"`
-			DueDate       string  `json:"due_date"`
-			Amount        float64 `json:"amount"`
-			CurrencyCode  string  `json:"currency_code"`
-			Status        string  `json:"status"`
-			CreatedBy     string  `json:"created_by"`
-			CreatedAt     string  `json:"created_at"`
-			CreatedStatus string  `json:"created_status"`
-			EditedBy      string  `json:"edited_by"`
-			EditedAt      string  `json:"edited_at"`
-			EditedStatus  string  `json:"edited_status"`
-			DeletedBy     string  `json:"deleted_by"`
-			DeletedAt     string  `json:"deleted_at"`
-			DeletedStatus string  `json:"deleted_status"`
+			PayableID    string  `json:"payable_id"`
+			EntityID     string  `json:"entity_id"`
+			VendorID     string  `json:"vendor_id"`
+			InvoiceNo    string  `json:"invoice_number"`
+			InvoiceDate  string  `json:"invoice_date"`
+			DueDate      string  `json:"due_date"`
+			Amount       float64 `json:"amount"`
+			CurrencyCode string  `json:"currency_code"`
+			Status       string  `json:"status"`
+			CreatedBy    string  `json:"created_by"`
+			CreatedAt    string  `json:"created_at"`
+			EditedBy     string  `json:"edited_by"`
+			EditedAt     string  `json:"edited_at"`
+			DeletedBy    string  `json:"deleted_by"`
+			DeletedAt    string  `json:"deleted_at"`
 		}
 		type Receivable struct {
-			ReceivableID  string  `json:"receivable_id"`
-			EntityID      string  `json:"entity_id"`
-			CustomerID    string  `json:"customer_id"`
-			InvoiceNo     string  `json:"invoice_number"`
-			InvoiceDate   string  `json:"invoice_date"`
-			DueDate       string  `json:"due_date"`
-			Amount        float64 `json:"invoice_amount"`
-			CurrencyCode  string  `json:"currency_code"`
-			Status        string  `json:"status"`
-			CreatedBy     string  `json:"created_by"`
-			CreatedAt     string  `json:"created_at"`
-			CreatedStatus string  `json:"created_status"`
-			EditedBy      string  `json:"edited_by"`
-			EditedAt      string  `json:"edited_at"`
-			EditedStatus  string  `json:"edited_status"`
-			DeletedBy     string  `json:"deleted_by"`
-			DeletedAt     string  `json:"deleted_at"`
-			DeletedStatus string  `json:"deleted_status"`
+			ReceivableID string  `json:"receivable_id"`
+			EntityID     string  `json:"entity_id"`
+			CustomerID   string  `json:"customer_id"`
+			InvoiceNo    string  `json:"invoice_number"`
+			InvoiceDate  string  `json:"invoice_date"`
+			DueDate      string  `json:"due_date"`
+			Amount       float64 `json:"invoice_amount"`
+			CurrencyCode string  `json:"currency_code"`
+			Status       string  `json:"status"`
+			CreatedBy    string  `json:"created_by"`
+			CreatedAt    string  `json:"created_at"`
+			EditedBy     string  `json:"edited_by"`
+			EditedAt     string  `json:"edited_at"`
+			DeletedBy    string  `json:"deleted_by"`
+			DeletedAt    string  `json:"deleted_at"`
 		}
 
 		// 1. Fetch all payables
@@ -472,13 +466,18 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if audit != nil {
 				payables[i].CreatedBy = audit["created_by"]
 				payables[i].CreatedAt = audit["created_at"]
-				payables[i].CreatedStatus = audit["created_status"]
 				payables[i].EditedBy = audit["edited_by"]
 				payables[i].EditedAt = audit["edited_at"]
-				payables[i].EditedStatus = audit["edited_status"]
 				payables[i].DeletedBy = audit["deleted_by"]
 				payables[i].DeletedAt = audit["deleted_at"]
-				payables[i].DeletedStatus = audit["deleted_status"]
+				// Set status: prefer DELETE, then EDIT, then CREATE
+				if audit["deleted_status"] != "" {
+					payables[i].Status = audit["deleted_status"]
+				} else if audit["edited_status"] != "" {
+					payables[i].Status = audit["edited_status"]
+				} else {
+					payables[i].Status = audit["created_status"]
+				}
 			}
 		}
 
@@ -523,13 +522,18 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if audit != nil {
 				receivables[i].CreatedBy = audit["created_by"]
 				receivables[i].CreatedAt = audit["created_at"]
-				receivables[i].CreatedStatus = audit["created_status"]
 				receivables[i].EditedBy = audit["edited_by"]
 				receivables[i].EditedAt = audit["edited_at"]
-				receivables[i].EditedStatus = audit["edited_status"]
 				receivables[i].DeletedBy = audit["deleted_by"]
 				receivables[i].DeletedAt = audit["deleted_at"]
-				receivables[i].DeletedStatus = audit["deleted_status"]
+				// Set status: prefer DELETE, then EDIT, then CREATE
+				if audit["deleted_status"] != "" {
+					receivables[i].Status = audit["deleted_status"]
+				} else if audit["edited_status"] != "" {
+					receivables[i].Status = audit["edited_status"]
+				} else {
+					receivables[i].Status = audit["created_status"]
+				}
 			}
 		}
 
@@ -586,11 +590,11 @@ func BulkDeletePayableAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkRejectPayableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string   `json:"user_id"`
-			ActionIDs []string `json:"action_ids"`
-			Comment   string   `json:"comment"`
+			UserID     string   `json:"user_id"`
+			PayableIDs []string `json:"payable_ids"`
+			Comment    string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.PayableIDs) == 0 {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
 			return
 		}
@@ -606,8 +610,21 @@ func BulkRejectPayableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
 			return
 		}
+		// For each payable_id, find the latest action_id
+		var actionIDs []string
+		for _, pid := range req.PayableIDs {
+			var actionID string
+			err := pgxPool.QueryRow(r.Context(), `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&actionID)
+			if err == nil && actionID != "" {
+				actionIDs = append(actionIDs, actionID)
+			}
+		}
+		if len(actionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "No valid actions found for provided payable_ids"})
+			return
+		}
 		query := `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,payable_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, req.ActionIDs)
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, actionIDs)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
 			return
@@ -740,11 +757,11 @@ func BulkDeleteReceivableAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkRejectReceivableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string   `json:"user_id"`
-			ActionIDs []string `json:"action_ids"`
-			Comment   string   `json:"comment"`
+			UserID        string   `json:"user_id"`
+			ReceivableIDs []string `json:"receivable_ids"`
+			Comment       string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ReceivableIDs) == 0 {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
 			return
 		}
@@ -760,8 +777,21 @@ func BulkRejectReceivableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
 			return
 		}
+		// For each receivable_id, find the latest action_id
+		var actionIDs []string
+		for _, rid := range req.ReceivableIDs {
+			var actionID string
+			err := pgxPool.QueryRow(r.Context(), `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&actionID)
+			if err == nil && actionID != "" {
+				actionIDs = append(actionIDs, actionID)
+			}
+		}
+		if len(actionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "No valid actions found for provided receivable_ids"})
+			return
+		}
 		query := `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,receivable_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, req.ActionIDs)
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, actionIDs)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
 			return
