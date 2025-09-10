@@ -1508,3 +1508,277 @@ func GetAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "actions": actions})
 	}
 }
+
+
+
+func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string `json:"user_id"`
+			ProposalID string `json:"proposal_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		// validate session
+		valid := false
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			api.RespondWithResult(w, false, "Invalid user_id or session")
+			return
+		}
+		if strings.TrimSpace(req.ProposalID) == "" {
+			api.RespondWithResult(w, false, "proposal_id required")
+			return
+		}
+
+		ctx := r.Context()
+
+		// fetch proposal with latest audit processing_status
+		q := `
+		SELECT
+		    p.proposal_id,
+		    p.proposal_name,
+		    p.old_proposal_name,
+		    p.effective_date,
+		    p.old_effective_date,
+		    p.currency_code AS currency,
+		    p.old_currency_code,
+		    p.entity_name AS entity,
+		    p.old_entity_name,
+		    p.department_id AS department,
+		    p.old_department_id,
+		    p.recurrence_type AS proposal_type,
+		    p.old_recurrence_type,
+		    p.recurrence_frequency AS frequency,
+		    p.old_recurrence_frequency,
+		    i.expected_amount,
+		    i.old_expected_amount,
+		    i.is_recurring,
+		    i.old_is_recurring,
+		    i.cashflow_type AS category_type,
+		    i.old_cashflow_type,
+		    i.category_id AS category_name,
+		    i.old_category_id,
+		    a.processing_status
+		FROM cashflow_proposal p
+		LEFT JOIN cashflow_proposal_item i 
+		       ON p.proposal_id = i.proposal_id
+		LEFT JOIN audit_action_cashflow_proposal a 
+		       ON p.proposal_id = a.proposal_id
+		WHERE p.proposal_id = $1
+		ORDER BY a.requested_at DESC
+		LIMIT 1;
+		`
+
+		var (
+			proposalID, proposalName, oldProposalName, effectiveDate, oldEffectiveDate,
+			currency, oldCurrency, entity, oldEntity, department, oldDepartment,
+			proposalType, oldProposalType, frequency, oldFrequency,
+			expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI,
+			categoryType, oldCategoryType, categoryName, oldCategoryName, processingStatus interface{}
+		)
+
+		row := pgxPool.QueryRow(ctx, q, req.ProposalID)
+		if err := row.Scan(&proposalID, &proposalName, &oldProposalName, &effectiveDate, &oldEffectiveDate,
+			&currency, &oldCurrency, &entity, &oldEntity, &department, &oldDepartment,
+			&proposalType, &oldProposalType, &frequency, &oldFrequency,
+			&expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI,
+			&categoryType, &oldCategoryType, &categoryName, &oldCategoryName, &processingStatus); err != nil {
+			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			return
+		}
+
+		// convert expected amounts
+		expectedAmount := 0.0
+		switch v := expectedAmountI.(type) {
+		case float64:
+			expectedAmount = v
+		case int64:
+			expectedAmount = float64(v)
+		case nil:
+			expectedAmount = 0
+		case string:
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				expectedAmount = f
+			}
+		default:
+			// try fmt.Sprint fallback
+			if s := fmt.Sprint(v); s != "<nil>" {
+				if f, err := strconv.ParseFloat(s, 64); err == nil {
+					expectedAmount = f
+				}
+			}
+		}
+
+		oldExpectedAmount := 0.0
+		switch v := oldExpectedAmountI.(type) {
+		case float64:
+			oldExpectedAmount = v
+		case int64:
+			oldExpectedAmount = float64(v)
+		case nil:
+			oldExpectedAmount = 0
+		case string:
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				oldExpectedAmount = f
+			}
+		default:
+			if s := fmt.Sprint(v); s != "<nil>" {
+				if f, err := strconv.ParseFloat(s, 64); err == nil {
+					oldExpectedAmount = f
+				}
+			}
+		}
+
+		// convert recurring flags
+		isRec := false
+		switch v := isRecurringI.(type) {
+		case bool:
+			isRec = v
+		case string:
+			if b, err := strconv.ParseBool(v); err == nil {
+				isRec = b
+			}
+		}
+
+		oldIsRec := false
+		switch v := oldIsRecurringI.(type) {
+		case bool:
+			oldIsRec = v
+		case string:
+			if b, err := strconv.ParseBool(v); err == nil {
+				oldIsRec = b
+			}
+		}
+
+		projection := map[string]interface{}{
+			"proposal_id":         ifaceToString(proposalID),
+			"proposal_type":       ifaceToString(proposalType),
+			"old_proposal_type":   ifaceToString(oldProposalType),
+			"proposal_name":       ifaceToString(proposalName),
+			"old_proposal_name":   ifaceToString(oldProposalName),
+			"effective_date":      ifaceToTimeString(effectiveDate),
+			"old_effective_date":  ifaceToTimeString(oldEffectiveDate),
+			"currency":            ifaceToString(currency),
+			"old_currency":        ifaceToString(oldCurrency),
+			"entity":              ifaceToString(entity),
+			"old_entity":          ifaceToString(oldEntity),
+			"department":          ifaceToString(department),
+			"old_department":      ifaceToString(oldDepartment),
+			"processing_status":   ifaceToString(processingStatus),
+			"frequency":           ifaceToString(frequency),
+			"old_frequency":       ifaceToString(oldFrequency),
+			"category_name":       ifaceToString(categoryName),
+			"old_category_name":   ifaceToString(oldCategoryName),
+			"category_type":       ifaceToString(categoryType),
+			"old_category_type":   ifaceToString(oldCategoryType),
+			"expected_amount":     expectedAmount,
+			"old_expected_amount": oldExpectedAmount,
+			"recurring":           strconv.FormatBool(isRec),
+			"old_recurring":       strconv.FormatBool(oldIsRec),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "projection": projection})
+	}
+}
+
+func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		// validate session
+		valid := false
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			api.RespondWithResult(w, false, "Invalid user_id or session")
+			return
+		}
+
+		ctx := r.Context()
+
+		q := `
+			SELECT p.proposal_id,
+				   p.recurrence_type,
+				   p.proposal_name,
+				   p.effective_date,
+				   p.currency_code,
+				   p.entity_name,
+				   COALESCE(array_agg(DISTINCT cpi.category_id) FILTER (WHERE cpi.category_id IS NOT NULL), ARRAY[]::text[]) AS categories,
+				   a.processing_status
+			FROM cashflow_proposal p
+			LEFT JOIN cashflow_proposal_item cpi ON p.proposal_id = cpi.proposal_id
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM audit_action_cashflow_proposal a2
+				WHERE a2.proposal_id = p.proposal_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) a ON TRUE
+			GROUP BY p.proposal_id, p.recurrence_type, p.proposal_name, p.effective_date, p.currency_code, p.entity_name, a.processing_status
+			ORDER BY p.effective_date DESC, p.proposal_id
+		`
+
+		rows, err := pgxPool.Query(ctx, q)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to query proposals: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var proposalID, recurrenceType, proposalName, currencyCode, entityName, processingStatus string
+			var effectiveDate time.Time
+			var categories []string
+			if err := rows.Scan(&proposalID, &recurrenceType, &proposalName, &effectiveDate, &currencyCode, &entityName, &categories, &processingStatus); err != nil {
+				continue
+			}
+
+			catName := ""
+			if len(categories) > 0 {
+				catName = strings.Join(categories, ",")
+			}
+
+			entry := map[string]interface{}{
+				"proposal_id":       proposalID,
+				"proposal_type":     recurrenceType,
+				"proposal_name":     proposalName,
+				"effective_date":    effectiveDate.Format("2006-01-02"),
+				"currency":          currencyCode,
+				"entity":            entityName,
+				"category_name":     catName,
+				"processing_status": processingStatus,
+			}
+
+			out = append(out, map[string]interface{}{"entry": entry})
+		}
+
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, "Error reading rows: "+err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "projections": out})
+	}
+}
