@@ -1016,7 +1016,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 2) Fetch items for the proposal
 		itemQ := `
-			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id, expected_amount, old_expected_amount, is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern, start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name, department_id, old_department_id, recurrence_frequency, old_recurrence_frequency
+			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id, CAST(expected_amount AS float8), CAST(old_expected_amount AS float8), is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern, start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name, department_id, old_department_id, recurrence_frequency, old_recurrence_frequency
 			FROM cashflow_proposal_item
 			WHERE proposal_id = $1
 			ORDER BY created_at
