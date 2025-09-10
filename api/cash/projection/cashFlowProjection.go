@@ -891,13 +891,17 @@ func CreateFromFlattened(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID      string `json:"user_id"`
+			UserID string `json:"user_id"`
+			Header struct {
+				Currency       string `json:"currency,omitempty"`
+				ProposalName   string `json:"proposal_name,omitempty"`
+				EffectiveDate  string `json:"effective_date,omitempty"`
+				ProjectionType string `json:"projection_type,omitempty"`
+			} `json:"header"`
 			Projections []struct {
 				Entry struct {
-					Currency       string  `json:"currency"`
+					Description    string  `json:"description,omitempty"`
 					Type           string  `json:"type"`
-					ProposalName   string  `json:"proposal_name"`
-					EffectiveDate  string  `json:"effective_date"`
 					CategoryName   string  `json:"categoryName"`
 					Entity         string  `json:"entity"`
 					Department     string  `json:"department"`
@@ -908,6 +912,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Projection map[string]interface{} `json:"projection"`
 			} `json:"projections"`
 		}
+
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
 			return
@@ -944,6 +949,28 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
+		// prepare proposal from header (single proposal for all items)
+		proposalID := fmt.Sprintf("PROP-%06d", time.Now().UnixNano()%1000000)
+		propName := strings.TrimSpace(req.Header.ProposalName)
+		if propName == "" {
+			propName = "Imported Proposal"
+		}
+		currency := strings.TrimSpace(req.Header.Currency)
+		if currency == "" {
+			currency = "USD"
+		}
+		effDate := strings.TrimSpace(req.Header.EffectiveDate)
+		if effDate == "" {
+			effDate = time.Now().Format("2006-01-02")
+		}
+		recurrenceType := strings.TrimSpace(req.Header.ProjectionType)
+
+		insProp := `INSERT INTO cashflow_proposal (proposal_id, proposal_name, currency_code, effective_date, recurrence_type, status) VALUES ($1,$2,$3,$4,$5,$6)`
+		if _, err := tx.Exec(ctx, insProp, proposalID, propName, currency, effDate, recurrenceType, "Active"); err != nil {
+			api.RespondWithResult(w, false, "Failed to create proposal: "+err.Error())
+			return
+		}
+
 		created := 0
 
 		for idx, p := range req.Projections {
@@ -959,46 +986,44 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// verify master records: category, department, entity
+			// verify category exists
 			var tmp string
 			if err := tx.QueryRow(ctx, `SELECT category_name FROM mastercashflowcategory WHERE category_name=$1`, entry.CategoryName).Scan(&tmp); err != nil {
 				api.RespondWithResult(w, false, "Master category not found: "+entry.CategoryName)
 				return
 			}
-			if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_code=$1`, entry.Department).Scan(&tmp); err != nil {
-				api.RespondWithResult(w, false, "Master department not found: "+entry.Department)
-				return
-			}
-			if err := tx.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_name=$1`, entry.Entity).Scan(&tmp); err != nil {
-				api.RespondWithResult(w, false, "Master entity not found: "+entry.Entity)
-				return
-			}
 
-			// create proposal
-			proposalID := fmt.Sprintf("PROP-%06d", time.Now().UnixNano()%1000000)
-			propName := strings.TrimSpace(entry.ProposalName)
-			if propName == "" {
-				propName = fmt.Sprintf("%s - %s", entry.CategoryName, entry.Entity)
+			// optional entity/department: allow empty -> store NULL
+			var entityParam interface{}
+			var deptParam interface{}
+			if s := strings.TrimSpace(entry.Entity); s != "" {
+				entityParam = s
+				// verify entity exists if provided
+				if err := tx.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_name=$1`, s).Scan(&tmp); err != nil {
+					api.RespondWithResult(w, false, "Master entity not found: "+s)
+					return
+				}
+			} else {
+				entityParam = nil
 			}
-			currency := entry.Currency
-			if strings.TrimSpace(currency) == "" {
-				currency = "USD"
-			}
-			effDate := entry.EffectiveDate
-			if strings.TrimSpace(effDate) == "" {
-				effDate = time.Now().Format("2006-01-02")
-			}
-
-			insProp := `INSERT INTO cashflow_proposal (proposal_id, proposal_name, entity_name, department_id, currency_code, effective_date, recurrence_type, recurrence_frequency, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`
-			if _, err := tx.Exec(ctx, insProp, proposalID, propName, entry.Entity, entry.Department, currency, effDate, entry.Frequency, entry.Frequency, "Active"); err != nil {
-				api.RespondWithResult(w, false, "Failed to create proposal: "+err.Error())
-				return
+			if d := strings.TrimSpace(entry.Department); d != "" {
+				deptParam = d
+				if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_code=$1`, d).Scan(&tmp); err != nil {
+					api.RespondWithResult(w, false, "Master department not found: "+d)
+					return
+				}
+			} else {
+				deptParam = nil
 			}
 
 			// create item
 			itemID := fmt.Sprintf("ITEM-%06d", time.Now().UnixNano()%1000000)
-			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`
-			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, entry.CategoryName, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effDate, nil); err != nil {
+			description := strings.TrimSpace(entry.Description)
+			if description == "" {
+				description = entry.CategoryName
+			}
+			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date, entity_name, department_id, recurrence_frequency) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
+			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, description, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effDate, nil, entityParam, deptParam, entry.Frequency); err != nil {
 				api.RespondWithResult(w, false, "Failed to create item: "+err.Error())
 				return
 			}
@@ -1079,14 +1104,14 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// audit
-			auditQ := `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
-			if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy); err != nil {
-				api.RespondWithResult(w, false, "Failed to create audit: "+err.Error())
-				return
-			}
-
 			created++
+		}
+
+		// audit - one per proposal
+		auditQ := `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
+		if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy); err != nil {
+			api.RespondWithResult(w, false, "Failed to create audit: "+err.Error())
+			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1098,6 +1123,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithResult(w, true, fmt.Sprintf("Successfully imported %d projections", created))
 	}
 }
+
 
 func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1718,15 +1744,12 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		q := `
 			SELECT p.proposal_id,
-				   p.recurrence_type,
-				   p.proposal_name,
-				   p.effective_date,
-				   p.currency_code,
-				   p.entity_name,
-				   COALESCE(array_agg(DISTINCT cpi.category_id) FILTER (WHERE cpi.category_id IS NOT NULL), ARRAY[]::text[]) AS categories,
-				   a.processing_status
+			       p.recurrence_type,
+			       p.proposal_name,
+			       p.effective_date,
+			       p.currency_code,
+			       a.processing_status
 			FROM cashflow_proposal p
-			LEFT JOIN cashflow_proposal_item cpi ON p.proposal_id = cpi.proposal_id
 			LEFT JOIN LATERAL (
 				SELECT processing_status
 				FROM audit_action_cashflow_proposal a2
@@ -1734,7 +1757,6 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
-			GROUP BY p.proposal_id, p.recurrence_type, p.proposal_name, p.effective_date, p.currency_code, p.entity_name, a.processing_status
 			ORDER BY p.effective_date DESC, p.proposal_id
 		`
 
@@ -1747,30 +1769,23 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var proposalID, recurrenceType, proposalName, currencyCode, entityName, processingStatus string
+			var proposalID, recurrenceType, proposalName, currencyCode, processingStatus string
 			var effectiveDate time.Time
-			var categories []string
-			if err := rows.Scan(&proposalID, &recurrenceType, &proposalName, &effectiveDate, &currencyCode, &entityName, &categories, &processingStatus); err != nil {
+			if err := rows.Scan(&proposalID, &recurrenceType, &proposalName, &effectiveDate, &currencyCode, &processingStatus); err != nil {
 				continue
 			}
 
-			catName := ""
-			if len(categories) > 0 {
-				catName = strings.Join(categories, ",")
-			}
-
-			entry := map[string]interface{}{
+			// Build header matching cashflow_proposal table fields
+			header := map[string]interface{}{
 				"proposal_id":       proposalID,
 				"proposal_type":     recurrenceType,
 				"proposal_name":     proposalName,
 				"effective_date":    effectiveDate.Format("2006-01-02"),
 				"currency":          currencyCode,
-				"entity":            entityName,
-				"category_name":     catName,
 				"processing_status": processingStatus,
 			}
 
-			out = append(out, map[string]interface{}{"entry": entry})
+			out = append(out, header)
 		}
 
 		if err := rows.Err(); err != nil {
@@ -1779,6 +1794,6 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "projections": out})
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "header": out})
 	}
 }
