@@ -47,16 +47,11 @@ func StartCashService(db *sql.DB) {
 
 	
 	// Cash flow projection routes
-	mux.Handle("/cash/cashflow-projection/create", api.BusinessUnitMiddleware(db)(projection.CreateAndSyncCashFlowProposals(pgxPool)))
-	mux.Handle("/cash/cashflow-projection/all", api.BusinessUnitMiddleware(db)(projection.GetCashFlowProposals(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-approve", api.BusinessUnitMiddleware(db)(projection.BulkApproveCashFlowProposalActions(pgxPool)))
 
 	mux.Handle("/cash/cashflow-projection/make", api.BusinessUnitMiddleware(db)(projection.AbsorbFlattenedProjections(pgxPool)))
-	mux.Handle("/cash/cashflow-projection/get", api.BusinessUnitMiddleware(db)(projection.GetFlattenedProjections(pgxPool)))
-	mux.Handle("/cash/cashflow-projection/audit", api.BusinessUnitMiddleware(db)(projection.GetAuditActions(pgxPool)))
-
 	mux.Handle("/cash/cashflow-projection/get-projection", api.BusinessUnitMiddleware(db)(projection.GetProposalVersion(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/get-header", api.BusinessUnitMiddleware(db)(projection.GetProjectionsSummary(pgxPool)))
 
@@ -69,6 +64,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
