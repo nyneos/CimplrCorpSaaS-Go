@@ -1245,3 +1245,254 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "header": out})
 	}
 }
+
+func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// entry is defined here
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Header      map[string]interface{}   `json:"header"`
+			Projections []map[string]interface{} `json:"projections"`
+			UserID      string                   `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		// --- Update proposal header ---
+		proposalID := ifaceToString(req.Header["proposal_id"])
+		// Fetch current proposal
+		var curName, curCurrency, curType string
+		var curEffDate time.Time
+		err = tx.QueryRow(ctx, `SELECT proposal_name, currency_code, effective_date, recurrence_type FROM cashflow_proposal WHERE proposal_id=$1`, proposalID).Scan(&curName, &curCurrency, &curEffDate, &curType)
+		if err != nil {
+			api.RespondWithResult(w, false, "Proposal not found: "+err.Error())
+			return
+		}
+		// Update with old_* fields
+		// Handle effective_date and old_effective_date: pass nil if empty
+		var newEffDate, oldEffDate interface{}
+		effDateStr := ifaceToString(req.Header["effective_date"])
+		if effDateStr == "" {
+			newEffDate = nil
+		} else {
+			newEffDate = effDateStr
+		}
+		oldEffDateStr := curEffDate.Format("2006-01-02")
+		if oldEffDateStr == "" {
+			oldEffDate = nil
+		} else {
+			oldEffDate = oldEffDateStr
+		}
+		_, err = tx.Exec(ctx, `UPDATE cashflow_proposal SET old_proposal_name=$1, proposal_name=$2, old_currency_code=$3, currency_code=$4, old_effective_date=$5, effective_date=$6, old_recurrence_type=$7, recurrence_type=$8 WHERE proposal_id=$9`,
+			curName,
+			ifaceToString(req.Header["proposal_name"]),
+			curCurrency,
+			ifaceToString(req.Header["currency"]),
+			oldEffDate,
+			newEffDate,
+			curType,
+			ifaceToString(req.Header["projection_type"]),
+			proposalID,
+		)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to update proposal: "+err.Error())
+			return
+		}
+
+		// --- Update items ---
+		for _, proj := range req.Projections {
+			entry, ok := proj["entry"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			itemID := ifaceToString(entry["item_id"])
+			// Fetch current item
+			var curCat, curDept, curEnt, curType, curRecPat, curRecFreq, curDesc string
+			var curAmt float64
+			var curRec bool
+			var curStart time.Time
+			var curEnd *time.Time
+			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date FROM cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
+				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd)
+			if err != nil {
+				api.RespondWithResult(w, false, "Item not found: "+err.Error())
+				return
+			}
+			// Update with old_* fields
+			startStr := ifaceToString(entry["start_date"])
+			var oldEnd, newEnd, oldStart, newStart interface{}
+			if curEnd != nil {
+				oldEndStr := curEnd.Format("2006-01-02")
+				if oldEndStr == "" {
+					oldEnd = nil
+				} else {
+					oldEnd = oldEndStr
+				}
+			} else {
+				oldEnd = nil
+			}
+			// newStart assignment
+			if startStr == "" {
+				newStart = nil
+			} else {
+				newStart = startStr
+			}
+			oldStartStr := curStart.Format("2006-01-02")
+			if oldStartStr == "" {
+				oldStart = nil
+			} else {
+				oldStart = oldStartStr
+			}
+			endStr := ifaceToString(entry["end_date"])
+			if endStr == "" {
+				newEnd = nil
+			} else {
+				newEnd = endStr
+			}
+			if curEnd != nil {
+				oldEndStr := curEnd.Format("2006-01-02")
+				if oldEndStr == "" {
+					oldEnd = nil
+				} else {
+					oldEnd = oldEndStr
+				}
+			} else {
+				oldEnd = nil
+			}
+			_, err = tx.Exec(ctx, `UPDATE cashflow_proposal_item SET old_category_id=$1, category_id=$2, old_department_id=$3, department_id=$4, old_entity_name=$5, entity_name=$6, old_expected_amount=$7, expected_amount=$8, old_cashflow_type=$9, cashflow_type=$10, old_recurrence_pattern=$11, recurrence_pattern=$12, old_recurrence_frequency=$13, recurrence_frequency=$14, old_is_recurring=$15, is_recurring=$16, old_start_date=$17, start_date=$18, old_end_date=$19, end_date=$20, description=$21 WHERE item_id=$22`,
+				curCat,
+				ifaceToString(entry["categoryName"]),
+				curDept,
+				ifaceToString(entry["department"]),
+				curEnt,
+				ifaceToString(entry["entity"]),
+				curAmt,
+				ifaceToFloat(entry["expectedAmount"]),
+				curType,
+				ifaceToString(entry["type"]),
+				curRecPat,
+				ifaceToString(entry["recurrence_pattern"]),
+				curRecFreq,
+				ifaceToString(entry["frequency"]),
+				curRec,
+				entry["recurring"],
+				oldStart,
+				newStart,
+				oldEnd,
+				newEnd,
+				ifaceToString(entry["description"]),
+				itemID,
+			)
+			if err != nil {
+				api.RespondWithResult(w, false, "Failed to update item: "+err.Error())
+				return
+			}
+
+			// --- Monthly projections ---
+			// If expectedAmount changed, delete and insert new monthly rows
+			if ifaceToFloat(entry["expectedAmount"]) != ifaceToFloat(curAmt) {
+				_, err = tx.Exec(ctx, `DELETE FROM cashflow_projection_monthly WHERE item_id=$1`, itemID)
+				if err != nil {
+					api.RespondWithResult(w, false, "Failed to delete monthly projections: "+err.Error())
+					return
+				}
+				projMap, ok := proj["projection"].(map[string]interface{})
+				if ok {
+					for k, v := range projMap {
+						if k == "type" || k == "categoryName" || k == "item_id" {
+							continue
+						}
+						// Parse month-year key
+						parts := strings.Split(k, "-")
+						if len(parts) != 2 {
+							continue
+						}
+						monthStr, yearStr := parts[0], parts[1]
+						monthNum := monthNameToInt(monthStr)
+						yearNum, _ := strconv.Atoi("20" + yearStr)
+						amt := ifaceToFloat(v)
+						projectionID := fmt.Sprintf("PROJ-%d", time.Now().UnixNano())
+						_, err = tx.Exec(ctx, `INSERT INTO cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`,
+							projectionID, itemID, yearNum, monthNum, amt)
+						if err != nil {
+							api.RespondWithResult(w, false, "Failed to insert monthly projection: "+err.Error())
+							return
+						}
+					}
+				}
+			}
+		}
+
+		// --- Insert audit action ---
+		_, err = tx.Exec(ctx, `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now())`, proposalID, req.UserID)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to insert audit action: "+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "Failed to commit transaction: "+err.Error())
+			return
+		}
+
+		api.RespondWithResult(w, true, "Proposal updated and submitted for approval")
+	}
+}
+
+// Helper: convert month name to int
+func monthNameToInt(m string) int {
+	switch strings.ToLower(m) {
+	case "jan":
+		return 1
+	case "feb":
+		return 2
+	case "mar":
+		return 3
+	case "apr":
+		return 4
+	case "may":
+		return 5
+	case "jun":
+		return 6
+	case "jul":
+		return 7
+	case "aug":
+		return 8
+	case "sep":
+		return 9
+	case "oct":
+		return 10
+	case "nov":
+		return 11
+	case "dec":
+		return 12
+	}
+	return 0
+}
+
+// Helper: convert interface{} to float64
+func ifaceToFloat(v interface{}) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case int:
+		return float64(val)
+	case int64:
+		return float64(val)
+	case string:
+		f, _ := strconv.ParseFloat(val, 64)
+		return f
+	default:
+		return 0
+	}
+}
