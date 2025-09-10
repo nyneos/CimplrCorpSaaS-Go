@@ -1567,153 +1567,241 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// fetch proposal with latest audit processing_status
-		q := `
-		SELECT
-		    p.proposal_id,
-		    p.proposal_name,
-		    p.old_proposal_name,
-		    p.effective_date,
-		    p.old_effective_date,
-		    p.currency_code AS currency,
-		    p.old_currency_code,
-		    p.entity_name AS entity,
-		    p.old_entity_name,
-		    p.department_id AS department,
-		    p.old_department_id,
-		    p.recurrence_type AS proposal_type,
-		    p.old_recurrence_type,
-		    p.recurrence_frequency AS frequency,
-		    p.old_recurrence_frequency,
-		    i.expected_amount,
-		    i.old_expected_amount,
-		    i.is_recurring,
-		    i.old_is_recurring,
-		    i.cashflow_type AS category_type,
-		    i.old_cashflow_type,
-		    i.category_id AS category_name,
-		    i.old_category_id,
-		    a.processing_status
-		FROM cashflow_proposal p
-		LEFT JOIN cashflow_proposal_item i 
-		       ON p.proposal_id = i.proposal_id
-		LEFT JOIN audit_action_cashflow_proposal a 
-		       ON p.proposal_id = a.proposal_id
-		WHERE p.proposal_id = $1
-		ORDER BY a.requested_at DESC
-		LIMIT 1;
-		`
+		// 1) Fetch proposal header with latest audit processing_status
+		hq := `
+			SELECT
+				p.proposal_id,
+				p.proposal_name,
+				p.old_proposal_name,
+				p.effective_date,
+				p.old_effective_date,
+				p.currency_code AS currency,
+				p.old_currency_code,
+				p.recurrence_type AS proposal_type,
+				p.old_recurrence_type,
+				a.processing_status
+			FROM cashflow_proposal p
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM audit_action_cashflow_proposal a2
+				WHERE a2.proposal_id = p.proposal_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) a ON TRUE
+			WHERE p.proposal_id = $1
+			LIMIT 1;
+			`
 
 		var (
-			proposalID, proposalName, oldProposalName, effectiveDate, oldEffectiveDate,
-			currency, oldCurrency, entity, oldEntity, department, oldDepartment,
-			proposalType, oldProposalType, frequency, oldFrequency,
-			expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI,
-			categoryType, oldCategoryType, categoryName, oldCategoryName, processingStatus interface{}
+			h_proposalID, h_proposalName, h_oldProposalName, h_currency, h_oldCurrency, h_proposalType, h_oldProposalType, h_processingStatus interface{}
+			h_effectiveDate, h_oldEffectiveDate                                                                                               interface{}
 		)
 
-		row := pgxPool.QueryRow(ctx, q, req.ProposalID)
-		if err := row.Scan(&proposalID, &proposalName, &oldProposalName, &effectiveDate, &oldEffectiveDate,
-			&currency, &oldCurrency, &entity, &oldEntity, &department, &oldDepartment,
-			&proposalType, &oldProposalType, &frequency, &oldFrequency,
-			&expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI,
-			&categoryType, &oldCategoryType, &categoryName, &oldCategoryName, &processingStatus); err != nil {
+		if err := pgxPool.QueryRow(ctx, hq, req.ProposalID).Scan(
+			&h_proposalID,
+			&h_proposalName,
+			&h_oldProposalName,
+			&h_effectiveDate,
+			&h_oldEffectiveDate,
+			&h_currency,
+			&h_oldCurrency,
+			&h_proposalType,
+			&h_oldProposalType,
+			&h_processingStatus,
+		); err != nil {
 			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
 			return
 		}
 
-		// convert expected amounts
-		expectedAmount := 0.0
-		switch v := expectedAmountI.(type) {
-		case float64:
-			expectedAmount = v
-		case int64:
-			expectedAmount = float64(v)
-		case nil:
-			expectedAmount = 0
-		case string:
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				expectedAmount = f
+		header := map[string]interface{}{
+			"proposal_id":         ifaceToString(h_proposalID),
+			"proposal_name":       ifaceToString(h_proposalName),
+			"old_proposal_name":   ifaceToString(h_oldProposalName),
+			"effective_date":      ifaceToTimeString(h_effectiveDate),
+			"old_effective_date":  ifaceToTimeString(h_oldEffectiveDate),
+			"currency":            ifaceToString(h_currency),
+			"old_currency":        ifaceToString(h_oldCurrency),
+			"projection_type":     ifaceToString(h_proposalType),
+			"old_projection_type": ifaceToString(h_oldProposalType),
+			"processing_status":   ifaceToString(h_processingStatus),
+		}
+		// fetch audit actions for this proposal
+		actions := make([]map[string]interface{}, 0)
+		aq := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment FROM audit_action_cashflow_proposal WHERE proposal_id = $1 ORDER BY requested_at DESC`
+		if aRows, aErr := pgxPool.Query(ctx, aq, req.ProposalID); aErr == nil {
+			defer aRows.Close()
+			for aRows.Next() {
+				var (
+					actionID                                                                                                         string
+					proposalID, actionType, processingStatus, reason, requestedBy, requestedAt, checkerBy, checkerAt, checkerComment interface{}
+				)
+				if err := aRows.Scan(&actionID, &proposalID, &actionType, &processingStatus, &reason, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment); err != nil {
+					continue
+				}
+				a := map[string]interface{}{
+					"action_id":         ifaceToString(actionID),
+					"proposal_id":       ifaceToString(proposalID),
+					"action_type":       ifaceToString(actionType),
+					"processing_status": ifaceToString(processingStatus),
+					"reason":            ifaceToString(reason),
+					"requested_by":      ifaceToString(requestedBy),
+					"requested_at":      ifaceToTimeString(requestedAt),
+					"checker_by":        ifaceToString(checkerBy),
+					"checker_at":        ifaceToTimeString(checkerAt),
+					"checker_comment":   ifaceToString(checkerComment),
+				}
+				actions = append(actions, a)
 			}
-		default:
-			// try fmt.Sprint fallback
-			if s := fmt.Sprint(v); s != "<nil>" {
-				if f, err := strconv.ParseFloat(s, 64); err == nil {
+		}
+
+		// 2) Fetch items for the proposal
+		itemQ := `
+			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id, expected_amount, old_expected_amount, is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern, start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name, department_id, old_department_id, recurrence_frequency, old_recurrence_frequency
+			FROM cashflow_proposal_item
+			WHERE proposal_id = $1
+			ORDER BY created_at
+			`
+
+		rows, err := pgxPool.Query(ctx, itemQ, req.ProposalID)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to query proposal items: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		projections := make([]map[string]interface{}, 0)
+
+		// map for monthly projections per item
+		for rows.Next() {
+			var (
+				itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID, entityName, oldEntityName, departmentID, oldDepartmentID, recurrenceFrequency, oldRecurrenceFrequency interface{}
+				expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI, recurrencePattern, oldRecurrencePattern, startDate, oldStartDate, endDate, oldEndDate                            interface{}
+			)
+
+			if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency); err != nil {
+				continue
+			}
+
+			// convert amounts
+			expectedAmount := 0.0
+			switch v := expectedAmountI.(type) {
+			case float64:
+				expectedAmount = v
+			case int64:
+				expectedAmount = float64(v)
+			case nil:
+				expectedAmount = 0
+			case string:
+				if f, err := strconv.ParseFloat(v, 64); err == nil {
 					expectedAmount = f
 				}
 			}
-		}
-
-		oldExpectedAmount := 0.0
-		switch v := oldExpectedAmountI.(type) {
-		case float64:
-			oldExpectedAmount = v
-		case int64:
-			oldExpectedAmount = float64(v)
-		case nil:
-			oldExpectedAmount = 0
-		case string:
-			if f, err := strconv.ParseFloat(v, 64); err == nil {
-				oldExpectedAmount = f
-			}
-		default:
-			if s := fmt.Sprint(v); s != "<nil>" {
-				if f, err := strconv.ParseFloat(s, 64); err == nil {
+			oldExpectedAmount := 0.0
+			switch v := oldExpectedAmountI.(type) {
+			case float64:
+				oldExpectedAmount = v
+			case int64:
+				oldExpectedAmount = float64(v)
+			case nil:
+				oldExpectedAmount = 0
+			case string:
+				if f, err := strconv.ParseFloat(v, 64); err == nil {
 					oldExpectedAmount = f
 				}
 			}
-		}
 
-		// convert recurring flags
-		isRec := false
-		switch v := isRecurringI.(type) {
-		case bool:
-			isRec = v
-		case string:
-			if b, err := strconv.ParseBool(v); err == nil {
-				isRec = b
+			// recurring flags
+			isRec := false
+			switch v := isRecurringI.(type) {
+			case bool:
+				isRec = v
+			case string:
+				if b, err := strconv.ParseBool(v); err == nil {
+					isRec = b
+				}
 			}
-		}
-
-		oldIsRec := false
-		switch v := oldIsRecurringI.(type) {
-		case bool:
-			oldIsRec = v
-		case string:
-			if b, err := strconv.ParseBool(v); err == nil {
-				oldIsRec = b
+			oldIsRec := false
+			switch v := oldIsRecurringI.(type) {
+			case bool:
+				oldIsRec = v
+			case string:
+				if b, err := strconv.ParseBool(v); err == nil {
+					oldIsRec = b
+				}
 			}
+
+			// build entry
+			entry := map[string]interface{}{
+				"item_id":                ifaceToString(itemID),
+				"description":            ifaceToString(description),
+				"type":                   ifaceToString(cashflowType),
+				"old_type":               ifaceToString(oldCashflowType),
+				"categoryName":           ifaceToString(categoryID),
+				"old_categoryName":       ifaceToString(oldCategoryID),
+				"entity":                 ifaceToString(entityName),
+				"old_entity":             ifaceToString(oldEntityName),
+				"department":             ifaceToString(departmentID),
+				"old_department":         ifaceToString(oldDepartmentID),
+				"expectedAmount":         expectedAmount,
+				"old_expectedAmount":     oldExpectedAmount,
+				"recurring":              isRec,
+				"old_recurring":          oldIsRec,
+				"frequency":              ifaceToString(recurrenceFrequency),
+				"old_frequency":          ifaceToString(oldRecurrenceFrequency),
+				"recurrence_pattern":     ifaceToString(recurrencePattern),
+				"old_recurrence_pattern": ifaceToString(oldRecurrencePattern),
+				"start_date":             ifaceToTimeString(startDate),
+				"old_start_date":         ifaceToTimeString(oldStartDate),
+				"end_date":               ifaceToTimeString(endDate),
+				"old_end_date":           ifaceToTimeString(oldEndDate),
+			}
+
+			// fetch monthly projections for this item
+			monthlyQ := `SELECT year, month, projected_amount FROM cashflow_projection_monthly WHERE item_id = $1 ORDER BY year, month`
+			mrows, err := pgxPool.Query(ctx, monthlyQ, ifaceToString(itemID))
+			if err != nil {
+				// still append entry without monthly data
+				projections = append(projections, map[string]interface{}{"entry": entry, "projection": map[string]interface{}{"type": ifaceToString(cashflowType), "categoryName": ifaceToString(categoryID)}})
+				continue
+			}
+
+			projMap := map[string]interface{}{
+				"type":         ifaceToString(cashflowType),
+				"categoryName": ifaceToString(categoryID),
+				"item_id":      ifaceToString(itemID),
+			}
+			monthNames := map[int]string{1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun", 7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+			for mrows.Next() {
+				var year, month int
+				var amt float64
+				if err := mrows.Scan(&year, &month, &amt); err != nil {
+					continue
+				}
+				mn := monthNames[month]
+				key := fmt.Sprintf("%s-%02d", mn, year%100)
+				projMap[key] = amt
+			}
+			mrows.Close()
+
+			projections = append(projections, map[string]interface{}{"entry": entry, "projection": projMap})
 		}
 
-		projection := map[string]interface{}{
-			"proposal_id":         ifaceToString(proposalID),
-			"proposal_type":       ifaceToString(proposalType),
-			"old_proposal_type":   ifaceToString(oldProposalType),
-			"proposal_name":       ifaceToString(proposalName),
-			"old_proposal_name":   ifaceToString(oldProposalName),
-			"effective_date":      ifaceToTimeString(effectiveDate),
-			"old_effective_date":  ifaceToTimeString(oldEffectiveDate),
-			"currency":            ifaceToString(currency),
-			"old_currency":        ifaceToString(oldCurrency),
-			"entity":              ifaceToString(entity),
-			"old_entity":          ifaceToString(oldEntity),
-			"department":          ifaceToString(department),
-			"old_department":      ifaceToString(oldDepartment),
-			"processing_status":   ifaceToString(processingStatus),
-			"frequency":           ifaceToString(frequency),
-			"old_frequency":       ifaceToString(oldFrequency),
-			"category_name":       ifaceToString(categoryName),
-			"old_category_name":   ifaceToString(oldCategoryName),
-			"category_type":       ifaceToString(categoryType),
-			"old_category_type":   ifaceToString(oldCategoryType),
-			"expected_amount":     expectedAmount,
-			"old_expected_amount": oldExpectedAmount,
-			"recurring":           strconv.FormatBool(isRec),
-			"old_recurring":       strconv.FormatBool(oldIsRec),
+		if err := rows.Err(); err != nil {
+			api.RespondWithResult(w, false, "Error reading items: "+err.Error())
+			return
+		}
+
+		// build response
+		resp := map[string]interface{}{
+			"success":     true,
+			"header":      header,
+			"projections": projections,
+			"actions":     actions,
+			// "user_id":     req.UserID,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "projection": projection})
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
