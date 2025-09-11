@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/dash/cfo"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
+	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	reports "CimplrCorpSaas/api/dash/reports"
@@ -95,7 +96,10 @@ func StartDashService(db *sql.DB) {
 
 	// Projection Pipeline Dashboard 
 	mux.Handle("/dash/projection-pipeline/kpi", api.BusinessUnitMiddleware(db)(projectiondash.GetProjectionPipelineKPI(pgxPool)))
-	mux.Handle("/dash/projection-pipeline/detailed", api.BusinessUnitMiddleware(db)(projectiondash.GetDetailedPipeline(pgxPool)))	
+	mux.Handle("/dash/projection-pipeline/detailed", api.BusinessUnitMiddleware(db)(projectiondash.GetDetailedPipeline(pgxPool)))
+
+	// Payables / Receivables dashboard rows
+	mux.Handle("/dash/payrec/rows", api.BusinessUnitMiddleware(db)(payablereceivabledash.GetPayablesReceivables(pgxPool)))	
 
 	log.Println("Dashboard Service started on :4143")
 	err = http.ListenAndServe(":4143", mux)
@@ -103,4 +107,5 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
