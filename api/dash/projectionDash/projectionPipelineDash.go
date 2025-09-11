@@ -236,3 +236,126 @@ func GetDetailedPipeline(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
 	}
 }
+
+
+// ProjectionByEntityOutput shapes
+type StatusAmount struct {
+	Amount float64 `json:"amount"`
+	Status string  `json:"status"`
+}
+
+type DepartmentBucket struct {
+	Name   string         `json:"name"`
+	Status []StatusAmount `json:"status"`
+}
+
+type EntityBucket struct {
+	Entity      string             `json:"entity"`
+	Departments []DepartmentBucket `json:"departments"`
+}
+
+// GetProjectionByEntity aggregates expected amounts (abs) converted to USD grouped by entity->department->processing_status
+func GetProjectionByEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	spotRates := map[string]float64{
+		"USD": 1.0,
+		"INR": 0.0117,
+		"EUR": 1.09,
+		"GBP": 1.28,
+		"AUD": 0.68,
+		"CAD": 0.75,
+		"CHF": 1.1,
+		"CNY": 0.14,
+		"JPY": 0.0067,
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithResult(w, false, "Method not allowed")
+			return
+		}
+		var body struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
+			api.RespondWithResult(w, false, "Missing or invalid user_id in body")
+			return
+		}
+
+		ctx := context.Background()
+
+		q := `
+			SELECT COALESCE(i.entity_name, '') AS entity_name,
+				   COALESCE(i.department_id, '') AS department_id,
+				   i.expected_amount,
+				   p.currency_code,
+				   (SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY a.requested_at DESC LIMIT 1) AS processing_status
+			FROM cashflow_proposal p
+			JOIN cashflow_proposal_item i ON i.proposal_id = p.proposal_id
+		`
+
+		rows, err := pgxPool.Query(ctx, q)
+		if err != nil {
+			api.RespondWithResult(w, false, "DB error: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		// nested map: entity -> department -> status -> amount
+		data := map[string]map[string]map[string]float64{}
+
+		for rows.Next() {
+			var entity, dept, currency, status *string
+			var amt float64
+			if err := rows.Scan(&entity, &dept, &amt, &currency, &status); err != nil {
+				continue
+			}
+			e := ""
+			if entity != nil {
+				e = *entity
+			}
+			d := ""
+			if dept != nil {
+				d = *dept
+			}
+			c := "USD"
+			if currency != nil && *currency != "" {
+				c = *currency
+			}
+			s := "UNKNOWN"
+			if status != nil && *status != "" {
+				s = *status
+			}
+
+			rate := 1.0
+			if r, ok := spotRates[c]; ok && r > 0 {
+				rate = r
+			}
+			converted := math.Abs(amt) * rate
+
+			if _, ok := data[e]; !ok {
+				data[e] = map[string]map[string]float64{}
+			}
+			if _, ok := data[e][d]; !ok {
+				data[e][d] = map[string]float64{}
+			}
+			data[e][d][s] += converted
+		}
+
+		// build output
+		out := make([]EntityBucket, 0, len(data))
+		for entity, deps := range data {
+			dbs := make([]DepartmentBucket, 0, len(deps))
+			for dept, sts := range deps {
+				sa := make([]StatusAmount, 0, len(sts))
+				for st, amount := range sts {
+					sa = append(sa, StatusAmount{Amount: amount, Status: st})
+				}
+				dbs = append(dbs, DepartmentBucket{Name: dept, Status: sa})
+			}
+			out = append(out, EntityBucket{Entity: entity, Departments: dbs})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": out})
+	}
+}
