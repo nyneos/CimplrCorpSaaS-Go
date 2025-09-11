@@ -242,17 +242,53 @@ func GetAllBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					var requestedAtPtr, checkerAtPtr *time.Time
 					if err := auditRows.Scan(&accID, &processingStatusPtr, &requestedByPtr, &requestedAtPtr,
 						&actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr); err == nil {
-						auditMap[accID] = map[string]interface{}{
-							"processing_status": api.GetAuditInfo("", requestedByPtr, requestedAtPtr).CreatedBy,
-							"action_type":       api.GetAuditInfo("", actionTypePtr, nil).CreatedBy,
-							"action_id":         api.GetAuditInfo("", actionIDPtr, nil).CreatedBy,
-							"requested_by":      api.GetAuditInfo("", requestedByPtr, requestedAtPtr).CreatedBy,
-							"requested_at":      api.GetAuditInfo("", requestedByPtr, requestedAtPtr).CreatedAt,
-							"checker_by":        api.GetAuditInfo("", checkerByPtr, checkerAtPtr).CreatedBy,
-							"checker_at":        api.GetAuditInfo("", checkerByPtr, checkerAtPtr).CreatedAt,
-							"checker_comment":   api.GetAuditInfo("", checkerCommentPtr, nil).CreatedBy,
-							"reason":            api.GetAuditInfo("", reasonPtr, nil).CreatedBy,
+								// Safely dereference pointers and format times
+						proc := ""
+						if processingStatusPtr != nil {
+							proc = *processingStatusPtr
 						}
+						actType := ""
+						if actionTypePtr != nil {
+							actType = *actionTypePtr
+						}
+						actID := ""
+						if actionIDPtr != nil {
+							actID = *actionIDPtr
+						}
+						reqBy := ""
+						if requestedByPtr != nil {
+							reqBy = *requestedByPtr
+						}
+						reqAt := ""
+						if requestedAtPtr != nil {
+							reqAt = requestedAtPtr.Format("2006-01-02 15:04:05")
+						}
+						chkBy := ""
+						if checkerByPtr != nil {
+							chkBy = *checkerByPtr
+						}
+						chkAt := ""
+						if checkerAtPtr != nil {
+							chkAt = checkerAtPtr.Format("2006-01-02 15:04:05")
+						}
+						chkComment := ""
+						if checkerCommentPtr != nil {
+							chkComment = *checkerCommentPtr
+						}
+						reason := ""
+						if reasonPtr != nil {
+							reason = *reasonPtr
+						}
+						auditMap[accID] = map[string]interface{}{
+							"processing_status": proc,
+							"action_type":       actType,
+							"action_id":         actID,
+							"requested_by":      reqBy,
+							"requested_at":      reqAt,
+							"checker_by":        chkBy,
+							"checker_at":        chkAt,
+							"checker_comment":   chkComment,
+							"reason":            reason,
 					}
 				}
 			}
