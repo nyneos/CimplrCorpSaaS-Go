@@ -637,11 +637,9 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var isDeleted bool
 			var processingStatus interface{}
 			if err := rows.Scan(&id, &name, &ctype, &isDeleted, &processingStatus); err == nil {
-				// hide when deleted and latest processing_status is APPROVED
-				if isDeleted && strings.ToUpper(ifaceToString(processingStatus)) == "APPROVED" {
-					continue
+				if !isDeleted && strings.ToUpper(ifaceToString(processingStatus)) == "APPROVED" {
+					out = append(out, map[string]interface{}{"category_id": ifaceToString(id), "category_name": ifaceToString(name), "category_type": ifaceToString(ctype)})
 				}
-				out = append(out, map[string]interface{}{"category_id": ifaceToString(id), "category_name": ifaceToString(name), "category_type": ifaceToString(ctype)})
 			}
 		}
 
