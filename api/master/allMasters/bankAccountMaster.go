@@ -289,6 +289,7 @@ func GetAllBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							"checker_at":        chkAt,
 							"checker_comment":   chkComment,
 							"reason":            reason,
+						}
 					}
 				}
 			}
