@@ -316,12 +316,14 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var (
 				categoryID, actionIDI string
-				categoryNameI, categoryTypeI, parentCategoryIDI,
-				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI,
-				oldCategoryNameI, oldCategoryTypeI, oldParentCategoryIDI, oldDefaultMappingI,
-				oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI,
-				categoryLevelI, oldCategoryLevelI, processingStatusI,
-				requestedByI, requestedAtI, actionTypeI,
+				categoryNameI, categoryTypeI interface{}
+				parentCategoryIDI *string
+				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI interface{}
+				oldCategoryNameI, oldCategoryTypeI interface{}
+				oldParentCategoryIDI *string
+				oldDefaultMappingI, oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI interface{}
+				categoryLevelI, oldCategoryLevelI, processingStatusI interface{}
+				requestedByI, requestedAtI, actionTypeI interface{}
 				checkerByI, checkerAtI, checkerCommentI, reasonI interface{}
 				isTopLevelCategory, isDeleted bool
 			)
@@ -346,7 +348,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"category_id":            categoryID,
 					"category_name":          ifaceToString(categoryNameI),
 					"category_type":          ifaceToString(categoryTypeI),
-					"parent_category_id":     ifaceToString(parentCategoryIDI),
+					"parent_category_id":     func() string { if parentCategoryIDI == nil { return "" }; return *parentCategoryIDI }(),
 					"default_mapping":        ifaceToString(defaultMappingI),
 					"cashflow_nature":        ifaceToString(cashflowNatureI),
 					"usage_flag":             ifaceToString(usageFlagI),
@@ -354,7 +356,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"status":                 ifaceToString(statusI),
 					"old_category_name":      ifaceToString(oldCategoryNameI),
 					"old_category_type":      ifaceToString(oldCategoryTypeI),
-					"old_parent_category_id": ifaceToString(oldParentCategoryIDI),
+					"old_parent_category_id": func() string { if oldParentCategoryIDI == nil { return "" }; return *oldParentCategoryIDI }(),
 					"old_default_mapping":    ifaceToString(oldDefaultMappingI),
 					"old_cashflow_nature":    ifaceToString(oldCashflowNatureI),
 					"old_usage_flag":         ifaceToString(oldUsageFlagI),
@@ -368,7 +370,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"requested_by":           ifaceToString(requestedByI),
 					"requested_at":           ifaceToTimeString(requestedAtI),
 					"action_type":            ifaceToString(actionTypeI),
-					"action_id":              actionIDI,
+					"action_id":              ifaceToString(actionIDI),
 					"checker_by":             ifaceToString(checkerByI),
 					"checker_at":             ifaceToTimeString(checkerAtI),
 					"checker_comment":        ifaceToString(checkerCommentI),
@@ -502,18 +504,22 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-
-		// Step 6: build final hierarchy
+		childIDs := map[string]bool{}
+		for _, children := range parentMap {
+			for _, cid := range children {
+				if entityMap[cid] != nil {
+					childIDs[cid] = true
+				}
+			}
+		}
 		rowsOut := []map[string]interface{}{}
 		for _, id := range typeIDs {
 			if entity, ok := entityMap[id]; ok {
-				parentID := ifaceToString(entity["data"].(map[string]interface{})["parent_category_id"])
-				if parentID == "" || entityMap[parentID] == nil {
+				if !childIDs[id] {
 					rowsOut = append(rowsOut, entity)
 				}
 			}
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rowsOut)
 	}
@@ -706,7 +712,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var (
 					existingCategoryNameI     interface{}
 					existingCategoryTypeI     interface{}
-					existingParentCategoryIDI interface{}
+					existingParentCategoryIDI *string
 					existingDefaultMappingI   interface{}
 					existingCashflowNatureI   interface{}
 					existingUsageFlagI        interface{}
@@ -741,7 +747,11 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						newParent := fmt.Sprint(v)
 						parentProvided = newParent
 						sets = append(sets, fmt.Sprintf("parent_category_id=$%d, old_parent_category_id=$%d", pos, pos+1))
-						args = append(args, newParent, ifaceToString(existingParentCategoryIDI))
+						oldParentVal := ""
+						if existingParentCategoryIDI != nil {
+							oldParentVal = *existingParentCategoryIDI
+						}
+						args = append(args, newParent, oldParentVal)
 						pos += 2
 					case "default_mapping":
 						sets = append(sets, fmt.Sprintf("default_mapping=$%d, old_default_mapping=$%d", pos, pos+1))
