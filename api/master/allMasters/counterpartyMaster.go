@@ -412,7 +412,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}()
 				sel := `SELECT system_counterparty_id, counterparty_name, counterparty_code, legal_name, counterparty_type, tax_id, address, default_cashflow_category, default_payment_terms, internal_risk_rating, treasury_rm, status FROM mastercounterparty WHERE counterparty_id=$1 FOR UPDATE`
 				var existingSysID, existingName, existingCode, existingLegal, existingType, existingTax, existingAddr, existingDefCat, existingDefTerms, existingRisk, existingRM, existingStatus interface{}
-				if err := tx.QueryRow(ctx, sel, row.CounterpartyID).Scan(&existingName, &existingCode, &existingType, &existingDefCat, &existingDefTerms, &existingRisk, &existingRM, &existingStatus); err != nil {
+				if err := tx.QueryRow(ctx, sel, row.CounterpartyID).Scan(&existingSysID, &existingName, &existingCode, &existingLegal, &existingType, &existingTax, &existingAddr, &existingDefCat, &existingDefTerms, &existingRisk, &existingRM, &existingStatus); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "counterparty_id": row.CounterpartyID})
 					return
 				}
@@ -451,9 +451,26 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						args = append(args, fmt.Sprint(v), ifaceToString(existingType))
 						pos += 2
 					case "default_cashflow_category":
-						sets = append(sets, fmt.Sprintf("default_cashflow_category=$%d, old_default_cashflow_category=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDefCat))
-						pos += 2
+						vStr := strings.TrimSpace(fmt.Sprint(v))
+						if vStr == "" {
+							sets = append(sets, fmt.Sprintf("default_cashflow_category=$%d, old_default_cashflow_category=$%d", pos, pos+1))
+							args = append(args, nil, ifaceToString(existingDefCat))
+							pos += 2
+						} else {
+							// validate category exists in mastercashflowcategory
+							var exists bool
+							if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM mastercashflowcategory WHERE category_name=$1)", vStr).Scan(&exists); err != nil {
+								results = append(results, map[string]interface{}{"success": false, "error": "failed to validate default_cashflow_category: " + err.Error(), "counterparty_id": row.CounterpartyID})
+								return
+							}
+							if !exists {
+								results = append(results, map[string]interface{}{"success": false, "error": "invalid default_cashflow_category: " + vStr, "counterparty_id": row.CounterpartyID})
+								return
+							}
+							sets = append(sets, fmt.Sprintf("default_cashflow_category=$%d, old_default_cashflow_category=$%d", pos, pos+1))
+							args = append(args, vStr, ifaceToString(existingDefCat))
+							pos += 2
+						}
 					case "default_payment_terms":
 						sets = append(sets, fmt.Sprintf("default_payment_terms=$%d, old_default_payment_terms=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingDefTerms))
