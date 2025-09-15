@@ -2,6 +2,7 @@ package cash
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/cash/bankbalances"
 	"CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
@@ -56,6 +57,13 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/cashflow-projection/get-header", api.BusinessUnitMiddleware(db)(projection.GetProjectionsSummary(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/update", api.BusinessUnitMiddleware(db)(projection.UpdateCashFlowProposal(pgxPool)))
 
+	//bank balance 
+	mux.Handle("/cash/bank-balances/create", api.BusinessUnitMiddleware(db)(bankbalances.CreateBankBalance(pgxPool)))
+	mux.Handle("/cash/bank-balances/bulk-approve", api.BusinessUnitMiddleware(db)(bankbalances.BulkApproveBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/bulk-reject", api.BusinessUnitMiddleware(db)(bankbalances.BulkRejectBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/bulk-delete", api.BusinessUnitMiddleware(db)(bankbalances.BulkRequestDeleteBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/all", api.BusinessUnitMiddleware(db)(bankbalances.GetBankBalances(pgxPool)))
+
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))
 	})
@@ -65,6 +73,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
