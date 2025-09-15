@@ -19,6 +19,38 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+func normalizeOrderType(orderType string) string {
+	// Normalize input
+	orderType = strings.TrimSpace(orderType)
+	orderType = strings.ToLower(orderType)
+
+	// Define mappings
+	buyAliases := map[string]bool{
+		"buy":      true,
+		"purchase": true,
+		"b":        true, // optional shorthand
+	}
+
+	sellAliases := map[string]bool{
+		"sell": true,
+		"sale": true,
+		"s":    true, // optional shorthand
+	}
+
+	// Check mapping
+	if buyAliases[orderType] {
+		return "Buy"
+	}
+	if sellAliases[orderType] {
+		return "Sell"
+	}
+
+	// Unknown type — keep original formatting
+	// You may want to return "" or "Invalid" instead if you want strict validation
+	return orderType
+}
+
+
 // Handler: AddForwardBookingManualEntry
 func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -343,6 +375,9 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				if !contains(buNames, entityLevel0) {
 					invalidRows = append(invalidRows, map[string]interface{}{"row": i + 1, "entity": entityLevel0})
 					continue
+				}
+				if ot, ok := r["order_type"].(string); ok {
+					r["order_type"] = normalizeOrderType(ot)
 				}
 				query := `INSERT INTO forward_bookings (
 					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
