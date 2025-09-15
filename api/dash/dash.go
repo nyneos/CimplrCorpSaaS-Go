@@ -37,10 +37,10 @@ func StartDashService(db *sql.DB) {
 	mux.HandleFunc("/dash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Dashboard Service"))
 	})
-	mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
-	mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
-	mux.Handle("/dash/bank-balances/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBalancesFromManual(pgxPool)))
-	mux.Handle("/dash/bank-balances/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))
+	// mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
+	// mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
+	mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBalancesFromManual(pgxPool)))
+	mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))
 
 	// Business Unit/Currency Exposure Dashboard
 	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))
@@ -112,6 +112,7 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
 
 
