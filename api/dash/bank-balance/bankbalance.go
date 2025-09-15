@@ -212,14 +212,16 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		// latest approved balances: join bank_balances_manual to latest auditactionbankbalances per balance_id with processing_status='APPROVED'
 		rows, err := pgxPool.Query(ctx, `
-			SELECT mb.bank_name, mb.account_no, mb.currency_code, SUM(mb.balance_amount) AS balance_account_ccy
+			SELECT  e.entity_name, mb.bank_name, mb.account_no, mb.currency_code, SUM(mb.balance_amount) AS balance_account_ccy
 			FROM bank_balances_manual mb
+			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
+			JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			JOIN (
 				SELECT DISTINCT ON (balance_id) balance_id, processing_status
 				FROM auditactionbankbalances
 				ORDER BY balance_id, requested_at DESC
 			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
-			GROUP BY mb.bank_name, mb.account_no, mb.currency_code;
+			GROUP BY e.entity_name,mb.bank_name, mb.account_no, mb.currency_code;
 		`)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
@@ -229,9 +231,9 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		resp := []map[string]interface{}{}
 		for rows.Next() {
-			var bankName, accountNo, currency string
+			var entity, bankName, accountNo, currency string
 			var balance float64
-			if err := rows.Scan(&bankName, &accountNo, &currency, &balance); err != nil {
+			if err := rows.Scan(&entity, &bankName, &accountNo, &currency, &balance); err != nil {
 				continue
 			}
 			spot := spotRates[currency]
@@ -243,6 +245,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bal = math.Round(bal*100) / 100
 			eq := math.Round((bal*spot)*100) / 100
 			resp = append(resp, map[string]interface{}{
+				"entity":            entity,
 				"bank":              bankName,
 				"accountNumber":     accountNo,
 				"currency":          currency,
