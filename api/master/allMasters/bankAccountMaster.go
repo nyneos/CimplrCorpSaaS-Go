@@ -1331,3 +1331,86 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
 	}
 }
+
+
+func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// optional user_id accepted but not required
+		_ = json.NewDecoder(r.Body).Decode(new(struct {
+			UserID string `json:"user_id"`
+		}))
+
+		query := `
+			SELECT
+				b.bank_name,
+				a.account_number,
+				a.iban,
+				a.account_currency,
+				a.account_nickname
+			FROM masterbankaccount a
+			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM auditactionbankaccount aa
+				WHERE aa.account_id = a.account_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) astatus ON TRUE
+			WHERE astatus.processing_status = 'APPROVED' AND a.account_status = 'Active'
+		`
+
+		rows, err := pgxPool.Query(r.Context(), query)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var bankName *string
+			var accountNumber string
+			var iban *string
+			var currency *string
+			var nickname *string
+			if err := rows.Scan(&bankName, &accountNumber, &iban, &currency, &nickname); err != nil {
+				// attempt alternative scan order in case of column ordering differences
+				// but prefer continue to avoid complexity
+				continue
+			}
+			out = append(out, map[string]interface{}{
+				"bank_name": func() string {
+					if bankName != nil {
+						return *bankName
+					}
+					return ""
+				}(),
+				"account_no": accountNumber,
+				"iban": func() string {
+					if iban != nil {
+						return *iban
+					}
+					return ""
+				}(),
+				"currency_code": func() string {
+					if currency != nil {
+						return *currency
+					}
+					return ""
+				}(),
+				"nickname": func() string {
+					if nickname != nil {
+						return *nickname
+					}
+					return ""
+				}(),
+			})
+		}
+
+		if out == nil {
+			out = make([]map[string]interface{}, 0)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+	}
+}
