@@ -115,6 +115,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/bankaccount/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveBankAccountAuditActions(pgxPool)))
 	mux.Handle("/master/bankaccount/names", api.BusinessUnitMiddleware(db)(allMaster.GetBankNamesWithIDForAccount(pgxPool)))
 	mux.Handle("/master/bankaccount/approved-with-entity", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedBankAccountsWithBankEntity(pgxPool)))
+	mux.Handle("/master/bankaccount/pre-populate", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedBankAccountsSimple(pgxPool)))
 
 	// Entity Master routes
 	mux.Handle("/master/entity/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncEntities(db)))
@@ -142,3 +143,4 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
