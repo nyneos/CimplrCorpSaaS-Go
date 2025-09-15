@@ -687,3 +687,166 @@ func nullifyFloat(f *float64) interface{} {
 	}
 	return *f
 }
+// UpdateBankBalance updates allowed fields for a specific balance_id, copies existing values into old_* columns and creates an EDIT audit action (PENDING_EDIT_APPROVAL)
+func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID    string                 `json:"user_id"`
+			BalanceID string                 `json:"balance_id"`
+			Fields    map[string]interface{} `json:"fields"`
+			Reason    string                 `json:"reason,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "invalid json: "+err.Error())
+			return
+		}
+		if req.UserID == "" || req.BalanceID == "" {
+			api.RespondWithResult(w, false, "user_id and balance_id required")
+			return
+		}
+
+		// resolve requested_by name
+		requestedBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				requestedBy = s.Name
+				break
+			}
+		}
+		if requestedBy == "" {
+			api.RespondWithResult(w, false, "invalid user_id or session")
+			return
+		}
+
+		ctx := r.Context()
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
+			return
+		}
+		defer func() {
+			if tx != nil {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		// fetch current row FOR UPDATE
+		sel := `SELECT bank_name, account_no, iban, currency_code, nickname, country, as_of_date, as_of_time, balance_type, balance_amount, statement_type, source_channel, opening_balance, total_credits, total_debits, closing_balance FROM bank_balances_manual WHERE balance_id=$1 FOR UPDATE`
+		var (
+			curBankName, curAccountNo, curIban, curCurrency, curNickname, curCountry sqlNullString
+			curAsOfDate                                                              sqlNullTime
+			curAsOfTime, curBalanceType, curStatementType, curSourceChannel          sqlNullString
+			curBalanceAmount, curOpening, curCredits, curDebits, curClosing          sqlNullFloat
+		)
+		if err := tx.QueryRow(ctx, sel, req.BalanceID).Scan(
+			&curBankName, &curAccountNo, &curIban, &curCurrency, &curNickname, &curCountry,
+			&curAsOfDate, &curAsOfTime, &curBalanceType, &curBalanceAmount, &curStatementType, &curSourceChannel,
+			&curOpening, &curCredits, &curDebits, &curClosing,
+		); err != nil {
+			api.RespondWithResult(w, false, "failed to fetch existing balance: "+err.Error())
+			return
+		}
+
+		// build update sets and args; when updating a field, set old_<field>=current_value
+		sets := []string{}
+		args := []interface{}{}
+		pos := 1
+
+		// helper to append set and old set
+		addStrField := func(col, oldcol string, val interface{}, cur sqlNullString) {
+			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			args = append(args, nullifyEmpty(fmt.Sprint(val)))
+			args = append(args, cur.ValueOrZero())
+			pos += 2
+		}
+		addFloatField := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
+			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			// val may be float64 or nil
+			if val == nil {
+				args = append(args, nil)
+			} else {
+				args = append(args, val)
+			}
+			if cur.Valid {
+				args = append(args, cur.F)
+			} else {
+				args = append(args, nil)
+			}
+			pos += 2
+		}
+
+		// Allowed fields mapping
+		for k, v := range req.Fields {
+			switch k {
+			case "bank_name":
+				addStrField("bank_name", "old_bank_name", v, curBankName)
+			case "account_no":
+				addStrField("account_no", "old_account_no", v, curAccountNo)
+			case "iban":
+				addStrField("iban", "old_iban", v, curIban)
+			case "currency_code":
+				addStrField("currency_code", "old_currency_code", v, curCurrency)
+			case "nickname":
+				addStrField("nickname", "old_nickname", v, curNickname)
+			case "country":
+				addStrField("country", "old_country", v, curCountry)
+			case "as_of_date":
+				// date string
+				sets = append(sets, fmt.Sprintf("as_of_date=$%d, old_as_of_date=$%d", pos, pos+1))
+				args = append(args, nullifyEmpty(fmt.Sprint(v)))
+				args = append(args, curAsOfDate.ValueOrZero())
+				pos += 2
+			case "as_of_time":
+				addStrField("as_of_time", "old_as_of_time", v, curAsOfTime)
+			case "balance_type":
+				addStrField("balance_type", "old_balance_type", v, curBalanceType)
+			case "balance_amount":
+				addFloatField("balance_amount", "old_balance_amount", v, curBalanceAmount)
+			case "statement_type":
+				addStrField("statement_type", "old_statement_type", v, curStatementType)
+			case "source_channel":
+				addStrField("source_channel", "old_source_channel", v, curSourceChannel)
+			case "opening_balance":
+				addFloatField("opening_balance", "old_opening_balance", v, curOpening)
+			case "total_credits":
+				addFloatField("total_credits", "old_total_credits", v, curCredits)
+			case "total_debits":
+				addFloatField("total_debits", "old_total_debits", v, curDebits)
+			case "closing_balance":
+				addFloatField("closing_balance", "old_closing_balance", v, curClosing)
+			default:
+				// ignore unknown fields
+			}
+		}
+
+		if len(sets) == 0 {
+			api.RespondWithResult(w, false, "no valid fields to update")
+			return
+		}
+
+		// build update query
+		q := "UPDATE bank_balances_manual SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE balance_id=$%d", pos)
+		args = append(args, req.BalanceID)
+
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			api.RespondWithResult(w, false, "failed to update balance: "+err.Error())
+			return
+		}
+
+		// insert audit action
+		auditQ := `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())`
+		if _, err := tx.Exec(ctx, auditQ, req.BalanceID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+			api.RespondWithResult(w, false, "failed to create audit action: "+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit: "+err.Error())
+			return
+		}
+		// clear tx rollback defer
+		tx = nil
+
+		api.RespondWithResult(w, true, req.BalanceID)
+	}
+}
