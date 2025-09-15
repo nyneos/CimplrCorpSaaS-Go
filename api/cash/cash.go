@@ -63,6 +63,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-balances/bulk-reject", api.BusinessUnitMiddleware(db)(bankbalances.BulkRejectBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/bulk-delete", api.BusinessUnitMiddleware(db)(bankbalances.BulkRequestDeleteBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/all", api.BusinessUnitMiddleware(db)(bankbalances.GetBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/upload", api.BusinessUnitMiddleware(db)(bankbalances.UploadBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/update", api.BusinessUnitMiddleware(db)(bankbalances.UpdateBankBalance(pgxPool)))
 
 	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello from Cash Service"))
@@ -73,6 +75,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
