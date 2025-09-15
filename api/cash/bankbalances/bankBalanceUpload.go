@@ -189,7 +189,6 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								}
 							}
 						} else {
-							// empty strings should be NULL in DB for non-string-required columns
 							if cell == "" {
 								vals = append(vals, nil)
 							} else {
@@ -199,10 +198,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					copyRows[i] = vals
 				}
-
-				// use normalized header names as staging columns
 				columns := append([]string{"upload_batch_id"}, headersNorm...)
-				// stage using CopyFrom
 				if _, err = pgxPool.CopyFrom(
 					ctx,
 					pgx.Identifier{"input_bank_balance_table"},
@@ -211,15 +207,11 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				); err != nil {
 					continue
 				}
-
-				// Begin transaction to move staged rows into final table using mapping
 				tx, err := pgxPool.Begin(ctx)
 				if err != nil {
 					api.RespondWithError(w, http.StatusInternalServerError, "failed to start db transaction: "+err.Error())
 					return
 				}
-
-				// read mapping
 				mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bank_balance`)
 				if err != nil {
 					tx.Rollback(ctx)
@@ -237,18 +229,14 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				mapRows.Close()
 
-				// build select expressions and target column list
 				var selectExprs []string
 				var tgtCols []string
 				for _, hn := range headersNorm {
 					if tgt, ok := mapping[hn]; ok && tgt != "" {
-						// use s.<hn> as <tgt>
 						selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", hn, tgt))
 						tgtCols = append(tgtCols, tgt)
 					}
 				}
-
-				// ensure balance_id exists in target columns; if not, generate it
 				hasBalanceID := false
 				for _, c := range tgtCols {
 					if c == "balance_id" {
@@ -262,13 +250,11 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				if len(tgtCols) == 0 || len(selectExprs) == 0 {
-					// nothing to insert -> rollback and return error
 					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusBadRequest, "no mapped columns found for upload file")
 					return
 				}
 
-				// ensure staged rows exist for this batch
 				var stagedCount int
 				if err := tx.QueryRow(ctx, `SELECT count(*) FROM input_bank_balance_table WHERE upload_batch_id = $1`, batchID).Scan(&stagedCount); err != nil {
 					tx.Rollback(ctx)
@@ -306,16 +292,12 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				rows.Close()
-
-				// If nothing inserted, rollback and return concise error
 				if len(insertedIDs) == 0 {
 					tx.Rollback(ctx)
 					msg := fmt.Sprintf("staged rows present for batch %s but no rows inserted into final table (staged=%d)", batchID, stagedCount)
 					api.RespondWithError(w, http.StatusInternalServerError, msg)
 					return
 				}
-
-				// create audit entries for each inserted balance
 				for _, bid := range insertedIDs {
 					if _, err := tx.Exec(ctx, `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, bid, userName); err != nil {
 						tx.Rollback(ctx)
