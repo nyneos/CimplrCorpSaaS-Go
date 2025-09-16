@@ -535,17 +535,13 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				},
 				"children": []interface{}{},
 			}
-			if isDeleted {
-				deletedIds[entityID] = true
-				// hide when deleted and processing_status is APPROVED
-				if strings.ToUpper(func() string {
-					if processingStatusPtr != nil {
-						return *processingStatusPtr
-					}
-					return ""
-				}()) == "APPROVED" {
-					hideIds[entityID] = true
+			if isDeleted && strings.ToUpper(func() string {
+				if processingStatusPtr != nil {
+					return *processingStatusPtr
 				}
+				return ""
+			}()) == "APPROVED" {
+				hideIds[entityID] = true
 			}
 		}
 		// Fetch relationships
