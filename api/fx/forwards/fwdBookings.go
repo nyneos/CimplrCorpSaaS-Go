@@ -13,11 +13,38 @@ import (
 
 	"fmt"
 	"strconv"
-
+	"time"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
+
+func NormalizeDate(dateStr string) string {
+    dateStr = strings.TrimSpace(dateStr)
+    if dateStr == "" {
+        return ""
+    }
+
+    layouts := []string{
+        "2006-01-02",
+        "02-01-2006",
+        "2006/01/02",
+        "02/01/2006",
+        "2006.01.02",
+        "02.01.2006",
+        time.RFC3339,
+        "2006-01-02 15:04:05",
+        "2006-01-02T15:04:05",
+    }
+
+    for _, l := range layouts {
+        if t, err := time.Parse(l, dateStr); err == nil {
+            return t.Format("2006-01-02")
+        }
+    }
+
+    return ""
+}
 
 func normalizeOrderType(orderType string) string {
 	// Normalize input
