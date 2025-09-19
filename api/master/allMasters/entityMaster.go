@@ -46,11 +46,109 @@ type EntityMasterBulkRequest struct {
 }
 
 // Combined handler: creates entities and syncs relationships
+// func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		var req struct {
+// 			UserID   string                  `json:"user_id"`
+// 			Entities []EntityMasterRequest   `json:"entities"`
+// 		}
+// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+// 			w.WriteHeader(http.StatusBadRequest)
+// 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid JSON"})
+// 			return
+// 		}
+// 		// Get created_by from session
+// 		createdBy := ""
+// 		sessions := auth.GetActiveSessions()
+// 		for _, s := range sessions {
+// 			if s.UserID == req.UserID {
+// 				createdBy = s.Email
+// 				break
+// 			}
+// 		}
+// 		// if createdBy == "" {
+// 		// 	w.WriteHeader(http.StatusBadRequest)
+// 		// 	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid user_id or session"})
+// 		// 	return
+// 		// }
+// 		// Insert entities
+// 		entityIDs := make(map[string]string) // name -> id
+// 		inserted := []map[string]interface{}{}
+// 		for _, entity := range req.Entities {
+// 			entityId := "E" + strings.ToUpper(uuid.New().String()[:8])
+// 			query := `INSERT INTO masterentity (
+// 				entity_id, entity_name, parentname, is_top_level_entity, address, contact_phone, contact_email, registration_number, pan_gst, legal_entity_identifier, tax_identification_number, default_currency, associated_business_units, reporting_currency, unique_identifier, legal_entity_type, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, is_deleted, approval_status, level, comments, company_name, created_by, updated_by, created_at
+// 			) VALUES (
+// 				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, now()
+// 			) RETURNING entity_id`
+// 			var newEntityID string
+// 			err := db.QueryRow(query,
+// 				entityId,
+// 				entity.EntityName,
+// 				entity.ParentName,
+// 				entity.IsTopLevelEntity,
+// 				entity.Address,
+// 				entity.ContactPhone,
+// 				entity.ContactEmail,
+// 				entity.RegistrationNumber,
+// 				entity.PanGST,
+// 				entity.LegalEntityIdentifier,
+// 				entity.TaxIdentificationNumber,
+// 				entity.DefaultCurrency,
+// 				entity.AssociatedBusinessUnits,
+// 				entity.ReportingCurrency,
+// 				entity.UniqueIdentifier,
+// 				entity.LegalEntityType,
+// 				entity.FxTradingAuthority,
+// 				entity.InternalFxTradingLimit,
+// 				entity.AssociatedTreasuryContact,
+// 				false, // is_deleted
+// 				"Pending", // approval_status
+// 				entity.Level,
+// 				entity.Comments,
+// 				entity.CompanyName,
+// 				createdBy,
+// 				createdBy,
+// 			).Scan(&newEntityID)
+// 			if err != nil {
+// 				inserted = append(inserted, map[string]interface{}{"success": false, "error": err.Error(), "entity_name": entity.EntityName})
+// 				continue
+// 			}
+// 			entityIDs[entity.EntityName] = newEntityID
+// 			inserted = append(inserted, map[string]interface{}{"success": true, "entity_id": newEntityID, "entity_name": entity.EntityName})
+// 		}
+// 		// Sync relationships
+// 		relationshipsAdded := []map[string]interface{}{}
+// 		for _, entity := range req.Entities {
+// 			if entity.ParentName == "" || entityIDs[entity.ParentName] == "" || entityIDs[entity.EntityName] == "" {
+// 				continue
+// 			}
+// 			parentId := entityIDs[entity.ParentName]
+// 			childId := entityIDs[entity.EntityName]
+// 			var exists int
+// 			err := db.QueryRow(`SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, childId).Scan(&exists)
+// 			if err == sql.ErrNoRows {
+// 				_, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentId, childId, "Active")
+// 				if err == nil {
+// 					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"parent_id": parentId, "child_id": childId})
+// 				}
+// 			}
+// 		}
+// 		w.Header().Set("Content-Type", "application/json")
+// 		json.NewEncoder(w).Encode(map[string]interface{}{
+// 			"success": true,
+// 			"entities": inserted,
+// 			"relationshipsAdded": len(relationshipsAdded),
+// 			"details": relationshipsAdded,
+// 		})
+// 	}
+// }
+
 func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string                  `json:"user_id"`
-			Entities []EntityMasterRequest   `json:"entities"`
+			UserID   string                `json:"user_id"`
+			Entities []EntityMasterRequest `json:"entities"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -102,7 +200,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				entity.FxTradingAuthority,
 				entity.InternalFxTradingLimit,
 				entity.AssociatedTreasuryContact,
-				false, // is_deleted
+				false,     // is_deleted
 				"Pending", // approval_status
 				entity.Level,
 				entity.Comments,
@@ -117,32 +215,51 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 			entityIDs[entity.EntityName] = newEntityID
 			inserted = append(inserted, map[string]interface{}{"success": true, "entity_id": newEntityID, "entity_name": entity.EntityName})
 		}
-		// Sync relationships
+		// Sync relationships: use entity_id for parent/child. Parent may be created in this batch
+		// (entityIDs map) or may already exist in DB (lookup by name). Skip if we can't resolve IDs.
 		relationshipsAdded := []map[string]interface{}{}
 		for _, entity := range req.Entities {
-			if entity.ParentName == "" || entityIDs[entity.ParentName] == "" || entityIDs[entity.EntityName] == "" {
+			if entity.ParentName == "" {
 				continue
 			}
-			parentId := entityIDs[entity.ParentName]
-			childId := entityIDs[entity.EntityName]
+
+			// Resolve parent entity_id: prefer inserted ID, otherwise lookup by name
+			var parentEntityID string
+			if id, ok := entityIDs[entity.ParentName]; ok && id != "" {
+				parentEntityID = id
+			} else {
+				// try to find existing parent by name
+				if err := db.QueryRow(`SELECT entity_id FROM masterentity WHERE entity_name = $1 LIMIT 1`, entity.ParentName).Scan(&parentEntityID); err != nil {
+					// parent not found, skip relationship
+					continue
+				}
+			}
+
+			// Resolve child entity_id (must have been created successfully in this batch)
+			childEntityID := entityIDs[entity.EntityName]
+			if childEntityID == "" {
+				// child insert failed earlier, skip
+				continue
+			}
+
 			var exists int
-			err := db.QueryRow(`SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentId, childId).Scan(&exists)
+			err := db.QueryRow(`SELECT 1 FROM entityrelationships WHERE parent_entity_id = $1 AND child_entity_id = $2`, parentEntityID, childEntityID).Scan(&exists)
 			if err == sql.ErrNoRows {
-				_, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentId, childId, "Active")
-				if err == nil {
-					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"parent_id": parentId, "child_id": childId})
+				if _, err := db.Exec(`INSERT INTO entityrelationships (parent_entity_id, child_entity_id, status) VALUES ($1, $2, $3)`, parentEntityID, childEntityID, "Active"); err == nil {
+					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"parent_id": parentEntityID, "child_id": childEntityID})
 				}
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"entities": inserted,
+			"success":            true,
+			"entities":           inserted,
 			"relationshipsAdded": len(relationshipsAdded),
-			"details": relationshipsAdded,
+			"details":            relationshipsAdded,
 		})
 	}
 }
+
 
 // GET handler to return entity hierarchy, excluding deleted entities and their descendants
 func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
