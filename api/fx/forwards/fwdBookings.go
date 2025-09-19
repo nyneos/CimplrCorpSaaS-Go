@@ -36,6 +36,14 @@ func NormalizeDate(dateStr string) string {
         "2006-01-02 15:04:05",
         "2006-01-02T15:04:05",
     }
+	
+	    layouts = append(layouts, []string{
+        "02-Jan-2006",
+        "02-Jan-06",
+        "2-Jan-2006",
+        "2-Jan-06",
+        "02-Jan-2006 15:04:05",
+    }...)
 
     for _, l := range layouts {
         if t, err := time.Parse(l, dateStr); err == nil {
@@ -406,17 +414,34 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				if ot, ok := r["order_type"].(string); ok {
 					r["order_type"] = normalizeOrderType(ot)
 				}
-					// Normalize any date-like fields in the uploaded row
+					
 					for k, v := range r {
+						// Normalize dates
 						if isDateColumn(k) {
 							if v == nil || v == "" {
 								r[k] = nil
+								continue
+							}
+							norm := api.NormalizeDate(fmt.Sprint(v))
+							if norm == "" {
+								r[k] = nil
 							} else {
-								norm := NormalizeDate(fmt.Sprint(v))
-								if norm == "" {
-									r[k] = nil
+								r[k] = norm
+							}
+							continue
+						}
+
+						lower := strings.ToLower(k)
+						if lower == "booking_amount" || lower == "actual_value_base_currency" || lower == "spot_rate" || lower == "forward_points" || lower == "bank_margin" || lower == "total_rate" || lower == "value_quote_currency" || lower == "intervening_rate_quote_to_local" || lower == "value_local_currency" {
+							s := fmt.Sprint(v)
+							s = strings.TrimSpace(s)
+							if s == "" {
+								r[k] = nil
+							} else {
+								if f, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64); err == nil {
+									r[k] = f
 								} else {
-									r[k] = norm
+									r[k] = v
 								}
 							}
 						}
