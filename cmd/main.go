@@ -32,7 +32,7 @@ func InitDB() (*sql.DB, error) {
 
 func main() {
 	// Load .env for local dev (ignored on Render)
-	_ = godotenv.Load("../.env")
+	_ = godotenv.Load()
 
 	// Initialize DB for Auth
 	db, err := InitDB()
@@ -78,3 +78,4 @@ func main() {
 		log.Fatal("failed to stop:", err)
 	}
 }
+
