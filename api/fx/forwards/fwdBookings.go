@@ -412,7 +412,7 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 							if v == nil || v == "" {
 								r[k] = nil
 							} else {
-								norm := api.NormalizeDate(fmt.Sprint(v))
+								norm := NormalizeDate(fmt.Sprint(v))
 								if norm == "" {
 									r[k] = nil
 								} else {
@@ -575,7 +575,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 					if v == nil || v == "" {
 						r["bank_confirmation_date"] = nil
 					} else {
-						n := api.NormalizeDate(fmt.Sprint(v))
+						n := NormalizeDate(fmt.Sprint(v))
 						if n == "" {
 							r["bank_confirmation_date"] = nil
 						} else {
@@ -770,7 +770,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 							if value == nil || value == "" {
 								insertObj[col] = nil
 							} else {
-								norm := api.NormalizeDate(fmt.Sprint(value))
+								norm := NormalizeDate(fmt.Sprint(value))
 								if norm == "" {
 									insertObj[col] = nil
 								} else {
@@ -857,7 +857,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 							if v == nil || v == "" {
 								booking[k] = nil
 							} else {
-								norm := api.NormalizeDate(fmt.Sprint(v))
+								norm := NormalizeDate(fmt.Sprint(v))
 								if norm == "" {
 									booking[k] = nil
 								} else {
