@@ -33,6 +33,19 @@ func InitDB() (*sql.DB, error) {
 func main() {
 	// Load .env for local dev (ignored on Render)
 	_ = godotenv.Load("/.env")
+	// Debug: Print important env vars (avoid printing password directly!)
+fmt.Println("ENV CHECK:")
+fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
+fmt.Println("  DB_HOST:", os.Getenv("DB_HOST"))
+fmt.Println("  DB_PORT:", os.Getenv("DB_PORT"))
+fmt.Println("  DB_NAME:", os.Getenv("DB_NAME"))
+
+// Optional: show if DB_PASSWORD is set (without leaking it)
+if os.Getenv("DB_PASSWORD") != "" {
+    fmt.Println("  DB_PASSWORD: [SET]")
+} else {
+    fmt.Println("  DB_PASSWORD: [NOT SET!]")
+}
 
 	// Initialize DB for Auth
 	db, err := InitDB()
@@ -78,5 +91,6 @@ func main() {
 		log.Fatal("failed to stop:", err)
 	}
 }
+
 
 
