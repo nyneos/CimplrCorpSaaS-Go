@@ -5,14 +5,14 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"sync"
+	"fmt"
+	"io"
 	"time"
 )
 
@@ -37,16 +37,16 @@ func extractClientIP(r *http.Request) string {
 }
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		h(w, r)
-	}
+    return func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Access-Control-Allow-Origin", "*")
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        if r.Method == "OPTIONS" {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+        h(w, r)
+    }
 }
 
 func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +58,6 @@ func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sessions)
 }
-
 // GetSessionByUserIDHandler returns session info for a specific user_id
 func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -156,6 +155,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"message":"logout successful"}`))
 }
 
+
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -188,72 +188,39 @@ func createReverseProxy(target string) http.HandlerFunc {
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code and response body
-// type responseWriter struct {
-// 	http.ResponseWriter
-// 	statusCode int
-// 	body       bytes.Buffer
-// }
-
-// func (rw *responseWriter) WriteHeader(code int) {
-// 	rw.statusCode = code
-// 	rw.ResponseWriter.WriteHeader(code)
-// }
-
-//	func (rw *responseWriter) Write(b []byte) (int, error) {
-//		rw.body.Write(b)
-//		return rw.ResponseWriter.Write(b)
-//	}
-
-type responseCapture struct {
+type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
-	buf        bytes.Buffer
-	cap        int
+	body       bytes.Buffer
 }
 
-func (rc *responseCapture) WriteHeader(code int) {
-	rc.statusCode = code
-	rc.ResponseWriter.WriteHeader(code)
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 
-func (rc *responseCapture) Write(b []byte) (int, error) {
-	// write through to underlying writer first
-	n, err := rc.ResponseWriter.Write(b)
-	if rc.cap > 0 && rc.buf.Len() < rc.cap {
-		// write only up to cap bytes into buffer
-		toWrite := b
-		if remaining := rc.cap - rc.buf.Len(); len(b) > remaining {
-			toWrite = b[:remaining]
-		}
-		rc.buf.Write(toWrite)
-	}
-	return n, err
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	rw.body.Write(b)
+	return rw.ResponseWriter.Write(b)
 }
-
 // LoggingMiddleware is a middleware for logging HTTP requests
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		// capture response written by downstream handlers (limit 64KB)
-		rc := &responseCapture{ResponseWriter: w, statusCode: 200, cap: 64 * 1024}
+		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
 		var body string
 		if r.Method == "POST" || r.Method == "PUT" {
 			b, _ := io.ReadAll(r.Body)
 			body = string(b)
 			r.Body = io.NopCloser(bytes.NewBuffer(b))
 		}
-		next.ServeHTTP(rc, r)
+		next.ServeHTTP(rw, r)
 		duration := time.Since(start)
 		clientIP := extractClientIP(r)
 		userAgent := r.Header.Get("User-Agent")
-		// prepare captured response body (truncate if larger than cap)
-		respBody := rc.buf.String()
-		if rc.buf.Len() >= rc.cap {
-			respBody = respBody + "...(truncated)"
-		}
 		fmt.Printf(
-			"[REQ] %s %s | Status: %d | IP: %s | UA: %s | Duration: %v | ReqBody: %s | RespBodySize: %d | RespBody: %s\n",
-			r.Method, r.URL.Path, rc.statusCode, clientIP, userAgent, duration, body, rc.buf.Len(), respBody,
+			"[REQ] %s %s | Status: %d | IP: %s | UA: %s | Duration: %v | Body: %s | RespSize: %d\n",
+			r.Method, r.URL.Path, rw.statusCode, clientIP, userAgent, duration, body, rw.body.Len(),
 		)
 	})
 }
