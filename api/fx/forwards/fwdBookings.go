@@ -379,6 +379,21 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				if ot, ok := r["order_type"].(string); ok {
 					r["order_type"] = normalizeOrderType(ot)
 				}
+					// Normalize any date-like fields in the uploaded row
+					for k, v := range r {
+						if isDateColumn(k) {
+							if v == nil || v == "" {
+								r[k] = nil
+							} else {
+								norm := api.NormalizeDate(fmt.Sprint(v))
+								if norm == "" {
+									r[k] = nil
+								} else {
+									r[k] = norm
+								}
+							}
+						}
+					}
 				query := `INSERT INTO forward_bookings (
 					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
 				) VALUES (
@@ -527,6 +542,19 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 				if !contains(buNames, entityLevel0) {
 					invalidRows = append(invalidRows, map[string]interface{}{"row": i + 1, "entity": entityLevel0})
 					continue
+				}
+				// Normalize bank_confirmation_date if provided
+				if v, ok := r["bank_confirmation_date"]; ok {
+					if v == nil || v == "" {
+						r["bank_confirmation_date"] = nil
+					} else {
+						n := api.NormalizeDate(fmt.Sprint(v))
+						if n == "" {
+							r["bank_confirmation_date"] = nil
+						} else {
+							r["bank_confirmation_date"] = n
+						}
+					}
 				}
 				updateQuery := `UPDATE forward_bookings SET
 					status = 'Confirmed',
@@ -710,9 +738,18 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 							continue
 						}
 						value := r[col]
-						// For date columns, set NULL if empty
-						if isDateColumn(col) && (value == nil || value == "") {
-							insertObj[col] = nil
+						// For date columns, normalize and set NULL if empty/invalid
+						if isDateColumn(col) {
+							if value == nil || value == "" {
+								insertObj[col] = nil
+							} else {
+								norm := api.NormalizeDate(fmt.Sprint(value))
+								if norm == "" {
+									insertObj[col] = nil
+								} else {
+									insertObj[col] = norm
+								}
+							}
 						} else if value != nil {
 							insertObj[col] = value
 						}
@@ -787,6 +824,22 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					booking["booking_amount"] = getStringOrDefault(booking["booking_amount"], r["booking_amount"])
 					booking["total_rate"] = getStringOrDefault(booking["total_rate"], r["total_rate"])
 					booking["processing_status"] = "pending"
+					// Normalize date fields in booking before insert
+					for k, v := range booking {
+						if isDateColumn(k) {
+							if v == nil || v == "" {
+								booking[k] = nil
+							} else {
+								norm := api.NormalizeDate(fmt.Sprint(v))
+								if norm == "" {
+									booking[k] = nil
+								} else {
+									booking[k] = norm
+								}
+							}
+						}
+					}
+
 					// Build dynamic insert
 					fields := []string{}
 					placeholders := []string{}
