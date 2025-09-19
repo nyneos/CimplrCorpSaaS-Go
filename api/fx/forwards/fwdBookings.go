@@ -422,7 +422,7 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 								r[k] = nil
 								continue
 							}
-							norm := api.NormalizeDate(fmt.Sprint(v))
+							norm := NormalizeDate(fmt.Sprint(v))
 							if norm == "" {
 								r[k] = nil
 							} else {
