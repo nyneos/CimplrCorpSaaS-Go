@@ -80,3 +80,16 @@ func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
 	}
 }
+
+func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]interface{}{"success": success}
+	if !success && errMsg != "" {
+		resp["error"] = errMsg
+	}
+	if payload != nil {
+		// use a conventional key `rows` for list payloads
+		resp["rows"] = payload
+	}
+	json.NewEncoder(w).Encode(resp)
+}
