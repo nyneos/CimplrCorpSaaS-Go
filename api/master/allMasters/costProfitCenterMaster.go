@@ -24,12 +24,30 @@ type CostProfitCenterRequest struct {
 	Status     string `json:"status"`
 	Source     string `json:"source"`
 	ErpRef     string `json:"erp_ref"`
+	// New optional fields
+	DefaultCurrency    string `json:"default_currency,omitempty"`
+	Owner              string `json:"owner,omitempty"`
+	OwnerEmail         string `json:"owner_email,omitempty"`
+	EffectiveFrom      string `json:"effective_from,omitempty"` // Date in "YYYY-MM-DD" format
+	EffectiveTo        string `json:"effective_to,omitempty"`   // Date in "YYYY-MM-DD" format
+	Tags               string `json:"tags,omitempty"`
+	ExternalCode       string `json:"external_code,omitempty"`
+	Segment            string `json:"segment,omitempty"`
+	SAPKOKRS           string `json:"sap_kokrs,omitempty"`
+	SAPBUKRS           string `json:"sap_bukrs,omitempty"`
+	SAPKOSTL           string `json:"sap_kostl,omitempty"`
+	SAPPRCTR           string `json:"sap_prctr,omitempty"`
+	OracleLedger       string `json:"oracle_ledger,omitempty"`
+	OracleDept         string `json:"oracle_dept,omitempty"`
+	OracleProfitCenter string `json:"oracle_profit_center,omitempty"`
+	TallyLedgerName    string `json:"tally_ledger_name,omitempty"`
+	TallyLedgerGroup   string `json:"tally_ledger_group,omitempty"`
+	SageDeptCode       string `json:"sage_department_code,omitempty"`
+	SageCostCentreCode string `json:"sage_cost_centre_code,omitempty"`
 	// optional: if caller wants to override computed values
 	CentreLevel      int  `json:"centre_level,omitempty"`
 	IsTopLevelCentre bool `json:"is_top_level_centre,omitempty"`
 }
-
-// CreateAndSyncCostProfitCenters creates centres and synchronously creates parent-child relationships
 func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -37,9 +55,11 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []CostProfitCenterRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithResult(w, false, "Invalid JSON")
 			return
 		}
+
+		// Find createdBy from active sessions
 		createdBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -61,17 +81,20 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// compute parent id and level
-			var parentID interface{}
+			// Compute parent id and level
+			var parentID *string
 			centreLevel := rrow.CentreLevel
 			isTop := rrow.IsTopLevelCentre
 			if strings.TrimSpace(rrow.ParentCode) != "" {
 				var pid string
 				var plevel int
 				if err := pgxPool.QueryRow(ctx, `SELECT centre_id, centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, rrow.ParentCode).Scan(&pid, &plevel); err == nil {
-					parentID = pid
+					parentID = &pid
 					centreLevel = plevel + 1
 					isTop = false
+				} else {
+					created = append(created, map[string]interface{}{"success": false, "error": "parent_centre_code not found", "centre_code": rrow.CentreCode})
+					continue
 				}
 			}
 
@@ -84,46 +107,122 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			func() {
 				defer func() {
 					if !committed {
-						tx.Rollback(ctx)
+						if rerr := tx.Rollback(ctx); rerr != nil {
+							log.Println("rollback failed:", rerr)
+						}
 					}
 				}()
-				var id string
-				ins := `INSERT INTO mastercostprofitcenter (centre_code, centre_name, centre_type, parent_centre_id, entity_name, status, source, erp_ref, centre_level, is_top_level_centre) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING centre_id`
-				if err := tx.QueryRow(ctx, ins, rrow.CentreCode, rrow.CentreName, rrow.CentreType, parentID, rrow.EntityCode, rrow.Status, rrow.Source, rrow.ErpRef, centreLevel, isTop).Scan(&id); err != nil {
+
+				// Generate CPC ID using DB sequence
+				var centreID string
+				if err := tx.QueryRow(ctx, `SELECT 'CPC-' || LPAD(nextval('cost_profit_center_seq')::text, 6, '0')`).Scan(&centreID); err != nil {
+					created = append(created, map[string]interface{}{"success": false, "error": "failed to generate centre_id: " + err.Error()})
+					return
+				}
+
+				// Parse dates
+				var effectiveFrom, effectiveTo interface{}
+				if rrow.EffectiveFrom != "" {
+					if norm := api.NormalizeDate(rrow.EffectiveFrom); norm != "" {
+						if tval, err := time.Parse("2006-01-02", norm); err == nil {
+							effectiveFrom = tval
+						}
+					}
+				}
+				if rrow.EffectiveTo != "" {
+					if norm := api.NormalizeDate(rrow.EffectiveTo); norm != "" {
+						if tval, err := time.Parse("2006-01-02", norm); err == nil {
+							effectiveTo = tval
+						}
+					}
+				}
+
+				// Insert CPC
+				ins := `INSERT INTO mastercostprofitcenter (
+					centre_id, centre_code, centre_name, centre_type, parent_centre_id, 
+					entity_name, status, source, erp_type, centre_level, is_top_level_centre,
+					default_currency, owner, owner_email, effective_from, effective_to, 
+					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
+					oracle_ledger, oracle_dept, oracle_profit_center, tally_ledger_name, 
+					tally_ledger_group, sage_department_code, sage_cost_centre_code
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`
+
+				_, err := tx.Exec(ctx, ins,
+					centreID,
+					rrow.CentreCode,
+					rrow.CentreName,
+					rrow.CentreType,
+					parentID,
+					rrow.EntityCode,
+					rrow.Status,
+					rrow.Source,
+					rrow.ErpRef,
+					centreLevel,
+					isTop,
+					rrow.DefaultCurrency,
+					rrow.Owner,
+					rrow.OwnerEmail,
+					effectiveFrom,
+					effectiveTo,
+					rrow.Tags,
+					rrow.ExternalCode,
+					rrow.Segment,
+					rrow.SAPKOKRS,
+					rrow.SAPBUKRS,
+					rrow.SAPKOSTL,
+					rrow.SAPPRCTR,
+					rrow.OracleLedger,
+					rrow.OracleDept,
+					rrow.OracleProfitCenter,
+					rrow.TallyLedgerName,
+					rrow.TallyLedgerGroup,
+					rrow.SageDeptCode,
+					rrow.SageCostCentreCode,
+				)
+				if err != nil {
 					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
 					return
 				}
 
-				// create relationship row if parent provided
+				// Insert relationship if parent exists
 				if parentID != nil {
-					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM costprofitcenterrelationships WHERE parent_centre_id=$1 AND child_centre_id=$2)`
-					if _, err := tx.Exec(ctx, relQ, parentID, id); err != nil {
+					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id)
+                             VALUES ($1, $2)
+                             ON CONFLICT (parent_centre_id, child_centre_id) DO NOTHING`
+					if _, err := tx.Exec(ctx, relQ, *parentID, centreID); err != nil {
 						created = append(created, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "centre_code": rrow.CentreCode})
 						return
 					}
 				}
 
-				auditQ := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
-				if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "centre_id": id})
+				// Insert audit
+				auditQ := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
+                           VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
+				if _, err := tx.Exec(ctx, auditQ, centreID, nil, createdBy); err != nil {
+					created = append(created, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "centre_id": centreID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "centre_id": id})
+					created = append(created, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "centre_id": centreID})
 					return
 				}
 				committed = true
-				created = append(created, map[string]interface{}{"success": true, "centre_id": id, "centre_code": rrow.CentreCode, "centre_level": centreLevel, "is_top_level_centre": isTop})
+
+				created = append(created, map[string]interface{}{
+					"success":             true,
+					"centre_id":           centreID,
+					"centre_code":         rrow.CentreCode,
+					"centre_level":        centreLevel,
+					"is_top_level_centre": isTop,
+				})
 			}()
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(created)
+		overall := api.IsBulkSuccess(created)
+		api.RespondWithPayload(w, overall, "", created)
 	}
 }
-
-// UpdateAndSyncCostProfitCenters updates centres and synchronously updates relationships when parent changes
 func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -154,12 +253,12 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.CentreID) == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "missing centre_id"})
+				results = append(results, map[string]interface{}{"success": false, "error": "missing centre_id", "centre_id": row.CentreID})
 				continue
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error(), "centre_id": row.CentreID})
 				continue
 			}
 			committed := false
@@ -174,8 +273,30 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var existingCode, existingName, existingType, existingParentID, existingEntity, existingStatus, existingSource, existingErp interface{}
 				var existingLevel interface{}
 				var existingIsTop interface{}
-				qSel := `SELECT centre_code, centre_name, centre_type, parent_centre_id, entity_name, status, source, erp_ref, centre_level, is_top_level_centre FROM mastercostprofitcenter WHERE centre_id = $1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, qSel, row.CentreID).Scan(&existingCode, &existingName, &existingType, &existingParentID, &existingEntity, &existingStatus, &existingSource, &existingErp, &existingLevel, &existingIsTop); err != nil {
+				var existingCurrency, existingOwner, existingOwnerEmail interface{}
+				var existingEffFrom, existingEffTo, existingTags, existingExtCode, existingSegment interface{}
+				var existingSAPKOKRS, existingSAPBUKRS, existingSAPKOSTL, existingSAPPRCTR interface{}
+				var existingOracleLedger, existingOracleDept, existingOraclePC interface{}
+				var existingTallyName, existingTallyGroup interface{}
+				var existingSageDept, existingSageCost interface{}
+
+				qSel := `SELECT 
+					centre_code, centre_name, centre_type, parent_centre_id, entity_name, 
+					status, source, erp_type, centre_level, is_top_level_centre,
+					default_currency, owner, owner_email, effective_from, effective_to,
+					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
+					oracle_ledger, oracle_dept, oracle_profit_center, tally_ledger_name,
+					tally_ledger_group, sage_department_code, sage_cost_centre_code
+				FROM mastercostprofitcenter WHERE centre_id = $1 FOR UPDATE`
+
+				if err := tx.QueryRow(ctx, qSel, row.CentreID).Scan(
+					&existingCode, &existingName, &existingType, &existingParentID, &existingEntity,
+					&existingStatus, &existingSource, &existingErp, &existingLevel, &existingIsTop,
+					&existingCurrency, &existingOwner, &existingOwnerEmail, &existingEffFrom, &existingEffTo,
+					&existingTags, &existingExtCode, &existingSegment, &existingSAPKOKRS, &existingSAPBUKRS,
+					&existingSAPKOSTL, &existingSAPPRCTR, &existingOracleLedger, &existingOracleDept,
+					&existingOraclePC, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost,
+				); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "centre_id": row.CentreID})
 					return
 				}
@@ -214,8 +335,8 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("source=$%d, old_source=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingSource))
 						pos += 2
-					case "erp_ref":
-						sets = append(sets, fmt.Sprintf("erp_ref=$%d, old_erp_ref=$%d", pos, pos+1))
+					case "erp_ref", "erp_type":
+						sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingErp))
 						pos += 2
 					case "centre_level":
@@ -249,6 +370,100 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("parent_centre_id=$%d, old_parent_centre_id=$%d, centre_level=$%d, old_centre_level=$%d, is_top_level_centre=$%d", pos, pos+1, pos+2, pos+3, pos+4))
 						args = append(args, newParentID, ifaceToString(existingParentID), computedLevel, existingLevel, computedIsTop)
 						pos += 5
+
+					// New fields - add old_* values for tracking changes
+					case "default_currency":
+						sets = append(sets, fmt.Sprintf("default_currency=$%d, old_default_currency=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingCurrency))
+						pos += 2
+					case "owner":
+						sets = append(sets, fmt.Sprintf("owner=$%d, old_owner=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOwner))
+						pos += 2
+					case "owner_email":
+						sets = append(sets, fmt.Sprintf("owner_email=$%d, old_owner_email=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOwnerEmail))
+						pos += 2
+					case "effective_from":
+						// Handle date parsing
+						dateStr := strings.TrimSpace(fmt.Sprint(v))
+						var dateVal interface{}
+						if dateStr != "" {
+							if date, err := time.Parse("2006-01-02", dateStr); err == nil {
+								dateVal = date
+							}
+						}
+						sets = append(sets, fmt.Sprintf("effective_from=$%d, old_effective_from=$%d", pos, pos+1))
+						args = append(args, dateVal, existingEffFrom)
+						pos += 2
+					case "effective_to":
+						// Handle date parsing
+						dateStr := strings.TrimSpace(fmt.Sprint(v))
+						var dateVal interface{}
+						if dateStr != "" {
+							if date, err := time.Parse("2006-01-02", dateStr); err == nil {
+								dateVal = date
+							}
+						}
+						sets = append(sets, fmt.Sprintf("effective_to=$%d, old_effective_to=$%d", pos, pos+1))
+						args = append(args, dateVal, existingEffTo)
+						pos += 2
+					case "tags":
+						sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTags))
+						pos += 2
+					case "external_code":
+						sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingExtCode))
+						pos += 2
+					case "segment":
+						sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSegment))
+						pos += 2
+					case "sap_kokrs":
+						sets = append(sets, fmt.Sprintf("sap_kokrs=$%d, old_sap_kokrs=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPKOKRS))
+						pos += 2
+					case "sap_bukrs":
+						sets = append(sets, fmt.Sprintf("sap_bukrs=$%d, old_sap_bukrs=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPBUKRS))
+						pos += 2
+					case "sap_kostl":
+						sets = append(sets, fmt.Sprintf("sap_kostl=$%d, old_sap_kostl=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPKOSTL))
+						pos += 2
+					case "sap_prctr":
+						sets = append(sets, fmt.Sprintf("sap_prctr=$%d, old_sap_prctr=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPPRCTR))
+						pos += 2
+					case "oracle_ledger":
+						sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLedger))
+						pos += 2
+					case "oracle_dept":
+						sets = append(sets, fmt.Sprintf("oracle_dept=$%d, old_oracle_dept=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleDept))
+						pos += 2
+					case "oracle_profit_center":
+						sets = append(sets, fmt.Sprintf("oracle_profit_center=$%d, old_oracle_profit_center=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOraclePC))
+						pos += 2
+					case "tally_ledger_name":
+						sets = append(sets, fmt.Sprintf("tally_ledger_name=$%d, old_tally_ledger_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyName))
+						pos += 2
+					case "tally_ledger_group":
+						sets = append(sets, fmt.Sprintf("tally_ledger_group=$%d, old_tally_ledger_group=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyGroup))
+						pos += 2
+					case "sage_department_code":
+						sets = append(sets, fmt.Sprintf("sage_department_code=$%d, old_sage_department_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSageDept))
+						pos += 2
+					case "sage_cost_centre_code":
+						sets = append(sets, fmt.Sprintf("sage_cost_centre_code=$%d, old_sage_cost_centre_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSageCost))
+						pos += 2
 					default:
 						// ignore unknown fields
 					}
@@ -309,19 +524,11 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			}()
 		}
-		overall := true
-		for _, r := range results {
-			if ok, exists := r["success"]; !exists || ok != true {
-				overall = false
-				break
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": overall, "rows": results})
+		overall := api.IsBulkSuccess(results)
+		api.RespondWithPayload(w, overall, "", results)
 	}
 }
 
-// UploadAndSyncCostProfitCenters uploads file(s), inserts masters and creates relationships based on parent_centre_code
 func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -342,14 +549,14 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userName := ""
+		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == userID {
-				userName = s.Name
+				userEmail = s.Email
 				break
 			}
 		}
-		if userName == "" {
+		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
 			return
 		}
@@ -364,6 +571,15 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
+
+		// Get the starting sequence number for CPC IDs
+		var seqNumber int
+		err := pgxPool.QueryRow(ctx, `SELECT nextval('cost_profit_center_seq')`).Scan(&seqNumber)
+		if err != nil {
+			// If sequence doesn't exist, create it and try again
+			_, _ = pgxPool.Exec(ctx, `CREATE SEQUENCE IF NOT EXISTS cost_profit_center_seq START WITH 1`)
+			_ = pgxPool.QueryRow(ctx, `SELECT nextval('cost_profit_center_seq')`).Scan(&seqNumber)
+		}
 
 		for _, fh := range files {
 			f, err := fh.Open()
@@ -427,7 +643,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"input_costprofitcenter"}, columns, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				api.RespondWithResult(w, false, "Failed to stage data: "+err.Error())
 				return
 			}
 
@@ -465,78 +681,124 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			tgtColsStr := strings.Join(tgtCols, ", ")
+			// Generate CPC IDs for all rows in this batch
+			var cpcIDs []string
+			for i := 0; i < len(dataRows); i++ {
+				cpcID := fmt.Sprintf("CPC-%06d", seqNumber)
+				cpcIDs = append(cpcIDs, cpcID)
+				seqNumber++
+			}
+
+			// Insert into master table with generated CPC IDs
+			tgtColsStr := strings.Join(append([]string{"centre_id"}, tgtCols...), ", ")
+
 			var selectExprs []string
+			selectExprs = append(selectExprs, "unnest($1::text[]) AS centre_id")
 			for i, src := range srcCols {
 				tgt := tgtCols[i]
-				if strings.ToLower(tgt) == "parent_centre_id" {
-					selectExprs = append(selectExprs, "NULL AS parent_centre_id")
-				} else {
-					selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
-				}
+				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
-			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s) SELECT %s FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
-			rows2, err := tx.Query(ctx, insertSQL, batchID)
+			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s) SELECT %s FROM input_costprofitcenter s WHERE s.upload_batch_id = $2`, tgtColsStr, srcColsStr)
+
+			// pass the generated centre_id slice directly; pgx will encode []string to text[]
+			_, err = tx.Exec(ctx, insertSQL, cpcIDs, batchID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				api.RespondWithResult(w, false, "Final insert error: "+err.Error())
 				return
 			}
-			var newIDs []string
-			for rows2.Next() {
+
+			// Get the inserted records with their CPC IDs and codes for relationship creation
+			// fetch inserted rows by the generated centre_id array
+			insertedRows, err := tx.Query(ctx,
+				`SELECT centre_id, centre_code FROM mastercostprofitcenter WHERE centre_id = ANY($1::text[])`,
+				cpcIDs)
+			if err != nil {
+				api.RespondWithResult(w, false, "Failed to fetch inserted records: "+err.Error())
+				return
+			}
+			defer insertedRows.Close()
+
+			codeToID := make(map[string]string)
+			for insertedRows.Next() {
 				var id, code string
-				if err := rows2.Scan(&id, &code); err == nil {
-					newIDs = append(newIDs, id)
+				if err := insertedRows.Scan(&id, &code); err == nil {
+					codeToID[code] = id
 				}
 			}
-			rows2.Close()
 
-			// create relationships from input rows where parent_centre_id column exists
-			relRows, err := tx.Query(ctx, `SELECT centre_code, parent_centre_id FROM input_costprofitcenter WHERE upload_batch_id=$1`, batchID)
+			// create relationships from input rows where parent_centre_code column exists
+			relRows, err := tx.Query(ctx,
+				`SELECT centre_code, parent_centre_id FROM input_costprofitcenter WHERE upload_batch_id=$1`,
+				batchID)
 			if err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read relationship inputs: "+err.Error())
 				return
 			}
 			defer relRows.Close()
+
 			for relRows.Next() {
 				var childCode, parentCode interface{}
 				if err := relRows.Scan(&childCode, &parentCode); err == nil {
 					cc := strings.TrimSpace(ifaceToString(childCode))
 					pc := strings.TrimSpace(ifaceToString(parentCode))
-					if cc == "" || pc == "" {
+					if cc == "" {
 						continue
 					}
-					// find child id and parent id by centre_code / parent centre identifier
-					var childID, parentID string
-					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, cc).Scan(&childID); err != nil {
-						// skip if child not found
+
+					// Find child ID from the map we created
+					childID, childExists := codeToID[cc]
+					if !childExists {
 						continue
 					}
-					// if parent value looks like a UUID, try to resolve directly; otherwise try as centre_code
-					if _, perr := uuid.Parse(pc); perr == nil {
-						if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_id=$1`, pc).Scan(&parentID); err != nil {
-							continue
+
+					var parentID string
+					if pc != "" {
+						// Try to find parent by code in the current batch first
+						if pid, exists := codeToID[pc]; exists {
+							parentID = pid
+						} else {
+							// If not found in current batch, try to find in existing master table
+							if err := pgxPool.QueryRow(ctx,
+								`SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`,
+								pc).Scan(&parentID); err != nil {
+								// Parent not found, skip relationship creation
+								continue
+							}
 						}
-					} else {
-						if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentID); err != nil {
-							continue
+
+						// Insert relationship
+						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) 
+								SELECT $1, $2 WHERE NOT EXISTS (
+									SELECT 1 FROM costprofitcenterrelationships 
+									WHERE parent_centre_id=$1 AND child_centre_id=$2
+								)`
+						if _, err := tx.Exec(ctx, relQ, parentID, childID); err != nil {
+							tx.Rollback(ctx)
+							api.RespondWithResult(w, false, "relationship insert failed: "+err.Error())
+							return
 						}
-					}
-					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM costprofitcenterrelationships WHERE parent_centre_id=$1 AND child_centre_id=$2)`
-					if _, err := tx.Exec(ctx, relQ, parentID, childID); err != nil {
-						tx.Rollback(ctx)
-						api.RespondWithError(w, http.StatusInternalServerError, "relationship insert failed: "+err.Error())
-						return
+
+						// Update the parent_centre_id in the master table
+						updateQ := `UPDATE mastercostprofitcenter SET parent_centre_id=$1 WHERE centre_id=$2`
+						if _, err := tx.Exec(ctx, updateQ, parentID, childID); err != nil {
+							tx.Rollback(ctx)
+							api.RespondWithResult(w, false, "parent update failed: "+err.Error())
+							return
+						}
 					}
 				}
 			}
 
-			if len(newIDs) > 0 {
-				auditSQL := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT centre_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM mastercostprofitcenter WHERE centre_id = ANY($2)`
-				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+			// Create audit entries
+			if len(cpcIDs) > 0 {
+				auditSQL := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at) 
+							SELECT centre_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() 
+							FROM mastercostprofitcenter WHERE centre_id = ANY($2)`
+				if _, err := tx.Exec(ctx, auditSQL, userEmail, cpcIDs); err != nil {
+					api.RespondWithResult(w, false, "Failed to insert audit actions: "+err.Error())
 					return
 				}
 			}
@@ -552,6 +814,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
 	}
 }
+
 
 // GetApprovedActiveCostProfitCenters returns minimal rows where latest audit is APPROVED and status is ACTIVE
 func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -606,7 +869,6 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 	}
 }
 
-// GetCostProfitCenterHierarchy returns full rows with latest audit info and bulk history and relationships
 func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -630,11 +892,33 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		query := `
-            SELECT m.centre_id, m.centre_code, m.centre_name, m.centre_type, m.parent_centre_id, m.entity_name, m.status,
-                   m.old_centre_code, m.old_centre_name, m.old_centre_type, m.old_parent_centre_id, m.old_entity_name, m.old_status,
-                   m.centre_level, m.old_centre_level, m.is_top_level_centre, m.is_deleted,
-                   a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
-                   a.checker_by, a.checker_at, a.checker_comment, a.reason
+            SELECT 
+                m.centre_id, m.centre_code, m.centre_name, m.centre_type, m.parent_centre_id, 
+                m.entity_name, m.status, m.source, m.erp_type,
+                m.old_centre_code, m.old_centre_name, m.old_centre_type, m.old_parent_centre_id, 
+                m.old_entity_name, m.old_status, m.old_source, m.old_erp_type,
+                m.centre_level, m.old_centre_level, m.is_top_level_centre, m.is_deleted,
+                m.default_currency, m.old_default_currency,
+                m.owner, m.old_owner,
+                m.owner_email, m.old_owner_email,
+                m.effective_from, m.old_effective_from,
+                m.effective_to, m.old_effective_to,
+                m.tags, m.old_tags,
+                m.external_code, m.old_external_code,
+                m.segment, m.old_segment,
+                m.sap_kokrs, m.old_sap_kokrs,
+                m.sap_bukrs, m.old_sap_bukrs,
+                m.sap_kostl, m.old_sap_kostl,
+                m.sap_prctr, m.old_sap_prctr,
+                m.oracle_ledger, m.old_oracle_ledger,
+                m.oracle_dept, m.old_oracle_dept,
+                m.oracle_profit_center, m.old_oracle_profit_center,
+                m.tally_ledger_name, m.old_tally_ledger_name,
+                m.tally_ledger_group, m.old_tally_ledger_group,
+                m.sage_department_code, m.old_sage_department_code,
+                m.sage_cost_centre_code, m.old_sage_cost_centre_code,
+                a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
+                a.checker_by, a.checker_at, a.checker_comment, a.reason
             FROM mastercostprofitcenter m
             LEFT JOIN LATERAL (
                 SELECT processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason
@@ -646,10 +930,11 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
         `
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithResult(w, false, err.Error())
 			return
 		}
 		defer rows.Close()
+
 		// build entityMap like cashflow implementation: id, name, data{...}, children[]
 		entityMap := map[string]map[string]interface{}{}
 		centreIDs := []string{}
@@ -658,16 +943,58 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var (
 				centreID, actionIDI string
-				centreCodeI, centreNameI, centreTypeI, parentCentreIDI, entityNameI, statusI,
-				oldCodeI, oldNameI, oldTypeI, oldParentI, oldEntityI, oldStatusI,
+				centreCodeI, centreNameI, centreTypeI, parentCentreIDI, entityNameI, statusI, sourceI, erpTypeI,
+				oldCodeI, oldNameI, oldTypeI, oldParentI, oldEntityI, oldStatusI, oldSourceI, oldErpTypeI,
 				centreLevelI, oldCentreLevelI, procStatusI, requestedByI, requestedAtI, actionTypeI,
 				checkerByI, checkerAtI, checkerCommentI, reasonI interface{}
 				isTopLevel, isDeleted bool
+
+				// New fields
+				defaultCurrencyI, oldDefaultCurrencyI,
+				ownerI, oldOwnerI,
+				ownerEmailI, oldOwnerEmailI,
+				effectiveFromI, oldEffectiveFromI,
+				effectiveToI, oldEffectiveToI,
+				tagsI, oldTagsI,
+				externalCodeI, oldExternalCodeI,
+				segmentI, oldSegmentI,
+				sapKOKRSI, oldSapKOKRSI,
+				sapBUKRSI, oldSapBUKRSI,
+				sapKOSTLI, oldSapKOSTLI,
+				sapPRCTRI, oldSapPRCTRI,
+				oracleLedgerI, oldOracleLedgerI,
+				oracleDeptI, oldOracleDeptI,
+				oracleProfitCenterI, oldOracleProfitCenterI,
+				tallyLedgerNameI, oldTallyLedgerNameI,
+				tallyLedgerGroupI, oldTallyLedgerGroupI,
+				sageDeptCodeI, oldSageDeptCodeI,
+				sageCostCentreCodeI, oldSageCostCentreCodeI interface{}
 			)
 
-			if err := rows.Scan(&centreID, &centreCodeI, &centreNameI, &centreTypeI, &parentCentreIDI, &entityNameI, &statusI,
-				&oldCodeI, &oldNameI, &oldTypeI, &oldParentI, &oldEntityI, &oldStatusI,
+			if err := rows.Scan(
+				&centreID, &centreCodeI, &centreNameI, &centreTypeI, &parentCentreIDI,
+				&entityNameI, &statusI, &sourceI, &erpTypeI,
+				&oldCodeI, &oldNameI, &oldTypeI, &oldParentI, &oldEntityI, &oldStatusI, &oldSourceI, &oldErpTypeI,
 				&centreLevelI, &oldCentreLevelI, &isTopLevel, &isDeleted,
+				&defaultCurrencyI, &oldDefaultCurrencyI,
+				&ownerI, &oldOwnerI,
+				&ownerEmailI, &oldOwnerEmailI,
+				&effectiveFromI, &oldEffectiveFromI,
+				&effectiveToI, &oldEffectiveToI,
+				&tagsI, &oldTagsI,
+				&externalCodeI, &oldExternalCodeI,
+				&segmentI, &oldSegmentI,
+				&sapKOKRSI, &oldSapKOKRSI,
+				&sapBUKRSI, &oldSapBUKRSI,
+				&sapKOSTLI, &oldSapKOSTLI,
+				&sapPRCTRI, &oldSapPRCTRI,
+				&oracleLedgerI, &oldOracleLedgerI,
+				&oracleDeptI, &oldOracleDeptI,
+				&oracleProfitCenterI, &oldOracleProfitCenterI,
+				&tallyLedgerNameI, &oldTallyLedgerNameI,
+				&tallyLedgerGroupI, &oldTallyLedgerGroupI,
+				&sageDeptCodeI, &oldSageDeptCodeI,
+				&sageCostCentreCodeI, &oldSageCostCentreCodeI,
 				&procStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI,
 				&checkerByI, &checkerAtI, &checkerCommentI, &reasonI); err != nil {
 				continue
@@ -677,32 +1004,91 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"id":   centreID,
 				"name": ifaceToString(centreNameI),
 				"data": map[string]interface{}{
-					"centre_id":            centreID,
-					"centre_code":          ifaceToString(centreCodeI),
-					"centre_name":          ifaceToString(centreNameI),
-					"centre_type":          ifaceToString(centreTypeI),
-					"parent_centre_id":     ifaceToString(parentCentreIDI),
-					"entity_name":          ifaceToString(entityNameI),
-					"status":               ifaceToString(statusI),
+					// Basic fields
+					"centre_id":        centreID,
+					"centre_code":      ifaceToString(centreCodeI),
+					"centre_name":      ifaceToString(centreNameI),
+					"centre_type":      ifaceToString(centreTypeI),
+					"parent_centre_id": ifaceToString(parentCentreIDI),
+					"entity_name":      ifaceToString(entityNameI),
+					"status":           ifaceToString(statusI),
+					"source":           ifaceToString(sourceI),
+					"erp_type":         ifaceToString(erpTypeI),
+
+					// Old values
 					"old_centre_code":      ifaceToString(oldCodeI),
 					"old_centre_name":      ifaceToString(oldNameI),
 					"old_centre_type":      ifaceToString(oldTypeI),
 					"old_parent_centre_id": ifaceToString(oldParentI),
 					"old_entity_name":      ifaceToString(oldEntityI),
 					"old_status":           ifaceToString(oldStatusI),
-					"centre_level":         ifaceToInt(centreLevelI),
-					"old_centre_level":     ifaceToInt(oldCentreLevelI),
-					"is_top_level_centre":  isTopLevel,
-					"is_deleted":           isDeleted,
-					"processing_status":    ifaceToString(procStatusI),
-					"action_type":          ifaceToString(actionTypeI),
-					"action_id":            actionIDI,
-					"checker_by":           ifaceToString(checkerByI),
-					"checker_at":           ifaceToTimeString(checkerAtI),
-					"checker_comment":      ifaceToString(checkerCommentI),
-					"reason":               ifaceToString(reasonI),
-					"requested_by":         ifaceToString(requestedByI),
-					"requested_at":         ifaceToTimeString(requestedAtI),
+					"old_source":           ifaceToString(oldSourceI),
+					"old_erp_type":         ifaceToString(oldErpTypeI),
+
+					// Level and flags
+					"centre_level":        ifaceToInt(centreLevelI),
+					"old_centre_level":    ifaceToInt(oldCentreLevelI),
+					"is_top_level_centre": isTopLevel,
+					"is_deleted":          isDeleted,
+
+					// New fields
+					"default_currency":     ifaceToString(defaultCurrencyI),
+					"old_default_currency": ifaceToString(oldDefaultCurrencyI),
+					"owner":                ifaceToString(ownerI),
+					"old_owner":            ifaceToString(oldOwnerI),
+					"owner_email":          ifaceToString(ownerEmailI),
+					"old_owner_email":      ifaceToString(oldOwnerEmailI),
+					"effective_from":       ifaceToDateString(effectiveFromI),
+					"old_effective_from":   ifaceToDateString(oldEffectiveFromI),
+					"effective_to":         ifaceToDateString(effectiveToI),
+					"old_effective_to":     ifaceToDateString(oldEffectiveToI),
+					"tags":                 ifaceToString(tagsI),
+					"old_tags":             ifaceToString(oldTagsI),
+					"external_code":        ifaceToString(externalCodeI),
+					"old_external_code":    ifaceToString(oldExternalCodeI),
+					"segment":              ifaceToString(segmentI),
+					"old_segment":          ifaceToString(oldSegmentI),
+
+					// SAP fields
+					"sap_kokrs":     ifaceToString(sapKOKRSI),
+					"old_sap_kokrs": ifaceToString(oldSapKOKRSI),
+					"sap_bukrs":     ifaceToString(sapBUKRSI),
+					"old_sap_bukrs": ifaceToString(oldSapBUKRSI),
+					"sap_kostl":     ifaceToString(sapKOSTLI),
+					"old_sap_kostl": ifaceToString(oldSapKOSTLI),
+					"sap_prctr":     ifaceToString(sapPRCTRI),
+					"old_sap_prctr": ifaceToString(oldSapPRCTRI),
+
+					// Oracle fields
+					"oracle_ledger":            ifaceToString(oracleLedgerI),
+					"old_oracle_ledger":        ifaceToString(oldOracleLedgerI),
+					"oracle_dept":              ifaceToString(oracleDeptI),
+					"old_oracle_dept":          ifaceToString(oldOracleDeptI),
+					"oracle_profit_center":     ifaceToString(oracleProfitCenterI),
+					"old_oracle_profit_center": ifaceToString(oldOracleProfitCenterI),
+
+					// Tally fields
+					"tally_ledger_name":      ifaceToString(tallyLedgerNameI),
+					"old_tally_ledger_name":  ifaceToString(oldTallyLedgerNameI),
+					"tally_ledger_group":     ifaceToString(tallyLedgerGroupI),
+					"old_tally_ledger_group": ifaceToString(oldTallyLedgerGroupI),
+
+					// Sage fields
+					"sage_department_code":      ifaceToString(sageDeptCodeI),
+					"old_sage_department_code":  ifaceToString(oldSageDeptCodeI),
+					"sage_cost_centre_code":     ifaceToString(sageCostCentreCodeI),
+					"old_sage_cost_centre_code": ifaceToString(oldSageCostCentreCodeI),
+
+					// Audit fields
+					"processing_status": ifaceToString(procStatusI),
+					"action_type":       ifaceToString(actionTypeI),
+					"action_id":         actionIDI,
+					"checker_by":        ifaceToString(checkerByI),
+					"checker_at":        ifaceToTimeString(checkerAtI),
+					"checker_comment":   ifaceToString(checkerCommentI),
+					"reason":            ifaceToString(reasonI),
+					"requested_by":      ifaceToString(requestedByI),
+					"requested_at":      ifaceToTimeString(requestedAtI),
 				},
 				"children": []interface{}{},
 			}
@@ -712,8 +1098,6 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				hideIds[centreID] = true
 			}
 		}
-
-		// bulk fetch CREATE/EDIT/DELETE audit history and merge
 		if len(centreIDs) > 0 {
 			auditQ := `SELECT centre_id, actiontype, requested_by, requested_at FROM auditactioncostprofitcenter WHERE centre_id = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
 			arows, err := pgxPool.Query(ctx, auditQ, centreIDs)
@@ -756,11 +1140,9 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-
-		// fetch relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_id, child_centre_id FROM costprofitcenterrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithResult(w, false, err.Error())
 			return
 		}
 		defer relRows.Close()
@@ -771,8 +1153,6 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentMap[p] = append(parentMap[p], c)
 			}
 		}
-
-		// hide deleted+approved nodes and their descendants
 		if len(hideIds) > 0 {
 			getAllDescendants := func(start []string) []string {
 				all := map[string]bool{}
@@ -805,8 +1185,6 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				delete(entityMap, id)
 			}
 		}
-
-		// rebuild children arrays using entity objects
 		for _, e := range entityMap {
 			e["children"] = []interface{}{}
 		}
@@ -819,8 +1197,6 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-
-		// collect top-level nodes (those not appearing as any child)
 		childSet := map[string]bool{}
 		for _, children := range parentMap {
 			for _, childID := range children {
@@ -833,9 +1209,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				topLevel = append(topLevel, e)
 			}
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(topLevel)
+		api.RespondWithPayload(w, true, "", topLevel)
 	}
 }
 
