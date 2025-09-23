@@ -66,14 +66,15 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/counterparty/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveCounterparties(pgxPool)))
 
 	// GL Account Master routes
-	mux.Handle("/master/glaccount/create", api.BusinessUnitMiddleware(db)(allMaster.CreateGLAccounts(pgxPool)))
-	mux.Handle("/master/glaccount/names", api.BusinessUnitMiddleware(db)(allMaster.GetGLAccountNamesWithID(pgxPool)))
-	mux.Handle("/master/glaccount/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateGLAccountBulk(pgxPool)))
-	mux.Handle("/master/glaccount/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteGLAccount(pgxPool)))
-	mux.Handle("/master/glaccount/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveGLAccountActions(pgxPool)))
-	mux.Handle("/master/glaccount/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectGLAccountActions(pgxPool)))
+	mux.Handle("/master/v2/glaccount/create", api.BusinessUnitMiddleware(db)(allMaster.CreateGLAccounts(pgxPool)))
+	mux.Handle("/master/v2/glaccount/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetGLAccountNamesWithID(pgxPool)))
+	mux.Handle("/master/v2/glaccount/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateAndSyncGLAccounts(pgxPool)))
+	mux.Handle("/master/v2/glaccount/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteGLAccount(pgxPool)))
+	mux.Handle("/master/v2/glaccount/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveGLAccountActions(pgxPool)))
+	mux.Handle("/master/v2/glaccount/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectGLAccountActions(pgxPool)))
 	mux.Handle("/master/glaccount/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccount(pgxPool)))
 	mux.Handle("/master/glaccount/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
+	mux.Handle("/master/v2/glaccount/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentGLAccountAtLevel(pgxPool)))
 
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -143,6 +144,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
