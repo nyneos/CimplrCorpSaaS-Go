@@ -40,7 +40,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/v2/costprofit-center/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateAndSyncCostProfitCenters(pgxPool)))
 	mux.Handle("/master/costprofit-center/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveCostProfitCenters(pgxPool)))
 	mux.Handle("/master/v2/costprofit-center/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetCostProfitCenterHierarchy(pgxPool)))
-	mux.Handle("/master/costprofit-center/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCostProfitCenterAtLevel(pgxPool)))
+	mux.Handle("/master/v2/costprofit-center/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCostProfitCenterAtLevel(pgxPool)))
 	mux.Handle("/master/v2/costprofit-center/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCostProfitCenter(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCostProfitCenterActions(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCostProfitCenterActions(pgxPool)))
@@ -143,6 +143,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
