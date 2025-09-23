@@ -52,40 +52,40 @@ type GLAccountRequest struct {
 	IsTopLevel             *bool  `json:"is_top_level_gl_account,omitempty"`
 	IsDeleted              *bool  `json:"is_deleted,omitempty"`
 }
-func NormalizeDate(dateStr string) string {
-    dateStr = strings.TrimSpace(dateStr)
-    if dateStr == "" {
-        return ""
-    }
+// func NormalizeDate(dateStr string) string {
+//     dateStr = strings.TrimSpace(dateStr)
+//     if dateStr == "" {
+//         return ""
+//     }
 
-    layouts := []string{
-        "2006-01-02",
-        "02-01-2006",
-        "2006/01/02",
-        "02/01/2006",
-        "2006.01.02",
-        "02.01.2006",
-        time.RFC3339,
-        "2006-01-02 15:04:05",
-        "2006-01-02T15:04:05",
-    }
+//     layouts := []string{
+//         "2006-01-02",
+//         "02-01-2006",
+//         "2006/01/02",
+//         "02/01/2006",
+//         "2006.01.02",
+//         "02.01.2006",
+//         time.RFC3339,
+//         "2006-01-02 15:04:05",
+//         "2006-01-02T15:04:05",
+//     }
 	
-	    layouts = append(layouts, []string{
-        "02-Jan-2006",
-        "02-Jan-06",
-        "2-Jan-2006",
-        "2-Jan-06",
-        "02-Jan-2006 15:04:05",
-    }...)
+// 	    layouts = append(layouts, []string{
+//         "02-Jan-2006",
+//         "02-Jan-06",
+//         "2-Jan-2006",
+//         "2-Jan-06",
+//         "02-Jan-2006 15:04:05",
+//     }...)
 
-    for _, l := range layouts {
-        if t, err := time.Parse(l, dateStr); err == nil {
-            return t.Format("2006-01-02")
-        }
-    }
+//     for _, l := range layouts {
+//         if t, err := time.Parse(l, dateStr); err == nil {
+//             return t.Format("2006-01-02")
+//         }
+//     }
 
-    return ""
-}
+//     return ""
+// }
 func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -201,14 +201,14 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var effectiveFrom interface{}
 			var effectiveTo interface{}
 			if rrow.EffectiveFrom != "" {
-				if norm := api.NormalizeDate(rrow.EffectiveFrom); norm != "" {
+				if norm := NormalizeDate(rrow.EffectiveFrom); norm != "" {
 					if tval, err := time.Parse("2006-01-02", norm); err == nil {
 						effectiveFrom = tval
 					}
 				}
 			}
 			if rrow.EffectiveTo != "" {
-				if norm := api.NormalizeDate(rrow.EffectiveTo); norm != "" {
+				if norm := NormalizeDate(rrow.EffectiveTo); norm != "" {
 					if tval, err := time.Parse("2006-01-02", norm); err == nil {
 						effectiveTo = tval
 					}
