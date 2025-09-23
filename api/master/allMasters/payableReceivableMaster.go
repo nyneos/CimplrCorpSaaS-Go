@@ -124,14 +124,14 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			var effFrom, effTo interface{}
 			if strings.TrimSpace(rrow.EffectiveFrom) != "" {
-				if norm := api.NormalizeDate(rrow.EffectiveFrom); norm != "" {
+				if norm := NormalizeDate(rrow.EffectiveFrom); norm != "" {
 					if tval, err := time.Parse("2006-01-02", norm); err == nil {
 						effFrom = tval
 					}
 				}
 			}
 			if strings.TrimSpace(rrow.EffectiveTo) != "" {
-				if norm := api.NormalizeDate(rrow.EffectiveTo); norm != "" {
+				if norm := NormalizeDate(rrow.EffectiveTo); norm != "" {
 					if tval, err := time.Parse("2006-01-02", norm); err == nil {
 						effTo = tval
 					}
