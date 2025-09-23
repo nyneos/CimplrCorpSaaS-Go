@@ -1270,7 +1270,6 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// DeleteCostProfitCenter inserts a DELETE audit action (no hard delete here)
 func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1298,17 +1297,59 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Bulk insert audit actions for all provided centre ids. Use unnest on the text[] parameter.
-		q := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
-			  SELECT cid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS cid`
-		if _, err := pgxPool.Exec(r.Context(), q, req.Reason, requestedBy, req.CentreIDs); err != nil {
+		// Fetch relationships and compute descendants so we add audit actions for all descendants as well
+		ctx := r.Context()
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_id, child_centre_id FROM costprofitcenterrelationships`)
+		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		defer relRows.Close()
+		parentMap := map[string][]string{}
+		for relRows.Next() {
+			var parentID, childID string
+			if err := relRows.Scan(&parentID, &childID); err == nil {
+				parentMap[parentID] = append(parentMap[parentID], childID)
+			}
+		}
+
+		// BFS to collect all descendants of provided centre ids
+		allSet := map[string]bool{}
+		queue := append([]string{}, req.CentreIDs...)
+		for _, id := range req.CentreIDs {
+			allSet[id] = true
+		}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, child := range parentMap[cur] {
+				if !allSet[child] {
+					allSet[child] = true
+					queue = append(queue, child)
+				}
+			}
+		}
+
+		if len(allSet) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No centres found to delete")
+			return
+		}
+
+		allList := make([]string, 0, len(allSet))
+		for id := range allSet {
+			allList = append(allList, id)
+		}
+
+		// Bulk insert audit actions for all centre ids (roots + descendants)
+		q := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
+			  SELECT cid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS cid`
+		if _, err := pgxPool.Exec(ctx, q, req.Reason, requestedBy, allList); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "queued_count": len(allList)})
 	}
 }
-
 // BulkRejectCostProfitCenterActions rejects latest audit actions for centre_ids
 func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
