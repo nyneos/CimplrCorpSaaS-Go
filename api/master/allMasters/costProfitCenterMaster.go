@@ -1300,7 +1300,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Bulk insert audit actions for all provided centre ids. Use unnest on the text[] parameter.
 		q := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
-			  SELECT cid::uuid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS cid`
+			  SELECT cid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS cid`
 		if _, err := pgxPool.Exec(r.Context(), q, req.Reason, requestedBy, req.CentreIDs); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
