@@ -1,7 +1,7 @@
 package allMaster
 
 import (
-	"CimplrCorpSaas/api"
+	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
 	"encoding/json"
@@ -49,6 +49,20 @@ type CostProfitCenterRequest struct {
 	// optional: if caller wants to override computed values
 	CentreLevel      int  `json:"centre_level,omitempty"`
 	IsTopLevelCentre bool `json:"is_top_level_centre,omitempty"`
+}
+func ifaceToDateString(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+
+	switch v := val.(type) {
+	case time.Time:
+		return v.Format("2006-01-02")
+	case string:
+		return v
+	default:
+		return fmt.Sprint(val)
+	}
 }
 func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
