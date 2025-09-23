@@ -1263,7 +1263,6 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// FindParentCostProfitCenterAtLevel returns ancestors at a given level
 func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1288,7 +1287,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		parentLevel := req.Level - 1
 		q := `
-			SELECT m.centre_name, m.centre_id
+			SELECT m.centre_name, m.centre_id, m.centre_code
 			FROM mastercostprofitcenter m
 			LEFT JOIN LATERAL (
 				SELECT processing_status
@@ -1310,15 +1309,16 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		results := []map[string]interface{}{}
 		for rows.Next() {
-			var name, id string
-			if err := rows.Scan(&name, &id); err == nil {
-				results = append(results, map[string]interface{}{"centre_name": name, "centre_id": id})
+			var name, id, code string
+			if err := rows.Scan(&name, &id, &code); err == nil {
+				results = append(results, map[string]interface{}{"centre_name": name, "centre_id": id, "centre_code": code})
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": results})
 	}
 }
+
 
 func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
