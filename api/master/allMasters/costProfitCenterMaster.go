@@ -1,7 +1,7 @@
 package allMaster
 
 import (
-	api "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
 	"encoding/json"
@@ -63,6 +63,40 @@ func ifaceToDateString(val interface{}) string {
 	default:
 		return fmt.Sprint(val)
 	}
+}
+func NormalizeDate(dateStr string) string {
+    dateStr = strings.TrimSpace(dateStr)
+    if dateStr == "" {
+        return ""
+    }
+
+    layouts := []string{
+        "2006-01-02",
+        "02-01-2006",
+        "2006/01/02",
+        "02/01/2006",
+        "2006.01.02",
+        "02.01.2006",
+        time.RFC3339,
+        "2006-01-02 15:04:05",
+        "2006-01-02T15:04:05",
+    }
+	
+	    layouts = append(layouts, []string{
+        "02-Jan-2006",
+        "02-Jan-06",
+        "2-Jan-2006",
+        "2-Jan-06",
+        "02-Jan-2006 15:04:05",
+    }...)
+
+    for _, l := range layouts {
+        if t, err := time.Parse(l, dateStr); err == nil {
+            return t.Format("2006-01-02")
+        }
+    }
+
+    return ""
 }
 func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -139,14 +173,14 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Parse dates
 				var effectiveFrom, effectiveTo interface{}
 				if rrow.EffectiveFrom != "" {
-					if norm := api.NormalizeDate(rrow.EffectiveFrom); norm != "" {
+					if norm := NormalizeDate(rrow.EffectiveFrom); norm != "" {
 						if tval, err := time.Parse("2006-01-02", norm); err == nil {
 							effectiveFrom = tval
 						}
 					}
 				}
 				if rrow.EffectiveTo != "" {
-					if norm := api.NormalizeDate(rrow.EffectiveTo); norm != "" {
+					if norm := NormalizeDate(rrow.EffectiveTo); norm != "" {
 						if tval, err := time.Parse("2006-01-02", norm); err == nil {
 							effectiveTo = tval
 						}
