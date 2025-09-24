@@ -30,9 +30,25 @@ type CashFlowCategoryRequest struct {
 	Description      string `json:"description"`
 	Status           string `json:"status"`
 	CategoryLevel    int    `json:"category_level"`
+	ERPType          string `json:"erp_type,omitempty"`
+	ERPExt           string `json:"erp_ext,omitempty"`
+	ERPSegment       string `json:"erp_segment,omitempty"`
+	SAPFsv           string `json:"sap_fsv,omitempty"`
+	SAPNode          string `json:"sap_node,omitempty"`
+	SAPBukrs         string `json:"sap_bukrs,omitempty"`
+	SAPNotes         string `json:"sap_notes,omitempty"`
+	OracleLedger     string `json:"oracle_ledger,omitempty"`
+	OracleCFCode     string `json:"oracle_cf_code,omitempty"`
+	OracleCFName     string `json:"oracle_cf_name,omitempty"`
+	OracleLine       string `json:"oracle_line,omitempty"`
+	TallyGroup       string `json:"tally_group,omitempty"`
+	TallyVoucher     string `json:"tally_voucher,omitempty"`
+	TallyNotes       string `json:"tally_notes,omitempty"`
+	SageSection      string `json:"sage_section,omitempty"`
+	SageLine         string `json:"sage_line,omitempty"`
+	SageNotes        string `json:"sage_notes,omitempty"`
 }
 
-// ifaceToString converts a scanned pgx value (interface{}) to string safely
 func ifaceToString(v interface{}) string {
 	if v == nil {
 		return ""
@@ -54,7 +70,6 @@ func ifaceToString(v interface{}) string {
 	}
 }
 
-// ifaceToTimeString converts scanned time-like values to formatted string
 func ifaceToTimeString(v interface{}) string {
 	if v == nil {
 		return ""
@@ -81,7 +96,6 @@ func ifaceToTimeString(v interface{}) string {
 	}
 }
 
-// ifaceToInt converts scanned numeric-like interface{} to int (safe)
 func ifaceToInt(v interface{}) int {
 	if v == nil {
 		return 0
@@ -125,12 +139,10 @@ func ifaceToInt(v interface{}) int {
 	}
 }
 
-// Helper: get file extension
 func getFileExt(filename string) string {
 	return strings.ToLower(filepath.Ext(filename))
 }
 
-// Helper: parse uploaded file into [][]string
 func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, error) {
 	if ext == ".csv" {
 		r := csv.NewReader(file)
@@ -151,8 +163,6 @@ func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, err
 	return nil, errors.New("unsupported file type")
 }
 
-// CreateAndSyncCashFlowCategories inserts categories into mastercashflowcategory and creates relationships
-// Request shape: { "user_id": "...", "categories": [ { ... } ] }
 func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -163,8 +173,6 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-
-		// validate session and get created_by
 		createdBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -180,11 +188,9 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 		created := make([]map[string]interface{}, 0)
-		// map index->category_id in case parent references are in same payload by id
 		nameToID := make(map[string]string)
 
 		for _, cat := range req.Categories {
-			// basic validation
 			if cat.CategoryName == "" || cat.CategoryType == "" || cat.DefaultMapping == "" || cat.CashflowNature == "" || cat.UsageFlag == "" || cat.Status == "" {
 				created = append(created, map[string]interface{}{"success": false, "error": "Missing required fields", "category_name": cat.CategoryName})
 				continue
@@ -195,13 +201,16 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				created = append(created, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + err.Error(), "category_name": cat.CategoryName})
 				continue
 			}
-
-			var categoryID string
-			// Insert into master table and return generated category_id
-			insertSQL := `INSERT INTO mastercashflowcategory (
-					category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, category_level
-				) VALUES ($1,$2, NULLIF($3, '')::uuid, $4, $5, $6, $7, $8, $9) RETURNING category_id`
-			err = tx.QueryRow(ctx, insertSQL,
+			categoryID := "CFC-" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:7]
+	    insertSQL := `INSERT INTO mastercashflowcategory (
+		    category_id, category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, category_level,
+					erp_type, erp_ext, erp_segment, sap_fsv, sap_node, sap_bukrs, sap_notes,
+					oracle_ledger, oracle_cf_code, oracle_cf_name, oracle_line,
+					tally_group, tally_voucher, tally_notes, sage_section, sage_line, sage_notes
+								) VALUES ($1,$2,$3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10,
+			  $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`
+			_, err = tx.Exec(ctx, insertSQL,
+				categoryID,
 				cat.CategoryName,
 				cat.CategoryType,
 				cat.ParentCategoryID,
@@ -211,15 +220,29 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cat.Description,
 				cat.Status,
 				cat.CategoryLevel,
-				// createdBy,
-			).Scan(&categoryID)
+				cat.ERPType,
+				cat.ERPExt,
+				cat.ERPSegment,
+				cat.SAPFsv,
+				cat.SAPNode,
+				cat.SAPBukrs,
+				cat.SAPNotes,
+				cat.OracleLedger,
+				cat.OracleCFCode,
+				cat.OracleCFName,
+				cat.OracleLine,
+				cat.TallyGroup,
+				cat.TallyVoucher,
+				cat.TallyNotes,
+				cat.SageSection,
+				cat.SageLine,
+				cat.SageNotes,
+			)
 			if err != nil {
 				tx.Rollback(ctx)
 				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "category_name": cat.CategoryName})
 				continue
 			}
-
-			// insert audit action
 			auditSQL := `INSERT INTO auditactioncashflowcategory (
 				category_id, actiontype, processing_status, reason, requested_by, requested_at
 			) VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, $3, now())`
@@ -228,23 +251,17 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				created = append(created, map[string]interface{}{"success": false, "error": "Audit insert failed: " + err.Error(), "category_id": categoryID})
 				continue
 			}
-
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
 				created = append(created, map[string]interface{}{"success": false, "error": "Commit failed: " + err.Error(), "category_id": categoryID})
 				continue
 			}
-
-			// record created
 			created = append(created, map[string]interface{}{"success": true, "category_id": categoryID, "category_name": cat.CategoryName})
 			nameToID[strings.ToLower(cat.CategoryName)] = categoryID
 		}
-
-		// Create relationships: iterate again and insert where parent provided
 		relAdded := 0
 		for _, cat := range req.Categories {
 			childID := ""
-			// find child id by name map (we stored by name), but prefer parent_category_id supplied
 			if id := nameToID[strings.ToLower(cat.CategoryName)]; id != "" {
 				childID = id
 			}
@@ -255,23 +272,18 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if parentID == "" {
 				continue
 			}
-			// insert relationship if not exists
 			ctx := context.Background()
 			var exists bool
 			err := pgxPool.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_id=$1 AND child_category_id=$2`, parentID, childID).Scan(&exists)
 			if err == nil && exists {
 				continue
 			}
-			// ignore error from select (treat as not exists)
 			if _, err := pgxPool.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_id, child_category_id, status) VALUES ($1,$2,'Active')`, parentID, childID); err == nil {
 				relAdded++
 			}
 		}
-
-		// respond
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":             true,
+		overall := api.IsBulkSuccess(created)
+		api.RespondWithPayload(w, overall, "", map[string]interface{}{
 			"created":             created,
 			"relationships_added": relAdded,
 		})
@@ -281,14 +293,17 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-
-		// Step 1: fetch categories with latest audit info
 		query := `
 			SELECT m.category_id, m.category_name, m.category_type, m.parent_category_id,
 			       m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status,
 			       m.old_category_name, m.old_category_type, m.old_parent_category_id,
 			       m.old_default_mapping, m.old_cashflow_nature, m.old_usage_flag, m.old_description, m.old_status,
 			       m.is_top_level_category, m.is_deleted, m.category_level, m.old_category_level,
+			       m.erp_type, m.erp_ext, m.erp_segment, m.old_erp_type, m.old_erp_ext, m.old_erp_segment,
+			       m.sap_fsv, m.sap_node, m.sap_bukrs, m.sap_notes, m.old_sap_fsv, m.old_sap_node, m.old_sap_bukrs, m.old_sap_notes,
+			       m.oracle_ledger, m.oracle_cf_code, m.oracle_cf_name, m.oracle_line, m.old_oracle_ledger, m.old_oracle_cf_code, m.old_oracle_cf_name, m.old_oracle_line,
+			       m.tally_group, m.tally_voucher, m.tally_notes, m.old_tally_group, m.old_tally_voucher, m.old_tally_notes,
+			       m.sage_section, m.sage_line, m.sage_notes, m.old_sage_section, m.old_sage_line, m.old_sage_notes,
 			       a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
 			       a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM mastercashflowcategory m
@@ -315,17 +330,27 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var (
-				categoryID, actionIDI string
-				categoryNameI, categoryTypeI interface{}
-				parentCategoryIDI *string
-				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI interface{}
-				oldCategoryNameI, oldCategoryTypeI interface{}
-				oldParentCategoryIDI *string
+				categoryID, actionIDI                                                              string
+				categoryNameI, categoryTypeI                                                       interface{}
+				parentCategoryIDI                                                                  *string
+				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI                interface{}
+				oldCategoryNameI, oldCategoryTypeI                                                 interface{}
+				oldParentCategoryIDI                                                               *string
 				oldDefaultMappingI, oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI interface{}
-				categoryLevelI, oldCategoryLevelI, processingStatusI interface{}
-				requestedByI, requestedAtI, actionTypeI interface{}
-				checkerByI, checkerAtI, checkerCommentI, reasonI interface{}
-				isTopLevelCategory, isDeleted bool
+				isTopLevelCategory, isDeleted                                                      bool
+				categoryLevelI, oldCategoryLevelI, processingStatusI                               interface{}
+				requestedByI, requestedAtI, actionTypeI                                            interface{}
+				checkerByI, checkerAtI, checkerCommentI, reasonI                                   interface{}
+				erpTypeI, erpExtI, erpSegmentI                                       interface{}
+				oldErpTypeI, oldErpExtI, oldErpSegmentI                              interface{}
+				sapFsvI, sapNodeI, sapBukrsI, sapNotesI                              interface{}
+				oldSapFsvI, oldSapNodeI, oldSapBukrsI, oldSapNotesI                  interface{}
+				oracleLedgerI, oracleCFCodeI, oracleCFNameI, oracleLineI             interface{}
+				oldOracleLedgerI, oldOracleCFCodeI, oldOracleCFNameI, oldOracleLineI interface{}
+				tallyGroupI, tallyVoucherI, tallyNotesI                              interface{}
+				oldTallyGroupI, oldTallyVoucherI, oldTallyNotesI                     interface{}
+				sageSectionI, sageLineI, sageNotesI                                  interface{}
+				oldSageSectionI, oldSageLineI, oldSageNotesI                         interface{}
 			)
 
 			if err := rows.Scan(
@@ -335,6 +360,11 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldDefaultMappingI, &oldCashflowNatureI, &oldUsageFlagI,
 				&oldDescriptionI, &oldStatusI,
 				&isTopLevelCategory, &isDeleted, &categoryLevelI, &oldCategoryLevelI,
+				&erpTypeI, &erpExtI, &erpSegmentI, &oldErpTypeI, &oldErpExtI, &oldErpSegmentI,
+				&sapFsvI, &sapNodeI, &sapBukrsI, &sapNotesI, &oldSapFsvI, &oldSapNodeI, &oldSapBukrsI, &oldSapNotesI,
+				&oracleLedgerI, &oracleCFCodeI, &oracleCFNameI, &oracleLineI, &oldOracleLedgerI, &oldOracleCFCodeI, &oldOracleCFNameI, &oldOracleLineI,
+				&tallyGroupI, &tallyVoucherI, &tallyNotesI, &oldTallyGroupI, &oldTallyVoucherI, &oldTallyNotesI,
+				&sageSectionI, &sageLineI, &sageNotesI, &oldSageSectionI, &oldSageLineI, &oldSageNotesI,
 				&processingStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI,
 				&checkerByI, &checkerAtI, &checkerCommentI, &reasonI,
 			); err != nil {
@@ -345,49 +375,92 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"id":   categoryID,
 				"name": ifaceToString(categoryNameI),
 				"data": map[string]interface{}{
-					"category_id":            categoryID,
-					"category_name":          ifaceToString(categoryNameI),
-					"category_type":          ifaceToString(categoryTypeI),
-					"parent_category_id":     func() string { if parentCategoryIDI == nil { return "" }; return *parentCategoryIDI }(),
-					"default_mapping":        ifaceToString(defaultMappingI),
-					"cashflow_nature":        ifaceToString(cashflowNatureI),
-					"usage_flag":             ifaceToString(usageFlagI),
-					"description":            ifaceToString(descriptionI),
-					"status":                 ifaceToString(statusI),
-					"old_category_name":      ifaceToString(oldCategoryNameI),
-					"old_category_type":      ifaceToString(oldCategoryTypeI),
-					"old_parent_category_id": func() string { if oldParentCategoryIDI == nil { return "" }; return *oldParentCategoryIDI }(),
-					"old_default_mapping":    ifaceToString(oldDefaultMappingI),
-					"old_cashflow_nature":    ifaceToString(oldCashflowNatureI),
-					"old_usage_flag":         ifaceToString(oldUsageFlagI),
-					"old_description":        ifaceToString(oldDescriptionI),
-					"old_status":             ifaceToString(oldStatusI),
-					"is_top_level_category":  isTopLevelCategory,
-					"is_deleted":             isDeleted,
-					"category_level":         ifaceToInt(categoryLevelI),
-					"old_category_level":     ifaceToInt(oldCategoryLevelI),
-					"processing_status":      ifaceToString(processingStatusI),
-					"requested_by":           ifaceToString(requestedByI),
-					"requested_at":           ifaceToTimeString(requestedAtI),
-					"action_type":            ifaceToString(actionTypeI),
-					"action_id":              ifaceToString(actionIDI),
-					"checker_by":             ifaceToString(checkerByI),
-					"checker_at":             ifaceToTimeString(checkerAtI),
-					"checker_comment":        ifaceToString(checkerCommentI),
-					"reason":                 ifaceToString(reasonI),
+					"category_id":   categoryID,
+					"category_name": ifaceToString(categoryNameI),
+					"category_type": ifaceToString(categoryTypeI),
+					"parent_category_id": func() string {
+						if parentCategoryIDI == nil {
+							return ""
+						}
+						return *parentCategoryIDI
+					}(),
+					"default_mapping":   ifaceToString(defaultMappingI),
+					"cashflow_nature":   ifaceToString(cashflowNatureI),
+					"usage_flag":        ifaceToString(usageFlagI),
+					"description":       ifaceToString(descriptionI),
+					"status":            ifaceToString(statusI),
+					"old_category_name": ifaceToString(oldCategoryNameI),
+					"old_category_type": ifaceToString(oldCategoryTypeI),
+					"old_parent_category_id": func() string {
+						if oldParentCategoryIDI == nil {
+							return ""
+						}
+						return *oldParentCategoryIDI
+					}(),
+					"old_default_mapping":   ifaceToString(oldDefaultMappingI),
+					"old_cashflow_nature":   ifaceToString(oldCashflowNatureI),
+					"old_usage_flag":        ifaceToString(oldUsageFlagI),
+					"old_description":       ifaceToString(oldDescriptionI),
+					"old_status":            ifaceToString(oldStatusI),
+					"is_top_level_category": isTopLevelCategory,
+					"is_deleted":            isDeleted,
+					"category_level":        ifaceToInt(categoryLevelI),
+					"old_category_level":    ifaceToInt(oldCategoryLevelI),
+					"erp_type":           ifaceToString(erpTypeI),
+					"erp_ext":            ifaceToString(erpExtI),
+					"erp_segment":        ifaceToString(erpSegmentI),
+					"old_erp_type":       ifaceToString(oldErpTypeI),
+					"old_erp_ext":        ifaceToString(oldErpExtI),
+					"old_erp_segment":    ifaceToString(oldErpSegmentI),
+					"sap_fsv":            ifaceToString(sapFsvI),
+					"sap_node":           ifaceToString(sapNodeI),
+					"sap_bukrs":          ifaceToString(sapBukrsI),
+					"sap_notes":          ifaceToString(sapNotesI),
+					"old_sap_fsv":        ifaceToString(oldSapFsvI),
+					"old_sap_node":       ifaceToString(oldSapNodeI),
+					"old_sap_bukrs":      ifaceToString(oldSapBukrsI),
+					"old_sap_notes":      ifaceToString(oldSapNotesI),
+					"oracle_ledger":      ifaceToString(oracleLedgerI),
+					"oracle_cf_code":     ifaceToString(oracleCFCodeI),
+					"oracle_cf_name":     ifaceToString(oracleCFNameI),
+					"oracle_line":        ifaceToString(oracleLineI),
+					"old_oracle_ledger":  ifaceToString(oldOracleLedgerI),
+					"old_oracle_cf_code": ifaceToString(oldOracleCFCodeI),
+					"old_oracle_cf_name": ifaceToString(oldOracleCFNameI),
+					"old_oracle_line":    ifaceToString(oldOracleLineI),
+					"tally_group":        ifaceToString(tallyGroupI),
+					"tally_voucher":      ifaceToString(tallyVoucherI),
+					"tally_notes":        ifaceToString(tallyNotesI),
+					"old_tally_group":    ifaceToString(oldTallyGroupI),
+					"old_tally_voucher":  ifaceToString(oldTallyVoucherI),
+					"old_tally_notes":    ifaceToString(oldTallyNotesI),
+					"sage_section":       ifaceToString(sageSectionI),
+					"sage_line":          ifaceToString(sageLineI),
+					"sage_notes":         ifaceToString(sageNotesI),
+					"old_sage_section":   ifaceToString(oldSageSectionI),
+					"old_sage_line":      ifaceToString(oldSageLineI),
+					"old_sage_notes":     ifaceToString(oldSageNotesI),
+					"processing_status":  ifaceToString(processingStatusI),
+					"requested_by":       ifaceToString(requestedByI),
+					"requested_at":       ifaceToTimeString(requestedAtI),
+					"created_by":         "", "created_at": "", "edited_by": "", "edited_at": "", "deleted_by": "", "deleted_at": "",
+					"action_type":     ifaceToString(actionTypeI),
+					"action_id":       ifaceToString(actionIDI),
+					"checker_by":      ifaceToString(checkerByI),
+					"checker_at":      ifaceToTimeString(checkerAtI),
+					"checker_comment": ifaceToString(checkerCommentI),
+					"reason":          ifaceToString(reasonI),
 				},
 				"children": []interface{}{},
 			}
 
 			typeIDs = append(typeIDs, categoryID)
 
-			// Mark for hiding if is_deleted=true and processing_status=APPROVED
 			if isDeleted && strings.ToUpper(ifaceToString(processingStatusI)) == "APPROVED" {
 				hideIds[categoryID] = true
 			}
 		}
 
-		// Step 2: fetch audit history (CREATE/EDIT/DELETE) in bulk
 		if len(typeIDs) > 0 {
 			auditQuery := `
 				SELECT category_id, actiontype, requested_by, requested_at
@@ -425,8 +498,6 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 				}
-
-				// merge into entityMap
 				for cid, info := range auditMap {
 					if entity, ok := entityMap[cid]; ok {
 						data := entity["data"].(map[string]interface{})
@@ -438,7 +509,6 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 3: fetch relationships
 		relRows, err := pgxPool.Query(ctx, "SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships")
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -453,8 +523,6 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentMap[parentID] = append(parentMap[parentID], childID)
 			}
 		}
-
-		// Step 4: hide deleted+approved categories and descendants
 		if len(hideIds) > 0 {
 			getAllDescendants := func(start []string) []string {
 				all := map[string]bool{}
@@ -488,7 +556,6 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Step 5: rebuild children arrays
 		for _, e := range entityMap {
 			e["children"] = []interface{}{}
 		}
@@ -520,17 +587,13 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(rowsOut)
+		api.RespondWithPayload(w, true, "", rowsOut)
 	}
 }
 
-// FindParentCashFlowCategoryAtLevel returns the ancestor of a category at the requested level (pgx)
 func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-
-		// Parse request
 		var req struct {
 			UserID string `json:"user_id"`
 			Level  int    `json:"level"`
@@ -540,7 +603,6 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Validate user session
 		validUser := false
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -577,7 +639,6 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		// var results []map[string]interface{}
 		results := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var name, id string
@@ -593,11 +654,9 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": results})
+		api.RespondWithPayload(w, true, "", results)
 	}
 }
-
-// GetCashFlowCategoryNamesWithID returns minimal id/name/type for all categories (requires user_id)
 func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -607,7 +666,6 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-		// validate session
 		valid := false
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -622,7 +680,6 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := context.Background()
-		// select with latest audit processing_status and is_deleted to filter out deleted+approved entries
 		rows, err := pgxPool.Query(ctx, `
 			SELECT m.category_id, m.category_name, m.category_type, m.is_deleted, a.processing_status
 			FROM mastercashflowcategory m
@@ -649,12 +706,9 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "categories": out})
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"categories": out})
 	}
 }
-
-// UpdateCashFlowCategoryBulk updates multiple cashflow categories with old_* preservation and audit via pgx
 func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -669,8 +723,6 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-
-		// get updated_by from session
 		updatedBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -707,8 +759,6 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tx.Rollback(ctx)
 					}
 				}()
-
-				// fetch existing values FOR UPDATE
 				var (
 					existingCategoryNameI     interface{}
 					existingCategoryTypeI     interface{}
@@ -721,14 +771,24 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					existingCategoryLevelI    interface{}
 					existingIsTopLevel        bool
 					existingIsDeleted         bool
+					existingErpTypeI, existingErpExtI, existingErpSegmentI                                   interface{}
+					existingSapFsvI, existingSapNodeI, existingSapBukrsI, existingSapNotesI                  interface{}
+					existingOracleLedgerI, existingOracleCFCodeI, existingOracleCFNameI, existingOracleLineI interface{}
+					existingTallyGroupI, existingTallyVoucherI, existingTallyNotesI                          interface{}
+					existingSageSectionI, existingSageLineI, existingSageNotesI                              interface{}
 				)
-				sel := `SELECT category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, is_top_level_category, is_deleted, category_level FROM mastercashflowcategory WHERE category_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, cat.CategoryID).Scan(&existingCategoryNameI, &existingCategoryTypeI, &existingParentCategoryIDI, &existingDefaultMappingI, &existingCashflowNatureI, &existingUsageFlagI, &existingDescriptionI, &existingStatusI, &existingIsTopLevel, &existingIsDeleted, &existingCategoryLevelI); err != nil {
+				sel := `SELECT category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, is_top_level_category, is_deleted, category_level,
+							   erp_type, erp_ext, erp_segment, sap_fsv, sap_node, sap_bukrs, sap_notes,
+							   oracle_ledger, oracle_cf_code, oracle_cf_name, oracle_line,
+							   tally_group, tally_voucher, tally_notes, sage_section, sage_line, sage_notes
+						FROM mastercashflowcategory WHERE category_id=$1 FOR UPDATE`
+				if err := tx.QueryRow(ctx, sel, cat.CategoryID).Scan(&existingCategoryNameI, &existingCategoryTypeI, &existingParentCategoryIDI, &existingDefaultMappingI, &existingCashflowNatureI, &existingUsageFlagI, &existingDescriptionI, &existingStatusI, &existingIsTopLevel, &existingIsDeleted, &existingCategoryLevelI,
+					&existingErpTypeI, &existingErpExtI, &existingErpSegmentI, &existingSapFsvI, &existingSapNodeI, &existingSapBukrsI, &existingSapNotesI,
+					&existingOracleLedgerI, &existingOracleCFCodeI, &existingOracleCFNameI, &existingOracleLineI,
+					&existingTallyGroupI, &existingTallyVoucherI, &existingTallyNotesI, &existingSageSectionI, &existingSageLineI, &existingSageNotesI); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing category: " + err.Error(), "category_id": cat.CategoryID})
 					return
 				}
-
-				// build dynamic update
 				var sets []string
 				var args []interface{}
 				pos := 1
@@ -774,7 +834,6 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						args = append(args, fmt.Sprint(v), ifaceToString(existingStatusI))
 						pos += 2
 					case "category_level":
-						// new integer level, preserve old_category_level
 						var newLevel int
 						switch t := v.(type) {
 						case float64:
@@ -825,8 +884,75 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("is_deleted=$%d", pos))
 						args = append(args, newBool)
 						pos++
+					case "erp_type":
+						sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingErpTypeI))
+						pos += 2
+					case "erp_ext":
+						sets = append(sets, fmt.Sprintf("erp_ext=$%d, old_erp_ext=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingErpExtI))
+						pos += 2
+					case "erp_segment":
+						sets = append(sets, fmt.Sprintf("erp_segment=$%d, old_erp_segment=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingErpSegmentI))
+						pos += 2
+					case "sap_fsv":
+						sets = append(sets, fmt.Sprintf("sap_fsv=$%d, old_sap_fsv=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSapFsvI))
+						pos += 2
+					case "sap_node":
+						sets = append(sets, fmt.Sprintf("sap_node=$%d, old_sap_node=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSapNodeI))
+						pos += 2
+					case "sap_bukrs":
+						sets = append(sets, fmt.Sprintf("sap_bukrs=$%d, old_sap_bukrs=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSapBukrsI))
+						pos += 2
+					case "sap_notes":
+						sets = append(sets, fmt.Sprintf("sap_notes=$%d, old_sap_notes=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSapNotesI))
+						pos += 2
+					case "oracle_ledger":
+						sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLedgerI))
+						pos += 2
+					case "oracle_cf_code":
+						sets = append(sets, fmt.Sprintf("oracle_cf_code=$%d, old_oracle_cf_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleCFCodeI))
+						pos += 2
+					case "oracle_cf_name":
+						sets = append(sets, fmt.Sprintf("oracle_cf_name=$%d, old_oracle_cf_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleCFNameI))
+						pos += 2
+					case "oracle_line":
+						sets = append(sets, fmt.Sprintf("oracle_line=$%d, old_oracle_line=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLineI))
+						pos += 2
+					case "tally_group":
+						sets = append(sets, fmt.Sprintf("tally_group=$%d, old_tally_group=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyGroupI))
+						pos += 2
+					case "tally_voucher":
+						sets = append(sets, fmt.Sprintf("tally_voucher=$%d, old_tally_voucher=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyVoucherI))
+						pos += 2
+					case "tally_notes":
+						sets = append(sets, fmt.Sprintf("tally_notes=$%d, old_tally_notes=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyNotesI))
+						pos += 2
+					case "sage_section":
+						sets = append(sets, fmt.Sprintf("sage_section=$%d, old_sage_section=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSageSectionI))
+						pos += 2
+					case "sage_line":
+						sets = append(sets, fmt.Sprintf("sage_line=$%d, old_sage_line=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSageLineI))
+						pos += 2
+					case "sage_notes":
+						sets = append(sets, fmt.Sprintf("sage_notes=$%d, old_sage_notes=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSageNotesI))
+						pos += 2
 					default:
-						// ignore unknown keys
 					}
 				}
 
@@ -841,8 +967,6 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				} else {
 					updatedCategoryID = cat.CategoryID
 				}
-
-				// Insert audit action
 				auditQuery := `INSERT INTO auditactioncashflowcategory (
 					category_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
@@ -850,13 +974,10 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					results = append(results, map[string]interface{}{"success": false, "error": "Category updated but audit log failed: " + err.Error(), "category_id": updatedCategoryID})
 					return
 				}
-
-				// Sync relationships if parent_category_id provided
 				if parentProvided != "" {
 					var exists bool
 					err := tx.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_id=$1 AND child_category_id=$2`, parentProvided, updatedCategoryID).Scan(&exists)
 					if err == nil && exists {
-						// already exists
 					} else {
 						if _, err := tx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_id, child_category_id, status) VALUES ($1,$2,'Active')`, parentProvided, updatedCategoryID); err == nil {
 							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "parent_category_id": parentProvided, "child_category_id": updatedCategoryID})
@@ -873,17 +994,14 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
+		overall := api.IsBulkSuccess(results)
+		api.RespondWithPayload(w, overall, "", map[string]interface{}{
 			"results":            results,
 			"relationshipsAdded": len(relationshipsAdded),
 			"details":            relationshipsAdded,
 		})
 	}
 }
-
-// DeleteCashFlowCategory marks a category and its descendants as deleted and creates audit actions (pgx-only)
 func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -901,7 +1019,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// get requested_by from session
 		requestedBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -917,7 +1034,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// Fetch relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -931,8 +1047,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentMap[parentID] = append(parentMap[parentID], childID)
 			}
 		}
-
-		// Traverse descendants
 		getAllDescendants := func(ids []string) []string {
 			all := map[string]bool{}
 			queue := append([]string{}, ids...)
@@ -961,8 +1075,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No category found to delete")
 			return
 		}
-
-		// Start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
@@ -974,8 +1086,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-
-		// Mark as deleted and RETURNING category_id
 		rows, err := tx.Query(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1) RETURNING category_id`, allToDelete)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -995,8 +1105,6 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No rows updated")
 			return
 		}
-
-		// Insert audit actions for each updated id
 		for _, cid := range updated {
 			if _, err := tx.Exec(ctx, `INSERT INTO auditactioncashflowcategory (category_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`, cid, req.Reason, requestedBy); err != nil {
 				tx.Rollback(ctx)
@@ -1011,13 +1119,9 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
-
-// BulkRejectCashFlowCategoryActions rejects audit actions for categories (and their descendants)
-// using pgx: updates processing_status='REJECTED', sets checker_by, checker_at and checker_comment
 func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1029,8 +1133,6 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-
-		// get checker_by from session
 		checkerBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -1045,8 +1147,6 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := context.Background()
-
-		// Fetch relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -1060,8 +1160,6 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				parentMap[parentID] = append(parentMap[parentID], childID)
 			}
 		}
-
-		// Traverse descendants
 		getAllDescendants := func(ids []string) []string {
 			all := map[string]bool{}
 			queue := append([]string{}, ids...)
@@ -1090,8 +1188,6 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No categories found to reject")
 			return
 		}
-
-		// Update audit rows to REJECTED and return affected rows
 		query := `UPDATE auditactioncashflowcategory SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
@@ -1108,19 +1204,15 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		success := len(updated) > 0
-		resp := map[string]interface{}{"success": success, "updated": updated}
 		if !success {
-			resp["message"] = "No rows updated"
+			api.RespondWithPayload(w, false, "No rows updated", map[string]interface{}{"updated": updated})
+			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
 
-// BulkApproveCashFlowCategoryActions approves audit actions for categories (and their descendants)
-// using pgx: updates processing_status='APPROVED', sets checker_by, checker_at and checker_comment
-// Returns the list of updated action_ids and category_ids along with action_type so callers can act accordingly.
 func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1133,7 +1225,6 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		// get checker_by from session
 		checkerBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -1149,7 +1240,6 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		ctx := context.Background()
 
-		// Fetch relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_category_id, child_category_id FROM cashflowcategoryrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -1164,7 +1254,6 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		// Traverse descendants
 		getAllDescendants := func(ids []string) []string {
 			all := map[string]bool{}
 			queue := append([]string{}, ids...)
@@ -1194,7 +1283,6 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		// Update audit rows to APPROVED and return affected rows including action type
 		query := `UPDATE auditactioncashflowcategory SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id, actiontype`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
@@ -1211,17 +1299,15 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
 		success := len(updated) > 0
-		resp := map[string]interface{}{"success": success, "updated": updated}
 		if !success {
-			resp["message"] = "No rows updated"
+			api.RespondWithPayload(w, false, "No rows updated", map[string]interface{}{"updated": updated})
+			return
 		}
-		json.NewEncoder(w).Encode(resp)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
 
-// Handler: UploadCashFlowCategory (staging + mapping)
 func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -1243,7 +1329,6 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Fetch user name from active sessions
 		userName := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -1293,7 +1378,6 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if j < len(row) {
 						cell := strings.TrimSpace(row[j])
 						if cell == "" {
-							// use nil so pgx encodes it as SQL NULL (avoids uuid binary-encoding errors)
 							vals[j+1] = nil
 						} else {
 							vals[j+1] = cell
@@ -1318,7 +1402,6 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}()
 
-			// Stage to input table
 			_, err = tx.CopyFrom(
 				ctx,
 				pgx.Identifier{"input_cashflow_category"},
@@ -1329,8 +1412,6 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
 				return
 			}
-
-			// Read mapping
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_cashflow_category`)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
@@ -1346,35 +1427,27 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			mapRows.Close()
 			var srcCols []string
 			var tgtCols []string
-			// build columns in CSV header order so SELECT columns align with INSERT columns
 			for _, h := range headerRow {
 				if tgt, ok := mapping[h]; ok {
 					srcCols = append(srcCols, h)
 					tgtCols = append(tgtCols, tgt)
 				} else {
-					// missing mapping for a header column -> fail
 					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
 					return
 				}
 			}
 			tgtColsStr := strings.Join(tgtCols, ", ")
-
-			// Build SELECT expressions in order and handle parent_category_id (text -> uuid)
 			var selectExprs []string
 			for i, src := range srcCols {
 				tgt := tgtCols[i]
 				if strings.ToLower(tgt) == "parent_category_id" {
-					// Avoid calling trim on a column that may already be uuid-typed.
-					// Convert the column to text for the emptiness check, then cast to uuid when non-empty.
-					selectExprs = append(selectExprs, fmt.Sprintf("CASE WHEN COALESCE(s.%s::text, '') = '' THEN NULL ELSE s.%s::uuid END AS %s", src, src, tgt))
+					selectExprs = append(selectExprs, fmt.Sprintf("CASE WHEN COALESCE(s.%s::text, '') = '' THEN NULL ELSE s.%s END AS %s", src, src, tgt))
 				} else {
 					selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
 				}
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
-
-			// Move to final table (resolve FKs via join)
 			insertSQL := fmt.Sprintf(`
 				INSERT INTO mastercashflowcategory (%s)
 				SELECT %s
@@ -1395,8 +1468,6 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			rows.Close()
-
-			// Bulk insert audit actions
 			if len(newCategoryIDs) > 0 {
 				auditSQL := `
 					INSERT INTO auditactioncashflowcategory (
@@ -1412,8 +1483,6 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 			}
-
-			// Bulk insert relationships (if parent_category_id is present)
 			if len(newCategoryIDs) > 0 {
 				relSQL := `
 					INSERT INTO cashflowcategoryrelationships (parent_category_id, child_category_id, status)
@@ -1434,9 +1503,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"batch_ids": batchIDs,
 			"message":   "All cash flow categories uploaded, mapped, synced, and audited",
 		})
