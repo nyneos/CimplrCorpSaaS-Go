@@ -366,16 +366,16 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldTallyLedgerGroupI          interface{}
 				oldSageNominalControlI        interface{}
 				oldSageAnalysisCodeI          interface{}
-				processingStatusI             interface{}
 				isDeletedI                    interface{}
-				requestedByI                  interface{}
-				requestedAtI                  interface{}
-				actionTypeI                   interface{}
-				actionIDI                     string
-				checkerByI                    interface{}
-				checkerAtI                    interface{}
-				checkerCommentI               interface{}
-				reasonI                       interface{}
+				processingStatusI             interface{}
+				requestedByI    interface{}
+				requestedAtI    interface{}
+				actionTypeI     interface{}
+				actionIDI       string
+				checkerByI      interface{}
+				checkerAtI      interface{}
+				checkerCommentI interface{}
+				reasonI         interface{}
 			)
 
 			if err := rows.Scan(
@@ -392,7 +392,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldTagsI, &oldErpTypeI, &oldSapCompanyCodeI, &oldSapFiDocTypeI, &oldSapPostingKeyDebitI, &oldSapPostingKeyCreditI,
 				&oldSapReconciliationGLI, &oldSapTaxCodeI, &oldOracleLedgerI, &oldOracleTransactionTypeI, &oldOracleDistributionSetI,
 				&oldOracleSourceI, &oldTallyVoucherTypeI, &oldTallyTaxClassI, &oldTallyLedgerGroupI, &oldSageNominalControlI, &oldSageAnalysisCodeI,
-				&processingStatusI, &isDeletedI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI, &checkerByI, &checkerAtI, &checkerCommentI, &reasonI,
+				&isDeletedI, &processingStatusI, &requestedByI, &requestedAtI, &actionTypeI, &actionIDI, &checkerByI, &checkerAtI, &checkerCommentI, &reasonI,
 			); err != nil {
 				continue
 			}
@@ -526,8 +526,6 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 				}
-
-				// Step 3: merge audit info back into output
 				for i, rec := range out {
 					tid := rec["type_id"].(string)
 					if audit, ok := auditMap[tid]; ok {
