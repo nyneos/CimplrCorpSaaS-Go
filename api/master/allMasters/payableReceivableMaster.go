@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	// "mime/multipart"
 	"net/http"
 	"strings"
 
@@ -14,43 +16,43 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
 type PayableReceivableRequest struct {
-	Status                    string  `json:"status"`
-	TypeCode                  string  `json:"type_code,omitempty"`
-	TypeName                  string  `json:"type_name"`
-	Direction                 string  `json:"direction"`
-	BusinessUnitDivision      string  `json:"business_unit_division"`
-	DefaultCurrency           string  `json:"default_currency"`
-	DefaultDueDays            *int    `json:"default_due_days,omitempty"`
-	PaymentTermsName          string  `json:"payment_terms_name,omitempty"`
-	AllowNetting              *bool   `json:"allow_netting,omitempty"`
-	SettlementDiscount        *bool   `json:"settlement_discount,omitempty"`
-	SettlementDiscountPercent *string `json:"settlement_discount_percent,omitempty"`
-	TaxApplicable             *bool   `json:"tax_applicable,omitempty"`
-	TaxCode                   string  `json:"tax_code,omitempty"`
-	DefaultReconGL            string  `json:"default_recon_gl,omitempty"`
-	OffsetRevenueExpenseGL    string  `json:"offset_revenue_expense_gl,omitempty"`
-	CashFlowCategory          string  `json:"cash_flow_category,omitempty"`
-	EffectiveFrom             string  `json:"effective_from,omitempty"`
-	EffectiveTo               string  `json:"effective_to,omitempty"`
-	Tags                      string  `json:"tags,omitempty"`
-	ErpType                   string  `json:"erp_type,omitempty"`
-	SAPCompanyCode            string  `json:"sap_company_code,omitempty"`
-	SAPFiDocType              string  `json:"sap_fi_doc_type,omitempty"`
-	SAPPostingKeyDebit        string  `json:"sap_posting_key_debit,omitempty"`
-	SAPPostingKeyCredit       string  `json:"sap_posting_key_credit,omitempty"`
-	SAPReconciliationGL       string  `json:"sap_reconciliation_gl,omitempty"`
-	SAPTaxCode                string  `json:"sap_tax_code,omitempty"`
-	OracleLedger              string  `json:"oracle_ledger,omitempty"`
-	OracleTransactionType     string  `json:"oracle_transaction_type,omitempty"`
-	OracleDistributionSet     string  `json:"oracle_distribution_set,omitempty"`
-	OracleSource              string  `json:"oracle_source,omitempty"`
-	TallyVoucherType          string  `json:"tally_voucher_type,omitempty"`
-	TallyTaxClass             string  `json:"tally_tax_class,omitempty"`
-	TallyLedgerGroup          string  `json:"tally_ledger_group,omitempty"`
-	SageNominalControl        string  `json:"sage_nominal_control,omitempty"`
-	SageAnalysisCode          string  `json:"sage_analysis_code,omitempty"`
+	Status                    string   `json:"status"`
+	TypeCode                  string   `json:"type_code,omitempty"`
+	TypeName                  string   `json:"type_name"`
+	Direction                 string   `json:"direction"`
+	BusinessUnitDivision      string   `json:"business_unit_division"`
+	DefaultCurrency           string   `json:"default_currency"`
+	DefaultDueDays            *int     `json:"default_due_days,omitempty"`
+	PaymentTermsName          string   `json:"payment_terms_name,omitempty"`
+	AllowNetting              *bool    `json:"allow_netting,omitempty"`
+	SettlementDiscount        *bool    `json:"settlement_discount,omitempty"`
+	SettlementDiscountPercent *float64 `json:"settlement_discount_percent,omitempty"`
+	TaxApplicable             *bool    `json:"tax_applicable,omitempty"`
+	TaxCode                   string   `json:"tax_code,omitempty"`
+	DefaultReconGL            string   `json:"default_recon_gl,omitempty"`
+	OffsetRevenueExpenseGL    string   `json:"offset_revenue_expense_gl,omitempty"`
+	CashFlowCategory          string   `json:"cash_flow_category,omitempty"`
+	Category                  string   `json:"category,omitempty"`
+	EffectiveFrom             string   `json:"effective_from,omitempty"`
+	EffectiveTo               string   `json:"effective_to,omitempty"`
+	Tags                      string   `json:"tags,omitempty"`
+	ErpType                   string   `json:"erp_type,omitempty"`
+	SAPCompanyCode            string   `json:"sap_company_code,omitempty"`
+	SAPFiDocType              string   `json:"sap_fi_doc_type,omitempty"`
+	SAPPostingKeyDebit        string   `json:"sap_posting_key_debit,omitempty"`
+	SAPPostingKeyCredit       string   `json:"sap_posting_key_credit,omitempty"`
+	SAPReconciliationGL       string   `json:"sap_reconciliation_gl,omitempty"`
+	SAPTaxCode                string   `json:"sap_tax_code,omitempty"`
+	OracleLedger              string   `json:"oracle_ledger,omitempty"`
+	OracleTransactionType     string   `json:"oracle_transaction_type,omitempty"`
+	OracleDistributionSet     string   `json:"oracle_distribution_set,omitempty"`
+	OracleSource              string   `json:"oracle_source,omitempty"`
+	TallyVoucherType          string   `json:"tally_voucher_type,omitempty"`
+	TallyTaxClass             string   `json:"tally_tax_class,omitempty"`
+	TallyLedgerGroup          string   `json:"tally_ledger_group,omitempty"`
+	SageNominalControl        string   `json:"sage_nominal_control,omitempty"`
+	SageAnalysisCode          string   `json:"sage_analysis_code,omitempty"`
 }
 
 func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -140,12 +142,13 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			ins := `INSERT INTO masterpayablereceivabletype (
 				type_id, status, type_code, type_name, direction, business_unit_division, default_currency, default_due_days,
-				payment_terms_name, allow_netting, settlement_discount, settlement_discount_percent, tax_applicable, tax_code,
-				default_recon_gl, offset_revenue_expense_gl, cash_flow_category, effective_from, effective_to, tags,
+					payment_terms_name, allow_netting, settlement_discount, settlement_discount_percent, tax_applicable, tax_code,
+					default_recon_gl, offset_revenue_expense_gl, cash_flow_category, category, effective_from, effective_to, tags,
 				erp_type, sap_company_code, sap_fi_doc_type, sap_posting_key_debit, sap_posting_key_credit, sap_reconciliation_gl,
 				sap_tax_code, oracle_ledger, oracle_transaction_type, oracle_distribution_set, oracle_source, tally_voucher_type,
 				tally_tax_class, tally_ledger_group, sage_nominal_control, sage_analysis_code
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36) RETURNING type_id`
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37) RETURNING type_id`
+			// include generated id as first parameter
 			if err := tx.QueryRow(ctx, ins,
 				id,
 				rrow.Status,
@@ -164,6 +167,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.DefaultReconGL,
 				rrow.OffsetRevenueExpenseGL,
 				rrow.CashFlowCategory,
+				rrow.Category,
 				effFrom,
 				effTo,
 				rrow.Tags,
@@ -235,7 +239,6 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
-
 		valid := false
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -255,13 +258,13 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.type_id,
 				m.type_code, m.type_name, m.direction, m.business_unit_division, m.default_currency, m.default_due_days, m.payment_terms_name,
 				m.allow_netting, m.settlement_discount, m.settlement_discount_percent, m.tax_applicable, m.tax_code,
-				m.default_recon_gl, m.offset_revenue_expense_gl, m.cash_flow_category, m.effective_from, m.effective_to, m.tags,
+				m.default_recon_gl, m.offset_revenue_expense_gl, m.cash_flow_category, m.category, m.effective_from, m.effective_to, m.tags,
 				m.erp_type, m.sap_company_code, m.sap_fi_doc_type, m.sap_posting_key_debit, m.sap_posting_key_credit, m.sap_reconciliation_gl,
 				m.sap_tax_code, m.oracle_ledger, m.oracle_transaction_type, m.oracle_distribution_set, m.oracle_source,
 				m.tally_voucher_type, m.tally_tax_class, m.tally_ledger_group, m.sage_nominal_control, m.sage_analysis_code,
 				m.old_type_code, m.old_type_name, m.old_direction, m.old_business_unit_division, m.old_default_currency, m.old_default_due_days,
 				m.old_payment_terms_name, m.old_allow_netting, m.old_settlement_discount, m.old_settlement_discount_percent, m.old_tax_applicable,
-				m.old_tax_code, m.old_default_recon_gl, m.old_offset_revenue_expense_gl, m.old_cash_flow_category, m.old_effective_from, m.old_effective_to,
+				m.old_tax_code, m.old_default_recon_gl, m.old_offset_revenue_expense_gl, m.old_cash_flow_category, m.old_category, m.old_effective_from, m.old_effective_to,
 				m.old_tags, m.old_erp_type, m.old_sap_company_code, m.old_sap_fi_doc_type, m.old_sap_posting_key_debit, m.old_sap_posting_key_credit,
 				m.old_sap_reconciliation_gl, m.old_sap_tax_code, m.old_oracle_ledger, m.old_oracle_transaction_type, m.old_oracle_distribution_set,
 				m.old_oracle_source, m.old_tally_voucher_type, m.old_tally_tax_class, m.old_tally_ledger_group, m.old_sage_nominal_control, m.old_sage_analysis_code,
@@ -308,6 +311,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defaultReconGLI               interface{}
 				offsetRevenueExpenseGLI       interface{}
 				cashFlowCategoryI             interface{}
+				categoryI                     interface{}
 				effectiveFromI                interface{}
 				effectiveToI                  interface{}
 				tagsI                         interface{}
@@ -342,6 +346,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldDefaultReconGLI            interface{}
 				oldOffsetRevenueExpenseGLI    interface{}
 				oldCashFlowCategoryI          interface{}
+				oldCategoryI                  interface{}
 				oldEffectiveFromI             interface{}
 				oldEffectiveToI               interface{}
 				oldTagsI                      interface{}
@@ -377,13 +382,13 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&typeID,
 				&typeCodeI, &typeNameI, &directionI, &businessUnitDivisionI, &defaultCurrencyI, &defaultDueDaysI, &paymentTermsNameI,
 				&allowNettingI, &settlementDiscountI, &settlementDiscountPercentI, &taxApplicableI, &taxCodeI,
-				&defaultReconGLI, &offsetRevenueExpenseGLI, &cashFlowCategoryI, &effectiveFromI, &effectiveToI, &tagsI,
+				&defaultReconGLI, &offsetRevenueExpenseGLI, &cashFlowCategoryI, &categoryI, &effectiveFromI, &effectiveToI, &tagsI,
 				&erpTypeI, &sapCompanyCodeI, &sapFiDocTypeI, &sapPostingKeyDebitI, &sapPostingKeyCreditI, &sapReconciliationGLI,
 				&sapTaxCodeI, &oracleLedgerI, &oracleTransactionTypeI, &oracleDistributionSetI, &oracleSourceI,
 				&tallyVoucherTypeI, &tallyTaxClassI, &tallyLedgerGroupI, &sageNominalControlI, &sageAnalysisCodeI,
 				&oldTypeCodeI, &oldTypeNameI, &oldDirectionI, &oldBusinessUnitDivisionI, &oldDefaultCurrencyI, &oldDefaultDueDaysI,
 				&oldPaymentTermsNameI, &oldAllowNettingI, &oldSettlementDiscountI, &oldSettlementDiscountPercentI, &oldTaxApplicableI,
-				&oldTaxCodeI, &oldDefaultReconGLI, &oldOffsetRevenueExpenseGLI, &oldCashFlowCategoryI, &oldEffectiveFromI, &oldEffectiveToI,
+				&oldTaxCodeI, &oldDefaultReconGLI, &oldOffsetRevenueExpenseGLI, &oldCashFlowCategoryI, &oldCategoryI, &oldEffectiveFromI, &oldEffectiveToI,
 				&oldTagsI, &oldErpTypeI, &oldSapCompanyCodeI, &oldSapFiDocTypeI, &oldSapPostingKeyDebitI, &oldSapPostingKeyCreditI,
 				&oldSapReconciliationGLI, &oldSapTaxCodeI, &oldOracleLedgerI, &oldOracleTransactionTypeI, &oldOracleDistributionSetI,
 				&oldOracleSourceI, &oldTallyVoucherTypeI, &oldTallyTaxClassI, &oldTallyLedgerGroupI, &oldSageNominalControlI, &oldSageAnalysisCodeI,
@@ -409,6 +414,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"default_recon_gl":                ifaceToString(defaultReconGLI),
 				"offset_revenue_expense_gl":       ifaceToString(offsetRevenueExpenseGLI),
 				"cash_flow_category":              ifaceToString(cashFlowCategoryI),
+				"category":                        ifaceToString(categoryI),
 				"effective_from":                  ifaceToTimeString(effectiveFromI),
 				"effective_to":                    ifaceToTimeString(effectiveToI),
 				"tags":                            ifaceToString(tagsI),
@@ -443,6 +449,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_default_recon_gl":            ifaceToString(oldDefaultReconGLI),
 				"old_offset_revenue_expense_gl":   ifaceToString(oldOffsetRevenueExpenseGLI),
 				"old_cash_flow_category":          ifaceToString(oldCashFlowCategoryI),
+				"old_category":                    ifaceToString(oldCategoryI),
 				"old_effective_from":              ifaceToTimeString(oldEffectiveFromI),
 				"old_effective_to":                ifaceToTimeString(oldEffectiveToI),
 				"old_tags":                        ifaceToString(oldTagsI),
@@ -477,7 +484,6 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, record)
 			typeIDs = append(typeIDs, typeID)
 		}
-
 		if len(typeIDs) > 0 {
 			queryAudit := `
 				SELECT type_id, actiontype, requested_by, requested_at
@@ -521,6 +527,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
+				// Step 3: merge audit info back into output
 				for i, rec := range out {
 					tid := rec["type_id"].(string)
 					if audit, ok := auditMap[tid]; ok {
@@ -550,6 +557,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
+
 		valid := false
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -625,6 +633,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
+		// get updated_by
 		updatedBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -657,6 +666,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tx.Rollback(ctx)
 					}
 				}()
+
 				var (
 					existingTypeCode                  interface{}
 					existingTypeName                  interface{}
@@ -673,6 +683,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					existingDefaultReconGL            interface{}
 					existingOffsetRevenueExpenseGL    interface{}
 					existingCashFlowCategory          interface{}
+					existingCategory                  interface{}
 					existingEffectiveFrom             interface{}
 					existingEffectiveTo               interface{}
 					existingTags                      interface{}
@@ -695,21 +706,21 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					existingStatus                    interface{}
 				)
 
-				sel := `SELECT type_code, type_name, direction, business_unit_division, default_currency, default_due_days, payment_terms_name,
-						allow_netting, settlement_discount, settlement_discount_percent, tax_applicable, tax_code,
-						default_recon_gl, offset_revenue_expense_gl, cash_flow_category, effective_from, effective_to, tags,
+						sel := `SELECT type_code, type_name, direction, business_unit_division, default_currency, default_due_days, payment_terms_name,
+								allow_netting, settlement_discount, settlement_discount_percent, tax_applicable, tax_code,
+								default_recon_gl, offset_revenue_expense_gl, cash_flow_category, category, effective_from, effective_to, tags,
 						erp_type, sap_company_code, sap_fi_doc_type, sap_posting_key_debit, sap_posting_key_credit, sap_reconciliation_gl,
 						sap_tax_code, oracle_ledger, oracle_transaction_type, oracle_distribution_set, oracle_source,
 						tally_voucher_type, tally_tax_class, tally_ledger_group, sage_nominal_control, sage_analysis_code, status
 					FROM masterpayablereceivabletype WHERE type_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, row.TypeID).Scan(
-					&existingTypeCode, &existingTypeName, &existingDirection, &existingBusinessUnitDivision, &existingDefaultCurrency, &existingDefaultDueDays, &existingPaymentTermsName,
-					&existingAllowNetting, &existingSettlementDiscount, &existingSettlementDiscountPercent, &existingTaxApplicable, &existingTaxCode,
-					&existingDefaultReconGL, &existingOffsetRevenueExpenseGL, &existingCashFlowCategory, &existingEffectiveFrom, &existingEffectiveTo, &existingTags,
-					&existingErpType, &existingSapCompanyCode, &existingSapFiDocType, &existingSapPostingKeyDebit, &existingSapPostingKeyCredit, &existingSapReconciliationGL,
-					&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
-					&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingStatus,
-				); err != nil {
+						if err := tx.QueryRow(ctx, sel, row.TypeID).Scan(
+							&existingTypeCode, &existingTypeName, &existingDirection, &existingBusinessUnitDivision, &existingDefaultCurrency, &existingDefaultDueDays, &existingPaymentTermsName,
+							&existingAllowNetting, &existingSettlementDiscount, &existingSettlementDiscountPercent, &existingTaxApplicable, &existingTaxCode,
+							&existingDefaultReconGL, &existingOffsetRevenueExpenseGL, &existingCashFlowCategory, &existingCategory, &existingEffectiveFrom, &existingEffectiveTo, &existingTags,
+							&existingErpType, &existingSapCompanyCode, &existingSapFiDocType, &existingSapPostingKeyDebit, &existingSapPostingKeyCredit, &existingSapReconciliationGL,
+							&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
+							&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingStatus,
+						); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "type_id": row.TypeID})
 					return
 				}
@@ -778,6 +789,10 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					case "cash_flow_category":
 						sets = append(sets, fmt.Sprintf("cash_flow_category=$%d, old_cash_flow_category=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingCashFlowCategory))
+						pos += 2
+					case "category":
+						sets = append(sets, fmt.Sprintf("category=$%d, old_category=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingCategory))
 						pos += 2
 					case "effective_from":
 						sets = append(sets, fmt.Sprintf("effective_from=$%d, old_effective_from=$%d", pos, pos+1))
@@ -873,6 +888,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
+				// audit
 				auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "audit failed: " + err.Error(), "type_id": updatedID})
@@ -887,6 +903,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": true, "type_id": updatedID})
 			}()
 		}
+
 		overall := true
 		for _, r := range results {
 			if ok, exists := r["success"]; exists {
@@ -920,6 +937,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
 			return
 		}
+		// validate session / user
 		requestedBy := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
@@ -1036,7 +1054,6 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 			actionIDs = append(actionIDs, aid)
 		}
-
 		missing := []string{}
 		for _, tid := range req.TypeIDs {
 			if !foundTypes[tid] {
@@ -1069,6 +1086,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				updated = append(updated, map[string]interface{}{"action_id": aid, "type_id": tid})
 			}
 		}
+
 		if len(updated) != len(actionIDs) {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("updated %d of %d actions, aborting", len(updated), len(actionIDs)))
 			return
@@ -1119,7 +1137,6 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 				tx.Rollback(ctx)
 			}
 		}()
-
 		sel := `SELECT DISTINCT ON (type_id) action_id, type_id, actiontype, processing_status FROM auditactionpayablereceivable WHERE type_id = ANY($1) ORDER BY type_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.TypeIDs)
 		if err != nil {
@@ -1205,7 +1222,6 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
 	}
 }
-
 func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -1308,11 +1324,15 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tx.Rollback(ctx)
 				}
 			}()
+
+			// stage
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_payablereceivable_table"}, columns, pgx.CopyFromRows(copyRows))
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
 				return
 			}
+
+			// read mapping
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_payablereceivable`)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
