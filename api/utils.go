@@ -75,21 +75,26 @@ func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 	w.Header().Set("Content-Type", "application/json")
 	if success {
+		log.Println("[INFO] RespondWithResult success")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 	} else {
+		log.Println("[ERROR] RespondWithResult", errMsg)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
 	}
 }
 
+// RespondWithPayload sends a consistent JSON response and includes an arbitrary payload
 func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]interface{}{"success": success}
 	if !success && errMsg != "" {
 		resp["error"] = errMsg
+		log.Println("[ERROR] RespondWithPayload", errMsg)
 	}
 	if payload != nil {
 		// use a conventional key `rows` for list payloads
 		resp["rows"] = payload
+		log.Println("[INFO] RespondWithPayload payload included")
 	}
 	json.NewEncoder(w).Encode(resp)
 }
