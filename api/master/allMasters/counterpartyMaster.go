@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -16,20 +17,31 @@ import (
 
 // Minimal request shape for counterparty create/sync
 type CounterpartyRequest struct {
-	InputMethod             string `json:"input_method"`
-	SystemCounterpartyID    string `json:"system_counterparty_id"`
-	CounterpartyName        string `json:"counterparty_name"`
-	CounterpartyCode        string `json:"counterparty_code"`
-	LegalName               string `json:"legal_name"`
-	CounterpartyType        string `json:"counterparty_type"`
-	TaxID                   string `json:"tax_id"`
-	Address                 string `json:"address"`
-	ErpRefID                string `json:"erp_ref_id"`
-	DefaultCashflowCategory string `json:"default_cashflow_category"`
-	DefaultPaymentTerms     string `json:"default_payment_terms"`
-	InternalRiskRating      string `json:"internal_risk_rating"`
-	TreasuryRM              string `json:"treasury_rm"`
-	Status                  string `json:"status"`
+	InputMethod      string        `json:"input_method"`
+	CounterpartyName string        `json:"counterparty_name"`
+	CounterpartyCode string        `json:"counterparty_code"`
+	CounterpartyType string        `json:"counterparty_type"`
+	Address          string        `json:"address"`
+	Status           string        `json:"status"`
+	Country          string        `json:"country,omitempty"`
+	Contact          string        `json:"contact,omitempty"`
+	Email            string        `json:"email,omitempty"`
+	EffFrom          string        `json:"eff_from,omitempty"`
+	EffTo            string        `json:"eff_to,omitempty"`
+	Tags             string        `json:"tags,omitempty"`
+	Banks            []BankRequest `json:"banks,omitempty"`
+}
+
+type BankRequest struct {
+	BankName string `json:"bank,omitempty"`
+	Country  string `json:"country"`
+	Branch   string `json:"branch,omitempty"`
+	Account  string `json:"account,omitempty"`
+	Swift    string `json:"swift,omitempty"`
+	Rel      string `json:"rel,omitempty"`
+	Currency string `json:"currency"`
+	Category string `json:"category,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 // CreateCounterparties inserts rows into mastercounterparty and creates audit entries
@@ -61,7 +73,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		created := make([]map[string]interface{}, 0)
 
 		for _, rrow := range req.Rows {
-			if rrow.SystemCounterpartyID == "" || rrow.CounterpartyName == "" || rrow.CounterpartyCode == "" {
+			if rrow.CounterpartyName == "" || rrow.CounterpartyCode == "" || rrow.CounterpartyType == "" {
 				created = append(created, map[string]interface{}{"success": false, "error": "missing required fields", "counterparty_name": rrow.CounterpartyName})
 				continue
 			}
@@ -73,13 +85,79 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			var id string
-			q := `INSERT INTO mastercounterparty (input_method, system_counterparty_id, counterparty_name, counterparty_code, legal_name, counterparty_type, tax_id, address, erp_ref_id, default_cashflow_category, default_payment_terms, internal_risk_rating, treasury_rm, status)
-				  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING counterparty_id`
-			if err := tx.QueryRow(ctx, q, rrow.InputMethod, rrow.SystemCounterpartyID, rrow.CounterpartyName, rrow.CounterpartyCode, rrow.LegalName, rrow.CounterpartyType, rrow.TaxID, rrow.Address, rrow.ErpRefID, rrow.DefaultCashflowCategory, rrow.DefaultPaymentTerms, rrow.InternalRiskRating, rrow.TreasuryRM, rrow.Status).Scan(&id); err != nil {
+			// parse eff_from/eff_to
+			var effFrom, effTo interface{}
+			if strings.TrimSpace(rrow.EffFrom) != "" {
+				if norm := NormalizeDate(rrow.EffFrom); norm != "" {
+					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+						effFrom = tval
+					}
+				}
+			}
+			if strings.TrimSpace(rrow.EffTo) != "" {
+				if norm := NormalizeDate(rrow.EffTo); norm != "" {
+					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+						effTo = tval
+					}
+				}
+			}
+
+			// generate counterparty_id explicitly with CPT- prefix
+			id = "CPT-" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:7]
+			q := `INSERT INTO mastercounterparty (counterparty_id, input_method, counterparty_name, counterparty_code, counterparty_type, address, status, country, contact, email, eff_from, eff_to, tags)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
+			if _, err := tx.Exec(ctx, q, id, rrow.InputMethod, rrow.CounterpartyName, rrow.CounterpartyCode, rrow.CounterpartyType, rrow.Address, rrow.Status, rrow.Country, rrow.Contact, rrow.Email, effFrom, effTo, rrow.Tags); err != nil {
 				tx.Rollback(ctx)
 				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "counterparty_name": rrow.CounterpartyName})
 				continue
 			}
+
+			// If banks are provided, insert them into mastercounterpartybanks within same transaction
+			var bankResults []map[string]interface{}
+			for _, b := range rrow.Banks {
+				// required: bank (name), country, currency
+				if strings.TrimSpace(b.BankName) == "" || strings.TrimSpace(b.Country) == "" || strings.TrimSpace(b.Currency) == "" {
+					bankResults = append(bankResults, map[string]interface{}{"success": false, "error": "missing bank required fields"})
+					continue
+				}
+				// generate bank_id with CBn- prefix
+				bankID := "CBn-" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:7]
+
+				// prepare nullable values
+				var branch interface{}
+				if strings.TrimSpace(b.Branch) != "" {
+					branch = b.Branch
+				}
+				var account interface{}
+				if strings.TrimSpace(b.Account) != "" {
+					account = b.Account
+				}
+				var swift interface{}
+				if strings.TrimSpace(b.Swift) != "" {
+					swift = b.Swift
+				}
+				var rel interface{}
+				if strings.TrimSpace(b.Rel) != "" {
+					rel = b.Rel
+				}
+				var category interface{}
+				if strings.TrimSpace(b.Category) != "" {
+					category = b.Category
+				}
+				status := b.Status
+				if strings.TrimSpace(status) == "" {
+					status = "Active"
+				}
+
+				bankQ := `INSERT INTO mastercounterpartybanks (bank_id, counterparty_id, bank, country, branch, account, swift, rel, currency, category, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`
+				if _, err := tx.Exec(ctx, bankQ, bankID, id, b.BankName, b.Country, branch, account, swift, rel, b.Currency, category, status); err != nil {
+					tx.Rollback(ctx)
+					created = append(created, map[string]interface{}{"success": false, "error": "bank insert failed: " + err.Error(), "counterparty_name": rrow.CounterpartyName})
+					goto nextRow
+				}
+				bankResults = append(bankResults, map[string]interface{}{"success": true, "bank_id": bankID})
+			}
+		nextRow:
 
 			auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
@@ -93,11 +171,14 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				created = append(created, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "id": id})
 				continue
 			}
-			created = append(created, map[string]interface{}{"success": true, "counterparty_id": id, "counterparty_name": rrow.CounterpartyName})
+			entry := map[string]interface{}{"success": true, "counterparty_id": id, "counterparty_name": rrow.CounterpartyName}
+			if len(bankResults) > 0 {
+				entry["banks"] = bankResults
+			}
+			created = append(created, entry)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": created})
+		api.RespondWithPayload(w, api.IsBulkSuccess(created), "", created)
 	}
 }
 
@@ -141,7 +222,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM auditactioncounterparty
 				ORDER BY counterparty_id, requested_at DESC
 			)
-			SELECT m.counterparty_id, m.input_method, m.system_counterparty_id, m.old_system_counterparty_id, m.counterparty_name, m.old_counterparty_name, m.counterparty_code, m.old_counterparty_code, m.legal_name, m.old_legal_name, m.counterparty_type, m.old_counterparty_type, m.tax_id, m.old_tax_id, m.address, m.old_address, m.erp_ref_id, m.old_erp_ref_id, m.default_cashflow_category, m.old_default_cashflow_category, m.default_payment_terms, m.old_default_payment_terms, m.internal_risk_rating, m.old_internal_risk_rating, m.treasury_rm, m.old_treasury_rm, m.status, m.old_status,
+	     SELECT m.counterparty_id, m.input_method, m.counterparty_name, m.old_counterparty_name, m.counterparty_code, m.old_counterparty_code, m.counterparty_type, m.old_counterparty_type, m.address, m.old_address, m.status, m.old_status, m.country, m.old_country, m.contact, m.old_contact, m.email, m.old_email, m.eff_from, m.old_eff_from, m.eff_to, m.old_eff_to, m.tags, m.old_tags, m.is_deleted,
 				   l.processing_status, l.requested_by, l.requested_at, l.actiontype, l.action_id, l.checker_by, l.checker_at, l.checker_comment, l.reason
 			FROM mastercounterparty m
 			LEFT JOIN latest l ON l.counterparty_id = m.counterparty_id
@@ -161,32 +242,28 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var (
 				id               string
 				inputMethod      interface{}
-				sysID            interface{}
-				oldSysID         interface{}
 				name             interface{}
 				oldName          interface{}
 				code             interface{}
 				oldCode          interface{}
-				legal            interface{}
-				oldLegal         interface{}
 				ctype            interface{}
 				oldCtype         interface{}
-				tax              interface{}
-				oldTax           interface{}
 				addr             interface{}
 				oldAddr          interface{}
-				erp              interface{}
-				oldErp           interface{}
-				defCat           interface{}
-				oldDefCat        interface{}
-				defTerms         interface{}
-				oldDefTerms      interface{}
-				risk             interface{}
-				oldRisk          interface{}
-				rm               interface{}
-				oldRm            interface{}
 				status           interface{}
 				oldStatus        interface{}
+				country          interface{}
+				oldCountry       interface{}
+				contact          interface{}
+				oldContact       interface{}
+				email            interface{}
+				oldEmail         interface{}
+				effFrom          interface{}
+				oldEffFrom       interface{}
+				effTo            interface{}
+				oldEffTo         interface{}
+				tags             interface{}
+				oldTags          interface{}
 				processingStatus interface{}
 				requestedBy      interface{}
 				requestedAt      interface{}
@@ -196,52 +273,56 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				checkerAt        interface{}
 				checkerComment   interface{}
 				reason           interface{}
+				isDeleted        bool
 			)
 
-			if err := rows.Scan(&id, &inputMethod, &sysID, &oldSysID, &name, &oldName, &code, &oldCode, &legal, &oldLegal, &ctype, &oldCtype, &tax, &oldTax, &addr, &oldAddr, &erp, &oldErp, &defCat, &oldDefCat, &defTerms, &oldDefTerms, &risk, &oldRisk, &rm, &oldRm, &status, &oldStatus, &processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+			if err := rows.Scan(&id, &inputMethod, &name, &oldName, &code, &oldCode, &ctype, &oldCtype, &addr, &oldAddr, &status, &oldStatus, &country, &oldCountry, &contact, &oldContact, &email, &oldEmail, &effFrom, &oldEffFrom, &effTo, &oldEffTo, &tags, &oldTags, &isDeleted, &processingStatus, &requestedBy, &requestedAt, &actionType, &actionID, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
 				continue
+			}
+
+			// If record is marked deleted and latest processing is APPROVED, skip it (soft-delete)
+			if isDeleted {
+				if ps := strings.ToUpper(strings.TrimSpace(ifaceToString(processingStatus))); ps == "APPROVED" {
+					continue
+				}
 			}
 
 			order = append(order, id)
 			outMap[id] = map[string]interface{}{
-				"counterparty_id":               id,
-				"input_method":                  ifaceToString(inputMethod),
-				"system_counterparty_id":        ifaceToString(sysID),
-				"old_system_counterparty_id":    ifaceToString(oldSysID),
-				"counterparty_name":             ifaceToString(name),
-				"old_counterparty_name":         ifaceToString(oldName),
-				"counterparty_code":             ifaceToString(code),
-				"old_counterparty_code":         ifaceToString(oldCode),
-				"legal_name":                    ifaceToString(legal),
-				"old_legal_name":                ifaceToString(oldLegal),
-				"counterparty_type":             ifaceToString(ctype),
-				"old_counterparty_type":         ifaceToString(oldCtype),
-				"tax_id":                        ifaceToString(tax),
-				"old_tax_id":                    ifaceToString(oldTax),
-				"address":                       ifaceToString(addr),
-				"old_address":                   ifaceToString(oldAddr),
-				"erp_ref_id":                    ifaceToString(erp),
-				"old_erp_ref_id":                ifaceToString(oldErp),
-				"default_cashflow_category":     ifaceToString(defCat),
-				"old_default_cashflow_category": ifaceToString(oldDefCat),
-				"default_payment_terms":         ifaceToString(defTerms),
-				"old_default_payment_terms":     ifaceToString(oldDefTerms),
-				"internal_risk_rating":          ifaceToString(risk),
-				"old_internal_risk_rating":      ifaceToString(oldRisk),
-				"treasury_rm":                   ifaceToString(rm),
-				"old_treasury_rm":               ifaceToString(oldRm),
-				"status":                        ifaceToString(status),
-				"old_status":                    ifaceToString(oldStatus),
-				"processing_status":             ifaceToString(processingStatus),
-				"requested_by":                  ifaceToString(requestedBy),
-				"requested_at":                  ifaceToTimeString(requestedAt),
-				"action_type":                   ifaceToString(actionType),
-				"action_id":                     actionID,
-				"checker_by":                    ifaceToString(checkerBy),
-				"checker_at":                    ifaceToTimeString(checkerAt),
-				"checker_comment":               ifaceToString(checkerComment),
-				"reason":                        ifaceToString(reason),
-				"created_by":                    "", "created_at": "", "edited_by": "", "edited_at": "", "deleted_by": "", "deleted_at": "",
+				"counterparty_id":       id,
+				"input_method":          ifaceToString(inputMethod),
+				"counterparty_name":     ifaceToString(name),
+				"old_counterparty_name": ifaceToString(oldName),
+				"counterparty_code":     ifaceToString(code),
+				"old_counterparty_code": ifaceToString(oldCode),
+				"counterparty_type":     ifaceToString(ctype),
+				"old_counterparty_type": ifaceToString(oldCtype),
+				"address":               ifaceToString(addr),
+				"old_address":           ifaceToString(oldAddr),
+				"status":                ifaceToString(status),
+				"old_status":            ifaceToString(oldStatus),
+				"country":               ifaceToString(country),
+				"old_country":           ifaceToString(oldCountry),
+				"contact":               ifaceToString(contact),
+				"old_contact":           ifaceToString(oldContact),
+				"email":                 ifaceToString(email),
+				"old_email":             ifaceToString(oldEmail),
+				"eff_from":              ifaceToTimeString(effFrom),
+				"old_eff_from":          ifaceToTimeString(oldEffFrom),
+				"eff_to":                ifaceToTimeString(effTo),
+				"old_eff_to":            ifaceToTimeString(oldEffTo),
+				"tags":                  ifaceToString(tags),
+				"old_tags":              ifaceToString(oldTags),
+				"processing_status":     ifaceToString(processingStatus),
+				"requested_by":          ifaceToString(requestedBy),
+				"requested_at":          ifaceToTimeString(requestedAt),
+				"action_type":           ifaceToString(actionType),
+				"action_id":             actionID,
+				"checker_by":            ifaceToString(checkerBy),
+				"checker_at":            ifaceToTimeString(checkerAt),
+				"checker_comment":       ifaceToString(checkerComment),
+				"reason":                ifaceToString(reason),
+				"created_by":            "", "created_at": "", "edited_by": "", "edited_at": "", "deleted_by": "", "deleted_at": "",
 			}
 		}
 
@@ -303,6 +384,81 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+	}
+}
+
+// GetCounterpartyBanks returns bank rows for a given counterparty_id
+func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string `json:"user_id"`
+			CounterpartyID string `json:"counterparty_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing counterparty_id")
+			return
+		}
+		if req.CounterpartyID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "counterparty_id required")
+			return
+		}
+		// validate session
+		valid := false
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
+
+		ctx := r.Context()
+		q := `SELECT bank_id, bank, old_bank, country, old_country, branch, old_branch, account, old_account, swift, old_swift, rel, old_rel, currency, old_currency, category, old_category, status, old_status FROM mastercounterpartybanks WHERE counterparty_id = $1`
+		rows, err := pgxPool.Query(ctx, q, req.CounterpartyID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := make([]map[string]interface{}, 0)
+		for rows.Next() {
+			var bankID string
+			var bank, oldBank, country, oldCountry, branch, oldBranch, account, oldAccount, swift, oldSwift, rel, oldRel, currency, oldCurrency, category, oldCategory, status, oldStatus interface{}
+			if err := rows.Scan(&bankID, &bank, &oldBank, &country, &oldCountry, &branch, &oldBranch, &account, &oldAccount, &swift, &oldSwift, &rel, &oldRel, &currency, &oldCurrency, &category, &oldCategory, &status, &oldStatus); err != nil {
+				continue
+			}
+			out = append(out, map[string]interface{}{
+				"bank_id":      bankID,
+				"bank":         ifaceToString(bank),
+				"old_bank":     ifaceToString(oldBank),
+				"country":      ifaceToString(country),
+				"old_country":  ifaceToString(oldCountry),
+				"branch":       ifaceToString(branch),
+				"old_branch":   ifaceToString(oldBranch),
+				"account":      ifaceToString(account),
+				"old_account":  ifaceToString(oldAccount),
+				"swift":        ifaceToString(swift),
+				"old_swift":    ifaceToString(oldSwift),
+				"rel":          ifaceToString(rel),
+				"old_rel":      ifaceToString(oldRel),
+				"currency":     ifaceToString(currency),
+				"old_currency": ifaceToString(oldCurrency),
+				"category":     ifaceToString(category),
+				"old_category": ifaceToString(oldCategory),
+				"status":       ifaceToString(status),
+				"old_status":   ifaceToString(oldStatus),
+			})
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "row iteration failed: "+err.Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", out)
 	}
 }
 
@@ -410,9 +566,9 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tx.Rollback(ctx)
 					}
 				}()
-				sel := `SELECT system_counterparty_id, counterparty_name, counterparty_code, legal_name, counterparty_type, tax_id, address, default_cashflow_category, default_payment_terms, internal_risk_rating, treasury_rm, status FROM mastercounterparty WHERE counterparty_id=$1 FOR UPDATE`
-				var existingSysID, existingName, existingCode, existingLegal, existingType, existingTax, existingAddr, existingDefCat, existingDefTerms, existingRisk, existingRM, existingStatus interface{}
-				if err := tx.QueryRow(ctx, sel, row.CounterpartyID).Scan(&existingSysID, &existingName, &existingCode, &existingLegal, &existingType, &existingTax, &existingAddr, &existingDefCat, &existingDefTerms, &existingRisk, &existingRM, &existingStatus); err != nil {
+				sel := `SELECT counterparty_name, counterparty_code, counterparty_type, address, status, country, contact, email, eff_from, eff_to, tags FROM mastercounterparty WHERE counterparty_id=$1 FOR UPDATE`
+				var existingName, existingCode, existingType, existingAddr, existingStatus, existingCountry, existingContact, existingEmail, existingEffFrom, existingEffTo, existingTags interface{}
+				if err := tx.QueryRow(ctx, sel, row.CounterpartyID).Scan(&existingName, &existingCode, &existingType, &existingAddr, &existingStatus, &existingCountry, &existingContact, &existingEmail, &existingEffFrom, &existingEffTo, &existingTags); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "counterparty_id": row.CounterpartyID})
 					return
 				}
@@ -426,22 +582,6 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("counterparty_name=$%d, old_counterparty_name=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingName))
 						pos += 2
-					case "system_counterparty_id":
-						sets = append(sets, fmt.Sprintf("system_counterparty_id=$%d, old_system_counterparty_id=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSysID))
-						pos += 2
-					case "legal_name":
-						sets = append(sets, fmt.Sprintf("legal_name=$%d, old_legal_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingLegal))
-						pos += 2
-					case "tax_id":
-						sets = append(sets, fmt.Sprintf("tax_id=$%d, old_tax_id=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTax))
-						pos += 2
-					case "address":
-						sets = append(sets, fmt.Sprintf("address=$%d, old_address=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingAddr))
-						pos += 2
 					case "counterparty_code":
 						sets = append(sets, fmt.Sprintf("counterparty_code=$%d, old_counterparty_code=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingCode))
@@ -450,42 +590,58 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("counterparty_type=$%d, old_counterparty_type=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingType))
 						pos += 2
-					case "default_cashflow_category":
-						vStr := strings.TrimSpace(fmt.Sprint(v))
-						if vStr == "" {
-							sets = append(sets, fmt.Sprintf("default_cashflow_category=$%d, old_default_cashflow_category=$%d", pos, pos+1))
-							args = append(args, nil, ifaceToString(existingDefCat))
-							pos += 2
-						} else {
-							// validate category exists in mastercashflowcategory
-							var exists bool
-							if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM mastercashflowcategory WHERE category_name=$1)", vStr).Scan(&exists); err != nil {
-								results = append(results, map[string]interface{}{"success": false, "error": "failed to validate default_cashflow_category: " + err.Error(), "counterparty_id": row.CounterpartyID})
-								return
-							}
-							if !exists {
-								results = append(results, map[string]interface{}{"success": false, "error": "invalid default_cashflow_category: " + vStr, "counterparty_id": row.CounterpartyID})
-								return
-							}
-							sets = append(sets, fmt.Sprintf("default_cashflow_category=$%d, old_default_cashflow_category=$%d", pos, pos+1))
-							args = append(args, vStr, ifaceToString(existingDefCat))
-							pos += 2
-						}
-					case "default_payment_terms":
-						sets = append(sets, fmt.Sprintf("default_payment_terms=$%d, old_default_payment_terms=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDefTerms))
-						pos += 2
-					case "internal_risk_rating":
-						sets = append(sets, fmt.Sprintf("internal_risk_rating=$%d, old_internal_risk_rating=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingRisk))
-						pos += 2
-					case "treasury_rm":
-						sets = append(sets, fmt.Sprintf("treasury_rm=$%d, old_treasury_rm=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingRM))
+					case "address":
+						sets = append(sets, fmt.Sprintf("address=$%d, old_address=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingAddr))
 						pos += 2
 					case "status":
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
+						pos += 2
+					case "country":
+						sets = append(sets, fmt.Sprintf("country=$%d, old_country=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingCountry))
+						pos += 2
+					case "contact":
+						sets = append(sets, fmt.Sprintf("contact=$%d, old_contact=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingContact))
+						pos += 2
+					case "email":
+						sets = append(sets, fmt.Sprintf("email=$%d, old_email=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingEmail))
+						pos += 2
+					case "eff_from":
+						// parse date and set old_eff_from
+						if s := strings.TrimSpace(fmt.Sprint(v)); s == "" {
+							sets = append(sets, fmt.Sprintf("eff_from=$%d, old_eff_from=$%d", pos, pos+1))
+							args = append(args, nil, existingEffFrom)
+							pos += 2
+						} else {
+							if norm := NormalizeDate(s); norm != "" {
+								if tval, err := time.Parse("2006-01-02", norm); err == nil {
+									sets = append(sets, fmt.Sprintf("eff_from=$%d, old_eff_from=$%d", pos, pos+1))
+									args = append(args, tval, existingEffFrom)
+									pos += 2
+								}
+							}
+						}
+					case "eff_to":
+						if s := strings.TrimSpace(fmt.Sprint(v)); s == "" {
+							sets = append(sets, fmt.Sprintf("eff_to=$%d, old_eff_to=$%d", pos, pos+1))
+							args = append(args, nil, existingEffTo)
+							pos += 2
+						} else {
+							if norm := NormalizeDate(s); norm != "" {
+								if tval, err := time.Parse("2006-01-02", norm); err == nil {
+									sets = append(sets, fmt.Sprintf("eff_to=$%d, old_eff_to=$%d", pos, pos+1))
+									args = append(args, tval, existingEffTo)
+									pos += 2
+								}
+							}
+						}
+					case "tags":
+						sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingTags))
 						pos += 2
 					default:
 						// ignore other fields for now
@@ -534,8 +690,143 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": overall, "rows": results})
+		api.RespondWithPayload(w, overall, "", results)
+	}
+}
+
+// UpdateCounterpartyBanksBulk updates multiple counterpartybanks by bank_id
+// and inserts an EDIT audit action for the parent counterparty to mark
+// the counterparty processing status as pending edit approval.
+func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+			Rows   []struct {
+				BankID string                 `json:"bank_id"`
+				Fields map[string]interface{} `json:"fields"`
+				Reason string                 `json:"reason"`
+			} `json:"rows"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+		updatedBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				updatedBy = s.Email
+				break
+			}
+		}
+		if updatedBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
+
+		ctx := r.Context()
+		results := []map[string]interface{}{}
+		for _, row := range req.Rows {
+			if strings.TrimSpace(row.BankID) == "" {
+				results = append(results, map[string]interface{}{"success": false, "error": "missing bank_id"})
+				continue
+			}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error(), "bank_id": row.BankID})
+				continue
+			}
+			committed := false
+			func() {
+				defer func() {
+					if !committed {
+						tx.Rollback(ctx)
+					}
+				}()
+
+				// lock existing bank row and fetch counterparty_id
+				sel := `SELECT counterparty_id, bank, country, branch, account, swift, rel, currency, category, status FROM mastercounterpartybanks WHERE bank_id=$1 FOR UPDATE`
+				var counterpartyID string
+				var exBank, exCountry, exBranch, exAccount, exSwift, exRel, exCurrency, exCategory, exStatus interface{}
+				if err := tx.QueryRow(ctx, sel, row.BankID).Scan(&counterpartyID, &exBank, &exCountry, &exBranch, &exAccount, &exSwift, &exRel, &exCurrency, &exCategory, &exStatus); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "bank_id": row.BankID})
+					return
+				}
+
+				var sets []string
+				var args []interface{}
+				pos := 1
+				for k, v := range row.Fields {
+					switch k {
+					case "bank":
+						sets = append(sets, fmt.Sprintf("bank=$%d, old_bank=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exBank))
+						pos += 2
+					case "country":
+						sets = append(sets, fmt.Sprintf("country=$%d, old_country=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exCountry))
+						pos += 2
+					case "branch":
+						sets = append(sets, fmt.Sprintf("branch=$%d, old_branch=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exBranch))
+						pos += 2
+					case "account":
+						sets = append(sets, fmt.Sprintf("account=$%d, old_account=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exAccount))
+						pos += 2
+					case "swift":
+						sets = append(sets, fmt.Sprintf("swift=$%d, old_swift=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exSwift))
+						pos += 2
+					case "rel":
+						sets = append(sets, fmt.Sprintf("rel=$%d, old_rel=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exRel))
+						pos += 2
+					case "currency":
+						sets = append(sets, fmt.Sprintf("currency=$%d, old_currency=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exCurrency))
+						pos += 2
+					case "category":
+						sets = append(sets, fmt.Sprintf("category=$%d, old_category=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exCategory))
+						pos += 2
+					case "status":
+						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(exStatus))
+						pos += 2
+					default:
+						// ignore unknown fields
+					}
+				}
+
+				updatedBankID := row.BankID
+				if len(sets) > 0 {
+					q := "UPDATE mastercounterpartybanks SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE bank_id=$%d RETURNING bank_id", pos)
+					args = append(args, row.BankID)
+					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedBankID); err != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": "update failed: " + err.Error(), "bank_id": row.BankID})
+						return
+					}
+				}
+
+				// insert audit action for parent counterparty to mark edit pending
+				auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
+				if _, err := tx.Exec(ctx, auditQ, counterpartyID, row.Reason, updatedBy); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "bank_id": updatedBankID, "counterparty_id": counterpartyID})
+					return
+				}
+
+				if err := tx.Commit(ctx); err != nil {
+					results = append(results, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "bank_id": updatedBankID})
+					return
+				}
+				committed = true
+				results = append(results, map[string]interface{}{"success": true, "bank_id": updatedBankID, "counterparty_id": counterpartyID})
+			}()
+		}
+
+		finalSuccess := api.IsBulkSuccess(results)
+		api.RespondWithPayload(w, finalSuccess, "", results)
 	}
 }
 
@@ -809,9 +1100,10 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(deleteIDs) > 0 {
-			delQ := `DELETE FROM mastercounterparty WHERE counterparty_id = ANY($1)`
+			// perform soft delete by setting is_deleted = true
+			delQ := `UPDATE mastercounterparty SET is_deleted = true WHERE counterparty_id = ANY($1)`
 			if _, err := tx.Exec(ctx, delQ, deleteIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to delete master rows: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to soft-delete master rows: "+err.Error())
 				return
 			}
 		}
@@ -820,7 +1112,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		api.RespondWithPayload(w, true, "", updated)
 	}
 }
 
@@ -1005,5 +1297,3 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
 	}
 }
-
-// (no nullableUUID helper required here)
