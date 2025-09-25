@@ -133,14 +133,14 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var effFrom interface{}
 		var effTo interface{}
 		if strings.TrimSpace(req.EffFrom) != "" {
-			if norm := api.NormalizeDate(req.EffFrom); norm != "" {
+			if norm := NormalizeDate(req.EffFrom); norm != "" {
 				if tval, err := time.Parse("2006-01-02", norm); err == nil {
 					effFrom = tval
 				}
 			}
 		}
 		if strings.TrimSpace(req.EffTo) != "" {
-			if norm := api.NormalizeDate(req.EffTo); norm != "" {
+			if norm := NormalizeDate(req.EffTo); norm != "" {
 				if tval, err := time.Parse("2006-01-02", norm); err == nil {
 					effTo = tval
 				}
@@ -405,7 +405,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						// parse date strings to time.Time using NormalizeDate
 						var dt interface{}
 						if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-							if norm := api.NormalizeDate(s); norm != "" {
+							if norm := NormalizeDate(s); norm != "" {
 								if tval, err := time.Parse("2006-01-02", norm); err == nil {
 									dt = tval
 								}
@@ -417,7 +417,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					case "eff_to":
 						var dt interface{}
 						if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-							if norm := api.NormalizeDate(s); norm != "" {
+							if norm := NormalizeDate(s); norm != "" {
 								if tval, err := time.Parse("2006-01-02", norm); err == nil {
 									dt = tval
 								}
