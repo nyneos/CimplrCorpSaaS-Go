@@ -1,6 +1,7 @@
 package payablerecievable
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
 	"encoding/csv"
@@ -18,11 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
-
-// TODO: ADD Old Value Concept for Audit Logs
-// TODO: dont ask entiyty_id or any id from user, fetch from session
-
-// Helper: fetch audit info for payables/receivables
 func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID string) (createdBy, createdAt, createdStatus, editedBy, editedAt, editedStatus, deletedBy, deletedAt, deletedStatus string) {
 	auditDetailsQuery := `SELECT actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
 	auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, payableID)
