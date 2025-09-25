@@ -112,7 +112,7 @@ func StartMasterService(db *sql.DB) {
 	// Bank Account Master routes
 	mux.Handle("/master/bankaccount/create", api.BusinessUnitMiddleware(db)(allMaster.CreateBankAccountMaster(pgxPool)))
 	mux.Handle("/master/bankaccount/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadBankAccount(pgxPool)))
-	mux.Handle("/master/bankaccount/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllBankAccountMaster(pgxPool)))
+	// mux.Handle("/master/bankaccount/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllBankAccountMaster(pgxPool)))
 	mux.Handle("/master/bankaccount/update", api.BusinessUnitMiddleware(db)(allMaster.UpdateBankAccountMasterBulk(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-delete", api.BusinessUnitMiddleware(db)(allMaster.BulkDeleteBankAccountAudit(pgxPool)))
 	mux.Handle("/master/bankaccount/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectBankAccountAuditActions(pgxPool)))
@@ -120,7 +120,10 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/bankaccount/names", api.BusinessUnitMiddleware(db)(allMaster.GetBankNamesWithIDForAccount(pgxPool)))
 	mux.Handle("/master/bankaccount/approved-with-entity", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedBankAccountsWithBankEntity(pgxPool)))
 	mux.Handle("/master/bankaccount/pre-populate", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedBankAccountsSimple(pgxPool)))
+	mux.Handle("/master/bankaccount/all", api.BusinessUnitMiddleware(db)(allMaster.GetBankAccountMetaAll(pgxPool)))
+	mux.Handle("/master/bankaccount/for-user", api.BusinessUnitMiddleware(db)(allMaster.GetBankAccountsForUser(pgxPool)))
 
+	
 	// Entity Master routes
 	mux.Handle("/master/entity/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncEntities(db)))
 	mux.Handle("/master/entity/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetEntityHierarchy(db)))
@@ -147,6 +150,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
