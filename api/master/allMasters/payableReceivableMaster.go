@@ -53,6 +53,8 @@ type PayableReceivableRequest struct {
 	TallyLedgerGroup          string   `json:"tally_ledger_group,omitempty"`
 	SageNominalControl        string   `json:"sage_nominal_control,omitempty"`
 	SageAnalysisCode          string   `json:"sage_analysis_code,omitempty"`
+	ExternalCode              string   `json:"external_code,omitempty"`
+	Segment                   string   `json:"segment,omitempty"`
 }
 
 func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -147,7 +149,8 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				erp_type, sap_company_code, sap_fi_doc_type, sap_posting_key_debit, sap_posting_key_credit, sap_reconciliation_gl,
 				sap_tax_code, oracle_ledger, oracle_transaction_type, oracle_distribution_set, oracle_source, tally_voucher_type,
 				tally_tax_class, tally_ledger_group, sage_nominal_control, sage_analysis_code
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37) RETURNING type_id`
+			, external_code, segment
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39) RETURNING type_id`
 			// include generated id as first parameter
 			if err := tx.QueryRow(ctx, ins,
 				id,
@@ -187,6 +190,8 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.TallyLedgerGroup,
 				rrow.SageNominalControl,
 				rrow.SageAnalysisCode,
+				rrow.ExternalCode,
+				rrow.Segment,
 			).Scan(&id); err != nil {
 				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
 				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "type_name": rrow.TypeName})
@@ -263,12 +268,14 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.sap_tax_code, m.oracle_ledger, m.oracle_transaction_type, m.oracle_distribution_set, m.oracle_source,
 				m.tally_voucher_type, m.tally_tax_class, m.tally_ledger_group, m.sage_nominal_control, m.sage_analysis_code,
 				m.old_type_code, m.old_type_name, m.old_direction, m.old_business_unit_division, m.old_default_currency, m.old_default_due_days,
+				m.external_code, m.segment,
 				m.old_payment_terms_name, m.old_allow_netting, m.old_settlement_discount, m.old_settlement_discount_percent, m.old_tax_applicable,
 				m.old_tax_code, m.old_default_recon_gl, m.old_offset_revenue_expense_gl, m.old_cash_flow_category, m.old_category, m.old_effective_from, m.old_effective_to,
 				m.old_tags, m.old_erp_type, m.old_sap_company_code, m.old_sap_fi_doc_type, m.old_sap_posting_key_debit, m.old_sap_posting_key_credit,
 				m.old_sap_reconciliation_gl, m.old_sap_tax_code, m.old_oracle_ledger, m.old_oracle_transaction_type, m.old_oracle_distribution_set,
 				m.old_oracle_source, m.old_tally_voucher_type, m.old_tally_tax_class, m.old_tally_ledger_group, m.old_sage_nominal_control, m.old_sage_analysis_code,
 				m.is_deleted,
+				m.old_external_code, m.old_segment,
 				a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
 				a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM masterpayablereceivabletype m
@@ -331,6 +338,8 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tallyLedgerGroupI             interface{}
 				sageNominalControlI           interface{}
 				sageAnalysisCodeI             interface{}
+				externalCodeI                  interface{}
+				segmentI                       interface{}
 				oldTypeCodeI                  interface{}
 				oldTypeNameI                  interface{}
 				oldDirectionI                 interface{}
@@ -366,6 +375,8 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldTallyLedgerGroupI          interface{}
 				oldSageNominalControlI        interface{}
 				oldSageAnalysisCodeI          interface{}
+					oldExternalCodeI               interface{}
+					oldSegmentI                    interface{}
 				isDeletedI                    interface{}
 				processingStatusI             interface{}
 				requestedByI    interface{}
@@ -388,6 +399,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&tallyVoucherTypeI, &tallyTaxClassI, &tallyLedgerGroupI, &sageNominalControlI, &sageAnalysisCodeI,
 				&oldTypeCodeI, &oldTypeNameI, &oldDirectionI, &oldBusinessUnitDivisionI, &oldDefaultCurrencyI, &oldDefaultDueDaysI,
 				&oldPaymentTermsNameI, &oldAllowNettingI, &oldSettlementDiscountI, &oldSettlementDiscountPercentI, &oldTaxApplicableI,
+				&externalCodeI, &segmentI,
 				&oldTaxCodeI, &oldDefaultReconGLI, &oldOffsetRevenueExpenseGLI, &oldCashFlowCategoryI, &oldCategoryI, &oldEffectiveFromI, &oldEffectiveToI,
 				&oldTagsI, &oldErpTypeI, &oldSapCompanyCodeI, &oldSapFiDocTypeI, &oldSapPostingKeyDebitI, &oldSapPostingKeyCreditI,
 				&oldSapReconciliationGLI, &oldSapTaxCodeI, &oldOracleLedgerI, &oldOracleTransactionTypeI, &oldOracleDistributionSetI,
@@ -434,6 +446,8 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"tally_ledger_group":              ifaceToString(tallyLedgerGroupI),
 				"sage_nominal_control":            ifaceToString(sageNominalControlI),
 				"sage_analysis_code":              ifaceToString(sageAnalysisCodeI),
+				"external_code":                   ifaceToString(externalCodeI),
+				"segment":                         ifaceToString(segmentI),
 				"old_type_code":                   ifaceToString(oldTypeCodeI),
 				"old_type_name":                   ifaceToString(oldTypeNameI),
 				"old_direction":                   ifaceToString(oldDirectionI),
@@ -469,6 +483,8 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_tally_ledger_group":          ifaceToString(oldTallyLedgerGroupI),
 				"old_sage_nominal_control":        ifaceToString(oldSageNominalControlI),
 				"old_sage_analysis_code":          ifaceToString(oldSageAnalysisCodeI),
+				"old_external_code":               ifaceToString(oldExternalCodeI),
+				"old_segment":                     ifaceToString(oldSegmentI),
 				"processing_status":               ifaceToString(processingStatusI),
 				"is_deleted":                      ifaceToString(isDeletedI),
 				"requested_by":                    ifaceToString(requestedByI),
@@ -701,6 +717,8 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					existingTallyLedgerGroup          interface{}
 					existingSageNominalControl        interface{}
 					existingSageAnalysisCode          interface{}
+					existingExternalCode              interface{}
+					existingSegment                   interface{}
 					existingStatus                    interface{}
 				)
 
@@ -709,7 +727,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								default_recon_gl, offset_revenue_expense_gl, cash_flow_category, category, effective_from, effective_to, tags,
 						erp_type, sap_company_code, sap_fi_doc_type, sap_posting_key_debit, sap_posting_key_credit, sap_reconciliation_gl,
 						sap_tax_code, oracle_ledger, oracle_transaction_type, oracle_distribution_set, oracle_source,
-						tally_voucher_type, tally_tax_class, tally_ledger_group, sage_nominal_control, sage_analysis_code, status
+						tally_voucher_type, tally_tax_class, tally_ledger_group, sage_nominal_control, sage_analysis_code, external_code, segment, status
 					FROM masterpayablereceivabletype WHERE type_id=$1 FOR UPDATE`
 						if err := tx.QueryRow(ctx, sel, row.TypeID).Scan(
 							&existingTypeCode, &existingTypeName, &existingDirection, &existingBusinessUnitDivision, &existingDefaultCurrency, &existingDefaultDueDays, &existingPaymentTermsName,
@@ -717,7 +735,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							&existingDefaultReconGL, &existingOffsetRevenueExpenseGL, &existingCashFlowCategory, &existingCategory, &existingEffectiveFrom, &existingEffectiveTo, &existingTags,
 							&existingErpType, &existingSapCompanyCode, &existingSapFiDocType, &existingSapPostingKeyDebit, &existingSapPostingKeyCredit, &existingSapReconciliationGL,
 							&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
-							&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingStatus,
+							&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode,&existingExternalCode, &existingSegment, &existingStatus,
 						); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "type_id": row.TypeID})
 					return
@@ -867,6 +885,14 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					case "sage_analysis_code":
 						sets = append(sets, fmt.Sprintf("sage_analysis_code=$%d, old_sage_analysis_code=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingSageAnalysisCode))
+						pos += 2
+					case "external_code":
+						sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingExternalCode))
+						pos += 2
+					case "segment":
+						sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(existingSegment))
 						pos += 2
 					case "status":
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
