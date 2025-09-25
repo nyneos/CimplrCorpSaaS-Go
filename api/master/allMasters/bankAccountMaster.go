@@ -10,6 +10,7 @@ import (
 
 	// "mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -21,23 +22,68 @@ import (
 // GET handler to fetch account_id, account_number, account_nickname for approved/active accounts
 
 type ClearingCode struct {
-	CodeType  string `json:"code_type"`
-	CodeValue string `json:"code_value"`
+	CodeType          string `json:"code_type"`
+	CodeValue         string `json:"code_value"`
+	OptionalCodeType  string `json:"optional_code_type,omitempty"`
+	OptionalCodeValue string `json:"optional_code_value,omitempty"`
 }
 
 type BankAccountMasterRequest struct {
 	BankID          string         `json:"bank_id"`
 	EntityID        string         `json:"entity_id"`
 	AccountNumber   string         `json:"account_number"`
-	AccountNickname string         `json:"account_nickname"`
-	AccountType     string         `json:"account_type"`
-	CreditLimit     float64        `json:"credit_limit"`
-	AccountCurrency string         `json:"account_currency"`
-	IBAN            string         `json:"iban"`
-	BranchName      string         `json:"branch_name"`
-	BranchAddress   string         `json:"branch_address"`
-	AccountStatus   string         `json:"account_status"`
-	ClearingCodes   []ClearingCode `json:"clearing_codes"`
+	AccountNickname string         `json:"account_nickname,omitempty"`
+	IBAN            string         `json:"iban,omitempty"`
+	BranchName      string         `json:"branch_name,omitempty"`
+	BankName        string         `json:"bank_name,omitempty"`
+	Country         string         `json:"country,omitempty"`
+	Relationship    string         `json:"relationship,omitempty"`
+	Usage           string         `json:"usage,omitempty"`
+	Currency        string         `json:"currency,omitempty"`
+	Nickname        string         `json:"nickname,omitempty"`
+	AccountNo       string         `json:"account_no,omitempty"`
+	EffFrom         string         `json:"eff_from,omitempty"`
+	EffTo           string         `json:"eff_to,omitempty"`
+	Status          string         `json:"status,omitempty"`
+	BranchEmail     string         `json:"branch_email,omitempty"`
+	BranchPhone     string         `json:"branch_phone,omitempty"`
+	Addr1           string         `json:"addr1,omitempty"`
+	Addr2           string         `json:"addr2,omitempty"`
+	City            string         `json:"city,omitempty"`
+	State           string         `json:"state,omitempty"`
+	Postal          string         `json:"postal,omitempty"`
+	ErpType         string         `json:"erp_type,omitempty"`
+	SapBukrs        string         `json:"sap_bukrs,omitempty"`
+	SapHbkid        string         `json:"sap_hbkid,omitempty"`
+	SapHktid        string         `json:"sap_hktid,omitempty"`
+	SapBankl        string         `json:"sap_bankl,omitempty"`
+	OraLedger       string         `json:"ora_ledger,omitempty"`
+	OraBranch       string         `json:"ora_branch,omitempty"`
+	OraAccount      string         `json:"ora_account,omitempty"`
+	TallyLedger     string         `json:"tally_ledger,omitempty"`
+	SageCC          string         `json:"sage_cc,omitempty"`
+	CatInflow       string         `json:"cat_inflow,omitempty"`
+	CatOutflow      string         `json:"cat_outflow,omitempty"`
+	CatCharges      string         `json:"cat_charges,omitempty"`
+	CatIntInc       string         `json:"cat_int_inc,omitempty"`
+	CatIntExp       string         `json:"cat_int_exp,omitempty"`
+	ConnChannel     string         `json:"conn_channel,omitempty"`
+	ConnTz          string         `json:"conn_tz,omitempty"`
+	ConnCutoff      string         `json:"conn_cutoff,omitempty"`
+	ApiBase         string         `json:"api_base,omitempty"`
+	ApiAuth         string         `json:"api_auth,omitempty"`
+	SftpHost        string         `json:"sftp_host,omitempty"`
+	SftpPort        *int           `json:"sftp_port,omitempty"`
+	SftpUser        string         `json:"sftp_user,omitempty"`
+	SftpFolder      string         `json:"sftp_folder,omitempty"`
+	EbicsHostID     string         `json:"ebics_host_id,omitempty"`
+	EbicsPartnerID  string         `json:"ebics_partner_id,omitempty"`
+	EbicsUserID     string         `json:"ebics_user_id,omitempty"`
+	SwiftBic        string         `json:"swift_bic,omitempty"`
+	SwiftService    string         `json:"swift_service,omitempty"`
+	PortalURL       string         `json:"portal_url,omitempty"`
+	PortalNotes     string         `json:"portal_notes,omitempty"`
+	ClearingCodes   []ClearingCode `json:"clearing_codes,omitempty"`
 	UserID          string         `json:"user_id"`
 }
 
@@ -65,8 +111,8 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "User session not found or email missing")
 			return
 		}
-		if req.BankID == "" || req.EntityID == "" || req.AccountNumber == "" || req.AccountType == "" || req.AccountCurrency == "" || req.AccountStatus == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields")
+		if req.BankID == "" || req.EntityID == "" || req.AccountNumber == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields: bank_id, entity_id, account_number")
 			return
 		}
 		ctx := r.Context()
@@ -83,14 +129,54 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 		var accountID string
+		// Normalize date fields
+		var effFrom interface{}
+		var effTo interface{}
+		if strings.TrimSpace(req.EffFrom) != "" {
+			if norm := api.NormalizeDate(req.EffFrom); norm != "" {
+				if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					effFrom = tval
+				}
+			}
+		}
+		if strings.TrimSpace(req.EffTo) != "" {
+			if norm := api.NormalizeDate(req.EffTo); norm != "" {
+				if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					effTo = tval
+				}
+			}
+		}
+
 		query := `INSERT INTO masterbankaccount (
-			bank_id, entity_id, account_number, account_nickname, account_type, credit_limit, account_currency, iban, branch_name, branch_address, account_status
+			bank_id, entity_id, account_number, account_nickname, iban, branch_name, bank_name, country, relationship, usage, currency, nickname, account_no,
+			eff_from, eff_to, status, branch_email, branch_phone, addr1, addr2, city, state, postal,
+			erp_type, sap_bukrs, sap_hbkid, sap_hktid, sap_bankl, ora_ledger, ora_branch, ora_account, tally_ledger, sage_cc,
+			cat_inflow, cat_outflow, cat_charges, cat_int_inc, cat_int_exp,
+			conn_channel, conn_tz, conn_cutoff, api_base, api_auth,
+			sftp_host, sftp_port, sftp_user, sftp_folder,
+			ebics_host_id, ebics_partner_id, ebics_user_id,
+			swift_bic, swift_service, portal_url, portal_notes
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54
 		) RETURNING account_id`
-		err = tx.QueryRow(ctx, query,
-			req.BankID, req.EntityID, req.AccountNumber, req.AccountNickname, req.AccountType, req.CreditLimit, req.AccountCurrency, req.IBAN, req.BranchName, req.BranchAddress, req.AccountStatus,
-		).Scan(&accountID)
+
+		// Build argument list matching the insert order
+		args := []interface{}{
+			req.BankID, req.EntityID, req.AccountNumber, req.AccountNickname, req.IBAN, req.BranchName, req.BankName, req.Country, req.Relationship, req.Usage,
+			req.Currency, req.Nickname, req.AccountNo, effFrom, effTo, req.Status, req.BranchEmail, req.BranchPhone, req.Addr1, req.Addr2, req.City, req.State, req.Postal,
+			req.ErpType, req.SapBukrs, req.SapHbkid, req.SapHktid, req.SapBankl, req.OraLedger, req.OraBranch, req.OraAccount, req.TallyLedger, req.SageCC,
+			req.CatInflow, req.CatOutflow, req.CatCharges, req.CatIntInc, req.CatIntExp,
+			req.ConnChannel, req.ConnTz, req.ConnCutoff, req.ApiBase, req.ApiAuth,
+			req.SftpHost, req.SftpPort, req.SftpUser, req.SftpFolder,
+			req.EbicsHostID, req.EbicsPartnerID, req.EbicsUserID,
+			req.SwiftBic, req.SwiftService, req.PortalURL, req.PortalNotes,
+		}
+
+		if err := tx.QueryRow(ctx, query, args...).Scan(&accountID); err != nil {
+			tx.Rollback(ctx)
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		if err != nil {
 			tx.Rollback(ctx)
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -117,9 +203,18 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if cc.CodeType == "" || cc.CodeValue == "" {
 				continue
 			}
-			ccQuery := `INSERT INTO masterclearingcode (account_id, code_type, code_value) VALUES ($1, $2, $3) RETURNING clearing_id`
+			// optional fields may be empty
+			ccQuery := `INSERT INTO masterclearingcode (account_id, code_type, code_value, optional_code_type, optional_code_value) VALUES ($1, $2, $3, $4, $5) RETURNING clearing_id`
 			var clearingID string
-			err := tx.QueryRow(ctx, ccQuery, accountID, cc.CodeType, cc.CodeValue).Scan(&clearingID)
+			var optType interface{}
+			var optVal interface{}
+			if strings.TrimSpace(cc.OptionalCodeType) != "" {
+				optType = cc.OptionalCodeType
+			}
+			if strings.TrimSpace(cc.OptionalCodeValue) != "" {
+				optVal = cc.OptionalCodeValue
+			}
+			err := tx.QueryRow(ctx, ccQuery, accountID, cc.CodeType, cc.CodeValue, optType, optVal).Scan(&clearingID)
 			if err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
@@ -141,408 +236,7 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetAllBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		rows, err := pgxPool.Query(ctx, `
-			SELECT 
-				a.account_id,
-				a.account_number,
-				a.account_type,
-				a.account_status,
-				a.account_currency,
-				a.account_nickname,
-				a.credit_limit,
-				a.iban,
-				a.branch_name,
-				a.branch_address,
-					a.old_bank_id,
-					a.old_entity_id,
-					a.old_account_number,
-					a.old_account_nickname,
-					a.old_account_type,
-					a.old_credit_limit,
-					a.old_account_currency,
-					a.old_iban,
-					a.old_branch_name,
-					a.old_branch_address,
-					a.old_account_status,
-				b.bank_id,
-				b.bank_name,
-				e.entity_id,
-				e.entity_name,
-				COALESCE(
-					(
-						SELECT json_agg(json_build_object(
-							'code_type', c.code_type,
-							'code_value', c.code_value,
-							'old_code_type', COALESCE(c.old_code_type, ''),
-							'old_code_value', COALESCE(c.old_code_value, '')
-						))
-						FROM masterclearingcode c
-						WHERE c.account_id = a.account_id
-					), '[]'::json
-				) AS clearing_codes
-			FROM masterbankaccount a
-			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
-			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
-		`)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer rows.Close()
 
-		type AccountRow struct {
-			AccountID, AccountNumber, AccountType, AccountStatus, AccountCurrency string
-			AccountNickname, IBAN, BranchName, BranchAddress                      *string
-			OldBankID, OldEntityID, OldAccountNumber, OldAccountNickname          *string
-			OldAccountType                                                        *string
-			CreditLimit, OldCreditLimit                                           *float64
-			OldAccountCurrency, OldIBAN, OldBranchName, OldBranchAddress          *string
-			OldAccountStatus                                                      *string
-			BankID, BankName, EntityID, EntityName                                *string
-			ClearingCodes                                                         []byte
-		}
-
-		var accountIDs []string
-		var accountRows []AccountRow
-
-		for rows.Next() {
-			var row AccountRow
-			if err := rows.Scan(
-				&row.AccountID, &row.AccountNumber, &row.AccountType, &row.AccountStatus,
-				&row.AccountCurrency, &row.AccountNickname, &row.CreditLimit, &row.IBAN,
-				&row.BranchName, &row.BranchAddress,
-				&row.OldBankID, &row.OldEntityID, &row.OldAccountNumber, &row.OldAccountNickname, &row.OldAccountType, &row.OldCreditLimit, &row.OldAccountCurrency, &row.OldIBAN, &row.OldBranchName, &row.OldBranchAddress, &row.OldAccountStatus,
-				&row.BankID, &row.BankName,
-				&row.EntityID, &row.EntityName,
-				&row.ClearingCodes,
-			); err == nil {
-				accountIDs = append(accountIDs, row.AccountID)
-				accountRows = append(accountRows, row)
-			}
-		}
-
-		// Fetch audit info (same as before)
-		auditMap := make(map[string]map[string]interface{})
-		if len(accountIDs) > 0 {
-			auditQuery := `
-				SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at,
-				       actiontype, action_id, checker_by, checker_at, checker_comment, reason
-				FROM auditactionbankaccount
-				WHERE account_id = ANY($1::uuid[])
-				ORDER BY account_id, requested_at DESC`
-			auditRows, err := pgxPool.Query(ctx, auditQuery, pq.Array(accountIDs))
-			if err == nil {
-				defer auditRows.Close()
-				for auditRows.Next() {
-					var accID string
-					var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
-					var requestedAtPtr, checkerAtPtr *time.Time
-					if err := auditRows.Scan(&accID, &processingStatusPtr, &requestedByPtr, &requestedAtPtr,
-						&actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr); err == nil {
-								// Safely dereference pointers and format times
-						proc := ""
-						if processingStatusPtr != nil {
-							proc = *processingStatusPtr
-						}
-						actType := ""
-						if actionTypePtr != nil {
-							actType = *actionTypePtr
-						}
-						actID := ""
-						if actionIDPtr != nil {
-							actID = *actionIDPtr
-						}
-						reqBy := ""
-						if requestedByPtr != nil {
-							reqBy = *requestedByPtr
-						}
-						reqAt := ""
-						if requestedAtPtr != nil {
-							reqAt = requestedAtPtr.Format("2006-01-02 15:04:05")
-						}
-						chkBy := ""
-						if checkerByPtr != nil {
-							chkBy = *checkerByPtr
-						}
-						chkAt := ""
-						if checkerAtPtr != nil {
-							chkAt = checkerAtPtr.Format("2006-01-02 15:04:05")
-						}
-						chkComment := ""
-						if checkerCommentPtr != nil {
-							chkComment = *checkerCommentPtr
-						}
-						reason := ""
-						if reasonPtr != nil {
-							reason = *reasonPtr
-						}
-						auditMap[accID] = map[string]interface{}{
-							"processing_status": proc,
-							"action_type":       actType,
-							"action_id":         actID,
-							"requested_by":      reqBy,
-							"requested_at":      reqAt,
-							"checker_by":        chkBy,
-							"checker_at":        chkAt,
-							"checker_comment":   chkComment,
-							"reason":            reason,
-						}
-					}
-				}
-			}
-		}
-
-		// Fetch audit details for CREATE/EDIT/DELETE
-		auditDetailMap := make(map[string]api.ActionAuditInfo)
-		if len(accountIDs) > 0 {
-			adQuery := `SELECT account_id, actiontype, requested_by, requested_at
-			            FROM auditactionbankaccount
-			            WHERE account_id = ANY($1::uuid[])
-			            AND actiontype IN ('CREATE','EDIT','DELETE')
-			            ORDER BY account_id, requested_at DESC`
-			adRows, err := pgxPool.Query(ctx, adQuery, pq.Array(accountIDs))
-			if err == nil {
-				defer adRows.Close()
-				for adRows.Next() {
-					var accID, adType string
-					var adByPtr *string
-					var adAtPtr *time.Time
-					if err := adRows.Scan(&accID, &adType, &adByPtr, &adAtPtr); err == nil {
-						info := api.GetAuditInfo(adType, adByPtr, adAtPtr)
-						audit := auditDetailMap[accID]
-						if info.CreatedBy != "" {
-							audit.CreatedBy = info.CreatedBy
-							audit.CreatedAt = info.CreatedAt
-						}
-						if info.EditedBy != "" {
-							audit.EditedBy = info.EditedBy
-							audit.EditedAt = info.EditedAt
-						}
-						if info.DeletedBy != "" {
-							audit.DeletedBy = info.DeletedBy
-							audit.DeletedAt = info.DeletedAt
-						}
-						auditDetailMap[accID] = audit
-					}
-				}
-			}
-		}
-
-		// Build response
-		var accounts []map[string]interface{}
-		for _, row := range accountRows {
-			var clearingCodes []map[string]interface{}
-			_ = json.Unmarshal(row.ClearingCodes, &clearingCodes)
-
-			audit := auditMap[row.AccountID]
-			auditInfo := auditDetailMap[row.AccountID]
-
-			accounts = append(accounts, map[string]interface{}{
-				"account_id":       row.AccountID,
-				"account_number":   row.AccountNumber,
-				"account_type":     row.AccountType,
-				"account_status":   row.AccountStatus,
-				"account_currency": row.AccountCurrency,
-				"account_nickname": func() string {
-					if row.AccountNickname != nil {
-						return *row.AccountNickname
-					}
-					return ""
-				}(),
-				"credit_limit": func() float64 {
-					if row.CreditLimit != nil {
-						return *row.CreditLimit
-					}
-					return 0
-				}(),
-				"iban": func() string {
-					if row.IBAN != nil {
-						return *row.IBAN
-					}
-					return ""
-				}(),
-				"branch_name": func() string {
-					if row.BranchName != nil {
-						return *row.BranchName
-					}
-					return ""
-				}(),
-				"branch_address": func() string {
-					if row.BranchAddress != nil {
-						return *row.BranchAddress
-					}
-					return ""
-				}(),
-				"old_bank_id": func() string {
-					if row.OldBankID != nil {
-						return *row.OldBankID
-					}
-					return ""
-				}(),
-				"old_entity_id": func() string {
-					if row.OldEntityID != nil {
-						return *row.OldEntityID
-					}
-					return ""
-				}(),
-				"old_account_number": func() string {
-					if row.OldAccountNumber != nil {
-						return *row.OldAccountNumber
-					}
-					return ""
-				}(),
-				"old_account_nickname": func() string {
-					if row.OldAccountNickname != nil {
-						return *row.OldAccountNickname
-					}
-					return ""
-				}(),
-				"old_account_type": func() string {
-					if row.OldAccountType != nil {
-						return *row.OldAccountType
-					}
-					return ""
-				}(),
-				"old_credit_limit": func() float64 {
-					if row.OldCreditLimit != nil {
-						return *row.OldCreditLimit
-					}
-					return 0
-				}(),
-				"old_account_currency": func() string {
-					if row.OldAccountCurrency != nil {
-						return *row.OldAccountCurrency
-					}
-					return ""
-				}(),
-				"old_iban": func() string {
-					if row.OldIBAN != nil {
-						return *row.OldIBAN
-					}
-					return ""
-				}(),
-				"old_branch_name": func() string {
-					if row.OldBranchName != nil {
-						return *row.OldBranchName
-					}
-					return ""
-				}(),
-				"old_branch_address": func() string {
-					if row.OldBranchAddress != nil {
-						return *row.OldBranchAddress
-					}
-					return ""
-				}(),
-				"old_account_status": func() string {
-					if row.OldAccountStatus != nil {
-						return *row.OldAccountStatus
-					}
-					return ""
-				}(),
-				"bank_id": func() string {
-					if row.BankID != nil {
-						return *row.BankID
-					}
-					return ""
-				}(),
-				"bank_name": func() string {
-					if row.BankName != nil {
-						return *row.BankName
-					}
-					return ""
-				}(),
-				"entity_id": func() string {
-					if row.EntityID != nil {
-						return *row.EntityID
-					}
-					return ""
-				}(),
-				"entity_name": func() string {
-					if row.EntityName != nil {
-						return *row.EntityName
-					}
-					return ""
-				}(),
-				"clearing_codes": clearingCodes,
-				"processing_status": func() interface{} {
-					if audit != nil {
-						return audit["processing_status"]
-					}
-					return ""
-				}(),
-				"action_type": func() interface{} {
-					if audit != nil {
-						return audit["action_type"]
-					}
-					return ""
-				}(),
-				"action_id": func() interface{} {
-					if audit != nil {
-						return audit["action_id"]
-					}
-					return ""
-				}(),
-				"requested_by": func() interface{} {
-					if audit != nil {
-						return audit["requested_by"]
-					}
-					return ""
-				}(),
-				"requested_at": func() interface{} {
-					if audit != nil {
-						return audit["requested_at"]
-					}
-					return ""
-				}(),
-				"checker_by": func() interface{} {
-					if audit != nil {
-						return audit["checker_by"]
-					}
-					return ""
-				}(),
-				"checker_at": func() interface{} {
-					if audit != nil {
-						return audit["checker_at"]
-					}
-					return ""
-				}(),
-				"checker_comment": func() interface{} {
-					if audit != nil {
-						return audit["checker_comment"]
-					}
-					return ""
-				}(),
-				"reason": func() interface{} {
-					if audit != nil {
-						return audit["reason"]
-					}
-					return ""
-				}(),
-				"created_by": auditInfo.CreatedBy,
-				"created_at": auditInfo.CreatedAt,
-				"edited_by":  auditInfo.EditedBy,
-				"edited_at":  auditInfo.EditedAt,
-				"deleted_by": auditInfo.DeletedBy,
-				"deleted_at": auditInfo.DeletedAt,
-			})
-		}
-
-		if accounts == nil {
-			accounts = make([]map[string]interface{}, 0)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    accounts,
-		})
-	}
-}
-
-// Bulk update handler for bank account master
 func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -596,11 +290,38 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 
-				// fetch current values for columns we care about
-				var exBankID, exEntityID, exAccountNumber, exAccountNickname, exAccountType, exAccountCurrency, exIBAN, exBranchName, exBranchAddress, exAccountStatus *string
-				var exCreditLimit *float64
-				sel := `SELECT bank_id, entity_id, account_number, account_nickname, account_type, credit_limit, account_currency, iban, branch_name, branch_address, account_status FROM masterbankaccount WHERE account_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, acc.AccountID).Scan(&exBankID, &exEntityID, &exAccountNumber, &exAccountNickname, &exAccountType, &exCreditLimit, &exAccountCurrency, &exIBAN, &exBranchName, &exBranchAddress, &exAccountStatus); err != nil {
+				// fetch current values for columns we care about (including newly added fields)
+				var exBankID, exEntityID, exAccountNumber, exAccountNickname, exAccountType, exAccountCurrency, exIBAN, exBranchName, exAccountStatus *string
+				var exAddr1, exAddr2, exCity, exState, exPostal *string
+				var exUsage *string
+				var exAccountNo, exNickname *string
+				var exConnChannel, exConnTz, exConnCutoff, exApiBase, exApiAuth *string
+				var exSftpHost, exSftpUser, exSftpFolder *string
+				var exSftpPort *int
+				var exEbicsHostID, exEbicsPartnerID, exEbicsUserID *string
+				var exSwiftBic, exSwiftService, exPortalURL, exPortalNotes *string
+				var exErpType, exSapBukrs, exSapHbkid, exSapHktid, exSapBankl *string
+				var exOraLedger, exOraBranch, exOraAccount, exTallyLedger, exSageCC *string
+				var exEffFrom, exEffTo *time.Time
+				sel := `SELECT bank_id, entity_id, account_number, account_nickname, relationship, usage, currency, iban, branch_name, status,
+								  account_no, nickname, eff_from, eff_to,
+								  conn_channel, conn_tz, conn_cutoff, api_base, api_auth,
+								  sftp_host, sftp_port, sftp_user, sftp_folder,
+								  ebics_host_id, ebics_partner_id, ebics_user_id,
+								  swift_bic, swift_service, portal_url, portal_notes,
+								  erp_type, sap_bukrs, sap_hbkid, sap_hktid, sap_bankl,
+								  ora_ledger, ora_branch, ora_account, tally_ledger, sage_cc,
+								  addr1, addr2, city, state, postal
+						   FROM masterbankaccount WHERE account_id=$1 FOR UPDATE`
+				if err := tx.QueryRow(ctx, sel, acc.AccountID).Scan(&exBankID, &exEntityID, &exAccountNumber, &exAccountNickname, &exAccountType, &exUsage, &exAccountCurrency, &exIBAN, &exBranchName, &exAccountStatus,
+					&exAccountNo, &exNickname, &exEffFrom, &exEffTo,
+					&exConnChannel, &exConnTz, &exConnCutoff, &exApiBase, &exApiAuth,
+					&exSftpHost, &exSftpPort, &exSftpUser, &exSftpFolder,
+					&exEbicsHostID, &exEbicsPartnerID, &exEbicsUserID,
+					&exSwiftBic, &exSwiftService, &exPortalURL, &exPortalNotes,
+					&exErpType, &exSapBukrs, &exSapHbkid, &exSapHktid, &exSapBankl,
+					&exOraLedger, &exOraBranch, &exOraAccount, &exTallyLedger, &exSageCC,
+					&exAddr1, &exAddr2, &exCity, &exState, &exPostal); err != nil {
 					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing account: " + err.Error(), "account_id": acc.AccountID})
 					return
 				}
@@ -647,26 +368,17 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						args = append(args, fmt.Sprint(v), oldVal)
 						pos += 2
 					case "account_type":
-						sets = append(sets, fmt.Sprintf("account_type=$%d, old_account_type=$%d", pos, pos+1))
+						// map legacy account_type updates to relationship column, preserve old_account_type with previous relationship value
+						sets = append(sets, fmt.Sprintf("relationship=$%d, old_relationship=$%d", pos, pos+1))
 						oldVal := ""
 						if exAccountType != nil {
 							oldVal = *exAccountType
 						}
 						args = append(args, fmt.Sprint(v), oldVal)
 						pos += 2
-					case "credit_limit":
-						// JSON numbers decode to float64
-						if num, ok := v.(float64); ok {
-							sets = append(sets, fmt.Sprintf("credit_limit=$%d, old_credit_limit=$%d", pos, pos+1))
-							oldNum := float64(0)
-							if exCreditLimit != nil {
-								oldNum = *exCreditLimit
-							}
-							args = append(args, num, oldNum)
-							pos += 2
-						}
-					case "account_currency":
-						sets = append(sets, fmt.Sprintf("account_currency=$%d, old_account_currency=$%d", pos, pos+1))
+					// credit_limit removed (not present in DDL)
+					case "currency":
+						sets = append(sets, fmt.Sprintf("currency=$%d, old_currency=$%d", pos, pos+1))
 						oldVal := ""
 						if exAccountCurrency != nil {
 							oldVal = *exAccountCurrency
@@ -681,6 +393,154 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 						args = append(args, fmt.Sprint(v), oldVal)
 						pos += 2
+					case "account_no":
+						sets = append(sets, fmt.Sprintf("account_no=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "nickname":
+						sets = append(sets, fmt.Sprintf("nickname=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "eff_from":
+						// parse date strings to time.Time using NormalizeDate
+						var dt interface{}
+						if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+							if norm := api.NormalizeDate(s); norm != "" {
+								if tval, err := time.Parse("2006-01-02", norm); err == nil {
+									dt = tval
+								}
+							}
+						}
+						sets = append(sets, fmt.Sprintf("eff_from=$%d", pos))
+						args = append(args, dt)
+						pos += 1
+					case "eff_to":
+						var dt interface{}
+						if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+							if norm := api.NormalizeDate(s); norm != "" {
+								if tval, err := time.Parse("2006-01-02", norm); err == nil {
+									dt = tval
+								}
+							}
+						}
+						sets = append(sets, fmt.Sprintf("eff_to=$%d", pos))
+						args = append(args, dt)
+						pos += 1
+					case "conn_channel":
+						sets = append(sets, fmt.Sprintf("conn_channel=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "conn_tz":
+						sets = append(sets, fmt.Sprintf("conn_tz=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "conn_cutoff":
+						sets = append(sets, fmt.Sprintf("conn_cutoff=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "api_base":
+						sets = append(sets, fmt.Sprintf("api_base=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "api_auth":
+						sets = append(sets, fmt.Sprintf("api_auth=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sftp_host":
+						sets = append(sets, fmt.Sprintf("sftp_host=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sftp_port":
+						// support numeric and string ports
+						if num, ok := v.(float64); ok {
+							args = append(args, int(num))
+							sets = append(sets, fmt.Sprintf("sftp_port=$%d", pos))
+							pos += 1
+						} else if s, ok := v.(string); ok {
+							if sTrim := strings.TrimSpace(s); sTrim != "" {
+								if pnum, err := strconv.Atoi(sTrim); err == nil {
+									args = append(args, pnum)
+									sets = append(sets, fmt.Sprintf("sftp_port=$%d", pos))
+									pos += 1
+								}
+							}
+						}
+					case "sftp_user":
+						sets = append(sets, fmt.Sprintf("sftp_user=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sftp_folder":
+						sets = append(sets, fmt.Sprintf("sftp_folder=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "ebics_host_id":
+						sets = append(sets, fmt.Sprintf("ebics_host_id=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "ebics_partner_id":
+						sets = append(sets, fmt.Sprintf("ebics_partner_id=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "ebics_user_id":
+						sets = append(sets, fmt.Sprintf("ebics_user_id=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "swift_bic":
+						sets = append(sets, fmt.Sprintf("swift_bic=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "swift_service":
+						sets = append(sets, fmt.Sprintf("swift_service=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "portal_url":
+						sets = append(sets, fmt.Sprintf("portal_url=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "portal_notes":
+						sets = append(sets, fmt.Sprintf("portal_notes=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "erp_type":
+						sets = append(sets, fmt.Sprintf("erp_type=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sap_bukrs":
+						sets = append(sets, fmt.Sprintf("sap_bukrs=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sap_hbkid":
+						sets = append(sets, fmt.Sprintf("sap_hbkid=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sap_hktid":
+						sets = append(sets, fmt.Sprintf("sap_hktid=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sap_bankl":
+						sets = append(sets, fmt.Sprintf("sap_bankl=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "ora_ledger":
+						sets = append(sets, fmt.Sprintf("ora_ledger=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "ora_branch":
+						sets = append(sets, fmt.Sprintf("ora_branch=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "ora_account":
+						sets = append(sets, fmt.Sprintf("ora_account=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "tally_ledger":
+						sets = append(sets, fmt.Sprintf("tally_ledger=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
+					case "sage_cc":
+						sets = append(sets, fmt.Sprintf("sage_cc=$%d", pos))
+						args = append(args, fmt.Sprint(v))
+						pos += 1
 					case "branch_name":
 						sets = append(sets, fmt.Sprintf("branch_name=$%d, old_branch_name=$%d", pos, pos+1))
 						oldVal := ""
@@ -689,16 +549,49 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 						args = append(args, fmt.Sprint(v), oldVal)
 						pos += 2
-					case "branch_address":
-						sets = append(sets, fmt.Sprintf("branch_address=$%d, old_branch_address=$%d", pos, pos+1))
+					case "addr1":
+						sets = append(sets, fmt.Sprintf("addr1=$%d, old_addr1=$%d", pos, pos+1))
 						oldVal := ""
-						if exBranchAddress != nil {
-							oldVal = *exBranchAddress
+						if exAddr1 != nil {
+							oldVal = *exAddr1
 						}
 						args = append(args, fmt.Sprint(v), oldVal)
 						pos += 2
-					case "account_status":
-						sets = append(sets, fmt.Sprintf("account_status=$%d, old_account_status=$%d", pos, pos+1))
+					case "addr2":
+						sets = append(sets, fmt.Sprintf("addr2=$%d, old_addr2=$%d", pos, pos+1))
+						oldVal := ""
+						if exAddr2 != nil {
+							oldVal = *exAddr2
+						}
+						args = append(args, fmt.Sprint(v), oldVal)
+						pos += 2
+					case "city":
+						sets = append(sets, fmt.Sprintf("city=$%d, old_city=$%d", pos, pos+1))
+						oldVal := ""
+						if exCity != nil {
+							oldVal = *exCity
+						}
+						args = append(args, fmt.Sprint(v), oldVal)
+						pos += 2
+					case "state":
+						sets = append(sets, fmt.Sprintf("state=$%d, old_state=$%d", pos, pos+1))
+						oldVal := ""
+						if exState != nil {
+							oldVal = *exState
+						}
+						args = append(args, fmt.Sprint(v), oldVal)
+						pos += 2
+					case "postal":
+						sets = append(sets, fmt.Sprintf("postal=$%d, old_postal=$%d", pos, pos+1))
+						oldVal := ""
+						if exPostal != nil {
+							oldVal = *exPostal
+						}
+						args = append(args, fmt.Sprint(v), oldVal)
+						pos += 2
+					case "status":
+						// DB column name is `status`; update status and preserve old_account_status
+						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						oldVal := ""
 						if exAccountStatus != nil {
 							oldVal = *exAccountStatus
@@ -739,24 +632,58 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						return
 					}
 
-					// fetch existing clearing codes to preserve old values
-					existingClearing := make([]ClearingCode, 0)
-					selClearing := `SELECT code_type, code_value FROM masterclearingcode WHERE account_id=$1 ORDER BY clearing_id`
+					// fetch existing clearing codes to preserve old values including optional fields
+					type existingClearingRow struct {
+						CodeType             string
+						CodeValue            string
+						OptionalCodeType     string
+						OptionalCodeValue    string
+						OldCodeType          string
+						OldCodeValue         string
+						OldOptionalCodeType  string
+						OldOptionalCodeValue string
+					}
+					existingClearing := make([]existingClearingRow, 0)
+					selClearing := `SELECT code_type, code_value, optional_code_type, optional_code_value, old_code_type, old_code_value, old_optional_code_type, old_optional_code_value FROM masterclearingcode WHERE account_id=$1 ORDER BY clearing_id`
 					erows, _ := tx.Query(ctx, selClearing, updatedAccountID)
 					if erows != nil {
 						defer erows.Close()
 						for erows.Next() {
-							var etypePtr, evaluePtr *string
-							if err := erows.Scan(&etypePtr, &evaluePtr); err == nil {
-								etype := ""
-								evalue := ""
-								if etypePtr != nil {
-									etype = *etypePtr
+							var ctPtr, cvPtr, optPtr, optValPtr, oldCtPtr, oldCvPtr, oldOptPtr, oldOptValPtr *string
+							if err := erows.Scan(&ctPtr, &cvPtr, &optPtr, &optValPtr, &oldCtPtr, &oldCvPtr, &oldOptPtr, &oldOptValPtr); err == nil {
+								ct := ""
+								cv := ""
+								opt := ""
+								optVal := ""
+								oldCt := ""
+								oldCv := ""
+								oldOpt := ""
+								oldOptVal := ""
+								if ctPtr != nil {
+									ct = *ctPtr
 								}
-								if evaluePtr != nil {
-									evalue = *evaluePtr
+								if cvPtr != nil {
+									cv = *cvPtr
 								}
-								existingClearing = append(existingClearing, ClearingCode{CodeType: etype, CodeValue: evalue})
+								if optPtr != nil {
+									opt = *optPtr
+								}
+								if optValPtr != nil {
+									optVal = *optValPtr
+								}
+								if oldCtPtr != nil {
+									oldCt = *oldCtPtr
+								}
+								if oldCvPtr != nil {
+									oldCv = *oldCvPtr
+								}
+								if oldOptPtr != nil {
+									oldOpt = *oldOptPtr
+								}
+								if oldOptValPtr != nil {
+									oldOptVal = *oldOptValPtr
+								}
+								existingClearing = append(existingClearing, existingClearingRow{ct, cv, opt, optVal, oldCt, oldCv, oldOpt, oldOptVal})
 							}
 						}
 					}
@@ -766,20 +693,34 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						return
 					}
 
-					// When inserting new clearing codes, set old_code_type/old_code_value from existingClearing by position if available
+					// When inserting new clearing codes, set old_code_type/old_code_value and old_optional_* from existingClearing by position if available
 					for i, cc := range codes {
 						if cc.CodeType == "" || cc.CodeValue == "" {
 							continue
 						}
 						oldType := ""
 						oldValue := ""
+						oldOptType := ""
+						oldOptValue := ""
 						if i < len(existingClearing) {
-							oldType = existingClearing[i].CodeType
-							oldValue = existingClearing[i].CodeValue
+							oldType = existingClearing[i].OldCodeType
+							oldValue = existingClearing[i].OldCodeValue
+							oldOptType = existingClearing[i].OldOptionalCodeType
+							oldOptValue = existingClearing[i].OldOptionalCodeValue
 						}
-						ccQuery := `INSERT INTO masterclearingcode (account_id, code_type, code_value, old_code_type, old_code_value) VALUES ($1, $2, $3, $4, $5) RETURNING clearing_id`
+
+						var optType interface{}
+						var optVal interface{}
+						if strings.TrimSpace(cc.OptionalCodeType) != "" {
+							optType = cc.OptionalCodeType
+						}
+						if strings.TrimSpace(cc.OptionalCodeValue) != "" {
+							optVal = cc.OptionalCodeValue
+						}
+
+						ccQuery := `INSERT INTO masterclearingcode (account_id, code_type, code_value, old_code_type, old_code_value, optional_code_type, old_optional_code_type, optional_code_value, old_optional_code_value) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING clearing_id`
 						var clearingID string
-						if err := tx.QueryRow(ctx, ccQuery, updatedAccountID, cc.CodeType, cc.CodeValue, oldType, oldValue).Scan(&clearingID); err != nil {
+						if err := tx.QueryRow(ctx, ccQuery, updatedAccountID, cc.CodeType, cc.CodeValue, oldType, oldValue, optType, oldOptType, optVal, oldOptValue).Scan(&clearingID); err != nil {
 							results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "account_id": updatedAccountID, "code_type": cc.CodeType})
 							return
 						}
@@ -810,7 +751,6 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": finalSuccess, "results": results})
 	}
 }
-
 // Bulk delete handler for bank account audit actions
 func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1032,7 +972,6 @@ func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GET handler to fetch approved accounts with bank and entity names
 func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1048,11 +987,12 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				a.account_nickname,
 				b.bank_id,
 				b.bank_name,
-				e.entity_id,
-				e.entity_name
+				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
 			LEFT JOIN LATERAL (
 				SELECT processing_status
 				FROM auditactionbankaccount aa
@@ -1060,7 +1000,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.account_status = 'Active'
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active'
 		`
 		rows, err := pgxPool.Query(r.Context(), query)
 		if err != nil {
@@ -1130,7 +1070,6 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 	}
 }
 
-// UploadBankAccount handles multipart uploads for bank accounts and stages them using pgxpool (no database/sql used)
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
@@ -1345,7 +1284,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				b.bank_name,
 				a.account_number,
 				a.iban,
-				a.account_currency,
+				a.currency,
 				a.account_nickname
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
@@ -1356,7 +1295,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.account_status = 'Active'
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active'
 		`
 
 		rows, err := pgxPool.Query(r.Context(), query)
@@ -1414,3 +1353,624 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
 	}
 }
+// Get accounts related to a user (based on audit requested_by = user's email)
+func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			AccountID string `json:"account_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AccountID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "account_id required in body")
+			return
+		}
+
+		ctx := r.Context()
+
+		query := `
+        SELECT 
+            a.account_id,
+            a.account_number,
+            a.account_nickname,
+            a.iban,
+            a.branch_name,
+            a.bank_id,
+            a.entity_id,
+            a.bank_name,
+            a.old_bank_name,
+            a.country,
+            a.old_country,
+            a.relationship,
+            a.old_relationship,
+            a.usage,
+            a.old_usage,
+            a.currency,
+            a.old_currency,
+            a.nickname,
+            a.old_nickname,
+            a.account_no,
+            a.old_account_no,
+            a.eff_from,
+            a.old_eff_from,
+            a.eff_to,
+            a.old_eff_to,
+            a.status,
+            a.old_status,
+            a.branch_email,
+            a.old_branch_email,
+            a.branch_phone,
+            a.old_branch_phone,
+            a.addr1,
+            a.old_addr1,
+            a.addr2,
+            a.old_addr2,
+            a.city,
+            a.old_city,
+            a.state,
+            a.old_state,
+            a.postal,
+            a.old_postal,
+            a.erp_type,
+            a.old_erp_type,
+            a.sap_bukrs,
+            a.old_sap_bukrs,
+            a.sap_hbkid,
+            a.old_sap_hbkid,
+            a.sap_hktid,
+            a.old_sap_hktid,
+            a.sap_bankl,
+            a.old_sap_bankl,
+            a.ora_ledger,
+            a.old_ora_ledger,
+            a.ora_branch,
+            a.old_ora_branch,
+            a.ora_account,
+            a.old_ora_account,
+            a.tally_ledger,
+            a.old_tally_ledger,
+            a.sage_cc,
+            a.old_sage_cc,
+            a.cat_inflow,
+            a.old_cat_inflow,
+            a.cat_outflow,
+            a.old_cat_outflow,
+            a.cat_charges,
+            a.old_cat_charges,
+            a.cat_int_inc,
+            a.old_cat_int_inc,
+            a.cat_int_exp,
+            a.old_cat_int_exp,
+            a.conn_channel,
+            a.old_conn_channel,
+            a.conn_tz,
+            a.old_conn_tz,
+            a.conn_cutoff,
+            a.old_conn_cutoff,
+            a.api_base,
+            a.old_api_base,
+            a.api_auth,
+            a.old_api_auth,
+            a.sftp_host,
+            a.old_sftp_host,
+            a.sftp_port,
+            a.old_sftp_port,
+            a.sftp_user,
+            a.old_sftp_user,
+            a.sftp_folder,
+            a.old_sftp_folder,
+            a.ebics_host_id,
+            a.old_ebics_host_id,
+            a.ebics_partner_id,
+            a.old_ebics_partner_id,
+            a.ebics_user_id,
+            a.old_ebics_user_id,
+            a.swift_bic,
+            a.old_swift_bic,
+            a.swift_service,
+            a.old_swift_service,
+            a.portal_url,
+            a.old_portal_url,
+            a.portal_notes,
+            a.old_portal_notes,
+            COALESCE(
+                (
+                    SELECT json_agg(json_build_object(
+                        'clearing_id', c.clearing_id,
+                        'code_type', c.code_type,
+                        'code_value', c.code_value,
+                        'optional_code_type', COALESCE(c.optional_code_type, ''),
+                        'optional_code_value', COALESCE(c.optional_code_value, ''),
+                        'old_code_type', COALESCE(c.old_code_type, ''),
+                        'old_code_value', COALESCE(c.old_code_value, '')
+                    ))
+                    FROM masterclearingcode c
+                    WHERE c.account_id = a.account_id
+                ), '[]'::json
+            ) AS clearing_codes,
+            b.bank_id,
+            b.bank_name,
+            COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
+            COALESCE(e.entity_name, ec.entity_name) AS entity_name
+        FROM masterbankaccount a
+        LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+        LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+        LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+        WHERE a.account_id = $1
+        `
+
+		rows, err := pgxPool.Query(ctx, query, req.AccountID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		type AccountRow struct {
+			AccountID, AccountNumber                                                                                   string
+			AccountNickname, IBAN, BranchName                                                                          *string
+			BankID, EntityID                                                                                           *string
+			BankName, OldBankName                                                                                      *string
+			Country, OldCountry                                                                                        *string
+			Relationship, OldRelationship                                                                              *string
+			Usage, OldUsage                                                                                            *string
+			Currency, OldCurrency                                                                                      *string
+			Nickname, OldNickname                                                                                      *string
+			AccountNo, OldAccountNo                                                                                    *string
+			EffFrom, OldEffFrom, EffTo, OldEffTo                                                                       *time.Time
+			Status, OldStatus                                                                                          *string
+			BranchEmail, OldBranchEmail                                                                                *string
+			BranchPhone, OldBranchPhone                                                                                *string
+			Addr1, OldAddr1, Addr2, OldAddr2                                                                           *string
+			City, OldCity, State, OldState, Postal, OldPostal                                                          *string
+			ErpType, OldErpType                                                                                        *string
+			SapBukrs, OldSapBukrs, SapHbkid, OldSapHbkid, SapHktid, OldSapHktid, SapBankl, OldSapBankl                 *string
+			OraLedger, OldOraLedger, OraBranch, OldOraBranch, OraAccount, OldOraAccount                                *string
+			TallyLedger, OldTallyLedger, SageCC, OldSageCC                                                             *string
+			CatInflow, OldCatInflow, CatOutflow, OldCatOutflow, CatCharges, OldCatCharges                              *string
+			CatIntInc, OldCatIntInc, CatIntExp, OldCatIntExp                                                           *string
+			ConnChannel, OldConnChannel, ConnTz, OldConnTz, ConnCutoff, OldConnCutoff                                  *string
+			ApiBase, OldApiBase, ApiAuth, OldApiAuth                                                                   *string
+			SftpHost, OldSftpHost, SftpUser, OldSftpUser, SftpFolder, OldSftpFolder                                    *string
+			SftpPort, OldSftpPort                                                                                      *int
+			EbicsHostID, OldEbicsHostID, EbicsPartnerID, OldEbicsPartnerID, EbicsUserID, OldEbicsUserID                *string
+			SwiftBic, OldSwiftBic, SwiftService, OldSwiftService, PortalURL, OldPortalURL, PortalNotes, OldPortalNotes *string
+			ClearingCodes                                                                                              []byte
+			BankIDOut, BankNameOut, EntityIDOut, EntityNameOut                                                         *string
+		}
+
+		var row AccountRow
+		if rows.Next() {
+			if err := rows.Scan(
+				&row.AccountID, &row.AccountNumber, &row.AccountNickname, &row.IBAN, &row.BranchName,
+				&row.BankID, &row.EntityID, &row.BankName, &row.OldBankName, &row.Country, &row.OldCountry,
+				&row.Relationship, &row.OldRelationship, &row.Usage, &row.OldUsage, &row.Currency, &row.OldCurrency,
+				&row.Nickname, &row.OldNickname, &row.AccountNo, &row.OldAccountNo, &row.EffFrom, &row.OldEffFrom,
+				&row.EffTo, &row.OldEffTo, &row.Status, &row.OldStatus, &row.BranchEmail, &row.OldBranchEmail,
+				&row.BranchPhone, &row.OldBranchPhone, &row.Addr1, &row.OldAddr1, &row.Addr2, &row.OldAddr2,
+				&row.City, &row.OldCity, &row.State, &row.OldState, &row.Postal, &row.OldPostal,
+				&row.ErpType, &row.OldErpType, &row.SapBukrs, &row.OldSapBukrs, &row.SapHbkid, &row.OldSapHbkid,
+				&row.SapHktid, &row.OldSapHktid, &row.SapBankl, &row.OldSapBankl, &row.OraLedger, &row.OldOraLedger,
+				&row.OraBranch, &row.OldOraBranch, &row.OraAccount, &row.OldOraAccount, &row.TallyLedger, &row.OldTallyLedger,
+				&row.SageCC, &row.OldSageCC, &row.CatInflow, &row.OldCatInflow, &row.CatOutflow, &row.OldCatOutflow,
+				&row.CatCharges, &row.OldCatCharges, &row.CatIntInc, &row.OldCatIntInc, &row.CatIntExp, &row.OldCatIntExp,
+				&row.ConnChannel, &row.OldConnChannel, &row.ConnTz, &row.OldConnTz, &row.ConnCutoff, &row.OldConnCutoff,
+				&row.ApiBase, &row.OldApiBase, &row.ApiAuth, &row.OldApiAuth, &row.SftpHost, &row.OldSftpHost,
+				&row.SftpPort, &row.OldSftpPort, &row.SftpUser, &row.OldSftpUser, &row.SftpFolder, &row.OldSftpFolder,
+				&row.EbicsHostID, &row.OldEbicsHostID, &row.EbicsPartnerID, &row.OldEbicsPartnerID, &row.EbicsUserID, &row.OldEbicsUserID,
+				&row.SwiftBic, &row.OldSwiftBic, &row.SwiftService, &row.OldSwiftService, &row.PortalURL, &row.OldPortalURL,
+				&row.PortalNotes, &row.OldPortalNotes, &row.ClearingCodes, &row.BankIDOut, &row.BankNameOut, &row.EntityIDOut, &row.EntityNameOut,
+			); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		} else {
+			api.RespondWithError(w, http.StatusNotFound, "account not found")
+			return
+		}
+
+		// fetch audit info for this account
+		auditMap := make(map[string]map[string]interface{})
+		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 ORDER BY account_id, requested_at DESC`
+		arows, err := pgxPool.Query(ctx, auditQuery, req.AccountID)
+		if err == nil {
+			defer arows.Close()
+			for arows.Next() {
+				var accID string
+				var processingStatusPtr, requestedByPtr, actionTypePtr, actionIDPtr, checkerByPtr, checkerCommentPtr, reasonPtr *string
+				var requestedAtPtr, checkerAtPtr *time.Time
+				if err := arows.Scan(&accID, &processingStatusPtr, &requestedByPtr, &requestedAtPtr, &actionTypePtr, &actionIDPtr, &checkerByPtr, &checkerAtPtr, &checkerCommentPtr, &reasonPtr); err == nil {
+					proc := ""
+					if processingStatusPtr != nil {
+						proc = *processingStatusPtr
+					}
+					actType := ""
+					if actionTypePtr != nil {
+						actType = *actionTypePtr
+					}
+					actID := ""
+					if actionIDPtr != nil {
+						actID = *actionIDPtr
+					}
+					reqBy := ""
+					if requestedByPtr != nil {
+						reqBy = *requestedByPtr
+					}
+					reqAt := ""
+					if requestedAtPtr != nil {
+						reqAt = requestedAtPtr.Format("2006-01-02 15:04:05")
+					}
+					chkBy := ""
+					if checkerByPtr != nil {
+						chkBy = *checkerByPtr
+					}
+					chkAt := ""
+					if checkerAtPtr != nil {
+						chkAt = checkerAtPtr.Format("2006-01-02 15:04:05")
+					}
+					chkComment := ""
+					if checkerCommentPtr != nil {
+						chkComment = *checkerCommentPtr
+					}
+					reason := ""
+					if reasonPtr != nil {
+						reason = *reasonPtr
+					}
+					auditMap[accID] = map[string]interface{}{
+						"processing_status": proc,
+						"action_type":       actType,
+						"action_id":         actID,
+						"requested_by":      reqBy,
+						"requested_at":      reqAt,
+						"checker_by":        chkBy,
+						"checker_at":        chkAt,
+						"checker_comment":   chkComment,
+						"reason":            reason,
+					}
+				}
+			}
+		}
+
+		// fetch audit detail
+		auditDetailMap := make(map[string]api.ActionAuditInfo)
+		adQuery := `SELECT account_id, actiontype, requested_by, requested_at FROM auditactionbankaccount WHERE account_id=$1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY account_id, requested_at DESC`
+		adRows, err := pgxPool.Query(ctx, adQuery, req.AccountID)
+		if err == nil {
+			defer adRows.Close()
+			for adRows.Next() {
+				var accID, adType string
+				var adByPtr *string
+				var adAtPtr *time.Time
+				if err := adRows.Scan(&accID, &adType, &adByPtr, &adAtPtr); err == nil {
+					info := api.GetAuditInfo(adType, adByPtr, adAtPtr)
+					audit := auditDetailMap[accID]
+					if info.CreatedBy != "" {
+						audit.CreatedBy = info.CreatedBy
+						audit.CreatedAt = info.CreatedAt
+					}
+					if info.EditedBy != "" {
+						audit.EditedBy = info.EditedBy
+						audit.EditedAt = info.EditedAt
+					}
+					if info.DeletedBy != "" {
+						audit.DeletedBy = info.DeletedBy
+						audit.DeletedAt = info.DeletedAt
+					}
+					auditDetailMap[accID] = audit
+				}
+			}
+		}
+
+		// build response with all fields
+		var clearingCodes []map[string]interface{}
+		_ = json.Unmarshal(row.ClearingCodes, &clearingCodes)
+		audit := auditMap[row.AccountID]
+		auditInfo := auditDetailMap[row.AccountID]
+
+		// Helper function to safely get string values
+		getString := func(s *string) string {
+			if s != nil {
+				return *s
+			}
+			return ""
+		}
+
+		// Helper function to safely get time values
+		getDate := func(t *time.Time) string {
+			if t != nil {
+				return t.Format("2006-01-02")
+			}
+			return ""
+		}
+
+		// Helper function to safely get int values
+		getInt := func(i *int) int {
+			if i != nil {
+				return *i
+			}
+			return 0
+		}
+
+		out := map[string]interface{}{
+			// Basic account info
+			"account_id":       row.AccountID,
+			"account_number":   row.AccountNumber,
+			"account_nickname": getString(row.AccountNickname),
+			"iban":             getString(row.IBAN),
+			"branch_name":      getString(row.BranchName),
+
+			// Bank and entity info
+			"bank_id":     getString(row.BankID),
+			"entity_id":   getString(row.EntityID),
+			"bank_name":   getString(row.BankNameOut),
+			"entity_name": getString(row.EntityNameOut),
+
+			// Location info
+			"country": getString(row.Country),
+			"addr1":   getString(row.Addr1),
+			"addr2":   getString(row.Addr2),
+			"city":    getString(row.City),
+			"state":   getString(row.State),
+			"postal":  getString(row.Postal),
+
+			// Account details
+			"relationship": getString(row.Relationship),
+			"usage":        getString(row.Usage),
+			"currency":     getString(row.Currency),
+			"nickname":     getString(row.Nickname),
+			"account_no":   getString(row.AccountNo),
+			"status":       getString(row.Status),
+
+			// Dates
+			"eff_from": getDate(row.EffFrom),
+			"eff_to":   getDate(row.EffTo),
+
+			// Contact info
+			"branch_email": getString(row.BranchEmail),
+			"branch_phone": getString(row.BranchPhone),
+
+			// ERP info
+			"erp_type":     getString(row.ErpType),
+			"sap_bukrs":    getString(row.SapBukrs),
+			"sap_hbkid":    getString(row.SapHbkid),
+			"sap_hktid":    getString(row.SapHktid),
+			"sap_bankl":    getString(row.SapBankl),
+			"ora_ledger":   getString(row.OraLedger),
+			"ora_branch":   getString(row.OraBranch),
+			"ora_account":  getString(row.OraAccount),
+			"tally_ledger": getString(row.TallyLedger),
+			"sage_cc":      getString(row.SageCC),
+
+			// Categories
+			"cat_inflow":  getString(row.CatInflow),
+			"cat_outflow": getString(row.CatOutflow),
+			"cat_charges": getString(row.CatCharges),
+			"cat_int_inc": getString(row.CatIntInc),
+			"cat_int_exp": getString(row.CatIntExp),
+
+			// Connection info
+			"conn_channel": getString(row.ConnChannel),
+			"conn_tz":      getString(row.ConnTz),
+			"conn_cutoff":  getString(row.ConnCutoff),
+			"api_base":     getString(row.ApiBase),
+			"api_auth":     getString(row.ApiAuth),
+
+			// SFTP info
+			"sftp_host":   getString(row.SftpHost),
+			"sftp_port":   getInt(row.SftpPort),
+			"sftp_user":   getString(row.SftpUser),
+			"sftp_folder": getString(row.SftpFolder),
+
+			// EBICS info
+			"ebics_host_id":    getString(row.EbicsHostID),
+			"ebics_partner_id": getString(row.EbicsPartnerID),
+			"ebics_user_id":    getString(row.EbicsUserID),
+
+			// SWIFT info
+			"swift_bic":     getString(row.SwiftBic),
+			"swift_service": getString(row.SwiftService),
+			"portal_url":    getString(row.PortalURL),
+			"portal_notes":  getString(row.PortalNotes),
+
+			// Old fields - all the old values
+			"old_bank_name":        getString(row.OldBankName),
+			"old_country":          getString(row.OldCountry),
+			"old_relationship":     getString(row.OldRelationship),
+			"old_usage":            getString(row.OldUsage),
+			"old_currency":         getString(row.OldCurrency),
+			"old_nickname":         getString(row.OldNickname),
+			"old_account_no":       getString(row.OldAccountNo),
+			"old_status":           getString(row.OldStatus),
+			"old_eff_from":         getDate(row.OldEffFrom),
+			"old_eff_to":           getDate(row.OldEffTo),
+			"old_branch_email":     getString(row.OldBranchEmail),
+			"old_branch_phone":     getString(row.OldBranchPhone),
+			"old_addr1":            getString(row.OldAddr1),
+			"old_addr2":            getString(row.OldAddr2),
+			"old_city":             getString(row.OldCity),
+			"old_state":            getString(row.OldState),
+			"old_postal":           getString(row.OldPostal),
+			"old_erp_type":         getString(row.OldErpType),
+			"old_sap_bukrs":        getString(row.OldSapBukrs),
+			"old_sap_hbkid":        getString(row.OldSapHbkid),
+			"old_sap_hktid":        getString(row.OldSapHktid),
+			"old_sap_bankl":        getString(row.OldSapBankl),
+			"old_ora_ledger":       getString(row.OldOraLedger),
+			"old_ora_branch":       getString(row.OldOraBranch),
+			"old_ora_account":      getString(row.OldOraAccount),
+			"old_tally_ledger":     getString(row.OldTallyLedger),
+			"old_sage_cc":          getString(row.OldSageCC),
+			"old_cat_inflow":       getString(row.OldCatInflow),
+			"old_cat_outflow":      getString(row.OldCatOutflow),
+			"old_cat_charges":      getString(row.OldCatCharges),
+			"old_cat_int_inc":      getString(row.OldCatIntInc),
+			"old_cat_int_exp":      getString(row.OldCatIntExp),
+			"old_conn_channel":     getString(row.OldConnChannel),
+			"old_conn_tz":          getString(row.OldConnTz),
+			"old_conn_cutoff":      getString(row.OldConnCutoff),
+			"old_api_base":         getString(row.OldApiBase),
+			"old_api_auth":         getString(row.OldApiAuth),
+			"old_sftp_host":        getString(row.OldSftpHost),
+			"old_sftp_port":        getInt(row.OldSftpPort),
+			"old_sftp_user":        getString(row.OldSftpUser),
+			"old_sftp_folder":      getString(row.OldSftpFolder),
+			"old_ebics_host_id":    getString(row.OldEbicsHostID),
+			"old_ebics_partner_id": getString(row.OldEbicsPartnerID),
+			"old_ebics_user_id":    getString(row.OldEbicsUserID),
+			"old_swift_bic":        getString(row.OldSwiftBic),
+			"old_swift_service":    getString(row.OldSwiftService),
+			"old_portal_url":       getString(row.OldPortalURL),
+			"old_portal_notes":     getString(row.OldPortalNotes),
+
+			// Additional data
+			"clearing_codes": clearingCodes,
+
+			// Audit info
+			"processing_status": func() interface{} {
+				if audit != nil {
+					return audit["processing_status"]
+				}
+				return ""
+			}(),
+			"action_type": func() interface{} {
+				if audit != nil {
+					return audit["action_type"]
+				}
+				return ""
+			}(),
+			"action_id": func() interface{} {
+				if audit != nil {
+					return audit["action_id"]
+				}
+				return ""
+			}(),
+			"requested_by": func() interface{} {
+				if audit != nil {
+					return audit["requested_by"]
+				}
+				return ""
+			}(),
+			"requested_at": func() interface{} {
+				if audit != nil {
+					return audit["requested_at"]
+				}
+				return ""
+			}(),
+			"checker_by": func() interface{} {
+				if audit != nil {
+					return audit["checker_by"]
+				}
+				return ""
+			}(),
+			"checker_at": func() interface{} {
+				if audit != nil {
+					return audit["checker_at"]
+				}
+				return ""
+			}(),
+			"checker_comment": func() interface{} {
+				if audit != nil {
+					return audit["checker_comment"]
+				}
+				return ""
+			}(),
+			"reason": func() interface{} {
+				if audit != nil {
+					return audit["reason"]
+				}
+				return ""
+			}(),
+			"created_by": auditInfo.CreatedBy,
+			"created_at": auditInfo.CreatedAt,
+			"edited_by":  auditInfo.EditedBy,
+			"edited_at":  auditInfo.EditedAt,
+			"deleted_by": auditInfo.DeletedBy,
+			"deleted_at": auditInfo.DeletedAt,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": out})
+	}
+}
+
+// Get summary/meta for all bank accounts: processing_status, status, entity, bank_name, account_nickname, account_id
+func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		ctx := r.Context()
+
+		// build base query
+		baseQuery := `
+			SELECT a.account_id, a.status,
+				   COALESCE(e.entity_id::text, ec.entity_id::text) as entity_id,
+				   COALESCE(e.entity_name, ec.entity_name) as entity_name,
+				   b.bank_name, a.account_nickname,
+				   COALESCE((SELECT processing_status FROM auditactionbankaccount aa WHERE aa.account_id = a.account_id ORDER BY requested_at DESC LIMIT 1), '') as processing_status
+			FROM masterbankaccount a
+			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+		`
+
+		rows, err := pgxPool.Query(ctx, baseQuery)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		var out []map[string]interface{}
+		for rows.Next() {
+			var accountID string
+			var accountStatus *string
+			var entityID, entityName *string
+			var bankName *string
+			var accountNickname *string
+			var procStatus string
+			if err := rows.Scan(&accountID, &accountStatus, &entityID, &entityName, &bankName, &accountNickname, &procStatus); err != nil {
+				continue
+			}
+			out = append(out, map[string]interface{}{
+				"account_id": accountID,
+				"status": func() string {
+					if accountStatus != nil {
+						return *accountStatus
+					}
+					return ""
+				}(),
+				"entity_id": func() string {
+					if entityID != nil {
+						return *entityID
+					}
+					return ""
+				}(),
+				"entity_name": func() string {
+					if entityName != nil {
+						return *entityName
+					}
+					return ""
+				}(),
+				"bank_name": func() string {
+					if bankName != nil {
+						return *bankName
+					}
+					return ""
+				}(),
+				"account_nickname": func() string {
+					if accountNickname != nil {
+						return *accountNickname
+					}
+					return ""
+				}(),
+				"processing_status": procStatus,
+			})
+		}
+		if out == nil {
+			out = make([]map[string]interface{}, 0)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": out})
+	}
+}
+
