@@ -13,14 +13,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"strconv"
+	"strings"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/xuri/excelize/v2"
-
-	// "mime/multipart"
-	// "math/rand"
-	// "time"
 
 	"github.com/lib/pq"
 )
@@ -78,6 +77,168 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// Helper: normalize date strings to YYYY-MM-DD format
+func NormalizeDate(dateStr string) string {
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return ""
+	}
+
+	// Remove extra spaces and normalize separators
+	dateStr = regexp.MustCompile(`\s+`).ReplaceAllString(dateStr, " ")
+
+	// Common date layouts to try
+	layouts := []string{
+		// ISO formats
+		"2006-01-02",
+		"2006/01/02",
+		"2006.01.02",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05.000Z",
+
+		// DD-MM-YYYY formats (European style)
+		"02-01-2006",
+		"02/01/2006",
+		"02.01.2006",
+		"02-01-2006 15:04:05",
+		"02/01/2006 15:04:05",
+		"02.01.2006 15:04:05",
+
+		// MM-DD-YYYY formats (US style)
+		"01-02-2006",
+		"01/02/2006",
+		"01.02.2006",
+		"01-02-2006 15:04:05",
+		"01/02/2006 15:04:05",
+		"01.02.2006 15:04:05",
+
+		// Text month formats
+		"02-Jan-2006",
+		"02-Jan-06",
+		"2-Jan-2006",
+		"2-Jan-06",
+		"02-Jan-2006 15:04:05",
+		"02 Jan 2006",
+		"2 Jan 2006",
+		"02 Jan 06",
+		"2 Jan 06",
+		"Jan 02, 2006",
+		"Jan 2, 2006",
+		"January 02, 2006",
+		"January 2, 2006",
+
+		// Single digit day/month formats
+		"2-1-2006",
+		"2/1/2006",
+		"2.1.2006",
+		"1-2-2006",
+		"1/2/2006",
+		"1.2.2006",
+
+		// Short year formats
+		"02-01-06",
+		"02/01/06",
+		"02.01.06",
+		"01-02-06",
+		"01/02/06",
+		"01.02.06",
+		"2-1-06",
+		"2/1/06",
+		"1-2-06",
+		"1/2/06",
+	}
+
+	// First, try to parse with standard layouts
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, dateStr); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+
+	// Handle Excel serial dates (numeric dates like 44927 for 2023-01-01)
+	if matched, _ := regexp.MatchString(`^\d+(\.\d+)?$`, dateStr); matched {
+		if days, err := strconv.ParseFloat(dateStr, 64); err == nil {
+			// Excel epoch starts from 1900-01-01, but has a leap year bug
+			// Excel treats 1900 as a leap year when it's not
+			excelEpoch := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+			if days > 60 {
+				days-- // Adjust for Excel's leap year bug
+			}
+			date := excelEpoch.AddDate(0, 0, int(days))
+			return date.Format("2006-01-02")
+		}
+	}
+
+	// Try to extract date parts using regex patterns
+	patterns := []struct {
+		regex  *regexp.Regexp
+		format func([]string) string
+	}{
+		// DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY
+		{
+			regexp.MustCompile(`^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$`),
+			func(matches []string) string {
+				day, _ := strconv.Atoi(matches[1])
+				month, _ := strconv.Atoi(matches[2])
+				year, _ := strconv.Atoi(matches[3])
+				if day <= 12 && month > 12 {
+					// Likely MM-DD-YYYY format
+					return fmt.Sprintf("%04d-%02d-%02d", year, day, month)
+				}
+				// Default to DD-MM-YYYY
+				return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+			},
+		},
+		// YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
+		{
+			regexp.MustCompile(`^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$`),
+			func(matches []string) string {
+				year, _ := strconv.Atoi(matches[1])
+				month, _ := strconv.Atoi(matches[2])
+				day, _ := strconv.Atoi(matches[3])
+				return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+			},
+		},
+		// DD-MM-YY or DD/MM/YY (assuming 20xx for years 00-30, 19xx for 31-99)
+		{
+			regexp.MustCompile(`^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$`),
+			func(matches []string) string {
+				day, _ := strconv.Atoi(matches[1])
+				month, _ := strconv.Atoi(matches[2])
+				year, _ := strconv.Atoi(matches[3])
+				if year <= 30 {
+					year += 2000
+				} else {
+					year += 1900
+				}
+				if day <= 12 && month > 12 {
+					// Likely MM-DD-YY format
+					return fmt.Sprintf("%04d-%02d-%02d", year, day, month)
+				}
+				// Default to DD-MM-YY
+				return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+			},
+		},
+	}
+
+	for _, pattern := range patterns {
+		if matches := pattern.regex.FindStringSubmatch(dateStr); matches != nil {
+			normalized := pattern.format(matches)
+			// Validate the normalized date
+			if _, err := time.Parse("2006-01-02", normalized); err == nil {
+				return normalized
+			}
+		}
+	}
+
+	// If all else fails, return empty string
+	log.Printf("[WARN] Could not normalize date: %s", dateStr)
+	return ""
 }
 
 // Helper: parse DB value to correct Go type
@@ -1038,6 +1199,14 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 							os.Remove(tempFile.Name())
 							continue
 						}
+						// Clean headers - remove BOM and trim whitespace
+						for i, h := range headers {
+							// Remove UTF-8 BOM if present
+							h = strings.TrimPrefix(h, "\ufeff")
+							// Remove other invisible characters and trim
+							h = strings.TrimSpace(h)
+							headers[i] = h
+						}
 						for {
 							row, err := reader.Read()
 							if err != nil {
@@ -1045,7 +1214,9 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 							}
 							obj := map[string]interface{}{}
 							for i, h := range headers {
-								obj[h] = row[i]
+								if h != "" { // Skip empty column names
+									obj[h] = row[i]
+								}
 							}
 							dataArr = append(dataArr, obj)
 						}
@@ -1065,13 +1236,23 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 							continue
 						}
 						headers := rows[0]
+						// Clean headers - remove BOM and trim whitespace
+						for i, h := range headers {
+							// Remove UTF-8 BOM if present
+							h = strings.TrimPrefix(h, "\ufeff")
+							// Remove other invisible characters and trim
+							h = strings.TrimSpace(h)
+							headers[i] = h
+						}
 						for _, row := range rows[1:] {
 							obj := map[string]interface{}{}
 							for i, h := range headers {
-								if i < len(row) {
-									obj[h] = row[i]
-								} else {
-									obj[h] = nil
+								if h != "" { // Skip empty column names
+									if i < len(row) {
+										obj[h] = row[i]
+									} else {
+										obj[h] = nil
+									}
 								}
 							}
 							dataArr = append(dataArr, obj)
@@ -1090,11 +1271,22 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 					case "creditors", "debitors", "grn":
 						buCol = "company"
 					}
-					invalidRows := []string{}
+					invalidRows := []map[string]interface{}{}
 					for _, row := range dataArr {
 						if buCol != "" {
 							buVal, _ := row[buCol].(string)
-							if !contains(buNames, buVal) {
+							buVal = strings.TrimSpace(buVal)
+
+							// Check if buVal matches any of the allowed business units (case-insensitive and trimmed)
+							found := false
+							for _, allowedBU := range buNames {
+								if strings.EqualFold(buVal, strings.TrimSpace(allowedBU)) {
+									found = true
+									break
+								}
+							}
+
+							if !found {
 								ref := "(no ref)"
 								for _, k := range []string{"reference_no", "document_no", "system_lc_number", "bank_reference"} {
 									if v, ok := row[k].(string); ok && v != "" {
@@ -1102,33 +1294,85 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 										break
 									}
 								}
-								invalidRows = append(invalidRows, ref)
+								invalidRows = append(invalidRows, map[string]interface{}{
+									"reference":     ref,
+									"business_unit": buVal,
+									"field":         buCol,
+								})
 							}
 						}
 					}
 					if len(invalidRows) > 0 {
+						allowedBUs := strings.Join(buNames, ", ")
+						errorMsg := fmt.Sprintf("Access denied: %d row(s) contain business units not authorized for your account. Your account has access to: [%s]. Please verify the '%s' field values in your file.",
+							len(invalidRows), allowedBUs, buCol)
 						results = append(results, map[string]interface{}{
-							"filename":            filename,
-							"error":               "Some rows have business_unit not allowed for this user.",
-							"invalidReferenceNos": invalidRows,
+							"filename":             filename,
+							"error":                errorMsg,
+							"invalidRows":          invalidRows,
+							"allowedBusinessUnits": buNames,
+							"validationField":      buCol,
 						})
 						os.Remove(tempFile.Name())
 						continue
 					}
+					// Get table columns to validate against
+					tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
+					var validColumns map[string]bool = make(map[string]bool)
+					if err == nil {
+						defer tableColumnsRes.Close()
+						for tableColumnsRes.Next() {
+							var colName string
+							if err := tableColumnsRes.Scan(&colName); err == nil {
+								validColumns[colName] = true
+							}
+						}
+					}
+
 					uploadBatchId := uuid.New().String()
 					insertedRows := 0
 					for i, row := range dataArr {
 						row["upload_batch_id"] = uploadBatchId
 						row["row_number"] = i + 1
+
+						// Normalize date fields
+						for k, v := range row {
+							if vStr, ok := v.(string); ok && vStr != "" {
+								// Check if field name suggests it's a date field
+								lowerK := strings.ToLower(k)
+								if strings.Contains(lowerK, "date") ||
+									strings.Contains(lowerK, "due") ||
+									strings.Contains(lowerK, "maturity") ||
+									strings.Contains(lowerK, "expiry") ||
+									strings.Contains(lowerK, "valid") ||
+									strings.Contains(lowerK, "created") ||
+									strings.Contains(lowerK, "updated") ||
+									strings.Contains(lowerK, "issued") ||
+									strings.Contains(lowerK, "received") ||
+									strings.Contains(lowerK, "payment") && strings.Contains(lowerK, "date") {
+									if normalized := NormalizeDate(vStr); normalized != "" {
+										row[k] = normalized
+									}
+								}
+							}
+						}
+
 						keys := []string{}
 						vals := []interface{}{}
 						placeholders := []string{}
 						idx := 1
 						for k, v := range row {
+							// Skip columns that don't exist in the table
+							if len(validColumns) > 0 && !validColumns[k] {
+								continue
+							}
 							keys = append(keys, k)
 							vals = append(vals, v)
 							placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
 							idx++
+						}
+						if len(keys) == 0 {
+							continue // Skip rows with no valid columns
 						}
 						query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
 						_, err := db.Exec(query, vals...)
@@ -1280,9 +1524,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 									}
 								}
 								line["exposure_header_id"] = exposureHeaderId
-								if _, ok := line["linked_exposure_header_id"]; ok {
-									delete(line, "linked_exposure_header_id")
-								}
+								delete(line, "linked_exposure_header_id")
 								lineKeys := []string{}
 								lineVals := []interface{}{}
 								linePlaceholders := []string{}
