@@ -705,8 +705,8 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"categories": out})
+	w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "categories": out})
 	}
 }
 func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
