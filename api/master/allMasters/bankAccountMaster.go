@@ -1900,17 +1900,38 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		ctx := r.Context()
 
-		// build base query
+		// build base query - include account_number and latest audit details plus action_id
 		baseQuery := `
-			SELECT a.account_id, a.status,
-				   COALESCE(e.entity_id::text, ec.entity_id::text) as entity_id,
-				   COALESCE(e.entity_name, ec.entity_name) as entity_name,
-				   b.bank_name, a.account_nickname,
-				   COALESCE((SELECT processing_status FROM auditactionbankaccount aa WHERE aa.account_id = a.account_id ORDER BY requested_at DESC LIMIT 1), '') as processing_status
-			FROM masterbankaccount a
-			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
-			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
-			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+	SELECT 
+    a.account_id, 
+    a.account_number, 
+    a.status,
+    COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
+    COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+    b.bank_name, 
+    a.account_nickname,
+    COALESCE(aa.processing_status, '') AS processing_status,
+    COALESCE(aa.actiontype, '') AS action_type,
+    COALESCE(aa.action_id::text, '') AS action_id,
+    COALESCE(aa.requested_by, '') AS requested_by,
+    COALESCE(to_char(aa.requested_at,'YYYY-MM-DD HH24:MI:SS'), '') AS requested_at,
+    COALESCE(aa.checker_by, '') AS checker_by,
+    COALESCE(to_char(aa.checker_at,'YYYY-MM-DD HH24:MI:SS'), '') AS checker_at,
+    COALESCE(aa.checker_comment, '') AS checker_comment,
+    COALESCE(aa.reason, '') AS reason
+FROM masterbankaccount a
+LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+LEFT JOIN LATERAL (
+    SELECT *
+    FROM auditactionbankaccount aa
+    WHERE aa.account_id = a.account_id
+    ORDER BY aa.requested_at DESC
+    LIMIT 1
+) aa ON TRUE;
+
+		
 		`
 
 		rows, err := pgxPool.Query(ctx, baseQuery)
@@ -1920,50 +1941,126 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		var out []map[string]interface{}
+		type AccountRow struct {
+			AccountID       string
+			AccountNumber   *string
+			AccountStatus   *string
+			EntityID        *string
+			EntityName      *string
+			BankName        *string
+			AccountNickname *string
+			ProcStatus      string
+			ActionType      string
+			ActionID        string
+			RequestedBy     string
+			RequestedAt     string
+			CheckerBy       string
+			CheckerAt       string
+			CheckerComment  string
+			Reason          string
+		}
+
+		var accountRows []AccountRow
+		var accountIDs []string
 		for rows.Next() {
-			var accountID string
-			var accountStatus *string
-			var entityID, entityName *string
-			var bankName *string
-			var accountNickname *string
-			var procStatus string
-			if err := rows.Scan(&accountID, &accountStatus, &entityID, &entityName, &bankName, &accountNickname, &procStatus); err != nil {
+			var row AccountRow
+			if err := rows.Scan(&row.AccountID, &row.AccountNumber, &row.AccountStatus, &row.EntityID, &row.EntityName, &row.BankName, &row.AccountNickname, &row.ProcStatus, &row.ActionType, &row.ActionID, &row.RequestedBy, &row.RequestedAt, &row.CheckerBy, &row.CheckerAt, &row.CheckerComment, &row.Reason); err != nil {
 				continue
 			}
+			accountRows = append(accountRows, row)
+			if row.AccountID != "" {
+				accountIDs = append(accountIDs, row.AccountID)
+			}
+		}
+
+		// fetch audit detail for created/edited/deleted
+		auditDetailMap := make(map[string]api.ActionAuditInfo)
+		if len(accountIDs) > 0 {
+			adQuery := `SELECT account_id, actiontype, requested_by, requested_at FROM auditactionbankaccount WHERE account_id::text = ANY($1) AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY account_id, requested_at DESC`
+			adRows, err := pgxPool.Query(ctx, adQuery, pq.Array(accountIDs))
+			if err == nil {
+				defer adRows.Close()
+				for adRows.Next() {
+					var accID, adType string
+					var adByPtr *string
+					var adAtPtr *time.Time
+					if err := adRows.Scan(&accID, &adType, &adByPtr, &adAtPtr); err == nil {
+						info := api.GetAuditInfo(adType, adByPtr, adAtPtr)
+						audit := auditDetailMap[accID]
+						if info.CreatedBy != "" {
+							audit.CreatedBy = info.CreatedBy
+							audit.CreatedAt = info.CreatedAt
+						}
+						if info.EditedBy != "" {
+							audit.EditedBy = info.EditedBy
+							audit.EditedAt = info.EditedAt
+						}
+						if info.DeletedBy != "" {
+							audit.DeletedBy = info.DeletedBy
+							audit.DeletedAt = info.DeletedAt
+						}
+						auditDetailMap[accID] = audit
+					}
+				}
+			}
+		}
+
+		var out []map[string]interface{}
+		for _, row := range accountRows {
+			auditInfo := auditDetailMap[row.AccountID]
 			out = append(out, map[string]interface{}{
-				"account_id": accountID,
+				"account_id": row.AccountID,
+				"account_number": func() string {
+					if row.AccountNumber != nil {
+						return *row.AccountNumber
+					}
+					return ""
+				}(),
 				"status": func() string {
-					if accountStatus != nil {
-						return *accountStatus
+					if row.AccountStatus != nil {
+						return *row.AccountStatus
 					}
 					return ""
 				}(),
 				"entity_id": func() string {
-					if entityID != nil {
-						return *entityID
+					if row.EntityID != nil {
+						return *row.EntityID
 					}
 					return ""
 				}(),
 				"entity_name": func() string {
-					if entityName != nil {
-						return *entityName
+					if row.EntityName != nil {
+						return *row.EntityName
 					}
 					return ""
 				}(),
 				"bank_name": func() string {
-					if bankName != nil {
-						return *bankName
+					if row.BankName != nil {
+						return *row.BankName
 					}
 					return ""
 				}(),
 				"account_nickname": func() string {
-					if accountNickname != nil {
-						return *accountNickname
+					if row.AccountNickname != nil {
+						return *row.AccountNickname
 					}
 					return ""
 				}(),
-				"processing_status": procStatus,
+				"processing_status": row.ProcStatus,
+				"action_type":       row.ActionType,
+				"action_id":         row.ActionID,
+				"requested_by":      row.RequestedBy,
+				"requested_at":      row.RequestedAt,
+				"checker_by":        row.CheckerBy,
+				"checker_at":        row.CheckerAt,
+				"checker_comment":   row.CheckerComment,
+				"reason":            row.Reason,
+				"created_by":        auditInfo.CreatedBy,
+				"created_at":        auditInfo.CreatedAt,
+				"edited_by":         auditInfo.EditedBy,
+				"edited_at":         auditInfo.EditedAt,
+				"deleted_by":        auditInfo.DeletedBy,
+				"deleted_at":        auditInfo.DeletedAt,
 			})
 		}
 		if out == nil {
@@ -1973,4 +2070,3 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": out})
 	}
 }
-
