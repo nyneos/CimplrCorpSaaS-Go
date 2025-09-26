@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+
+	// "strconv"
 	"strings"
 	"time"
 
@@ -670,12 +673,27 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			headerNorm := make([]string, len(headerRow))
+			// regex to insert underscore between a lower/number and upper case letter
+			camelRe := regexp.MustCompile(`([a-z0-9])([A-Z])`)
+			// regex to collapse multiple non-alphanumeric into single underscore
+			nonAlnumRe := regexp.MustCompile(`[^a-zA-Z0-9]+`)
+
 			for i, h := range headerRow {
 				hn := strings.TrimSpace(h)
 				hn = strings.Trim(hn, ", ")
-				hn = strings.ToLower(hn)
-				hn = strings.ReplaceAll(hn, " ", "_")
 				hn = strings.Trim(hn, "\"'`")
+				if hn == "" {
+					headerNorm[i] = hn
+					continue
+				}
+				// First, normalize camelCase/PascalCase -> insert underscore between lowercase/number and uppercase
+				hn = camelRe.ReplaceAllString(hn, `${1}_${2}`)
+				// Replace any remaining non-alphanumeric sequences with underscore
+				hn = nonAlnumRe.ReplaceAllString(hn, "_")
+				// Lowercase
+				hn = strings.ToLower(hn)
+				// Trim leading/trailing underscores
+				hn = strings.Trim(hn, "_")
 				headerNorm[i] = hn
 			}
 			columns := append([]string{"upload_batch_id"}, headerNorm...)
@@ -731,41 +749,25 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Generate CPC IDs for all rows in this batch
-			var cpcIDs []string
-			for i := 0; i < len(dataRows); i++ {
-				cpcID := fmt.Sprintf("CPC-%06d", seqNumber)
-				cpcIDs = append(cpcIDs, cpcID)
-				seqNumber++
-			}
-
-			// Insert into master table with generated CPC IDs
+			// Insert into master table; generate centre_id server-side using sequence to avoid PK collisions.
+			// Use RETURNING to get centre_id and centre_code for the newly inserted rows.
 			tgtColsStr := strings.Join(append([]string{"centre_id"}, tgtCols...), ", ")
 
+			// Build SELECT expressions: for centre_id use sequence-generated value, then map source columns
 			var selectExprs []string
-			selectExprs = append(selectExprs, "unnest($1::text[]) AS centre_id")
+			selectExprs = append(selectExprs, "('CPC-' || LPAD(nextval('cost_profit_center_seq')::text, 6, '0')) AS centre_id")
 			for i, src := range srcCols {
 				tgt := tgtCols[i]
 				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
-			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s) SELECT %s FROM input_costprofitcenter s WHERE s.upload_batch_id = $2`, tgtColsStr, srcColsStr)
+			// Use ON CONFLICT (centre_code) DO NOTHING to skip existing centre_codes
+			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s) SELECT %s FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT (centre_code) DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
 
-			// pass the generated centre_id slice directly; pgx will encode []string to text[]
-			_, err = tx.Exec(ctx, insertSQL, cpcIDs, batchID)
+			insertedRows, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
 				api.RespondWithResult(w, false, "Final insert error: "+err.Error())
-				return
-			}
-
-			// Get the inserted records with their CPC IDs and codes for relationship creation
-			// fetch inserted rows by the generated centre_id array
-			insertedRows, err := tx.Query(ctx,
-				`SELECT centre_id, centre_code FROM mastercostprofitcenter WHERE centre_id = ANY($1::text[])`,
-				cpcIDs)
-			if err != nil {
-				api.RespondWithResult(w, false, "Failed to fetch inserted records: "+err.Error())
 				return
 			}
 			defer insertedRows.Close()
@@ -778,10 +780,69 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// create relationships from input rows where parent_centre_code column exists
-			relRows, err := tx.Query(ctx,
-				`SELECT centre_code, parent_centre_id FROM input_costprofitcenter WHERE upload_batch_id=$1`,
-				batchID)
+			// Also include any pre-existing centre_codes that were not inserted due to conflict
+			// so relationships can be created for those rows as well.
+			existingRows, err := tx.Query(ctx, `
+				SELECT m.centre_id, m.centre_code
+				FROM mastercostprofitcenter m
+				WHERE m.centre_code IN (
+					SELECT DISTINCT centre_code FROM input_costprofitcenter WHERE upload_batch_id = $1
+				)
+			`, batchID)
+			if err == nil {
+				defer existingRows.Close()
+				for existingRows.Next() {
+					var id, code string
+					if err := existingRows.Scan(&id, &code); err == nil {
+						if _, ok := codeToID[code]; !ok {
+							codeToID[code] = id
+						}
+					}
+				}
+			}
+
+			// create relationships from input rows using the actual source columns that map to centre_code and parent info
+			// find source column names for centre_code and parent (if mapped)
+			childSrcCol := "centre_code"
+			parentSrcCol := "parent_centre_id"
+			// try to locate in mapping: srcCols[i] maps to tgtCols[i]
+			for i, tgt := range tgtCols {
+				lt := strings.ToLower(strings.TrimSpace(tgt))
+				if lt == "centre_code" {
+					childSrcCol = srcCols[i]
+				}
+				// accept multiple possible parent target names
+				if lt == "parent_centre_id" || lt == "parent_centre_code" || lt == "parent_centre" || lt == "parent" {
+					parentSrcCol = srcCols[i]
+				}
+			}
+
+			// If parentSrcCol not present in headerNorm, attempt fallback to a common parent column name
+			foundParent := false
+			for _, hn := range headerNorm {
+				if hn == parentSrcCol {
+					foundParent = true
+					break
+				}
+			}
+			if !foundParent {
+				// try common fallback names
+				for _, cand := range []string{"parent_centre_code", "parent_centre_id", "parent_centre", "parent"} {
+					for _, hn := range headerNorm {
+						if hn == cand {
+							parentSrcCol = cand
+							foundParent = true
+							break
+						}
+					}
+					if foundParent {
+						break
+					}
+				}
+			}
+
+			relQuery := fmt.Sprintf("SELECT %s, %s FROM input_costprofitcenter WHERE upload_batch_id=$1", childSrcCol, parentSrcCol)
+			relRows, err := tx.Query(ctx, relQuery, batchID)
 			if err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read relationship inputs: "+err.Error())
@@ -798,56 +859,62 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						continue
 					}
 
-					// Find child ID from the map we created
-					childID, childExists := codeToID[cc]
-					if !childExists {
-						continue
+					// Resolve child ID: prefer newly inserted map, fallback to existing master
+					var childID string
+					if cid, ok := codeToID[cc]; ok {
+						childID = cid
+					} else {
+						if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, cc).Scan(&childID); err != nil {
+							// cannot resolve child - skip
+							continue
+						}
 					}
 
-					var parentID string
 					if pc != "" {
-						// Try to find parent by code in the current batch first
-						if pid, exists := codeToID[pc]; exists {
+						// Resolve parent ID: prefer current batch map, then existing master by code
+						var parentID string
+						if pid, ok := codeToID[pc]; ok {
 							parentID = pid
 						} else {
-							// If not found in current batch, try to find in existing master table
-							if err := pgxPool.QueryRow(ctx,
-								`SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`,
-								pc).Scan(&parentID); err != nil {
-								// Parent not found, skip relationship creation
+							if err := tx.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentID); err != nil {
+								// cannot resolve parent - skip relationship
 								continue
 							}
 						}
 
-						// Insert relationship
-						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) 
-								SELECT $1, $2 WHERE NOT EXISTS (
-									SELECT 1 FROM costprofitcenterrelationships 
-									WHERE parent_centre_id=$1 AND child_centre_id=$2
-								)`
+						// Insert relationship (no-op if exists)
+						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`
 						if _, err := tx.Exec(ctx, relQ, parentID, childID); err != nil {
 							tx.Rollback(ctx)
 							api.RespondWithResult(w, false, "relationship insert failed: "+err.Error())
 							return
 						}
 
-						// Update the parent_centre_id in the master table
-						updateQ := `UPDATE mastercostprofitcenter SET parent_centre_id=$1 WHERE centre_id=$2`
-						if _, err := tx.Exec(ctx, updateQ, parentID, childID); err != nil {
-							tx.Rollback(ctx)
-							api.RespondWithResult(w, false, "parent update failed: "+err.Error())
-							return
+						// Update child master: set parent and compute level
+						var parentLevel int
+						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_id=$1`, parentID).Scan(&parentLevel); err == nil {
+							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_id=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, parentID, parentLevel+1, childID)
+						} else {
+							// parent exists but level unknown - at least set parent id
+							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_id=$1 WHERE centre_id=$2`, parentID, childID)
 						}
+					} else {
+						// No parent specified: ensure this child is marked top-level with level 1
+						_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_id=NULL, centre_level=1, is_top_level_centre=true WHERE centre_id=$1`, childID)
 					}
 				}
 			}
 
-			// Create audit entries
-			if len(cpcIDs) > 0 {
+			// Create audit entries for the newly inserted rows
+			var centreIDs []string
+			for _, id := range codeToID {
+				centreIDs = append(centreIDs, id)
+			}
+			if len(centreIDs) > 0 {
 				auditSQL := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at) 
 							SELECT centre_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() 
 							FROM mastercostprofitcenter WHERE centre_id = ANY($2)`
-				if _, err := tx.Exec(ctx, auditSQL, userEmail, cpcIDs); err != nil {
+				if _, err := tx.Exec(ctx, auditSQL, userEmail, centreIDs); err != nil {
 					api.RespondWithResult(w, false, "Failed to insert audit actions: "+err.Error())
 					return
 				}
@@ -864,7 +931,6 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
 	}
 }
-
 
 // GetApprovedActiveCostProfitCenters returns minimal rows where latest audit is APPROVED and status is ACTIVE
 func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
