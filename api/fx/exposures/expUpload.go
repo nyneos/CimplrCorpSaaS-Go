@@ -435,7 +435,17 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				rowMap[col] = parseDBValue(col, vals[i])
+				// rowMap[col] = parseDBValue(col, vals[i])
+					pv := parseDBValue(col, vals[i])
+				if pv == nil {
+					// log.Printf("[DEBUG] column %s is nil; setting empty string (pending join record)", col)
+					rowMap[col] = ""
+				} else if s, ok := pv.(string); ok && s == "" {
+					// log.Printf("[DEBUG] column %s is empty string; keeping empty (pending join record)", col)
+					rowMap[col] = ""
+				} else {
+					rowMap[col] = pv
+				}
 			}
 			results = append(results, rowMap)
 		}
@@ -533,7 +543,17 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range joinCols {
-				rowMap[col] = parseDBValue(col, vals[i])
+				// rowMap[col] = parseDBValue(col, vals[i])
+					pv := parseDBValue(col, vals[i])
+				if pv == nil {
+					// log.Printf("[DEBUG] column %s is nil; setting empty string (pending join record)", col)
+					rowMap[col] = ""
+				} else if s, ok := pv.(string); ok && s == "" {
+					// log.Printf("[DEBUG] column %s is empty string; keeping empty (pending join record)", col)
+					rowMap[col] = ""
+				} else {
+					rowMap[col] = pv
+				}
 			}
 			joinData = append(joinData, rowMap)
 		}
@@ -701,7 +721,17 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range joinCols {
-				rowMap[col] = parseDBValue(col, vals[i])
+				// rowMap[col] = parseDBValue(col, vals[i])
+					pv := parseDBValue(col, vals[i])
+				if pv == nil {
+					// log.Printf("[DEBUG] column %s is nil; setting empty string (pending join record)", col)
+					rowMap[col] = ""
+				} else if s, ok := pv.(string); ok && s == "" {
+					// log.Printf("[DEBUG] column %s is empty string; keeping empty (pending join record)", col)
+					rowMap[col] = ""
+				} else {
+					rowMap[col] = pv
+				}
 			}
 			joinData = append(joinData, rowMap)
 		}
