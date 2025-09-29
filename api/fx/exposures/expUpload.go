@@ -434,18 +434,18 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			rowMap := map[string]interface{}{}
-			for i, col := range cols {
-				// rowMap[col] = parseDBValue(col, vals[i])
-					pv := parseDBValue(col, vals[i])
+			for i, col := range joinCols {
+				pv := parseDBValue(col, vals[i])
 				if pv == nil {
-					// log.Printf("[DEBUG] column %s is nil; setting empty string (pending join record)", col)
-					rowMap[col] = ""
+					pv = ""
 				} else if s, ok := pv.(string); ok && s == "" {
-					// log.Printf("[DEBUG] column %s is empty string; keeping empty (pending join record)", col)
-					rowMap[col] = ""
-				} else {
-					rowMap[col] = pv
+					pv = ""
 				}
+				// If column already set and new value is empty, preserve the existing value
+				if _, exists := rowMap[col]; exists && pv == "" {
+					continue
+				}
+				rowMap[col] = pv
 			}
 			results = append(results, rowMap)
 		}
@@ -543,17 +543,17 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range joinCols {
-				// rowMap[col] = parseDBValue(col, vals[i])
-					pv := parseDBValue(col, vals[i])
+				pv := parseDBValue(col, vals[i])
 				if pv == nil {
-					// log.Printf("[DEBUG] column %s is nil; setting empty string (pending join record)", col)
-					rowMap[col] = ""
+					pv = ""
 				} else if s, ok := pv.(string); ok && s == "" {
-					// log.Printf("[DEBUG] column %s is empty string; keeping empty (pending join record)", col)
-					rowMap[col] = ""
-				} else {
-					rowMap[col] = pv
+					pv = ""
 				}
+				// If column already set and new value is empty, preserve the existing value
+				if _, exists := rowMap[col]; exists && pv == "" {
+					continue
+				}
+				rowMap[col] = pv
 			}
 			joinData = append(joinData, rowMap)
 		}
@@ -721,17 +721,17 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range joinCols {
-				// rowMap[col] = parseDBValue(col, vals[i])
-					pv := parseDBValue(col, vals[i])
+				pv := parseDBValue(col, vals[i])
 				if pv == nil {
-					// log.Printf("[DEBUG] column %s is nil; setting empty string (pending join record)", col)
-					rowMap[col] = ""
+					pv = ""
 				} else if s, ok := pv.(string); ok && s == "" {
-					// log.Printf("[DEBUG] column %s is empty string; keeping empty (pending join record)", col)
-					rowMap[col] = ""
-				} else {
-					rowMap[col] = pv
+					pv = ""
 				}
+				// If column already set and new value is empty, preserve the existing value
+				if _, exists := rowMap[col]; exists && pv == "" {
+					continue
+				}
+				rowMap[col] = pv
 			}
 			joinData = append(joinData, rowMap)
 		}
