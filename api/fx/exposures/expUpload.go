@@ -434,7 +434,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			rowMap := map[string]interface{}{}
-			for i, col := range joinCols {
+			for i, col := range cols {
 				pv := parseDBValue(col, vals[i])
 				if pv == nil {
 					pv = ""
