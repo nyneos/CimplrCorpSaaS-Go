@@ -235,14 +235,33 @@ func NormalizeDate(dateStr string) string {
 			}
 		}
 	}
-
-	// If all else fails, return empty string
 	log.Printf("[WARN] Could not normalize date: %s", dateStr)
 	return ""
 }
 
 // Helper: parse DB value to correct Go type
 func parseDBValue(col string, val interface{}) interface{} {
+	if val == nil {
+		return nil
+	}
+	switch t := val.(type) {
+	case time.Time:
+		y := t.Year()
+		if y >= 0 && y <= 9999 {
+			return t.Format(time.RFC3339)
+		}
+		return fmt.Sprintf("%v", t)
+	case *time.Time:
+		if t == nil {
+			return ""
+		}
+		y := t.Year()
+		if y >= 0 && y <= 9999 {
+			return t.Format(time.RFC3339)
+		}
+		return fmt.Sprintf("%v", t)
+	}
+
 	if b, ok := val.([]byte); ok {
 		// JSON fields
 		if col == "additional_header_details" || col == "additional_line_details" {
@@ -569,8 +588,17 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		if perms, ok := exposureUploadPerms["exposure-upload"]; ok {
 			resp["exposure-upload"] = perms
 		}
+		// Debug: log sizes so we can see why clients receive empty responses
+		log.Printf("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		b, jerr := json.Marshal(resp)
+		if jerr != nil {
+			respondWithError(w, http.StatusInternalServerError, "JSON marshal failed: "+jerr.Error())
+			return
+		}
+		if _, werr := w.Write(b); werr != nil {
+			log.Printf("[ERROR] Failed to write response: %v", werr)
+		}
 	}
 }
 
