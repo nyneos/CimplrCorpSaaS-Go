@@ -79,17 +79,16 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// Helper: normalize date strings to YYYY-MM-DD format
 func NormalizeDate(dateStr string) string {
 	dateStr = strings.TrimSpace(dateStr)
 	if dateStr == "" {
 		return ""
 	}
 
-	// Remove extra spaces and normalize separators
+	// Normalize spaces
 	dateStr = regexp.MustCompile(`\s+`).ReplaceAllString(dateStr, " ")
 
-	// Common date layouts to try
+	// Try common layouts first (preserve original behavior)
 	layouts := []string{
 		// ISO formats
 		"2006-01-02",
@@ -101,7 +100,7 @@ func NormalizeDate(dateStr string) string {
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05.000Z",
 
-		// DD-MM-YYYY formats (European style)
+		// DD-MM-YYYY formats
 		"02-01-2006",
 		"02/01/2006",
 		"02.01.2006",
@@ -109,7 +108,7 @@ func NormalizeDate(dateStr string) string {
 		"02/01/2006 15:04:05",
 		"02.01.2006 15:04:05",
 
-		// MM-DD-YYYY formats (US style)
+		// MM-DD-YYYY formats
 		"01-02-2006",
 		"01/02/2006",
 		"01.02.2006",
@@ -150,92 +149,73 @@ func NormalizeDate(dateStr string) string {
 		"2-1-06",
 		"2/1/06",
 		"1-2-06",
-		"1/2/06",
+		"1/2-06",
+
+		// compact
+		"20060102",
 	}
 
-	// First, try to parse with standard layouts
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, dateStr); err == nil {
+	for _, l := range layouts {
+		if t, err := time.Parse(l, dateStr); err == nil {
+			if t.Year() < 1900 || t.Year() > 9999 {
+				continue
+			}
 			return t.Format("2006-01-02")
 		}
 	}
 
-	// Handle Excel serial dates (numeric dates like 44927 for 2023-01-01)
-	if matched, _ := regexp.MatchString(`^\d+(\.\d+)?$`, dateStr); matched {
-		if days, err := strconv.ParseFloat(dateStr, 64); err == nil {
-			// Excel epoch starts from 1900-01-01, but has a leap year bug
-			// Excel treats 1900 as a leap year when it's not
-			excelEpoch := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-			if days > 60 {
-				days-- // Adjust for Excel's leap year bug
-			}
-			date := excelEpoch.AddDate(0, 0, int(days))
-			return date.Format("2006-01-02")
+	// If the string is purely numeric try several heuristics:
+	// - YYYYMMDD (8 digits)
+	// - Unix timestamp (seconds / ms / us / ns)
+	// - Excel serial (days since 1899-12-30)
+	digits := true
+	for _, r := range dateStr {
+		if r < '0' || r > '9' {
+			digits = false
+			break
 		}
 	}
 
-	// Try to extract date parts using regex patterns
-	patterns := []struct {
-		regex  *regexp.Regexp
-		format func([]string) string
-	}{
-		// DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY
-		{
-			regexp.MustCompile(`^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$`),
-			func(matches []string) string {
-				day, _ := strconv.Atoi(matches[1])
-				month, _ := strconv.Atoi(matches[2])
-				year, _ := strconv.Atoi(matches[3])
-				if day <= 12 && month > 12 {
-					// Likely MM-DD-YYYY format
-					return fmt.Sprintf("%04d-%02d-%02d", year, day, month)
+	if digits {
+		// YYYYMMDD
+		if len(dateStr) == 8 {
+			if y, err := strconv.Atoi(dateStr[0:4]); err == nil {
+				if m, err := strconv.Atoi(dateStr[4:6]); err == nil {
+					if d, err := strconv.Atoi(dateStr[6:8]); err == nil {
+						if y >= 1900 && y <= 9999 {
+							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+						}
+					}
 				}
-				// Default to DD-MM-YYYY
-				return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
-			},
-		},
-		// YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
-		{
-			regexp.MustCompile(`^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$`),
-			func(matches []string) string {
-				year, _ := strconv.Atoi(matches[1])
-				month, _ := strconv.Atoi(matches[2])
-				day, _ := strconv.Atoi(matches[3])
-				return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
-			},
-		},
-		// DD-MM-YY or DD/MM/YY (assuming 20xx for years 00-30, 19xx for 31-99)
-		{
-			regexp.MustCompile(`^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$`),
-			func(matches []string) string {
-				day, _ := strconv.Atoi(matches[1])
-				month, _ := strconv.Atoi(matches[2])
-				year, _ := strconv.Atoi(matches[3])
-				if year <= 30 {
-					year += 2000
-				} else {
-					year += 1900
-				}
-				if day <= 12 && month > 12 {
-					// Likely MM-DD-YY format
-					return fmt.Sprintf("%04d-%02d-%02d", year, day, month)
-				}
-				// Default to DD-MM-YY
-				return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
-			},
-		},
-	}
+			}
+		}
 
-	for _, pattern := range patterns {
-		if matches := pattern.regex.FindStringSubmatch(dateStr); matches != nil {
-			normalized := pattern.format(matches)
-			// Validate the normalized date
-			if _, err := time.Parse("2006-01-02", normalized); err == nil {
-				return normalized
+		if v, err := strconv.ParseInt(dateStr, 10, 64); err == nil {
+			var t time.Time
+			switch {
+			case v >= 1e17:
+				// nanoseconds since epoch
+				t = time.Unix(0, v)
+			case v >= 1e14:
+				// microseconds -> ns
+				t = time.Unix(0, v*1000)
+			case v >= 1e11:
+				// milliseconds -> ns
+				t = time.Unix(0, v*1000000)
+			case v >= 1e9:
+				// seconds
+				t = time.Unix(v, 0)
+			default:
+				// Treat as Excel serial date (days since 1899-12-30)
+				base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+				t = base.AddDate(0, 0, int(v))
+			}
+			if t.Year() >= 1900 && t.Year() <= 9999 {
+				return t.Format("2006-01-02")
 			}
 		}
 	}
-	log.Printf("[WARN] Could not normalize date: %s", dateStr)
+
 	return ""
 }
 
