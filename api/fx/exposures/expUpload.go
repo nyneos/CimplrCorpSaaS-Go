@@ -437,7 +437,11 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			for i, col := range cols {
 				pv := parseDBValue(col, vals[i])
 				if pv == nil {
-					pv = ""
+					if col == "additional_header_details" || col == "additional_line_details" {
+						rowMap[col] = map[string]interface{}{}
+					} else {
+						pv = ""
+					}
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
@@ -545,7 +549,11 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			for i, col := range joinCols {
 				pv := parseDBValue(col, vals[i])
 				if pv == nil {
-					pv = ""
+					if col == "additional_header_details" || col == "additional_line_details" {
+						rowMap[col] = map[string]interface{}{}
+					} else {
+						pv = ""
+					}
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
@@ -723,7 +731,11 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			for i, col := range joinCols {
 				pv := parseDBValue(col, vals[i])
 				if pv == nil {
-					pv = ""
+					if col == "additional_header_details" || col == "additional_line_details" {
+						rowMap[col] = map[string]interface{}{}
+					} else {
+						pv = ""
+					}
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
