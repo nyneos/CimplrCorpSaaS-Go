@@ -98,3 +98,22 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	}
 	json.NewEncoder(w).Encode(resp)
 }
+
+
+// LogInfo logs an informational message (wrapper for consistent logging)
+func LogInfo(msg string, args ...interface{}) {
+	if len(args) > 0 {
+		log.Printf("[INFO] "+msg, args...)
+	} else {
+		log.Println("[INFO]", msg)
+	}
+}
+
+// LogError logs an error message (wrapper for consistent logging)
+func LogError(msg string, args ...interface{}) {
+	if len(args) > 0 {
+		log.Printf("[ERROR] "+msg, args...)
+	} else {
+		log.Println("[ERROR]", msg)
+	}
+}
