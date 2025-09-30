@@ -31,11 +31,16 @@ func StartCashService(db *sql.DB) {
 	}
 	mux.Handle("/cash/upload-bank-statement", bankstatement.UploadBankStatement(pgxPool))
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
-	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
+	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-delete", bankstatement.BulkDeleteBankStatements(pgxPool))
+	mux.Handle("/cash/bank-statements/create", api.BusinessUnitMiddleware(db)(bankstatement.CreateBankStatements(pgxPool)))
+	mux.Handle("/cash/bank-statements/update", api.BusinessUnitMiddleware(db)(bankstatement.UpdateBankStatement(pgxPool)))
+	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetAllBankStatements(pgxPool)))
+	
 	mux.Handle("/cash/payrec/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
+	
 
 	mux.Handle("/cash/fund-planning", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanning(pgxPool)))
 
@@ -82,6 +87,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
