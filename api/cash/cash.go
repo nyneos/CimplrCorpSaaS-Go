@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
+	"CimplrCorpSaas/api/cash/fundplanning"
 	"context"
 	"database/sql"
 	"fmt"
@@ -35,6 +36,9 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-delete", bankstatement.BulkDeleteBankStatements(pgxPool))
 	mux.Handle("/cash/payrec/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
+
+	mux.Handle("/cash/fund-planning", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanning(pgxPool)))
+
 
 	// Bulk audit action routes for payables
 	mux.Handle("/cash/payable/bulk-delete", payablerecievable.BulkDeletePayableAudit(pgxPool))
@@ -78,6 +82,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
