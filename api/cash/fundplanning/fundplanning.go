@@ -13,6 +13,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var (
+	schemaCache struct {
+		hasCpiCounterparty bool
+		hasCpCounterparty  bool
+		hasCpiDept         bool
+		expires            time.Time
+	}
+)
+
+
 func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
