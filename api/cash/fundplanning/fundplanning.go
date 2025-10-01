@@ -94,14 +94,15 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				primaryField = "''"
 			}
 
-			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center FROM (
+			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
 				SELECT 
 					p.due_date as dt, 
 					'outflow' as direction, 
 					p.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
 					p.amount as amount,
-					'Generic' as costprofit_center
+					'Generic' as costprofit_center,
+					p.payable_id::text as source_ref
 				FROM tr_payables p
 				LEFT JOIN mastercounterparty m ON m.counterparty_name = p.counterparty_name
 				WHERE EXISTS (
@@ -139,14 +140,15 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				primaryField = "''"
 			}
 
-			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center FROM (
+			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref  FROM (
 				SELECT 
 					r.due_date as dt, 
 					'inflow' as direction, 
 					r.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
 					r.invoice_amount as amount,
-					'Generic' as costprofit_center
+					'Generic' as costprofit_center,
+					r.receivable_id::text as source_ref
 				FROM tr_receivables r
 				LEFT JOIN mastercounterparty m ON m.counterparty_name = r.counterparty_name
 				WHERE EXISTS (
@@ -205,14 +207,15 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				primaryField = "'Generic'"
 			}
-			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center FROM (
+			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
 				SELECT 
 					cpi.start_date as dt, 
 					CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'inflow' ELSE 'outflow' END as direction, 
 					cp.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
 					cpi.expected_amount as amount,
-					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center
+					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center,
+					cp.proposal_id::text as source_ref
 				FROM cashflow_proposal cp
 				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id
 
@@ -285,13 +288,14 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Primary          string  `json:"primary"`
 			Amount           float64 `json:"amount"`
 			CostProfitCenter string  `json:"costprofit_center"`
+			SourceRef        string  `json:"source_ref"`
 		}
 		res := []Row{}
 		for rows.Next() {
 			var dt time.Time
-			var dir, curr, primary, costProfitCenter string
+			var dir, curr, primary, costProfitCenter, sourceRef  string
 			var amt float64
-			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter); err != nil {
+			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter, &sourceRef); err != nil {
 				continue
 			}
 			if strings.TrimSpace(costProfitCenter) == "" && strings.TrimSpace(req.CostProfitCenter) != "" {
@@ -304,9 +308,87 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Primary:          primary,
 				Amount:           amt,
 				CostProfitCenter: costProfitCenter,
+				SourceRef:        sourceRef,
 			})
 		}
 
 		api.RespondWithPayload(w, true, "", res)
 	}
+}
+
+
+func GetApprovedBankAccountsForFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if r.Method == http.MethodPost {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithResult(w, false, "invalid JSON")
+				return
+			}
+		}
+
+		ctx := r.Context()
+
+		query := `
+			SELECT a.usage,
+				   a.account_number,
+				   NULLIF(a.account_nickname, '') AS account_name,
+				   b.bank_name,
+				   a.conn_cutoff,
+				   a.conn_tz,
+				    a.currency
+			FROM masterbankaccount a
+			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM auditactionbankaccount aa
+				WHERE aa.account_id = a.account_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) astatus ON TRUE
+			WHERE COALESCE(a.is_deleted, false) = false
+			  AND a.status = 'Active'
+			  AND astatus.processing_status = 'APPROVED'
+		`
+
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		results := make([]map[string]interface{}, 0)
+
+		for rows.Next() {
+			var accountNo string
+			var usage, accountName, bankName, connCutoff, connTz, currency sql.NullString
+
+			if err := rows.Scan(&usage, &accountNo, &accountName, &bankName, &connCutoff, &connTz, &currency); err != nil {
+				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
+				continue
+			}
+
+			results = append(results, map[string]interface{}{
+				"usage":        nullableToString(usage),
+				"account_no":   accountNo,
+				"account_name": nullableToString(accountName),
+				"bank_name":    nullableToString(bankName),
+				"conn_cutoff":  nullableToString(connCutoff),
+				"conn_tz":      nullableToString(connTz),
+				"currency":     nullableToString(currency),
+			})
+		}
+
+		api.RespondWithPayload(w, true, "", results)
+	}
+}
+
+func nullableToString(ns sql.NullString) interface{} {
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
 }
