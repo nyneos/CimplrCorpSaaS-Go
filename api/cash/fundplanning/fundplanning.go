@@ -266,6 +266,9 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter); err != nil {
 				continue
 			}
+			if strings.TrimSpace(costProfitCenter) == "" && strings.TrimSpace(req.CostProfitCenter) != "" {
+				costProfitCenter = req.CostProfitCenter
+			}
 			res = append(res, Row{
 				Date:             dt.Format("2006-01-02"),
 				Direction:        dir,
@@ -276,6 +279,6 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"rows": res})
+		api.RespondWithPayload(w, true, "", res)
 	}
 }
