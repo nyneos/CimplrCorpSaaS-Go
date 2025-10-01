@@ -1,38 +1,85 @@
---Go Backend For CimplrCorpSaas
+# Go Backend For CimplrCorpSaaS
 
+## Manifest Generation & Verification
 
- OWNER (Windows) — Generate & Sign manifest
+Below are platform-specific commands for owners (to generate and sign manifests) and clients (to verify manifests and files).
+
+---
+
+### Windows
+
+**OWNER — Generate & Sign manifest**
+```powershell
 .\release\service-g-windows-amd64.exe -root . -out manifest.json -privkey private.pem -exclude "*.pem,*.log,*.env,*.exe,README.md,.gitignore"
+```
 
- CLIENT (Windows) — Verify manifest and files
+**CLIENT — Verify manifest and files**
+```powershell
 .\release\service-v-windows-amd64.exe -manifest manifest.json -root .
+```
 
- OWNER (Linux) — Generate & Sign manifest
+---
+
+### Linux
+
+**OWNER — Generate & Sign manifest**
+```bash
 ./release/service-g-linux-amd64 -root . -out manifest.json -privkey private.pem -exclude '*.pem,*.log,*.env,*.exe,README.md,.gitignore'
+```
 
- CLIENT (Linux) — Make verifier executable (one-time)
+**CLIENT — Make verifier executable (one-time)**
+```bash
 chmod +x release/service-v-linux-amd64
+```
 
- CLIENT (Linux) — Verify manifest and files
+**CLIENT — Verify manifest and files**
+```bash
 ./release/service-v-linux-amd64 -manifest manifest.json -root .
+```
 
- OWNER (macOS amd64) — Generate & Sign manifest
+---
+
+### macOS (amd64)
+
+**OWNER — Generate & Sign manifest**
+```bash
 ./release/service-g-darwin-amd64 -root . -out manifest.json -privkey private.pem -exclude '*.pem,*.log,*.env,*.exe,README.md,.gitignore'
+```
 
- CLIENT (macOS amd64) — Make verifier executable (one-time)
+**CLIENT — Make verifier executable (one-time)**
+```bash
 chmod +x release/service-v-darwin-amd64
+```
 
- CLIENT (macOS amd64) — Verify manifest and files
+**CLIENT — Verify manifest and files**
+```bash
 ./release/service-v-darwin-amd64 -manifest manifest.json -root .
+```
 
- OWNER (macOS arm64) — Generate & Sign manifest
+---
+
+### macOS (arm64)
+
+**OWNER — Generate & Sign manifest**
+```bash
 ./release/service-g-darwin-arm64 -root . -out manifest.json -privkey private.pem -exclude '*.pem,*.log,*.env,*.exe,README.md,.gitignore'
+```
 
- CLIENT (macOS arm64) — Make verifier executable (one-time)
+**CLIENT — Make verifier executable (one-time)**
+```bash
 chmod +x release/service-v-darwin-arm64
+```
 
- CLIENT (macOS arm64) — Verify manifest and files
+**CLIENT — Verify manifest and files**
+```bash
 ./release/service-v-darwin-arm64 -manifest manifest.json -root .
+```
 
- OWNER (Linux) — Generate, Sign, and create snapshot (example)
+---
+
+### Linux — Generate, Sign, and Create Snapshot (example)
+
+**OWNER — Generate, Sign, and create snapshot**
+```bash
 ./release/service-g-linux-amd64 -root . -out manifest.json -snapshot snapshot.zip -privkey private.pem -exclude '*.pem,*.log,*.env,*.exe,README.md,.gitignore'
+```
