@@ -1331,7 +1331,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			itemID := ifaceToString(entry["item_id"])
 			// Fetch current item
-			var curCat, curDept, curEnt, curType, curRecPat, curRecFreq, curDesc,, curCP, curOldCP  string
+			var curCat, curDept, curEnt, curType, curRecPat, curRecFreq, curDesc, curCP, curOldCP  string
 			var curAmt float64
 			var curRec bool
 			var curStart time.Time
