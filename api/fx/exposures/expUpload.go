@@ -537,13 +537,54 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
-				// If column already set and new value is empty, preserve the existing value
-				if _, exists := rowMap[col]; exists && pv == "" {
-					continue
-				}
-				rowMap[col] = pv
+									// If column already set and new value is empty, preserve the existing value
+					if _, exists := rowMap[col]; exists && pv == "" {
+						continue
+					}
+					rowMap[col] = pv
 			}
-			joinData = append(joinData, rowMap)
+				// Normalize date-like fields for frontend (DD-MM-YYYY)
+				for k, v := range rowMap {
+					lk := strings.ToLower(k)
+					if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
+						switch tv := v.(type) {
+						case string:
+							if nd := NormalizeDate(tv); nd != "" {
+								// Try to parse the normalized date and reformat to dd-mm-yyyy
+								var perr error
+								layouts := []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"}
+								parsedOK := false
+								var parsed time.Time
+								for _, l := range layouts {
+									parsed, perr = time.Parse(l, nd)
+									if perr == nil {
+										rowMap[k] = parsed.Format("02-01-2006")
+										parsedOK = true
+										break
+									}
+								}
+								if !parsedOK {
+									// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
+									parts := strings.Split(nd, "-")
+									if len(parts) == 3 && len(parts[0]) == 4 {
+										rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
+									} else {
+										rowMap[k] = nd
+									}
+								}
+							}
+						case time.Time:
+							rowMap[k] = tv.Format("02-01-2006")
+						case *time.Time:
+							if tv != nil {
+								rowMap[k] = tv.Format("02-01-2006")
+							} else {
+								rowMap[k] = ""
+							}
+						}
+					}
+				}
+				joinData = append(joinData, rowMap)
 		}
 
 		// Fetch permissions for 'exposure-upload' page for this role
@@ -719,15 +760,56 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
-				// If column already set and new value is empty, preserve the existing value
-				if _, exists := rowMap[col]; exists && pv == "" {
-					continue
-				}
-				rowMap[col] = pv
+				
+					// If column already set and new value is empty, preserve the existing value
+					if _, exists := rowMap[col]; exists && pv == "" {
+						continue
+					}
+					rowMap[col] = pv
 			}
-			joinData = append(joinData, rowMap)
+				// Normalize date-like fields for frontend (YYYY-MM-DD)
+				for k, v := range rowMap {
+					lk := strings.ToLower(k)
+					if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
+						switch tv := v.(type) {
+						case string:
+							if nd := NormalizeDate(tv); nd != "" {
+								// Try to parse the normalized date and reformat to dd-mm-yyyy
+								var perr error
+								layouts := []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"}
+								parsedOK := false
+								var parsed time.Time
+								for _, l := range layouts {
+									parsed, perr = time.Parse(l, nd)
+									if perr == nil {
+										rowMap[k] = parsed.Format("02-01-2006")
+										parsedOK = true
+										break
+									}
+								}
+								if !parsedOK {
+									// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
+									parts := strings.Split(nd, "-")
+									if len(parts) == 3 && len(parts[0]) == 4 {
+										rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
+									} else {
+										rowMap[k] = nd
+									}
+								}
+							}
+						case time.Time:
+							rowMap[k] = tv.Format("02-01-2006")
+						case *time.Time:
+							if tv != nil {
+								rowMap[k] = tv.Format("02-01-2006")
+							} else {
+								rowMap[k] = ""
+							}
+						}
+					}
+				}
+				joinData = append(joinData, rowMap)
 		}
-
 		// Fetch permissions for 'exposure-upload' page for this role
 		exposureUploadPerms := map[string]interface{}{}
 		var roleId int
