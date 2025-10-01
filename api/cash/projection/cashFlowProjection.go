@@ -1045,8 +1045,11 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// map for monthly projections per item
 		for rows.Next() {
 		var (
-			itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID, entityName, oldEntityName, departmentID, oldDepartmentID, recurrenceFrequency, oldRecurrenceFrequency, counterpartyName, oldCounterpartyName interface{}				expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI, recurrencePattern, oldRecurrencePattern, startDate, oldStartDate, endDate, oldEndDate                            interface{}
-		)
+    itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID, entityName, oldEntityName, departmentID, oldDepartmentID, recurrenceFrequency, oldRecurrenceFrequency, counterpartyName, oldCounterpartyName string
+    expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI interface{}
+    recurrencePattern, oldRecurrencePattern interface{}
+    startDate, oldStartDate, endDate, oldEndDate interface{}
+)
 		if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency, &counterpartyName, &oldCounterpartyName); err != nil {
 			continue
 		}
