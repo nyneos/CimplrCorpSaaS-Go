@@ -77,7 +77,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IncludePayables {
 			primaryField := ""
 			if req.IncludeCounterparty {
-				primaryField = "m.counterparty_name"
+				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
 			} else if req.IncludeType {
 				primaryField = "'Vendor Payment'"
 			} else {
@@ -91,7 +91,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					p.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
 					p.amount as amount,
-					'' as costprofit_center
+					'Generic' as costprofit_center
 				FROM tr_payables p
 				LEFT JOIN mastercounterparty m ON m.counterparty_name = p.counterparty_name
 				WHERE EXISTS (
@@ -122,7 +122,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IncludeReceivables {
 			primaryField := ""
 			if req.IncludeCounterparty {
-				primaryField = "m.counterparty_name"
+				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
 			} else if req.IncludeType {
 				primaryField = "'Collection'"
 			} else {
@@ -136,7 +136,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					r.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
 					r.invoice_amount as amount,
-					'' as costprofit_center
+					'Generic' as costprofit_center
 				FROM tr_receivables r
 				LEFT JOIN mastercounterparty m ON m.counterparty_name = r.counterparty_name
 				WHERE EXISTS (
@@ -165,23 +165,35 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.IncludeProjections {
 			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
-			_ = pgxPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_id')").Scan(&hasCpiCounterparty)
-			_ = pgxPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_id')").Scan(&hasCpCounterparty)
-			_ = pgxPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id')").Scan(&hasCpiDept)
-
-			primaryField := "'NA'"
+			if time.Now().Before(schemaCache.expires) {
+				hasCpiCounterparty = schemaCache.hasCpiCounterparty
+				hasCpCounterparty = schemaCache.hasCpCounterparty
+				hasCpiDept = schemaCache.hasCpiDept
+			} else {
+				row := pgxPool.QueryRow(ctx, `SELECT
+					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_name') as has_cpi_counterparty,
+					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_name') as has_cp_counterparty,
+					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id') as has_cpi_dept
+				`)
+				_ = row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept)
+				schemaCache.hasCpiCounterparty = hasCpiCounterparty
+				schemaCache.hasCpCounterparty = hasCpCounterparty
+				schemaCache.hasCpiDept = hasCpiDept
+				schemaCache.expires = time.Now().Add(5 * time.Minute)
+			}
+			primaryField := "'Generic'"
 			joinCounterparty := false
 			if req.IncludeCounterparty {
 				if hasCpiCounterparty || hasCpCounterparty {
-					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'NA')"
+					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'Generic')"
 					joinCounterparty = true
 				} else {
-					primaryField = "'NA'"
+					primaryField = "'Generic'"
 				}
 			} else if req.IncludeType {
-				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'NA')"
+				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
 			} else {
-				primaryField = "'NA'"
+				primaryField = "'Generic'"
 			}
 			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center FROM (
 				SELECT 
@@ -190,18 +202,18 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					cp.currency_code as currency, 
 					` + primaryField + ` as primary_name, 
 					cpi.expected_amount as amount,
-					COALESCE(NULLIF(cpi.department_id, ''), '') as costprofit_center
+					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center
 				FROM cashflow_proposal cp
 				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id
 
 `
 			if joinCounterparty {
-				if hasCpiCounterparty && hasCpCounterparty {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_id = COALESCE(cpi.counterparty_id, cp.counterparty_id)\n"
+					if hasCpiCounterparty && hasCpCounterparty {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = COALESCE(NULLIF(cpi.counterparty_name, ''), NULLIF(cp.counterparty_name, ''))\n"
 				} else if hasCpiCounterparty {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_id = cpi.counterparty_id\n"
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cpi.counterparty_name\n"
 				} else {
-					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_id = cp.counterparty_id\n"
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cp.counterparty_name\n"
 				}
 			}
 
