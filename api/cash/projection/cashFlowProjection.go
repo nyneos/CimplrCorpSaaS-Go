@@ -404,6 +404,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					CategoryName   string  `json:"categoryName"`
 					Entity         string  `json:"entity"`
 					Department     string  `json:"department"`
+					CounterpartyName string  `json:"counterparty_name,omitempty"`
 					ExpectedAmount float64 `json:"expectedAmount"`
 					Recurring      bool    `json:"recurring"`
 					Frequency      string  `json:"frequency"`
@@ -521,8 +522,12 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if description == "" {
 				description = entry.CategoryName
 			}
-			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date, entity_name, department_id, recurrence_frequency) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
-			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, description, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effDate, nil, entityParam, deptParam, entry.Frequency); err != nil {
+			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date, entity_name, department_id, counterparty_name, old_counterparty_name, recurrence_frequency) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
+			cp := strings.TrimSpace(entry.CounterpartyName)
+			if cp == "" {
+				cp = "Generic"
+			}
+			if _, err := tx.Exec(ctx, insItem, itemID, proposalID, description, tUpper, entry.CategoryName, entry.ExpectedAmount, entry.Recurring, entry.Frequency, effDate, nil, entityParam, deptParam, cp, nil, entry.Frequency); err != nil {
 				api.RespondWithResult(w, false, "Failed to create item: "+err.Error())
 				return
 			}
@@ -675,7 +680,9 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cpi.is_recurring,
 				cpi.recurrence_pattern,
 				cpi.start_date,
-				cpi.end_date
+				cpi.end_date,
+				cpi.counterparty_name,
+				cpi.old_counterparty_name
 			FROM cashflow_proposal cp
 			JOIN cashflow_proposal_item cpi ON cp.proposal_id = cpi.proposal_id
 			WHERE 1=1
@@ -734,6 +741,8 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RecurrencePattern   string
 			StartDate           time.Time
 			EndDate             *time.Time
+			CounterpartyName    string
+			OldCounterpartyName string
 		}
 
 		var proposals []ProposalItem
@@ -760,6 +769,8 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&pi.RecurrencePattern,
 				&pi.StartDate,
 				&pi.EndDate,
+				&pi.CounterpartyName,
+				&pi.OldCounterpartyName,
 			)
 			if err != nil {
 				api.RespondWithResult(w, false, "Failed to scan proposal: "+err.Error())
@@ -1016,7 +1027,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 2) Fetch items for the proposal
 		itemQ := `
-			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id, CAST(expected_amount AS float8), CAST(old_expected_amount AS float8), is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern, start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name, department_id, old_department_id, recurrence_frequency, old_recurrence_frequency
+			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id, CAST(expected_amount AS float8), CAST(old_expected_amount AS float8), is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern, start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name, department_id, old_department_id, recurrence_frequency, old_recurrence_frequency, counterparty_name, old_counterparty_name
 			FROM cashflow_proposal_item
 			WHERE proposal_id = $1
 			ORDER BY created_at
@@ -1033,14 +1044,12 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// map for monthly projections per item
 		for rows.Next() {
-			var (
-				itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID, entityName, oldEntityName, departmentID, oldDepartmentID, recurrenceFrequency, oldRecurrenceFrequency interface{}
-				expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI, recurrencePattern, oldRecurrencePattern, startDate, oldStartDate, endDate, oldEndDate                            interface{}
-			)
-
-			if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency); err != nil {
-				continue
-			}
+		var (
+			itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID, entityName, oldEntityName, departmentID, oldDepartmentID, recurrenceFrequency, oldRecurrenceFrequency, counterpartyName, oldCounterpartyName interface{}				expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI, recurrencePattern, oldRecurrencePattern, startDate, oldStartDate, endDate, oldEndDate                            interface{}
+		)
+		if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency, &counterpartyName, &oldCounterpartyName); err != nil {
+			continue
+		}
 
 			// convert amounts
 			expectedAmount := 0.0
@@ -1114,6 +1123,8 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_start_date":         ifaceToTimeString(oldStartDate),
 				"end_date":               ifaceToTimeString(endDate),
 				"old_end_date":           ifaceToTimeString(oldEndDate),
+				"counterparty_name":      ifaceToString(counterpartyName),
+				"old_counterparty_name":  ifaceToString(oldCounterpartyName),
 			}
 
 			// fetch monthly projections for this item
@@ -1317,13 +1328,13 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			itemID := ifaceToString(entry["item_id"])
 			// Fetch current item
-			var curCat, curDept, curEnt, curType, curRecPat, curRecFreq, curDesc string
+			var curCat, curDept, curEnt, curType, curRecPat, curRecFreq, curDesc,, curCP, curOldCP  string
 			var curAmt float64
 			var curRec bool
 			var curStart time.Time
 			var curEnd *time.Time
-			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date FROM cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
-				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd)
+			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name, old_counterparty_name FROM cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
+				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd, &curCP, &curOldCP)
 			if err != nil {
 				api.RespondWithResult(w, false, "Item not found: "+err.Error())
 				return
@@ -1369,7 +1380,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				oldEnd = nil
 			}
-			_, err = tx.Exec(ctx, `UPDATE cashflow_proposal_item SET old_category_id=$1, category_id=$2, old_department_id=$3, department_id=$4, old_entity_name=$5, entity_name=$6, old_expected_amount=$7, expected_amount=$8, old_cashflow_type=$9, cashflow_type=$10, old_recurrence_pattern=$11, recurrence_pattern=$12, old_recurrence_frequency=$13, recurrence_frequency=$14, old_is_recurring=$15, is_recurring=$16, old_start_date=$17, start_date=$18, old_end_date=$19, end_date=$20, description=$21 WHERE item_id=$22`,
+			_, err = tx.Exec(ctx, `UPDATE cashflow_proposal_item SET old_category_id=$1, category_id=$2, old_department_id=$3, department_id=$4, old_entity_name=$5, entity_name=$6, old_expected_amount=$7, expected_amount=$8, old_cashflow_type=$9, cashflow_type=$10, old_recurrence_pattern=$11, recurrence_pattern=$12, old_recurrence_frequency=$13, recurrence_frequency=$14, old_is_recurring=$15, is_recurring=$16, old_start_date=$17, start_date=$18, old_end_date=$19, end_date=$20, description=$21, old_counterparty_name=$22, counterparty_name=$23 WHERE item_id=$24`,
 				curCat,
 				ifaceToString(entry["categoryName"]),
 				curDept,
@@ -1391,6 +1402,8 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				oldEnd,
 				newEnd,
 				ifaceToString(entry["description"]),
+				curCP,
+				ifaceToString(entry["counterparty_name"]),
 				itemID,
 			)
 			if err != nil {
