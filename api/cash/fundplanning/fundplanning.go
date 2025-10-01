@@ -1,3 +1,4 @@
+
 package fundplanning
 
 import (
@@ -12,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// GetFundPlanning returns rows aggregated from payables, receivables and proposals
 func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -32,7 +32,6 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Validate required fields
 		if req.UserID == "" {
 			api.RespondWithResult(w, false, "user_id required")
 			return
@@ -45,19 +44,16 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Validate that at least one data source is selected
 		if !req.IncludePayables && !req.IncludeReceivables && !req.IncludeProjections {
 			api.RespondWithResult(w, false, "at least one data source required (pay/rec/proj)")
 			return
 		}
 
-		// Validate that only one of IncludeCounterparty or IncludeType is true
 		if req.IncludeCounterparty && req.IncludeType {
 			api.RespondWithResult(w, false, "only one of counterparty or type can be true")
 			return
 		}
 
-		// Validate session
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -78,9 +74,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args := make([]interface{}, 0)
 		argI := 1
 
-		// Payables
 		if req.IncludePayables {
-			// Determine primary field
 			primaryField := ""
 			if req.IncludeCounterparty {
 				primaryField = "m.counterparty_name"
@@ -99,7 +93,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					p.amount as amount,
 					'' as costprofit_center
 				FROM tr_payables p
-				LEFT JOIN mastercounterparty m ON m.counterparty_id = p.counterparty_name
+				LEFT JOIN mastercounterparty m ON m.counterparty_name = p.counterparty_name
 				WHERE EXISTS (
 					SELECT 1 FROM auditactionpayable a WHERE a.payable_id::text = p.payable_id::text AND a.processing_status = 'APPROVED'
 				)
@@ -121,15 +115,11 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				argI++
 			}
 
-			// payables table does not contain department_id in this schema; skip filtering here
-
 			q += `) t`
 			parts = append(parts, q)
 		}
 
-		// Receivables
 		if req.IncludeReceivables {
-			// Determine primary field
 			primaryField := ""
 			if req.IncludeCounterparty {
 				primaryField = "m.counterparty_name"
@@ -148,7 +138,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					r.invoice_amount as amount,
 					'' as costprofit_center
 				FROM tr_receivables r
-				LEFT JOIN mastercounterparty m ON m.counterparty_id = r.counterparty_name
+				LEFT JOIN mastercounterparty m ON m.counterparty_name = r.counterparty_name
 				WHERE EXISTS (
 					SELECT 1 FROM auditactionreceivable a WHERE a.receivable_id::text = r.receivable_id::text AND a.processing_status = 'APPROVED'
 				)
@@ -170,24 +160,29 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				argI++
 			}
 
-			// receivables table does not contain department_id in this schema; skip filtering here
-
 			q += `) t`
 			parts = append(parts, q)
 		}
-
-		// Projections
 		if req.IncludeProjections {
-			// Determine primary field
-			primaryField := ""
-			if req.IncludeCounterparty {
-				primaryField = "COALESCE(m.counterparty_name, '')"
-			} else if req.IncludeType {
-				primaryField = `CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' ELSE 'Vendor Payment' END`
-			} else {
-				primaryField = "''"
-			}
+			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
+			_ = pgxPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_id')").Scan(&hasCpiCounterparty)
+			_ = pgxPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_id')").Scan(&hasCpCounterparty)
+			_ = pgxPool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id')").Scan(&hasCpiDept)
 
+			primaryField := "'NA'"
+			joinCounterparty := false
+			if req.IncludeCounterparty {
+				if hasCpiCounterparty || hasCpCounterparty {
+					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'NA')"
+					joinCounterparty = true
+				} else {
+					primaryField = "'NA'"
+				}
+			} else if req.IncludeType {
+				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'NA')"
+			} else {
+				primaryField = "'NA'"
+			}
 			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center FROM (
 				SELECT 
 					cpi.start_date as dt, 
@@ -198,8 +193,19 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(NULLIF(cpi.department_id, ''), '') as costprofit_center
 				FROM cashflow_proposal cp
 				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id
-				LEFT JOIN mastercounterparty m ON m.counterparty_id = cpi.counterparty_id
-				WHERE EXISTS (
+
+`
+			if joinCounterparty {
+				if hasCpiCounterparty && hasCpCounterparty {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_id = COALESCE(cpi.counterparty_id, cp.counterparty_id)\n"
+				} else if hasCpiCounterparty {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_id = cpi.counterparty_id\n"
+				} else {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_id = cp.counterparty_id\n"
+				}
+			}
+
+			q += `			WHERE EXISTS (
 					SELECT 1 FROM audit_action_cashflow_proposal a WHERE a.proposal_id::text = cp.proposal_id::text AND a.processing_status = 'APPROVED'
 				)
 				AND cp.status = 'Active'
@@ -221,7 +227,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				argI++
 			}
 
-			if req.CostProfitCenter != "" {
+			if strings.TrimSpace(req.CostProfitCenter) != "" && hasCpiDept {
 				q += ` AND cpi.department_id = $` + fmt.Sprint(argI)
 				args = append(args, req.CostProfitCenter)
 				argI++
@@ -233,7 +239,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		finalQ := strings.Join(parts, " UNION ALL ") + " ORDER BY dt, currency"
 
-		// debug: log final query and argument types/values to help debug type mismatch
+		// // debug: log final query and argument types/values to help debug type mismatch
 		// defer func() {
 		// 	// no-op defer to keep patch context
 		// }()
