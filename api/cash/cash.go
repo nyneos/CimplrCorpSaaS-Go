@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
 	"CimplrCorpSaas/api/cash/fundplanning"
+	"CimplrCorpSaas/api/cash/sweepConfig"
 	"context"
 	"database/sql"
 	"fmt"
@@ -40,10 +41,15 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetAllBankStatements(pgxPool)))
 	
 	mux.Handle("/cash/payrec/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
-	
-
 	mux.Handle("/cash/fund-planning", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanning(pgxPool)))
 
+	// Sweep configuration routes
+	mux.Handle("/cash/sweep-config/create", api.BusinessUnitMiddleware(db)(sweepconfig.CreateSweepConfiguration(pgxPool)))
+	mux.Handle("/cash/sweep-config/update", api.BusinessUnitMiddleware(db)(sweepconfig.UpdateSweepConfiguration(pgxPool)))
+	mux.Handle("/cash/sweep-config/all", api.BusinessUnitMiddleware(db)(sweepconfig.GetSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config/bulk-approve", api.BusinessUnitMiddleware(db)(sweepconfig.BulkApproveSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config/bulk-reject", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRejectSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config/request-delete", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRequestDeleteSweepConfigurations(pgxPool)))
 
 	// Bulk audit action routes for payables
 	mux.Handle("/cash/payable/bulk-delete", payablerecievable.BulkDeletePayableAudit(pgxPool))
@@ -87,6 +93,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
