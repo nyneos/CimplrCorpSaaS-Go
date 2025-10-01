@@ -42,6 +42,7 @@ func StartCashService(db *sql.DB) {
 	
 	mux.Handle("/cash/payrec/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
 	mux.Handle("/cash/fund-planning", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanning(pgxPool)))
+	mux.Handle("/cash/fund-planning/bank-accounts", api.BusinessUnitMiddleware(db)(fundplanning.GetApprovedBankAccountsForFundPlanning(pgxPool)))
 
 	// Sweep configuration routes
 	mux.Handle("/cash/sweep-config/create", api.BusinessUnitMiddleware(db)(sweepconfig.CreateSweepConfiguration(pgxPool)))
@@ -93,6 +94,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
