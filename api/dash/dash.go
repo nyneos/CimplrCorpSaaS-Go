@@ -7,6 +7,7 @@ import (
 	"CimplrCorpSaas/api/dash/cfo"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
+	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
 	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
@@ -96,6 +97,13 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/liquidity/kpi", api.BusinessUnitMiddleware(db)(liqsnap.KpiCardsHandler(pgxPool)))
 	mux.Handle("/dash/liquidity/daily", api.BusinessUnitMiddleware(db)(liqsnap.DetailedDailyCashFlowHandler(pgxPool)))
 
+	// Cashflow Forecast (monthly aggregated projections + KPIs)
+	mux.Handle("/dash/cash/forecast/monthly", api.BusinessUnitMiddleware(db)(cashflowforecast.GetCashflowForecastHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/kpi", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastKPIsHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/rows", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastRowsHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/categories", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastCategorySumsHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/daily", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastDailyHandler(pgxPool)))
+	
 	// --- Reports Dashboard Routes ---
 	mux.Handle("/dash/reports/exposure-summary", api.BusinessUnitMiddleware(db)(reports.GetExposureSummary(db)))
 	mux.Handle("/dash/reports/linked-summary-by-category", api.BusinessUnitMiddleware(db)(reports.GetLinkedSummaryByCategory(db)))
@@ -118,6 +126,7 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
 
 
