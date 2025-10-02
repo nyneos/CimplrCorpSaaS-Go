@@ -193,102 +193,170 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-		// fetch approved payables within max range (start..qEnd)
-				// select latest audit processing_status once per payable to avoid per-row subqueries
-				payQ := `
-								SELECT COALESCE(me.entity_name, p.entity_name) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code
-								FROM tr_payables p
-								JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
-								LEFT JOIN masterentitycash me ON p.entity_name = me.entity_name
-								JOIN (
-									SELECT DISTINCT ON (payable_id) payable_id, processing_status
-									FROM auditactionpayable
-									ORDER BY payable_id, requested_at DESC
-								) a ON a.payable_id = p.payable_id
-								WHERE p.due_date BETWEEN $1 AND $2
-									AND a.processing_status = 'APPROVED'
-				`
-				rows, err := pgxPool.Query(ctx, payQ, start, qEnd)
+		// fetch canonical payables within max range using the due_date index only
+		// then fetch latest audit processing_status only for those ids (avoids scanning the whole audit table)
+		type payRow struct {
+			Entity      string
+			Counterparty string
+			Due         time.Time
+			Amt         float64
+			Currency    string
+			ID          string
+		}
+		payQ := `
+			SELECT COALESCE(me.entity_name, p.entity_name) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code, p.payable_id
+			FROM tr_payables p
+			JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
+			LEFT JOIN masterentitycash me ON p.entity_name = me.entity_name
+			WHERE p.due_date BETWEEN $1 AND $2
+		`
+		payRows := make([]payRow, 0)
+		rows, err := pgxPool.Query(ctx, payQ, start, qEnd)
 		if err == nil {
 			for rows.Next() {
-				var entity, counterparty, currency string
-				var due time.Time
-				var amt float64
-				if err := rows.Scan(&entity, &counterparty, &due, &amt, &currency); err != nil {
+				var pr payRow
+				if err := rows.Scan(&pr.Entity, &pr.Counterparty, &pr.Due, &pr.Amt, &pr.Currency, &pr.ID); err != nil {
+					continue
+				}
+				payRows = append(payRows, pr)
+			}
+			rows.Close()
+		}
+
+		// if we have any payables in range, fetch their latest audit status in one small query
+		if len(payRows) > 0 {
+			ids := make([]string, 0, len(payRows))
+			for _, r := range payRows {
+				ids = append(ids, r.ID)
+			}
+
+			auditsQ := `
+				SELECT DISTINCT ON (payable_id) payable_id, processing_status
+				FROM auditactionpayable
+				WHERE payable_id = ANY($1)
+				ORDER BY payable_id, requested_at DESC
+			`
+			statusMap := map[string]string{}
+			arows, err2 := pgxPool.Query(ctx, auditsQ, ids)
+			if err2 == nil {
+				for arows.Next() {
+					var id, st string
+					if err := arows.Scan(&id, &st); err != nil {
+						continue
+					}
+					statusMap[id] = st
+				}
+				arows.Close()
+			}
+
+			for _, r := range payRows {
+				if statusMap[r.ID] != "APPROVED" {
 					continue
 				}
 				// determine bucket
 				var key string
 				switch {
-				case !due.Before(ranges[0].Start) && !due.After(ranges[0].End):
+				case !r.Due.Before(ranges[0].Start) && !r.Due.After(ranges[0].End):
 					key = "next30"
-				case !due.Before(ranges[1].Start) && !due.After(ranges[1].End):
+				case !r.Due.Before(ranges[1].Start) && !r.Due.After(ranges[1].End):
 					key = "next60"
-				case !due.Before(ranges[2].Start) && !due.After(ranges[2].End):
+				case !r.Due.Before(ranges[2].Start) && !r.Due.After(ranges[2].End):
 					key = "quarter"
 				default:
 					continue
 				}
-				if _, ok := buckets[key][entity]; !ok {
-					buckets[key][entity] = map[string]map[string]map[string]float64{}
+				if _, ok := buckets[key][r.Entity]; !ok {
+					buckets[key][r.Entity] = map[string]map[string]map[string]float64{}
 				}
-				if _, ok := buckets[key][entity][counterparty]; !ok {
-					buckets[key][entity][counterparty] = map[string]map[string]float64{}
+				if _, ok := buckets[key][r.Entity][r.Counterparty]; !ok {
+					buckets[key][r.Entity][r.Counterparty] = map[string]map[string]float64{}
 				}
-				if _, ok := buckets[key][entity][counterparty]["Payable"]; !ok {
-					buckets[key][entity][counterparty]["Payable"] = map[string]float64{}
+				if _, ok := buckets[key][r.Entity][r.Counterparty]["Payable"]; !ok {
+					buckets[key][r.Entity][r.Counterparty]["Payable"] = map[string]float64{}
 				}
-				buckets[key][entity][counterparty]["Payable"][currency] += amt
+				buckets[key][r.Entity][r.Counterparty]["Payable"][r.Currency] += r.Amt
 			}
-			rows.Close()
 		}
 
-		// fetch approved receivables within max range
-				recQ := `
-								SELECT COALESCE(me.entity_name, r.entity_name) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code
-								FROM tr_receivables r
-								JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
-								LEFT JOIN masterentitycash me ON r.entity_name = me.entity_name
-								JOIN (
-									SELECT DISTINCT ON (receivable_id) receivable_id, processing_status
-									FROM auditactionreceivable
-									ORDER BY receivable_id, requested_at DESC
-								) a ON a.receivable_id = r.receivable_id
-								WHERE r.due_date BETWEEN $1 AND $2
-									AND a.processing_status = 'APPROVED'
-				`
-				rows2, err := pgxPool.Query(ctx, recQ, start, qEnd)
+				// fetch canonical receivables within max range, then fetch latest audit status for those ids
+		type recRow struct {
+			Entity      string
+			Counterparty string
+			Due         time.Time
+			Amt         float64
+			Currency    string
+			ID          string
+		}
+		recQ := `
+			SELECT COALESCE(me.entity_name, r.entity_name) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code, r.receivable_id
+			FROM tr_receivables r
+			JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
+			LEFT JOIN masterentitycash me ON r.entity_name = me.entity_name
+			WHERE r.due_date BETWEEN $1 AND $2
+		`
+		recRows := make([]recRow, 0)
+		rows2, err := pgxPool.Query(ctx, recQ, start, qEnd)
 		if err == nil {
 			for rows2.Next() {
-				var entity, counterparty, currency string
-				var due time.Time
-				var amt float64
-				if err := rows2.Scan(&entity, &counterparty, &due, &amt, &currency); err != nil {
+				var rr recRow
+				if err := rows2.Scan(&rr.Entity, &rr.Counterparty, &rr.Due, &rr.Amt, &rr.Currency, &rr.ID); err != nil {
+					continue
+				}
+				recRows = append(recRows, rr)
+			}
+			rows2.Close()
+		}
+
+		if len(recRows) > 0 {
+			ids := make([]string, 0, len(recRows))
+			for _, r := range recRows {
+				ids = append(ids, r.ID)
+			}
+			auditsQ := `
+				SELECT DISTINCT ON (receivable_id) receivable_id, processing_status
+				FROM auditactionreceivable
+				WHERE receivable_id = ANY($1)
+				ORDER BY receivable_id, requested_at DESC
+			`
+			statusMap := map[string]string{}
+			arows, err2 := pgxPool.Query(ctx, auditsQ, ids)
+			if err2 == nil {
+				for arows.Next() {
+					var id, st string
+					if err := arows.Scan(&id, &st); err != nil {
+						continue
+					}
+					statusMap[id] = st
+				}
+				arows.Close()
+			}
+
+			for _, r := range recRows {
+				if statusMap[r.ID] != "APPROVED" {
 					continue
 				}
 				var key string
 				switch {
-				case !due.Before(ranges[0].Start) && !due.After(ranges[0].End):
+				case !r.Due.Before(ranges[0].Start) && !r.Due.After(ranges[0].End):
 					key = "next30"
-				case !due.Before(ranges[1].Start) && !due.After(ranges[1].End):
+				case !r.Due.Before(ranges[1].Start) && !r.Due.After(ranges[1].End):
 					key = "next60"
-				case !due.Before(ranges[2].Start) && !due.After(ranges[2].End):
+				case !r.Due.Before(ranges[2].Start) && !r.Due.After(ranges[2].End):
 					key = "quarter"
 				default:
 					continue
 				}
-				if _, ok := buckets[key][entity]; !ok {
-					buckets[key][entity] = map[string]map[string]map[string]float64{}
+				if _, ok := buckets[key][r.Entity]; !ok {
+					buckets[key][r.Entity] = map[string]map[string]map[string]float64{}
 				}
-				if _, ok := buckets[key][entity][counterparty]; !ok {
-					buckets[key][entity][counterparty] = map[string]map[string]float64{}
+				if _, ok := buckets[key][r.Entity][r.Counterparty]; !ok {
+					buckets[key][r.Entity][r.Counterparty] = map[string]map[string]float64{}
 				}
-				if _, ok := buckets[key][entity][counterparty]["Receivable"]; !ok {
-					buckets[key][entity][counterparty]["Receivable"] = map[string]float64{}
+				if _, ok := buckets[key][r.Entity][r.Counterparty]["Receivable"]; !ok {
+					buckets[key][r.Entity][r.Counterparty]["Receivable"] = map[string]float64{}
 				}
-				buckets[key][entity][counterparty]["Receivable"][currency] += amt
+				buckets[key][r.Entity][r.Counterparty]["Receivable"][r.Currency] += r.Amt
 			}
-			rows2.Close()
 		}
 
 		// build response matching the mock shape
