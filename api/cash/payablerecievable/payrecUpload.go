@@ -322,47 +322,62 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// Handler: GetAllPayableReceivable
 func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		type Payable struct {
-			PayableID    string  `json:"payable_id"`
-			EntityID     string  `json:"entity_id"`
-			VendorID     string  `json:"vendor_id"`
-			InvoiceNo    string  `json:"invoice_number"`
-			InvoiceDate  string  `json:"invoice_date"`
-			DueDate      string  `json:"due_date"`
-			Amount       float64 `json:"amount"`
-			CurrencyCode string  `json:"currency_code"`
-			Status       string  `json:"status"`
-			CreatedBy    string  `json:"created_by"`
-			CreatedAt    string  `json:"created_at"`
-			EditedBy     string  `json:"edited_by"`
-			EditedAt     string  `json:"edited_at"`
-			DeletedBy    string  `json:"deleted_by"`
-			DeletedAt    string  `json:"deleted_at"`
+			PayableID        string  `json:"payable_id"`
+			EntityName       string  `json:"entity_name"`
+			CounterpartyName string  `json:"counterparty_name"`
+			InvoiceNo        string  `json:"invoice_number"`
+			InvoiceDate      string  `json:"invoice_date"`
+			DueDate          string  `json:"due_date"`
+			Amount           float64 `json:"amount"`
+			CurrencyCode     string  `json:"currency_code"`
+			// old values
+			OldEntityName   string  `json:"old_entity_name"`
+			OldCounterparty string  `json:"old_counterparty_name"`
+			OldInvoiceNo    string  `json:"old_invoice_number"`
+			OldInvoiceDate  string  `json:"old_invoice_date"`
+			OldDueDate      string  `json:"old_due_date"`
+			OldAmount       float64 `json:"old_amount"`
+			OldCurrencyCode string  `json:"old_currency_code"`
+			Status          string  `json:"status"`
+			CreatedBy       string  `json:"created_by"`
+			CreatedAt       string  `json:"created_at"`
+			EditedBy        string  `json:"edited_by"`
+			EditedAt        string  `json:"edited_at"`
+			DeletedBy       string  `json:"deleted_by"`
+			DeletedAt       string  `json:"deleted_at"`
 		}
 		type Receivable struct {
-			ReceivableID string  `json:"receivable_id"`
-			EntityID     string  `json:"entity_id"`
-			CustomerID   string  `json:"customer_id"`
-			InvoiceNo    string  `json:"invoice_number"`
-			InvoiceDate  string  `json:"invoice_date"`
-			DueDate      string  `json:"due_date"`
-			Amount       float64 `json:"invoice_amount"`
-			CurrencyCode string  `json:"currency_code"`
-			Status       string  `json:"status"`
-			CreatedBy    string  `json:"created_by"`
-			CreatedAt    string  `json:"created_at"`
-			EditedBy     string  `json:"edited_by"`
-			EditedAt     string  `json:"edited_at"`
-			DeletedBy    string  `json:"deleted_by"`
-			DeletedAt    string  `json:"deleted_at"`
+			ReceivableID     string  `json:"receivable_id"`
+			EntityName       string  `json:"entity_name"`
+			CounterpartyName string  `json:"counterparty_name"`
+			InvoiceNo        string  `json:"invoice_number"`
+			InvoiceDate      string  `json:"invoice_date"`
+			DueDate          string  `json:"due_date"`
+			Amount           float64 `json:"invoice_amount"`
+			CurrencyCode     string  `json:"currency_code"`
+			// old values
+			OldEntityName   string  `json:"old_entity_name"`
+			OldCounterparty string  `json:"old_counterparty_name"`
+			OldInvoiceNo    string  `json:"old_invoice_number"`
+			OldInvoiceDate  string  `json:"old_invoice_date"`
+			OldDueDate      string  `json:"old_due_date"`
+			OldAmount       float64 `json:"old_invoice_amount"`
+			OldCurrencyCode string  `json:"old_currency_code"`
+			Status          string  `json:"status"`
+			CreatedBy       string  `json:"created_by"`
+			CreatedAt       string  `json:"created_at"`
+			EditedBy        string  `json:"edited_by"`
+			EditedAt        string  `json:"edited_at"`
+			DeletedBy       string  `json:"deleted_by"`
+			DeletedAt       string  `json:"deleted_at"`
 		}
 
-		// 1. Fetch all payables
-		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_id, vendor_id, invoice_number, invoice_date, due_date, amount, currency_code FROM payables`)
+		// 1. Fetch all payables (new table tr_payables)
+		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
@@ -374,10 +389,50 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for payableRows.Next() {
 			var p Payable
 			var invoiceDate, dueDate *time.Time
-			if err := payableRows.Scan(&p.PayableID, &p.EntityID, &p.VendorID, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode); err != nil {
+			var oldEntityPtr, oldCounterPtr, oldInvoicePtr *string
+			var oldInvoiceDate, oldDueDate *time.Time
+			var oldAmountPtr *float64
+			var oldCurrencyPtr *string
+			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
 				return
+			}
+			// populate old fields safely
+			if oldEntityPtr != nil {
+				p.OldEntityName = *oldEntityPtr
+			} else {
+				p.OldEntityName = ""
+			}
+			if oldCounterPtr != nil {
+				p.OldCounterparty = *oldCounterPtr
+			} else {
+				p.OldCounterparty = ""
+			}
+			if oldInvoicePtr != nil {
+				p.OldInvoiceNo = *oldInvoicePtr
+			} else {
+				p.OldInvoiceNo = ""
+			}
+			if oldInvoiceDate != nil {
+				p.OldInvoiceDate = oldInvoiceDate.Format("2006-01-02")
+			} else {
+				p.OldInvoiceDate = ""
+			}
+			if oldDueDate != nil {
+				p.OldDueDate = oldDueDate.Format("2006-01-02")
+			} else {
+				p.OldDueDate = ""
+			}
+			if oldAmountPtr != nil {
+				p.OldAmount = *oldAmountPtr
+			} else {
+				p.OldAmount = 0
+			}
+			if oldCurrencyPtr != nil {
+				p.OldCurrencyCode = *oldCurrencyPtr
+			} else {
+				p.OldCurrencyCode = ""
 			}
 			p.InvoiceDate = ""
 			if invoiceDate != nil {
@@ -391,8 +446,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			payableIDs = append(payableIDs, p.PayableID)
 		}
 
-		// 2. Fetch all receivables
-		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_id, customer_id, invoice_number, invoice_date, due_date, invoice_amount, currency_code FROM receivables`)
+		// 2. Fetch all receivables (new table tr_receivables)
+		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
@@ -404,10 +459,49 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for receivableRows.Next() {
 			var rcv Receivable
 			var invoiceDate, dueDate *time.Time
-			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityID, &rcv.CustomerID, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode); err != nil {
+			var oldEntityPtr, oldCounterPtr, oldInvoicePtr *string
+			var oldInvoiceDate, oldDueDate *time.Time
+			var oldAmountPtr *float64
+			var oldCurrencyPtr *string
+			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
 				return
+			}
+			if oldEntityPtr != nil {
+				rcv.OldEntityName = *oldEntityPtr
+			} else {
+				rcv.OldEntityName = ""
+			}
+			if oldCounterPtr != nil {
+				rcv.OldCounterparty = *oldCounterPtr
+			} else {
+				rcv.OldCounterparty = ""
+			}
+			if oldInvoicePtr != nil {
+				rcv.OldInvoiceNo = *oldInvoicePtr
+			} else {
+				rcv.OldInvoiceNo = ""
+			}
+			if oldInvoiceDate != nil {
+				rcv.OldInvoiceDate = oldInvoiceDate.Format("2006-01-02")
+			} else {
+				rcv.OldInvoiceDate = ""
+			}
+			if oldDueDate != nil {
+				rcv.OldDueDate = oldDueDate.Format("2006-01-02")
+			} else {
+				rcv.OldDueDate = ""
+			}
+			if oldAmountPtr != nil {
+				rcv.OldAmount = *oldAmountPtr
+			} else {
+				rcv.OldAmount = 0
+			}
+			if oldCurrencyPtr != nil {
+				rcv.OldCurrencyCode = *oldCurrencyPtr
+			} else {
+				rcv.OldCurrencyCode = ""
 			}
 			rcv.InvoiceDate = ""
 			if invoiceDate != nil {
@@ -543,708 +637,707 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
-
-// Bulk delete handler for payables audit actions
-func BulkDeletePayableAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// BulkRequestDeleteTransactions inserts DELETE audit actions for mixed transaction ids (payable or receivable)
+func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID     string   `json:"user_id"`
-			PayableIDs []string `json:"payable_ids"`
-			Reason     string   `json:"reason"`
+			UserID         string   `json:"user_id"`
+			TransactionIDs []string `json:"transaction_ids"`
+			Reason         string   `json:"reason"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.PayableIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json or missing fields"})
 			return
 		}
-		sessions := auth.GetActiveSessions()
+
 		requestedBy := ""
-		for _, s := range sessions {
+		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				requestedBy = s.Email
+				requestedBy = s.Name
 				break
 			}
 		}
 		if requestedBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
 			return
 		}
-		var results []string
-		for _, pid := range req.PayableIDs {
-			query := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()) RETURNING action_id`
-			var actionID string
-			err := pgxPool.QueryRow(r.Context(), query, pid, req.Reason, requestedBy).Scan(&actionID)
-			if err == nil {
-				results = append(results, actionID)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "created": results})
-	}
-}
 
-// Bulk reject audit actions for payables
-func BulkRejectPayableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID     string   `json:"user_id"`
-			PayableIDs []string `json:"payable_ids"`
-			Comment    string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.PayableIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
-			return
-		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
+		txIDsPay := []string{}
+		txIDsRec := []string{}
+		for _, id := range req.TransactionIDs {
+			if strings.HasPrefix(id, "TR-PAY-") {
+				txIDsPay = append(txIDsPay, id)
+			} else if strings.HasPrefix(id, "TR-REC-") {
+				txIDsRec = append(txIDsRec, id)
 			}
 		}
-		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
-			return
-		}
-		// For each payable_id, find the latest action_id
-		var actionIDs []string
-		for _, pid := range req.PayableIDs {
-			var actionID string
-			err := pgxPool.QueryRow(r.Context(), `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&actionID)
-			if err == nil && actionID != "" {
-				actionIDs = append(actionIDs, actionID)
-			}
-		}
-		if len(actionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "No valid actions found for provided payable_ids"})
-			return
-		}
-		query := `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,payable_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, actionIDs)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
-			return
-		}
-		defer rows.Close()
-		var updated []string
-		for rows.Next() {
-			var id, pid string
-			rows.Scan(&id, &pid)
-			updated = append(updated, id, pid)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
-	}
-}
 
-// Bulk approve audit actions for payables
-func BulkApprovePayableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID     string   `json:"user_id"`
-			PayableIDs []string `json:"payable_ids"`
-			Comment    string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.PayableIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
-			return
-		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
-		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
-			return
-		}
-		// For each payable_id, find the latest action_id
-		var actionIDs []string
-		for _, pid := range req.PayableIDs {
-			var actionID string
-			err := pgxPool.QueryRow(r.Context(), `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&actionID)
-			if err == nil && actionID != "" {
-				actionIDs = append(actionIDs, actionID)
-			}
-		}
-		if len(actionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "No valid actions found for provided payable_ids"})
-			return
-		}
-		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the found action_ids
-		delQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, payable_id`
-		delRows, delErr := pgxPool.Query(r.Context(), delQuery, actionIDs)
-		var deleted []string
-		var payableIDsToDelete []string
-		if delErr == nil {
-			defer delRows.Close()
-			for delRows.Next() {
-				var id, pid string
-				delRows.Scan(&id, &pid)
-				deleted = append(deleted, id, pid)
-				payableIDsToDelete = append(payableIDsToDelete, pid)
-			}
-		}
-		// Delete corresponding payables from payables
-		if len(payableIDsToDelete) > 0 {
-			delPayableQuery := `DELETE FROM payables WHERE payable_id = ANY($1)`
-			_, _ = pgxPool.Exec(r.Context(), delPayableQuery, payableIDsToDelete)
-		}
-		// Then, approve the rest
-		query := `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,payable_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, actionIDs)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
-			return
-		}
-		defer rows.Close()
-		var updated []string
-		for rows.Next() {
-			var id, pid string
-			rows.Scan(&id, &pid)
-			updated = append(updated, id, pid)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated, "deleted": deleted})
-	}
-}
-
-// Repeat the same for receivables
-func BulkDeleteReceivableAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID        string   `json:"user_id"`
-			ReceivableIDs []string `json:"receivable_ids"`
-			Reason        string   `json:"reason"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ReceivableIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
-			return
-		}
-		sessions := auth.GetActiveSessions()
-		requestedBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Email
-				break
-			}
-		}
-		if requestedBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
-			return
-		}
-		var results []string
-		for _, rid := range req.ReceivableIDs {
-			query := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()) RETURNING action_id`
-			var actionID string
-			err := pgxPool.QueryRow(r.Context(), query, rid, req.Reason, requestedBy).Scan(&actionID)
-			if err == nil {
-				results = append(results, actionID)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "created": results})
-	}
-}
-
-func BulkRejectReceivableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID        string   `json:"user_id"`
-			ReceivableIDs []string `json:"receivable_ids"`
-			Comment       string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ReceivableIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
-			return
-		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
-		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
-			return
-		}
-		// For each receivable_id, find the latest action_id
-		var actionIDs []string
-		for _, rid := range req.ReceivableIDs {
-			var actionID string
-			err := pgxPool.QueryRow(r.Context(), `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&actionID)
-			if err == nil && actionID != "" {
-				actionIDs = append(actionIDs, actionID)
-			}
-		}
-		if len(actionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "No valid actions found for provided receivable_ids"})
-			return
-		}
-		query := `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,receivable_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, actionIDs)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
-			return
-		}
-		defer rows.Close()
-		var updated []string
-		for rows.Next() {
-			var id, rid string
-			rows.Scan(&id, &rid)
-			updated = append(updated, id, rid)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
-	}
-}
-
-func BulkApproveReceivableAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID        string   `json:"user_id"`
-			ReceivableIDs []string `json:"receivable_ids"`
-			Comment       string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ReceivableIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid JSON or missing fields"})
-			return
-		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Email
-				break
-			}
-		}
-		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Invalid user_id or session"})
-			return
-		}
-		// For each receivable_id, find the latest action_id
-		var actionIDs []string
-		for _, rid := range req.ReceivableIDs {
-			var actionID string
-			err := pgxPool.QueryRow(r.Context(), `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&actionID)
-			if err == nil && actionID != "" {
-				actionIDs = append(actionIDs, actionID)
-			}
-		}
-		if len(actionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "No valid actions found for provided receivable_ids"})
-			return
-		}
-		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the found action_ids
-		delQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, receivable_id`
-		delRows, delErr := pgxPool.Query(r.Context(), delQuery, actionIDs)
-		var deleted []string
-		var receivableIDsToDelete []string
-		if delErr == nil {
-			defer delRows.Close()
-			for delRows.Next() {
-				var id, rid string
-				delRows.Scan(&id, &rid)
-				deleted = append(deleted, id, rid)
-				receivableIDsToDelete = append(receivableIDsToDelete, rid)
-			}
-		}
-		// Delete corresponding receivables from receivables
-		if len(receivableIDsToDelete) > 0 {
-			delReceivableQuery := `DELETE FROM receivables WHERE receivable_id = ANY($1)`
-			_, _ = pgxPool.Exec(r.Context(), delReceivableQuery, receivableIDsToDelete)
-		}
-		// Then, approve the rest
-		query := `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,receivable_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, actionIDs)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
-			return
-		}
-		defer rows.Close()
-		var updated []string
-		for rows.Next() {
-			var id, rid string
-			rows.Scan(&id, &rid)
-			updated = append(updated, id, rid)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated, "deleted": deleted})
-	}
-}
-
-func CreatePayable(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		var req struct {
-			UserID        string  `json:"user_id"`
-			EntityID      string  `json:"entity_id"`
-			VendorID      string  `json:"vendor_id"`
-			InvoiceNumber string  `json:"invoice_number"`
-			InvoiceDate   string  `json:"invoice_date"`
-			DueDate       string  `json:"due_date"`
-			Amount        float64 `json:"amount"`
-			CurrencyCode  string  `json:"currency_code"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		if req.UserID == "" || req.EntityID == "" || req.VendorID == "" || req.InvoiceNumber == "" || req.CurrencyCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "missing required fields")
-			return
-		}
-
-		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user not found in sessions")
-			return
-		}
-
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to begin tx"})
 			return
 		}
+		committed := false
 		defer func() {
-			if err != nil {
+			if !committed {
 				tx.Rollback(ctx)
 			}
 		}()
 
-		invDate := normalizeDate(req.InvoiceDate)
-		dueDate := normalizeDate(req.DueDate)
-		var invDateVal, dueDateVal interface{}
-		if strings.TrimSpace(invDate) != "" {
-			if t, e := time.Parse("2006-01-02", invDate); e == nil {
-				invDateVal = t
+		insPay := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now()) RETURNING action_id`
+		reasonArg := interface{}(nil)
+		if strings.TrimSpace(req.Reason) != "" {
+			reasonArg = req.Reason
+		}
+		for _, id := range txIDsPay {
+			var actionID string
+			if err := tx.QueryRow(ctx, insPay, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
+				// nop: collected if needed
 			}
 		}
-		if strings.TrimSpace(dueDate) != "" {
-			if t, e := time.Parse("2006-01-02", dueDate); e == nil {
-				dueDateVal = t
+
+		insRec := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now()) RETURNING action_id`
+		for _, id := range txIDsRec {
+			var actionID string
+			if err := tx.QueryRow(ctx, insRec, id, reasonArg, requestedBy).Scan(&actionID); err == nil {
+				// nop
 			}
 		}
 
-		var payableID string
-		q := `INSERT INTO payables (entity_id, vendor_id, invoice_number, invoice_date, due_date, amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING payable_id`
-		if err = tx.QueryRow(ctx, q, req.EntityID, req.VendorID, req.InvoiceNumber, invDateVal, dueDateVal, req.Amount, req.CurrencyCode).Scan(&payableID); err != nil {
-			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+		if err := tx.Commit(ctx); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to commit"})
 			return
 		}
+		committed = true
 
-		var actionID string
-		auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
-		if err = tx.QueryRow(ctx, auditQ, payableID, userName).Scan(&actionID); err != nil {
-			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		api.RespondWithPayload(w, true, "", map[string]string{"payable_id": payableID, "action_id": actionID})
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "delete requests created"})
 	}
 }
 
-func UpdatePayable(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// BulkRejectTransactions rejects latest audit actions for mixed transaction ids (payable or receivable)
+func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string   `json:"user_id"`
+			TransactionIDs []string `json:"transaction_ids"`
+			Comment        string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json or missing fields"})
+			return
+		}
+
+		checkerBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				checkerBy = s.Name
+				break
+			}
+		}
+		if checkerBy == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
+			return
+		}
+
+		// separate ids
+		payIDs := []string{}
+		recIDs := []string{}
+		for _, id := range req.TransactionIDs {
+			if strings.HasPrefix(id, "TR-PAY-") {
+				payIDs = append(payIDs, id)
+			} else if strings.HasPrefix(id, "TR-REC-") {
+				recIDs = append(recIDs, id)
+			}
+		}
+
+		ctx := r.Context()
+		var actionIDs []string
+
+		// For payables: find latest action_id per payable and add to list
+		if len(payIDs) > 0 {
+			for _, pid := range payIDs {
+				var aid string
+				if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&aid); err == nil && aid != "" {
+					actionIDs = append(actionIDs, aid)
+				}
+			}
+		}
+
+		// For receivables
+		if len(recIDs) > 0 {
+			for _, rid := range recIDs {
+				var aid string
+				if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&aid); err == nil && aid != "" {
+					actionIDs = append(actionIDs, aid)
+				}
+			}
+		}
+
+		if len(actionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "no valid actions found for provided ids"})
+			return
+		}
+		commentArg := interface{}(nil)
+		if strings.TrimSpace(req.Comment) != "" {
+			commentArg = req.Comment
+		}
+		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionpayable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
+			// ignore error, try receivable update
+		}
+		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`, checkerBy, commentArg, actionIDs); err != nil {
+			// ignore
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rejected_count": len(actionIDs)})
+	}
+}
+
+// BulkApproveTransactions approves latest audit actions for mixed transaction ids (payable or receivable)
+func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string   `json:"user_id"`
+			TransactionIDs []string `json:"transaction_ids"`
+			Comment        string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json or missing fields"})
+			return
+		}
+
+		checkerBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				checkerBy = s.Name
+				break
+			}
+		}
+		if checkerBy == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
+			return
+		}
+
+		// separate ids
+		payIDs := []string{}
+		recIDs := []string{}
+		for _, id := range req.TransactionIDs {
+			if strings.HasPrefix(id, "TR-PAY-") {
+				payIDs = append(payIDs, id)
+			} else if strings.HasPrefix(id, "TR-REC-") {
+				recIDs = append(recIDs, id)
+			}
+		}
+
+		ctx := r.Context()
+		// Get latest action ids for provided transaction ids
+		var actionIDs []string
+		for _, pid := range payIDs {
+			var aid string
+			if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionpayable WHERE payable_id = $1 ORDER BY requested_at DESC LIMIT 1`, pid).Scan(&aid); err == nil && aid != "" {
+				actionIDs = append(actionIDs, aid)
+			}
+		}
+		for _, rid := range recIDs {
+			var aid string
+			if err := pgxPool.QueryRow(ctx, `SELECT action_id FROM auditactionreceivable WHERE receivable_id = $1 ORDER BY requested_at DESC LIMIT 1`, rid).Scan(&aid); err == nil && aid != "" {
+				actionIDs = append(actionIDs, aid)
+			}
+		}
+
+		if len(actionIDs) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "no valid actions found for provided ids"})
+			return
+		}
+		// First, remove PENDING_DELETE_APPROVAL audit actions and collect their target transaction ids
+		var payableIDsToDelete []string
+		var receivableIDsToDelete []string
+
+		delPayQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, payable_id`
+		delPayRows, _ := pgxPool.Query(ctx, delPayQuery, actionIDs)
+		if delPayRows != nil {
+			defer delPayRows.Close()
+			for delPayRows.Next() {
+				var aid, pid string
+				if err := delPayRows.Scan(&aid, &pid); err == nil {
+					payableIDsToDelete = append(payableIDsToDelete, pid)
+				}
+			}
+		}
+
+		delRecQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, receivable_id`
+		delRecRows, _ := pgxPool.Query(ctx, delRecQuery, actionIDs)
+		if delRecRows != nil {
+			defer delRecRows.Close()
+			for delRecRows.Next() {
+				var aid, rid string
+				if err := delRecRows.Scan(&aid, &rid); err == nil {
+					receivableIDsToDelete = append(receivableIDsToDelete, rid)
+				}
+			}
+		}
+
+		// Mark canonical rows as deleted (soft-delete) instead of hard delete
+		if len(payableIDsToDelete) > 0 {
+			if _, err := pgxPool.Exec(ctx, `UPDATE tr_payables SET is_deleted = TRUE, updated_at = now() WHERE payable_id = ANY($1)`, payableIDsToDelete); err != nil {
+				// log or ignore; continue
+			}
+		}
+		if len(receivableIDsToDelete) > 0 {
+			if _, err := pgxPool.Exec(ctx, `UPDATE tr_receivables SET is_deleted = TRUE, updated_at = now() WHERE receivable_id = ANY($1)`, receivableIDsToDelete); err != nil {
+				// log or ignore
+			}
+		}
+
+		// Approve the remaining actions
+		commentArg := interface{}(nil)
+		if strings.TrimSpace(req.Comment) != "" {
+			commentArg = req.Comment
+		}
+		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionpayable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL'`, checkerBy, commentArg, actionIDs); err != nil {
+			// ignore
+		}
+		if _, err := pgxPool.Exec(ctx, `UPDATE auditactionreceivable SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL'`, checkerBy, commentArg, actionIDs); err != nil {
+			// ignore
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "approved_count": len(actionIDs)})
+	}
+}
+
+func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID   string                 `json:"user_id"`
-			PayableID string                `json:"payable_id"`
-			Fields   map[string]interface{} `json:"fields"`
+			UserID string                   `json:"user_id"`
+			Items  []map[string]interface{} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json"})
 			return
 		}
-		if req.UserID == "" || req.PayableID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "missing user_id or payable_id")
+		if req.UserID == "" || len(req.Items) == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "user_id and items are required"})
 			return
 		}
 
 		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
+		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				userName = s.Name
 				break
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user not found in sessions")
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
 			return
 		}
 
-		allowed := map[string]bool{"entity_id":true, "vendor_id":true, "invoice_number":true, "invoice_date":true, "due_date":true, "amount":true, "currency_code":true, "status":true}
-		var sets []string
-		var args []interface{}
-		pos := 1
-		for k, v := range req.Fields {
-			if !allowed[k] {
-				continue
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to begin tx"})
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
 			}
-			switch k {
-			case "invoice_date", "due_date":
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					if norm := normalizeDate(s); norm != "" {
-						if t, e := time.Parse("2006-01-02", norm); e == nil {
-							sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
-							args = append(args, t)
-							pos++
-						}
+		}()
+
+		var createdPayables []string
+		var createdReceivables []string
+		var payableActionIDs []string
+		var receivableActionIDs []string
+
+		for idx, itm := range req.Items {
+			tRaw, ok := itm["transaction_type"]
+			if !ok {
+				tx.Rollback(ctx)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("item %d missing transaction_type", idx)})
+				return
+			}
+			txType := strings.ToUpper(fmt.Sprint(tRaw))
+
+			entityName := fmt.Sprint(itm["entity_name"])         // required
+			counterparty := fmt.Sprint(itm["counterparty_name"]) // required
+			invoiceNumber := fmt.Sprint(itm["invoice_number"])   // required
+			invDateStr := fmt.Sprint(itm["invoice_date"])        // optional
+			dueDateStr := fmt.Sprint(itm["due_date"])            // optional
+			currency := fmt.Sprint(itm["currency_code"])         // required
+
+			amountF := 0.0
+			if v, ok := itm["amount"]; ok {
+				switch vv := v.(type) {
+				case float64:
+					amountF = vv
+				case float32:
+					amountF = float64(vv)
+				case int:
+					amountF = float64(vv)
+				case int64:
+					amountF = float64(vv)
+				case string:
+					fmt.Sscan(vv, &amountF)
+				}
+			}
+			if entityName == "" || counterparty == "" || invoiceNumber == "" || currency == "" {
+				tx.Rollback(ctx)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("item %d missing required fields", idx)})
+				return
+			}
+
+			invDate := normalizeDate(invDateStr)
+			dueDate := normalizeDate(dueDateStr)
+			var invDateVal, dueDateVal interface{}
+			if strings.TrimSpace(invDate) != "" {
+				if t, e := time.Parse("2006-01-02", invDate); e == nil {
+					invDateVal = t
+				}
+			}
+			if strings.TrimSpace(dueDate) != "" {
+				if t, e := time.Parse("2006-01-02", dueDate); e == nil {
+					dueDateVal = t
+				}
+			}
+
+			if txType == "PAYABLE" {
+				var pid string
+				q := `INSERT INTO tr_payables (entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING payable_id`
+				if err := tx.QueryRow(ctx, q, entityName, counterparty, invoiceNumber, invDateVal, dueDateVal, amountF, currency).Scan(&pid); err != nil {
+					tx.Rollback(ctx)
+					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to insert payable item %d: %v", idx, err)})
+					return
+				}
+				createdPayables = append(createdPayables, pid)
+				var actionID string
+				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
+				if err := tx.QueryRow(ctx, auditQ, pid, userName).Scan(&actionID); err != nil {
+					tx.Rollback(ctx)
+					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to create audit for payable %s: %v", pid, err)})
+					return
+				}
+				payableActionIDs = append(payableActionIDs, actionID)
+
+			} else if txType == "RECEIVABLE" {
+				var rid string
+				q := `INSERT INTO tr_receivables (entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING receivable_id`
+				if err := tx.QueryRow(ctx, q, entityName, counterparty, invoiceNumber, invDateVal, dueDateVal, amountF, currency).Scan(&rid); err != nil {
+					tx.Rollback(ctx)
+					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to insert receivable item %d: %v", idx, err)})
+					return
+				}
+				createdReceivables = append(createdReceivables, rid)
+				var actionID string
+				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
+				if err := tx.QueryRow(ctx, auditQ, rid, userName).Scan(&actionID); err != nil {
+					tx.Rollback(ctx)
+					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err)})
+					return
+				}
+				receivableActionIDs = append(receivableActionIDs, actionID)
+
+			} else {
+				tx.Rollback(ctx)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("item %d unknown transaction_type: %s", idx, txType)})
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to commit"})
+			return
+		}
+		committed = true
+
+		resp := map[string]interface{}{"success": true}
+		if len(createdPayables) > 0 {
+			resp["created_payables"] = createdPayables
+			resp["payable_action_ids"] = payableActionIDs
+		}
+		if len(createdReceivables) > 0 {
+			resp["created_receivables"] = createdReceivables
+			resp["receivable_action_ids"] = receivableActionIDs
+		}
+
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID string                 `json:"user_id"`
+			ID     string                 `json:"id"`
+			Fields map[string]interface{} `json:"fields"`
+			Reason string                 `json:"reason,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if req.UserID == "" || req.ID == "" || len(req.Fields) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id, id and fields are required")
+			return
+		}
+
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		id := strings.TrimSpace(req.ID)
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		var actionID string
+
+		if strings.HasPrefix(id, "TR-PAY-") {
+			// Update single payable using old_ pattern
+			sel := `SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code FROM tr_payables WHERE payable_id=$1 FOR UPDATE`
+			var curEntity, curCounter, curInvoice sqlNullString
+			var curInvoiceDate, curDueDate sqlNullTime
+			var curAmount sqlNullFloat
+			var curCurrency sqlNullString
+			if err := tx.QueryRow(ctx, sel, id).Scan(&curEntity, &curCounter, &curInvoice, &curInvoiceDate, &curDueDate, &curAmount, &curCurrency); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch payable: "+err.Error())
+				return
+			}
+
+			sets := []string{}
+			args := []interface{}{}
+			pos := 1
+			addStr := func(col, oldcol string, val interface{}, cur sqlNullString) {
+				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				args = append(args, nullifyEmpty(fmt.Sprint(val)))
+				args = append(args, cur.ValueOrZero())
+				pos += 2
+			}
+			addDate := func(col, oldcol string, val interface{}, cur sqlNullTime) {
+				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				if val == nil {
+					args = append(args, nil)
+				} else if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
+					if t, e := time.Parse("2006-01-02", normalizeDate(s)); e == nil {
+						args = append(args, t)
+					} else {
+						args = append(args, nil)
+					}
+				} else {
+					args = append(args, nil)
+				}
+				args = append(args, cur.ValueOrZero())
+				pos += 2
+			}
+			addFloat := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
+				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				if val == nil {
+					args = append(args, nil)
+				} else {
+					switch vv := val.(type) {
+					case float64:
+						args = append(args, vv)
+					case float32:
+						args = append(args, float64(vv))
+					case int:
+						args = append(args, float64(vv))
+					case int64:
+						args = append(args, float64(vv))
+					case string:
+						var out float64
+						fmt.Sscan(vv, &out)
+						args = append(args, out)
+					default:
+						args = append(args, nil)
 					}
 				}
-			case "amount":
-				switch val := v.(type) {
-				case float64:
-					sets = append(sets, fmt.Sprintf("amount=$%d", pos))
-					args = append(args, val)
-					pos++
-				case string:
-					sets = append(sets, fmt.Sprintf("amount=$%d", pos))
-					args = append(args, val)
-					pos++
+				args = append(args, cur.ValueOrZero())
+				pos += 2
+			}
+
+			for k, v := range req.Fields {
+				switch k {
+				case "entity_name":
+					addStr("entity_name", "old_entity_name", v, curEntity)
+				case "counterparty_name":
+					addStr("counterparty_name", "old_counterparty_name", v, curCounter)
+				case "invoice_number":
+					addStr("invoice_number", "old_invoice_number", v, curInvoice)
+				case "invoice_date":
+					addDate("invoice_date", "old_invoice_date", v, curInvoiceDate)
+				case "due_date":
+					addDate("due_date", "old_due_date", v, curDueDate)
+				case "amount":
+					addFloat("amount", "old_amount", v, curAmount)
+				case "currency_code":
+					addStr("currency_code", "old_currency_code", v, curCurrency)
+				default:
+					// ignore unknown
 				}
-			default:
-				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
-				args = append(args, fmt.Sprint(v))
-				pos++
 			}
-		}
-		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no updatable fields provided")
-			return
-		}
-
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer func() { if err != nil { tx.Rollback(ctx) } }()
-
-		args = append(args, req.PayableID)
-		upd := fmt.Sprintf("UPDATE payables SET %s WHERE payable_id=$%d RETURNING payable_id", strings.Join(sets, ", "), pos)
-		var updatedID string
-		if err = tx.QueryRow(ctx, upd, args...).Scan(&updatedID); err != nil {
-			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		var actionID string
-		auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',NULL,$2,now()) RETURNING action_id`
-		if err = tx.QueryRow(ctx, auditQ, updatedID, userName).Scan(&actionID); err != nil {
-			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		api.RespondWithPayload(w, true, "", map[string]string{"payable_id": updatedID, "action_id": actionID})
-	}
-}
-
-func CreateReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		var req struct {
-			UserID        string  `json:"user_id"`
-			EntityID      string  `json:"entity_id"`
-			CustomerID    string  `json:"customer_id"`
-			InvoiceNumber string  `json:"invoice_number"`
-			InvoiceDate   string  `json:"invoice_date"`
-			DueDate       string  `json:"due_date"`
-			Amount        float64 `json:"invoice_amount"`
-			CurrencyCode  string  `json:"currency_code"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		if req.UserID == "" || req.EntityID == "" || req.CustomerID == "" || req.InvoiceNumber == "" || req.CurrencyCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "missing required fields")
-			return
-		}
-
-		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				userName = s.Name
-				break
+			if len(sets) == 0 {
+				api.RespondWithResult(w, false, "no valid fields to update")
+				tx.Rollback(ctx)
+				return
 			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user not found in sessions")
-			return
-		}
-
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer func() { if err != nil { tx.Rollback(ctx) } }()
-
-		invDate := normalizeDate(req.InvoiceDate)
-		dueDate := normalizeDate(req.DueDate)
-		var invDateVal, dueDateVal interface{}
-		if strings.TrimSpace(invDate) != "" {
-			if t, e := time.Parse("2006-01-02", invDate); e == nil {
-				invDateVal = t
+			q := "UPDATE tr_payables SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE payable_id=$%d RETURNING payable_id", pos)
+			args = append(args, id)
+			var updatedID string
+			if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to update payable: "+err.Error())
+				return
 			}
-		}
-		if strings.TrimSpace(dueDate) != "" {
-			if t, e := time.Parse("2006-01-02", dueDate); e == nil {
-				dueDateVal = t
+
+			auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()) RETURNING action_id`
+			reasonArg := interface{}(nil)
+			if strings.TrimSpace(req.Reason) != "" {
+				reasonArg = req.Reason
 			}
-		}
-
-		var receivableID string
-		q := `INSERT INTO receivables (entity_id, customer_id, invoice_number, invoice_date, due_date, invoice_amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING receivable_id`
-		if err = tx.QueryRow(ctx, q, req.EntityID, req.CustomerID, req.InvoiceNumber, invDateVal, dueDateVal, req.Amount, req.CurrencyCode).Scan(&receivableID); err != nil {
-			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		var actionID string
-		auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
-		if err = tx.QueryRow(ctx, auditQ, receivableID, userName).Scan(&actionID); err != nil {
-			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		api.RespondWithPayload(w, true, "", map[string]string{"receivable_id": receivableID, "action_id": actionID})
-	}
-}
-
-func UpdateReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		var req struct {
-			UserID       string                 `json:"user_id"`
-			ReceivableID string                 `json:"receivable_id"`
-			Fields       map[string]interface{} `json:"fields"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-		if req.UserID == "" || req.ReceivableID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "missing user_id or receivable_id")
-			return
-		}
-
-		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				userName = s.Name
-				break
+			if err := tx.QueryRow(ctx, auditQ, updatedID, reasonArg, userName).Scan(&actionID); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for payable: "+err.Error())
+				return
 			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user not found in sessions")
-			return
-		}
 
-		allowed := map[string]bool{"entity_id":true, "customer_id":true, "invoice_number":true, "invoice_date":true, "due_date":true, "invoice_amount":true, "currency_code":true, "status":true}
-		var sets []string
-		var args []interface{}
-		pos := 1
-		for k, v := range req.Fields {
-			if !allowed[k] {
-				continue
+		} else if strings.HasPrefix(id, "TR-REC-") {
+			sel := `SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code FROM tr_receivables WHERE receivable_id=$1 FOR UPDATE`
+			var curEntity, curCounter, curInvoice sqlNullString
+			var curInvoiceDate, curDueDate sqlNullTime
+			var curAmount sqlNullFloat
+			var curCurrency sqlNullString
+			if err := tx.QueryRow(ctx, sel, id).Scan(&curEntity, &curCounter, &curInvoice, &curInvoiceDate, &curDueDate, &curAmount, &curCurrency); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch receivable: "+err.Error())
+				return
 			}
-			switch k {
-			case "invoice_date", "due_date":
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					if norm := normalizeDate(s); norm != "" {
-						if t, e := time.Parse("2006-01-02", norm); e == nil {
-							sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
-							args = append(args, t)
-							pos++
-						}
+
+			sets := []string{}
+			args := []interface{}{}
+			pos := 1
+			addStr := func(col, oldcol string, val interface{}, cur sqlNullString) {
+				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				args = append(args, nullifyEmpty(fmt.Sprint(val)))
+				args = append(args, cur.ValueOrZero())
+				pos += 2
+			}
+			addDate := func(col, oldcol string, val interface{}, cur sqlNullTime) {
+				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				if val == nil {
+					args = append(args, nil)
+				} else if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
+					if t, e := time.Parse("2006-01-02", normalizeDate(s)); e == nil {
+						args = append(args, t)
+					} else {
+						args = append(args, nil)
+					}
+				} else {
+					args = append(args, nil)
+				}
+				args = append(args, cur.ValueOrZero())
+				pos += 2
+			}
+			addFloat := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
+				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				if val == nil {
+					args = append(args, nil)
+				} else {
+					switch vv := val.(type) {
+					case float64:
+						args = append(args, vv)
+					case float32:
+						args = append(args, float64(vv))
+					case int:
+						args = append(args, float64(vv))
+					case int64:
+						args = append(args, float64(vv))
+					case string:
+						var out float64
+						fmt.Sscan(vv, &out)
+						args = append(args, out)
+					default:
+						args = append(args, nil)
 					}
 				}
-			case "invoice_amount":
-				switch val := v.(type) {
-				case float64:
-					sets = append(sets, fmt.Sprintf("invoice_amount=$%d", pos))
-					args = append(args, val)
-					pos++
-				case string:
-					sets = append(sets, fmt.Sprintf("invoice_amount=$%d", pos))
-					args = append(args, val)
-					pos++
-				}
-			default:
-				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
-				args = append(args, fmt.Sprint(v))
-				pos++
+				args = append(args, cur.ValueOrZero())
+				pos += 2
 			}
-		}
-		if len(sets) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no updatable fields provided")
-			return
-		}
 
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer func() { if err != nil { tx.Rollback(ctx) } }()
+			for k, v := range req.Fields {
+				switch k {
+				case "entity_name":
+					addStr("entity_name", "old_entity_name", v, curEntity)
+				case "counterparty_name":
+					addStr("counterparty_name", "old_counterparty_name", v, curCounter)
+				case "invoice_number":
+					addStr("invoice_number", "old_invoice_number", v, curInvoice)
+				case "invoice_date":
+					addDate("invoice_date", "old_invoice_date", v, curInvoiceDate)
+				case "due_date":
+					addDate("due_date", "old_due_date", v, curDueDate)
+				case "invoice_amount":
+					addFloat("invoice_amount", "old_invoice_amount", v, curAmount)
+				case "currency_code":
+					addStr("currency_code", "old_currency_code", v, curCurrency)
+				default:
+					// ignore unknown
+				}
+			}
+			if len(sets) == 0 {
+				api.RespondWithResult(w, false, "no valid fields to update")
+				tx.Rollback(ctx)
+				return
+			}
+			q := "UPDATE tr_receivables SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE receivable_id=$%d RETURNING receivable_id", pos)
+			args = append(args, id)
+			var updatedID string
+			if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to update receivable: "+err.Error())
+				return
+			}
 
-		args = append(args, req.ReceivableID)
-		upd := fmt.Sprintf("UPDATE receivables SET %s WHERE receivable_id=$%d RETURNING receivable_id", strings.Join(sets, ", "), pos)
-		var updatedID string
-		if err = tx.QueryRow(ctx, upd, args...).Scan(&updatedID); err != nil {
+			auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now()) RETURNING action_id`
+			reasonArg := interface{}(nil)
+			if strings.TrimSpace(req.Reason) != "" {
+				reasonArg = req.Reason
+			}
+			if err := tx.QueryRow(ctx, auditQ, updatedID, reasonArg, userName).Scan(&actionID); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit for receivable: "+err.Error())
+				return
+			}
+
+		} else {
+			api.RespondWithError(w, http.StatusBadRequest, "unknown id prefix")
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		var actionID string
-		auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',NULL,$2,now()) RETURNING action_id`
-		if err = tx.QueryRow(ctx, auditQ, updatedID, userName).Scan(&actionID); err != nil {
-			tx.Rollback(ctx)
+		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+		committed = true
 
-		api.RespondWithPayload(w, true, "", map[string]string{"receivable_id": updatedID, "action_id": actionID})
+		api.RespondWithPayload(w, true, "", map[string]string{"id": id, "action_id": actionID})
 	}
 }
