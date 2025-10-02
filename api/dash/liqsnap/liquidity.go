@@ -68,10 +68,10 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct{
-			UserID string `json:"user_id"`
+		var req struct {
+			UserID     string `json:"user_id"`
 			EntityName string `json:"entity_name,omitempty"`
-			Currency string `json:"currency,omitempty"`
+			Currency   string `json:"currency,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -108,14 +108,14 @@ func TotalCashBalanceByEntity(pgxPool *pgxpool.Pool) ([]EntityBankBalance, error
 	query := `SELECT 
 		m.entity_name,
 		mb.bank_name,
-		bs.currencycode,
+		bs.currency_code,
 		COALESCE(SUM(bs.closingbalance), 0) AS balance
 	FROM bank_statement bs
 	JOIN masterentity m ON bs.entityid = m.entity_id
 	JOIN masterbankaccount mba ON bs.account_no = mba.account_no
 	JOIN masterbank mb ON mba.bank_id = mb.bank_id
 	WHERE bs.status = 'Approved'
-	GROUP BY m.entity_name, mb.bank_name, bs.currencycode;`
+	GROUP BY m.entity_name, mb.bank_name, bs.currency_code;`
 	rows, err := pgxPool.Query(context.Background(), query)
 	if err != nil {
 		return nil, err
@@ -431,7 +431,9 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 			return k, err
 		}
 		rate := rates[cur]
-		if rate == 0 { rate = 1.0 }
+		if rate == 0 {
+			rate = 1.0
+		}
 		inflowsUSD += amt * rate
 	}
 	inflowRows2.Close()
@@ -468,7 +470,9 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 			return k, err
 		}
 		rate := rates[cur]
-		if rate == 0 { rate = 1.0 }
+		if rate == 0 {
+			rate = 1.0
+		}
 		outflowsUSD += amt * rate
 	}
 	outflowRows2.Close()
@@ -553,7 +557,9 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 { rate = 1.0 }
+		if rate == 0 {
+			rate = 1.0
+		}
 		openingBalance += amt * rate
 	}
 
@@ -590,7 +596,9 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 { rate = 1.0 }
+		if rate == 0 {
+			rate = 1.0
+		}
 		inflowsMap[d.Format("2006-01-02")] += amt * rate
 	}
 
@@ -627,7 +635,9 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 { rate = 1.0 }
+		if rate == 0 {
+			rate = 1.0
+		}
 		outflowsMap[d.Format("2006-01-02")] += amt * rate
 	}
 
