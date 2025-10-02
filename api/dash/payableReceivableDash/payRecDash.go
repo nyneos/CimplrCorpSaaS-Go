@@ -50,19 +50,27 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+	// tie queries to the request context and add a timeout to avoid runaway queries
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
 
 		out := make([]PayRecRow, 0)
 
 		// Payables
-		payQ := `
-				SELECT p.invoice_number, p.due_date, p.amount, p.currency_code, c.counterparty_name, p.entity_name
-				FROM tr_payables p
-				JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
-				WHERE (SELECT a.processing_status FROM auditactionpayable a WHERE a.payable_id = p.payable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
-				ORDER BY p.due_date
-		`
-		rows, err := pgxPool.Query(ctx, payQ)
+	// Avoid per-row correlated subqueries by selecting the latest audit row once
+	payQ := `
+		SELECT p.invoice_number, p.due_date, p.amount, p.currency_code, c.counterparty_name, p.entity_name
+		FROM tr_payables p
+		JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
+		JOIN (
+		  SELECT DISTINCT ON (payable_id) payable_id, processing_status
+		  FROM auditactionpayable
+		  ORDER BY payable_id, requested_at DESC
+		) a ON a.payable_id = p.payable_id
+		WHERE a.processing_status = 'APPROVED'
+		ORDER BY p.due_date
+	`
+	rows, err := pgxPool.Query(ctx, payQ)
 		if err != nil {
 			api.RespondWithResult(w, false, "DB error: "+err.Error())
 			return
@@ -92,14 +100,20 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows.Close()
 
 		// Receivables
-		recQ := `
-				SELECT r.invoice_number, r.due_date, r.invoice_amount, r.currency_code, c.counterparty_name, r.entity_name
-				FROM tr_receivables r
-				JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
-				WHERE (SELECT a.processing_status FROM auditactionreceivable a WHERE a.receivable_id = r.receivable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
-				ORDER BY r.due_date
-		`
-		rows2, err := pgxPool.Query(ctx, recQ)
+	// Use the same DISTINCT ON trick for receivables
+	recQ := `
+		SELECT r.invoice_number, r.due_date, r.invoice_amount, r.currency_code, c.counterparty_name, r.entity_name
+		FROM tr_receivables r
+		JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
+		JOIN (
+		  SELECT DISTINCT ON (receivable_id) receivable_id, processing_status
+		  FROM auditactionreceivable
+		  ORDER BY receivable_id, requested_at DESC
+		) a ON a.receivable_id = r.receivable_id
+		WHERE a.processing_status = 'APPROVED'
+		ORDER BY r.due_date
+	`
+	rows2, err := pgxPool.Query(ctx, recQ)
 		if err != nil {
 			api.RespondWithResult(w, false, "DB error: "+err.Error())
 			return
@@ -175,18 +189,26 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			buckets[b.Key] = map[string]map[string]map[string]map[string]float64{}
 		}
 
-		ctx := context.Background()
+	// bind to request context with timeout to guard long-running forecasts
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 
 		// fetch approved payables within max range (start..qEnd)
-		payQ := `
-				SELECT COALESCE(me.entity_name, p.entity_name) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code
-				FROM tr_payables p
-				JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
-				LEFT JOIN masterentitycash me ON p.entity_name = me.entity_name
-				WHERE p.due_date BETWEEN $1 AND $2
-				  AND (SELECT a.processing_status FROM auditactionpayable a WHERE a.payable_id = p.payable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
-		`
-		rows, err := pgxPool.Query(ctx, payQ, start, qEnd)
+				// select latest audit processing_status once per payable to avoid per-row subqueries
+				payQ := `
+								SELECT COALESCE(me.entity_name, p.entity_name) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code
+								FROM tr_payables p
+								JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
+								LEFT JOIN masterentitycash me ON p.entity_name = me.entity_name
+								JOIN (
+									SELECT DISTINCT ON (payable_id) payable_id, processing_status
+									FROM auditactionpayable
+									ORDER BY payable_id, requested_at DESC
+								) a ON a.payable_id = p.payable_id
+								WHERE p.due_date BETWEEN $1 AND $2
+									AND a.processing_status = 'APPROVED'
+				`
+				rows, err := pgxPool.Query(ctx, payQ, start, qEnd)
 		if err == nil {
 			for rows.Next() {
 				var entity, counterparty, currency string
@@ -222,15 +244,20 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// fetch approved receivables within max range
-		recQ := `
-				SELECT COALESCE(me.entity_name, r.entity_name) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code
-				FROM tr_receivables r
-				JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
-				LEFT JOIN masterentitycash me ON r.entity_name = me.entity_name
-				WHERE r.due_date BETWEEN $1 AND $2
-				  AND (SELECT a.processing_status FROM auditactionreceivable a WHERE a.receivable_id = r.receivable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
-		`
-		rows2, err := pgxPool.Query(ctx, recQ, start, qEnd)
+				recQ := `
+								SELECT COALESCE(me.entity_name, r.entity_name) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code
+								FROM tr_receivables r
+								JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
+								LEFT JOIN masterentitycash me ON r.entity_name = me.entity_name
+								JOIN (
+									SELECT DISTINCT ON (receivable_id) receivable_id, processing_status
+									FROM auditactionreceivable
+									ORDER BY receivable_id, requested_at DESC
+								) a ON a.receivable_id = r.receivable_id
+								WHERE r.due_date BETWEEN $1 AND $2
+									AND a.processing_status = 'APPROVED'
+				`
+				rows2, err := pgxPool.Query(ctx, recQ, start, qEnd)
 		if err == nil {
 			for rows2.Next() {
 				var entity, counterparty, currency string
