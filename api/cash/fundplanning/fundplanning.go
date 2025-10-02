@@ -1,16 +1,20 @@
 package fundplanning
 
+//TODO : Soft Delete for Fund Plans
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1028,4 +1032,281 @@ func roundToDecimal(val float64, precision int) float64 {
 	}
 	rounded := float64(int(val*multiplier+0.5)) / multiplier
 	return rounded
+}
+
+// CreateFundPlan request structures
+type CreateFundPlanRequest struct {
+	UserID     string                 `json:"user_id"`
+	PlanID     string                 `json:"plan_id"`
+	EntityName string                 `json:"entity_name"`
+	Horizon    int                    `json:"horizon"`
+	Groups     []FundPlanGroupRequest `json:"groups"`
+}
+
+type FundPlanGroupRequest struct {
+	GroupID           string                      `json:"group_id"`
+	Status            string                      `json:"status"`
+	TotalAmount       float64                     `json:"total_amount"`
+	AllocatedAccounts []FundPlanAllocationRequest `json:"allocated_accounts"`
+	Lines             []FundPlanLineRequest       `json:"lines"`
+}
+
+type FundPlanAllocationRequest struct {
+	AccountID       string  `json:"account_id"`
+	AllocatedAmount float64 `json:"allocated_amount"`
+}
+
+type FundPlanLineRequest struct {
+	LineID               string  `json:"line_id"`
+	Amount               float64 `json:"amount"`
+	AllocatedBankAccount string  `json:"allocated_bank_account"`
+	AllocatedAmount      float64 `json:"allocated_amount"`
+}
+
+// CreateFundPlan creates a new fund plan with groups, lines, allocations and audit actions
+func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req CreateFundPlanRequest
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		// Log the parsed request for debugging
+		api.LogInfo("CreateFundPlan request parsed", map[string]interface{}{
+			"plan_id":     req.PlanID,
+			"user_id":     req.UserID,
+			"entity_name": req.EntityName,
+			"horizon":     req.Horizon,
+			"num_groups":  len(req.Groups),
+		})
+
+		for i, group := range req.Groups {
+			api.LogInfo("Group details", map[string]interface{}{
+				"index":                  i,
+				"group_id":               group.GroupID,
+				"total_amount":           group.TotalAmount,
+				"num_allocated_accounts": len(group.AllocatedAccounts),
+				"num_lines":              len(group.Lines),
+			})
+		}
+
+		// Validate required fields
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if req.PlanID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			return
+		}
+		if req.EntityName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+		if req.Horizon <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "horizon must be greater than 0")
+			return
+		}
+		if len(req.Groups) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "at least one group is required")
+			return
+		}
+
+		// Get user email from active sessions
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		// Start transaction
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		results := make([]map[string]interface{}, 0)
+
+		// Process each group
+		for _, group := range req.Groups {
+			groupResult := processGroupCreation(ctx, tx, req.PlanID, req.EntityName, req.Horizon, group, userEmail)
+			results = append(results, groupResult)
+		}
+
+		// Check if all groups were processed successfully
+		allSuccess := true
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				allSuccess = false
+				break
+			}
+		}
+
+		if allSuccess {
+			if err = tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				return
+			}
+		} else {
+			// Transaction will be rolled back by defer
+		}
+
+		api.RespondWithPayload(w, allSuccess, "", results)
+	}
+}
+
+// processGroupCreation handles creation of a single fund plan group with all its components
+func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityName string, horizon int, group FundPlanGroupRequest, userEmail string) map[string]interface{} {
+	result := map[string]interface{}{
+		"group_id": group.GroupID,
+		"success":  false,
+	}
+
+	// Parse group metadata from group_id
+	direction, currency, primaryKey, primaryValue, err := parseGroupID(group.GroupID)
+	if err != nil {
+		result["error"] = fmt.Sprintf("failed to parse group_id %s: %s", group.GroupID, err.Error())
+		return result
+	}
+
+	// Validate allocations match total amount
+	totalAllocated := 0.0
+	for _, allocation := range group.AllocatedAccounts {
+		totalAllocated += allocation.AllocatedAmount
+	}
+
+	// Use a more reasonable tolerance for floating point comparison
+	tolerance := 0.01
+	difference := abs(totalAllocated - group.TotalAmount)
+
+	if difference > tolerance {
+		// Provide detailed error information
+		var allocationDetails []string
+		for i, allocation := range group.AllocatedAccounts {
+			allocationDetails = append(allocationDetails, fmt.Sprintf("Account %d: %s = %.2f", i+1, allocation.AccountID, allocation.AllocatedAmount))
+		}
+
+		result["error"] = fmt.Sprintf("sum of allocated amounts (%.2f) does not match group total amount (%.2f). Difference: %.2f. Allocations: [%s]",
+			totalAllocated, group.TotalAmount, difference, strings.Join(allocationDetails, ", "))
+		return result
+	}
+
+	// Insert fund_plan_groups record
+	insertGroupQuery := `
+		INSERT INTO fund_plan_groups (group_id, plan_id, direction, currency, primary_key, primary_value, total_amount, entity_name, horizon)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+
+	_, err = tx.Exec(ctx, insertGroupQuery, group.GroupID, planID, direction, currency, primaryKey, primaryValue, group.TotalAmount, entityName, horizon)
+	if err != nil {
+		result["error"] = fmt.Sprintf("failed to insert group: %s", err.Error())
+		return result
+	}
+
+	// Insert fund_plan_lines records
+	for _, line := range group.Lines {
+		// Generate UUID for database line_id (primary key), use line.LineID as source_ref
+		lineUUID := uuid.New().String()
+
+		// Determine allocated account ID and amount from the line
+		var allocatedAccountID sql.NullString
+		var allocatedAmount sql.NullFloat64
+
+		if line.AllocatedBankAccount != "" {
+			allocatedAccountID = sql.NullString{String: line.AllocatedBankAccount, Valid: true}
+			allocatedAmount = sql.NullFloat64{Float64: line.AllocatedAmount, Valid: true}
+		}
+
+		insertLineQuery := `
+			INSERT INTO fund_plan_lines (line_id, group_id, source_ref, counterparty_or_type, category, amount, currency, allocated_account_id, allocated_amount)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+
+		_, err = tx.Exec(ctx, insertLineQuery,
+			lineUUID, // Database UUID primary key
+			group.GroupID,
+			line.LineID,  // source_ref is the transaction reference (TR-PAY-xxx, TR-REC-xxx)
+			primaryValue, // counterparty_or_type from group metadata
+			getCategoryFromDirection(direction),
+			line.Amount,
+			currency,
+			allocatedAccountID,
+			allocatedAmount)
+
+		if err != nil {
+			result["error"] = fmt.Sprintf("failed to insert line %s: %s", line.LineID, err.Error())
+			return result
+		}
+	}
+
+	// Insert fund_plan_allocations records
+	for _, allocation := range group.AllocatedAccounts {
+		insertAllocationQuery := `
+			INSERT INTO fund_plan_allocations (allocation_id, group_id, account_id, allocated_amount)
+			VALUES (gen_random_uuid(), $1, $2, $3)`
+
+		_, err = tx.Exec(ctx, insertAllocationQuery, group.GroupID, allocation.AccountID, allocation.AllocatedAmount)
+		if err != nil {
+			result["error"] = fmt.Sprintf("failed to insert allocation for account %s: %s", allocation.AccountID, err.Error())
+			return result
+		}
+	}
+
+	// Create audit action entry
+	insertAuditQuery := `
+		INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, requested_by, requested_at)
+		VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
+		RETURNING action_id`
+
+	var actionID string
+	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, userEmail).Scan(&actionID)
+	if err != nil {
+		result["error"] = fmt.Sprintf("failed to create audit action: %s", err.Error())
+		return result
+	}
+
+	result["success"] = true
+	result["action_id"] = actionID
+	result["message"] = "Fund plan group created successfully"
+	return result
+}
+
+// parseGroupID extracts metadata from group_id pattern: G-{number}-{date}-{currency}-{entity/counterparty}
+func parseGroupID(groupID string) (direction, currency, primaryKey, primaryValue string, err error) {
+	// Expected pattern: G-1-202510100-USD-ACMELtd or G-2-202510100-USD-ACMELtd
+	parts := strings.Split(groupID, "-")
+	if len(parts) < 5 {
+		err = errors.New("invalid group_id format, expected: G-{number}-{date}-{currency}-{entity}")
+		return
+	}
+
+	// Extract currency (4th part)
+	currency = parts[3]
+
+	// Extract entity/counterparty name (5th part onwards, joined by -)
+	primaryValue = strings.Join(parts[4:], "-")
+
+	// For this implementation, we'll default to outflow direction and counterparty type
+	// In a real scenario, you might want to derive this from other data or make it explicit in the request
+	direction = "outflow"
+	primaryKey = "Counterparty"
+
+	return
+}
+
+// abs returns absolute value of a float64
+func abs(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
