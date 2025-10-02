@@ -25,15 +25,17 @@ type PayRecRow struct {
 func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// static spot rates to USD (example/fallback)
 	spotRates := map[string]float64{
-		"USD": 1.0,
-		"INR": 0.0117,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"JPY": 0.0067,
+		"USD": 85.47,
+		"AUD": 58.12,
+		"CAD": 64.10,
+		"CHF": 94.02,
+		"CNY": 11.97,
+		"RMB": 11.97,
+		"EUR": 93.16,
+		"GBP": 109.40,
+		"JPY": 0.57,
+		"SEK": 8.12,
+		"INR": 1.00,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -50,15 +52,15 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-	// tie queries to the request context and add a timeout to avoid runaway queries
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
+		// tie queries to the request context and add a timeout to avoid runaway queries
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
 
 		out := make([]PayRecRow, 0)
 
 		// Payables
-	// Avoid per-row correlated subqueries by selecting the latest audit row once
-	payQ := `
+		// Avoid per-row correlated subqueries by selecting the latest audit row once
+		payQ := `
 		SELECT p.invoice_number, p.due_date, p.amount, p.currency_code, c.counterparty_name, p.entity_name
 		FROM tr_payables p
 		JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
@@ -70,7 +72,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		WHERE a.processing_status = 'APPROVED'
 		ORDER BY p.due_date
 	`
-	rows, err := pgxPool.Query(ctx, payQ)
+		rows, err := pgxPool.Query(ctx, payQ)
 		if err != nil {
 			api.RespondWithResult(w, false, "DB error: "+err.Error())
 			return
@@ -100,8 +102,8 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows.Close()
 
 		// Receivables
-	// Use the same DISTINCT ON trick for receivables
-	recQ := `
+		// Use the same DISTINCT ON trick for receivables
+		recQ := `
 		SELECT r.invoice_number, r.due_date, r.invoice_amount, r.currency_code, c.counterparty_name, r.entity_name
 		FROM tr_receivables r
 		JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
@@ -113,7 +115,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		WHERE a.processing_status = 'APPROVED'
 		ORDER BY r.due_date
 	`
-	rows2, err := pgxPool.Query(ctx, recQ)
+		rows2, err := pgxPool.Query(ctx, recQ)
 		if err != nil {
 			api.RespondWithResult(w, false, "DB error: "+err.Error())
 			return
@@ -166,42 +168,37 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
 		next30 := start.AddDate(0, 0, 30)
 		next60 := start.AddDate(0, 0, 60)
-		// quarter end
-		month := int(start.Month())
-		q := (month-1)/3 + 1
-		qEndMonth := q * 3
-		qEnd := time.Date(start.Year(), time.Month(qEndMonth), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, -1) // last day of quarter
+		next90 := start.AddDate(0, 0, 90)
 
 		// top-level map: bucket -> entity -> counterparty -> type -> currency -> amount
 		buckets := map[string]map[string]map[string]map[string]map[string]float64{}
-		// make buckets exclusive so they don't all start from 'start'
-		next60Start := next30.AddDate(0, 0, 1)
-		quarterStart := next60.AddDate(0, 0, 1)
+
 		ranges := []struct {
 			Key, Label string
 			Start, End time.Time
 		}{
 			{"next30", "Next 30 Days", start, next30},
-			{"next60", "Next 60 Days", next60Start, next60},
-			{"quarter", "This Quarter", quarterStart, qEnd},
+			{"next60", "Next 60 Days", start, next60},
+			{"quarter", "This Quarter", start, next90},
 		}
+
 		for _, b := range ranges {
 			buckets[b.Key] = map[string]map[string]map[string]map[string]float64{}
 		}
 
-	// bind to request context with timeout to guard long-running forecasts
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
+		// bind to request context with timeout to guard long-running forecasts
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
 
 		// fetch canonical payables within max range using the due_date index only
 		// then fetch latest audit processing_status only for those ids (avoids scanning the whole audit table)
 		type payRow struct {
-			Entity      string
+			Entity       string
 			Counterparty string
-			Due         time.Time
-			Amt         float64
-			Currency    string
-			ID          string
+			Due          time.Time
+			Amt          float64
+			Currency     string
+			ID           string
 		}
 		payQ := `
 			SELECT COALESCE(me.entity_name, p.entity_name) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code, p.payable_id
@@ -211,7 +208,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE p.due_date BETWEEN $1 AND $2
 		`
 		payRows := make([]payRow, 0)
-		rows, err := pgxPool.Query(ctx, payQ, start, qEnd)
+		rows, err := pgxPool.Query(ctx, payQ, start, next90)
 		if err == nil {
 			for rows.Next() {
 				var pr payRow
@@ -253,39 +250,33 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if statusMap[r.ID] != "APPROVED" {
 					continue
 				}
-				// determine bucket
-				var key string
-				switch {
-				case !r.Due.Before(ranges[0].Start) && !r.Due.After(ranges[0].End):
-					key = "next30"
-				case !r.Due.Before(ranges[1].Start) && !r.Due.After(ranges[1].End):
-					key = "next60"
-				case !r.Due.Before(ranges[2].Start) && !r.Due.After(ranges[2].End):
-					key = "quarter"
-				default:
-					continue
+				// add this payable to all cumulative ranges that include its due date
+				for _, rg := range ranges {
+					if !r.Due.Before(rg.Start) && !r.Due.After(rg.End) {
+						key := rg.Key
+						if _, ok := buckets[key][r.Entity]; !ok {
+							buckets[key][r.Entity] = map[string]map[string]map[string]float64{}
+						}
+						if _, ok := buckets[key][r.Entity][r.Counterparty]; !ok {
+							buckets[key][r.Entity][r.Counterparty] = map[string]map[string]float64{}
+						}
+						if _, ok := buckets[key][r.Entity][r.Counterparty]["Payable"]; !ok {
+							buckets[key][r.Entity][r.Counterparty]["Payable"] = map[string]float64{}
+						}
+						buckets[key][r.Entity][r.Counterparty]["Payable"][r.Currency] += r.Amt
+					}
 				}
-				if _, ok := buckets[key][r.Entity]; !ok {
-					buckets[key][r.Entity] = map[string]map[string]map[string]float64{}
-				}
-				if _, ok := buckets[key][r.Entity][r.Counterparty]; !ok {
-					buckets[key][r.Entity][r.Counterparty] = map[string]map[string]float64{}
-				}
-				if _, ok := buckets[key][r.Entity][r.Counterparty]["Payable"]; !ok {
-					buckets[key][r.Entity][r.Counterparty]["Payable"] = map[string]float64{}
-				}
-				buckets[key][r.Entity][r.Counterparty]["Payable"][r.Currency] += r.Amt
 			}
 		}
 
-				// fetch canonical receivables within max range, then fetch latest audit status for those ids
+		// fetch canonical receivables within max range, then fetch latest audit status for those ids
 		type recRow struct {
-			Entity      string
+			Entity       string
 			Counterparty string
-			Due         time.Time
-			Amt         float64
-			Currency    string
-			ID          string
+			Due          time.Time
+			Amt          float64
+			Currency     string
+			ID           string
 		}
 		recQ := `
 			SELECT COALESCE(me.entity_name, r.entity_name) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code, r.receivable_id
@@ -295,7 +286,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE r.due_date BETWEEN $1 AND $2
 		`
 		recRows := make([]recRow, 0)
-		rows2, err := pgxPool.Query(ctx, recQ, start, qEnd)
+		rows2, err := pgxPool.Query(ctx, recQ, start, next90)
 		if err == nil {
 			for rows2.Next() {
 				var rr recRow
@@ -335,27 +326,22 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if statusMap[r.ID] != "APPROVED" {
 					continue
 				}
-				var key string
-				switch {
-				case !r.Due.Before(ranges[0].Start) && !r.Due.After(ranges[0].End):
-					key = "next30"
-				case !r.Due.Before(ranges[1].Start) && !r.Due.After(ranges[1].End):
-					key = "next60"
-				case !r.Due.Before(ranges[2].Start) && !r.Due.After(ranges[2].End):
-					key = "quarter"
-				default:
-					continue
+				// add this receivable to all cumulative ranges that include its due date
+				for _, rg := range ranges {
+					if !r.Due.Before(rg.Start) && !r.Due.After(rg.End) {
+						key := rg.Key
+						if _, ok := buckets[key][r.Entity]; !ok {
+							buckets[key][r.Entity] = map[string]map[string]map[string]float64{}
+						}
+						if _, ok := buckets[key][r.Entity][r.Counterparty]; !ok {
+							buckets[key][r.Entity][r.Counterparty] = map[string]map[string]float64{}
+						}
+						if _, ok := buckets[key][r.Entity][r.Counterparty]["Receivable"]; !ok {
+							buckets[key][r.Entity][r.Counterparty]["Receivable"] = map[string]float64{}
+						}
+						buckets[key][r.Entity][r.Counterparty]["Receivable"][r.Currency] += r.Amt
+					}
 				}
-				if _, ok := buckets[key][r.Entity]; !ok {
-					buckets[key][r.Entity] = map[string]map[string]map[string]float64{}
-				}
-				if _, ok := buckets[key][r.Entity][r.Counterparty]; !ok {
-					buckets[key][r.Entity][r.Counterparty] = map[string]map[string]float64{}
-				}
-				if _, ok := buckets[key][r.Entity][r.Counterparty]["Receivable"]; !ok {
-					buckets[key][r.Entity][r.Counterparty]["Receivable"] = map[string]float64{}
-				}
-				buckets[key][r.Entity][r.Counterparty]["Receivable"][r.Currency] += r.Amt
 			}
 		}
 
