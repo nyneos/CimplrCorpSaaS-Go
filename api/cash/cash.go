@@ -61,20 +61,6 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config/bulk-approve", api.BusinessUnitMiddleware(db)(sweepconfig.BulkApproveSweepConfigurations(pgxPool)))
 	mux.Handle("/cash/sweep-config/bulk-reject", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRejectSweepConfigurations(pgxPool)))
 	mux.Handle("/cash/sweep-config/request-delete", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRequestDeleteSweepConfigurations(pgxPool)))
-
-	// Bulk audit action routes for payables
-	mux.Handle("/cash/payable/bulk-delete", payablerecievable.BulkDeletePayableAudit(pgxPool))
-	mux.Handle("/cash/payable/bulk-reject", payablerecievable.BulkRejectPayableAuditActions(pgxPool))
-	mux.Handle("/cash/payable/bulk-approve", payablerecievable.BulkApprovePayableAuditActions(pgxPool))
-	mux.Handle("/cash/payable/create", api.BusinessUnitMiddleware(db)(payablerecievable.CreatePayable(pgxPool)))
-	mux.Handle("/cash/payable/update", api.BusinessUnitMiddleware(db)(payablerecievable.UpdatePayable(pgxPool)))
-
-	// Bulk audit action routes for receivables
-	mux.Handle("/cash/receivable/bulk-delete", payablerecievable.BulkDeleteReceivableAudit(pgxPool))
-	mux.Handle("/cash/receivable/bulk-reject", payablerecievable.BulkRejectReceivableAuditActions(pgxPool))
-	mux.Handle("/cash/receivable/bulk-approve", payablerecievable.BulkApproveReceivableAuditActions(pgxPool))
-	mux.Handle("/cash/receivable/create", api.BusinessUnitMiddleware(db)(payablerecievable.CreateReceivable(pgxPool)))
-	mux.Handle("/cash/receivable/update", api.BusinessUnitMiddleware(db)(payablerecievable.UpdateReceivable(pgxPool)))
 	
 	// Cash flow projection routes
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
@@ -104,6 +90,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
