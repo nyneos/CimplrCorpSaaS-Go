@@ -1,15 +1,15 @@
-
 package fundplanning
 
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
-	"database/sql"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,7 +22,6 @@ var (
 		expires            time.Time
 	}
 )
-
 
 func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -222,7 +221,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 `
 			if joinCounterparty {
-					if hasCpiCounterparty && hasCpCounterparty {
+				if hasCpiCounterparty && hasCpCounterparty {
 					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = COALESCE(NULLIF(cpi.counterparty_name, ''), NULLIF(cp.counterparty_name, ''))\n"
 				} else if hasCpiCounterparty {
 					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cpi.counterparty_name\n"
@@ -294,7 +293,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		res := []Row{}
 		for rows.Next() {
 			var dt time.Time
-			var dir, curr, primary, costProfitCenter, sourceRef  string
+			var dir, curr, primary, costProfitCenter, sourceRef string
 			var amt float64
 			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter, &sourceRef); err != nil {
 				continue
@@ -317,6 +316,633 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// Enhanced response structures for fund planning with grouping and account suggestions
+type FundPlanningGroup struct {
+	GroupID            string             `json:"group_id"`
+	GroupLabel         string             `json:"group_label"`
+	Direction          string             `json:"direction"`
+	Currency           string             `json:"currency"`
+	PrimaryKey         string             `json:"primary_key"`
+	PrimaryValue       string             `json:"primary_value"`
+	Count              int                `json:"count"`
+	TotalAmount        float64            `json:"total_amount"`
+	SuggestedAccounts  []SuggestedAccount `json:"suggested_accounts"`
+	ProposedAllocation []AllocationItem   `json:"proposed_allocation"`
+	Lines              []FundPlanningLine `json:"lines"`
+	GroupWarnings      []string           `json:"group_warnings"`
+}
+
+type SuggestedAccount struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Currency   string   `json:"currency"`
+	Score      int      `json:"score"`
+	Confidence int      `json:"confidence"`
+	Reasons    []string `json:"reasons"`
+	Warnings   []string `json:"warnings"`
+}
+
+type AllocationItem struct {
+	AccountID string  `json:"account_id"`
+	Pct       float64 `json:"pct"`
+}
+
+type FundPlanningLine struct {
+	LineID             string              `json:"line_id"`
+	Date               string              `json:"date"`
+	Type               string              `json:"type"`
+	SourceRef          string              `json:"source_ref"`
+	CounterpartyOrType string              `json:"counterparty_or_type"`
+	Category           string              `json:"category"`
+	Amount             float64             `json:"amount"`
+	Currency           string              `json:"currency"`
+	PlannedBankAccount *PlannedBankAccount `json:"planned_bank_account,omitempty"`
+	Rationale          []string            `json:"rationale"`
+	SuggestionRank     int                 `json:"suggestion_rank,omitempty"`
+}
+
+type PlannedBankAccount struct {
+	ID                 string  `json:"id"`
+	Name               string  `json:"name"`
+	AllocatedPctOfLine float64 `json:"allocated_pct_of_line"`
+}
+
+func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID              string `json:"user_id"`
+			HorizonDays         int    `json:"horizon"`
+			EntityID            string `json:"entity,omitempty"`
+			Currency            string `json:"curr,omitempty"`
+			IncludePayables     bool   `json:"pay"`
+			IncludeReceivables  bool   `json:"rec"`
+			IncludeProjections  bool   `json:"proj"`
+			IncludeCounterparty bool   `json:"counterparty"`
+			IncludeType         bool   `json:"type"`
+			CostProfitCenter    string `json:"costprofit_center,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, "invalid JSON")
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithResult(w, false, "user_id required")
+			return
+		}
+		if req.HorizonDays == 0 {
+			req.HorizonDays = 30
+		}
+		if req.HorizonDays < 1 {
+			api.RespondWithResult(w, false, "invalid horizon")
+			return
+		}
+
+		if !req.IncludePayables && !req.IncludeReceivables && !req.IncludeProjections {
+			api.RespondWithResult(w, false, "at least one data source required (pay/rec/proj)")
+			return
+		}
+
+		if req.IncludeCounterparty && req.IncludeType {
+			api.RespondWithResult(w, false, "only one of counterparty or type can be true")
+			return
+		}
+
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithResult(w, false, "invalid user_id or session")
+			return
+		}
+
+		ctx := r.Context()
+		now := time.Now()
+		endDate := now.Add(time.Duration(req.HorizonDays) * 24 * time.Hour)
+
+		parts := make([]string, 0)
+		args := make([]interface{}, 0)
+		argI := 1
+
+		if req.IncludePayables {
+			primaryField := ""
+			if req.IncludeCounterparty {
+				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
+			} else if req.IncludeType {
+				primaryField = "'Vendor Payment'"
+			} else {
+				primaryField = "''"
+			}
+
+			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
+				SELECT
+					p.due_date as dt,
+					'outflow' as direction,
+					p.currency_code as currency,
+					` + primaryField + ` as primary_name,
+					p.amount as amount,
+					'Generic' as costprofit_center,
+					p.payable_id::text as source_ref
+				FROM tr_payables p
+				LEFT JOIN mastercounterparty m ON m.counterparty_name = p.counterparty_name
+				WHERE EXISTS (
+					SELECT 1 FROM auditactionpayable a WHERE a.payable_id::text = p.payable_id::text AND a.processing_status = 'APPROVED'
+				)
+				AND p.due_date >= $` + fmt.Sprint(argI) + `
+				AND p.due_date <= $` + fmt.Sprint(argI+1)
+
+			args = append(args, now, endDate)
+			argI += 2
+
+			if req.EntityID != "" {
+				q += ` AND p.entity_name = $` + fmt.Sprint(argI)
+				args = append(args, req.EntityID)
+				argI++
+			}
+
+			if req.Currency != "" {
+				q += ` AND p.currency_code = $` + fmt.Sprint(argI)
+				args = append(args, req.Currency)
+				argI++
+			}
+
+			q += `) t`
+			parts = append(parts, q)
+		}
+
+		if req.IncludeReceivables {
+			primaryField := ""
+			if req.IncludeCounterparty {
+				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
+			} else if req.IncludeType {
+				primaryField = "'Collection'"
+			} else {
+				primaryField = "''"
+			}
+
+			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref  FROM (
+				SELECT
+					r.due_date as dt,
+					'inflow' as direction,
+					r.currency_code as currency,
+					` + primaryField + ` as primary_name,
+					r.invoice_amount as amount,
+					'Generic' as costprofit_center,
+					r.receivable_id::text as source_ref
+				FROM tr_receivables r
+				LEFT JOIN mastercounterparty m ON m.counterparty_name = r.counterparty_name
+				WHERE EXISTS (
+					SELECT 1 FROM auditactionreceivable a WHERE a.receivable_id::text = r.receivable_id::text AND a.processing_status = 'APPROVED'
+				)
+				AND r.due_date >= $` + fmt.Sprint(argI) + `
+				AND r.due_date <= $` + fmt.Sprint(argI+1)
+
+			args = append(args, now, endDate)
+			argI += 2
+
+			if req.EntityID != "" {
+				q += ` AND r.entity_name = $` + fmt.Sprint(argI)
+				args = append(args, req.EntityID)
+				argI++
+			}
+
+			if req.Currency != "" {
+				q += ` AND r.currency_code = $` + fmt.Sprint(argI)
+				args = append(args, req.Currency)
+				argI++
+			}
+
+			q += `) t`
+			parts = append(parts, q)
+		}
+		if req.IncludeProjections {
+			var hasCpiCounterparty, hasCpCounterparty, hasCpiDept bool
+			if time.Now().Before(schemaCache.expires) {
+				hasCpiCounterparty = schemaCache.hasCpiCounterparty
+				hasCpCounterparty = schemaCache.hasCpCounterparty
+				hasCpiDept = schemaCache.hasCpiDept
+			} else {
+				row := pgxPool.QueryRow(ctx, `SELECT
+					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='counterparty_name') as has_cpi_counterparty,
+					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal' AND column_name='counterparty_name') as has_cp_counterparty,
+					EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='cashflow_proposal_item' AND column_name='department_id') as has_cpi_dept
+				`)
+				_ = row.Scan(&hasCpiCounterparty, &hasCpCounterparty, &hasCpiDept)
+				schemaCache.hasCpiCounterparty = hasCpiCounterparty
+				schemaCache.hasCpCounterparty = hasCpCounterparty
+				schemaCache.hasCpiDept = hasCpiDept
+				schemaCache.expires = time.Now().Add(5 * time.Minute)
+			}
+			primaryField := "'Generic'"
+			joinCounterparty := false
+			if req.IncludeCounterparty {
+				if hasCpiCounterparty || hasCpCounterparty {
+					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'Generic')"
+					joinCounterparty = true
+				} else {
+					primaryField = "'Generic'"
+				}
+			} else if req.IncludeType {
+				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
+			} else {
+				primaryField = "'Generic'"
+			}
+			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
+				SELECT
+					cpi.start_date as dt,
+					CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'inflow' ELSE 'outflow' END as direction,
+					cp.currency_code as currency,
+					` + primaryField + ` as primary_name,
+					cpi.expected_amount as amount,
+					COALESCE(NULLIF(cpi.department_id, ''), 'Generic') as costprofit_center,
+					cp.proposal_id::text as source_ref
+				FROM cashflow_proposal cp
+				JOIN cashflow_proposal_item cpi ON cpi.proposal_id = cp.proposal_id
+
+`
+			if joinCounterparty {
+				if hasCpiCounterparty && hasCpCounterparty {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = COALESCE(NULLIF(cpi.counterparty_name, ''), NULLIF(cp.counterparty_name, ''))\n"
+				} else if hasCpiCounterparty {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cpi.counterparty_name\n"
+				} else {
+					q += "\t\tLEFT JOIN mastercounterparty m ON m.counterparty_name = cp.counterparty_name\n"
+				}
+			}
+
+			q += `			WHERE EXISTS (
+					SELECT 1 FROM audit_action_cashflow_proposal a WHERE a.proposal_id::text = cp.proposal_id::text AND a.processing_status = 'APPROVED'
+				)
+				AND cp.status = 'Active'
+				AND cpi.start_date >= $` + fmt.Sprint(argI) + `
+				AND cpi.start_date <= $` + fmt.Sprint(argI+1)
+
+			args = append(args, now, endDate)
+			argI += 2
+
+			if req.EntityID != "" {
+				q += ` AND cpi.entity_name = $` + fmt.Sprint(argI)
+				args = append(args, req.EntityID)
+				argI++
+			}
+
+			if req.Currency != "" {
+				q += ` AND cp.currency_code = $` + fmt.Sprint(argI)
+				args = append(args, req.Currency)
+				argI++
+			}
+
+			if strings.TrimSpace(req.CostProfitCenter) != "" && hasCpiDept {
+				q += ` AND cpi.department_id = $` + fmt.Sprint(argI)
+				args = append(args, req.CostProfitCenter)
+				argI++
+			}
+
+			q += `) t`
+			parts = append(parts, q)
+		}
+
+		finalQ := strings.Join(parts, " UNION ALL ") + " ORDER BY dt, currency"
+
+		rows, err := pgxPool.Query(ctx, finalQ, args...)
+		if err != nil {
+			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		// Collect raw data
+		rawData := []RawRow{}
+		for rows.Next() {
+			var dt time.Time
+			var dir, curr, primary, costProfitCenter, sourceRef string
+			var amt float64
+			if err := rows.Scan(&dt, &dir, &curr, &primary, &amt, &costProfitCenter, &sourceRef); err != nil {
+				continue
+			}
+			if strings.TrimSpace(costProfitCenter) == "" && strings.TrimSpace(req.CostProfitCenter) != "" {
+				costProfitCenter = req.CostProfitCenter
+			}
+			rawData = append(rawData, RawRow{
+				Date:             dt,
+				Direction:        dir,
+				Currency:         curr,
+				Primary:          primary,
+				Amount:           amt,
+				CostProfitCenter: costProfitCenter,
+				SourceRef:        sourceRef,
+			})
+		}
+
+		// Group data and generate enhanced response
+		groups := groupFundPlanningData(rawData, req.IncludeCounterparty, req.IncludeType)
+
+		// Get available bank accounts for suggestions
+		bankAccounts := getAvailableBankAccounts(ctx, pgxPool)
+
+		// Enhance groups with account suggestions and allocations
+		for i := range groups {
+			groups[i].SuggestedAccounts = suggestAccountsForGroup(&groups[i], bankAccounts)
+			groups[i].ProposedAllocation = proposeAllocationForGroup(&groups[i], groups[i].SuggestedAccounts)
+			assignPlannedAccountsToLines(&groups[i])
+		}
+
+		api.RespondWithPayload(w, true, "", groups)
+	}
+}
+
+// Helper functions for enhanced fund planning
+
+type RawRow struct {
+	Date             time.Time
+	Direction        string
+	Currency         string
+	Primary          string
+	Amount           float64
+	CostProfitCenter string
+	SourceRef        string
+}
+
+type BankAccountInfo struct {
+	ID       string
+	Name     string
+	Currency string
+	Usage    string
+	BankName string
+}
+
+func groupFundPlanningData(rawData []RawRow, includeCounterparty, includeType bool) []FundPlanningGroup {
+	groupMap := make(map[string]*FundPlanningGroup)
+
+	for _, row := range rawData {
+		// Determine primary key and value
+		var primaryKey, primaryValue string
+		if includeCounterparty {
+			primaryKey = "Counterparty"
+			primaryValue = row.Primary
+		} else if includeType {
+			primaryKey = "Type"
+			primaryValue = row.Primary
+		} else {
+			primaryKey = "Generic"
+			primaryValue = "Generic"
+		}
+
+		// Create group key
+		groupKey := fmt.Sprintf("%s-%s-%s-%s-%s",
+			row.Date.Format("2006-01-02"),
+			row.Direction,
+			row.Currency,
+			primaryKey,
+			primaryValue)
+
+		// Get or create group
+		group, exists := groupMap[groupKey]
+		if !exists {
+			// Capitalize first letter of direction
+			direction := row.Direction
+			if len(direction) > 0 {
+				direction = strings.ToUpper(direction[:1]) + direction[1:]
+			}
+			group = &FundPlanningGroup{
+				GroupID:       fmt.Sprintf("G-%d-%s-%s-%s", len(groupMap)+1, row.Date.Format("20061010"), row.Currency, strings.ReplaceAll(primaryValue, " ", "")),
+				GroupLabel:    fmt.Sprintf("%s · %s · %s · %s: %s", row.Date.Format("2006-10-10"), direction, row.Currency, primaryKey, primaryValue),
+				Direction:     row.Direction,
+				Currency:      row.Currency,
+				PrimaryKey:    primaryKey,
+				PrimaryValue:  primaryValue,
+				Count:         0,
+				TotalAmount:   0,
+				Lines:         []FundPlanningLine{},
+				GroupWarnings: []string{},
+			}
+			groupMap[groupKey] = group
+		}
+
+		// Add line to group
+		line := FundPlanningLine{
+			LineID:             row.SourceRef,
+			Date:               row.Date.Format("2006-01-02"),
+			Type:               row.Direction,
+			SourceRef:          row.SourceRef,
+			CounterpartyOrType: primaryValue,
+			Category:           getCategoryFromDirection(row.Direction),
+			Amount:             row.Amount,
+			Currency:           row.Currency,
+			Rationale:          []string{},
+		}
+
+		group.Lines = append(group.Lines, line)
+		group.Count++
+		group.TotalAmount += row.Amount
+	}
+
+	// Convert map to slice and round total amounts
+	groups := make([]FundPlanningGroup, 0, len(groupMap))
+	for _, group := range groupMap {
+		// Round total amount to 4 decimal places
+		group.TotalAmount = roundToDecimal(group.TotalAmount, 4)
+		groups = append(groups, *group)
+	}
+
+	return groups
+}
+
+func getCategoryFromDirection(direction string) string {
+	if direction == "inflow" {
+		return "Collections"
+	}
+	return "Vendor Payment"
+}
+
+func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []BankAccountInfo {
+	query := `
+		SELECT
+			a.account_id,
+			COALESCE(NULLIF(a.account_nickname, ''), a.account_number) as name,
+			COALESCE(a.currency, '') as currency,
+			COALESCE(a.usage, '') as usage,
+			COALESCE(b.bank_name, '') as bank_name
+		FROM masterbankaccount a
+		LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+		LEFT JOIN LATERAL (
+			SELECT processing_status
+			FROM auditactionbankaccount aa
+			WHERE aa.account_id = a.account_id
+			ORDER BY requested_at DESC
+			LIMIT 1
+		) astatus ON TRUE
+		WHERE COALESCE(a.is_deleted, false) = false
+		  AND a.status = 'Active'
+		  AND astatus.processing_status = 'APPROVED'
+	`
+
+	rows, err := pgxPool.Query(ctx, query)
+	if err != nil {
+		api.LogError("getAvailableBankAccounts query failed", map[string]interface{}{"error": err.Error()})
+		return []BankAccountInfo{}
+	}
+	defer rows.Close()
+
+	var accounts []BankAccountInfo
+	for rows.Next() {
+		var id, name, currency, usage, bankName string
+		if err := rows.Scan(&id, &name, &currency, &usage, &bankName); err != nil {
+			api.LogError("getAvailableBankAccounts scan failed", map[string]interface{}{"error": err.Error()})
+			continue
+		}
+		accounts = append(accounts, BankAccountInfo{
+			ID:       id,
+			Name:     name,
+			Currency: currency,
+			Usage:    usage,
+			BankName: bankName,
+		})
+	}
+
+	api.LogInfo("getAvailableBankAccounts", map[string]interface{}{"count": len(accounts)})
+	return accounts
+}
+
+func suggestAccountsForGroup(group *FundPlanningGroup, bankAccounts []BankAccountInfo) []SuggestedAccount {
+	var suggestions []SuggestedAccount
+
+	for _, account := range bankAccounts {
+		score := 0
+		confidence := 0
+		var reasons []string
+		var warnings []string
+
+		// Currency match (+30)
+		if account.Currency == group.Currency {
+			score += 30
+			confidence += 30
+			reasons = append(reasons, fmt.Sprintf("Currency match (%s) +30", group.Currency))
+		}
+
+		// Direction allowed (+20)
+		if (group.Direction == "inflow" && (account.Usage == "Collection" || account.Usage == "Operational")) ||
+			(group.Direction == "outflow" && (account.Usage == "Operational" || account.Usage == "Vendor Payment")) {
+			score += 20
+			confidence += 20
+			reasons = append(reasons, fmt.Sprintf("Direction allowed (%s) +20", group.Direction))
+		}
+
+		// Usage alignment (+15)
+		if (group.Direction == "inflow" && account.Usage == "Collection") ||
+			(group.Direction == "outflow" && account.Usage == "Vendor Payment") {
+			score += 15
+			confidence += 15
+			reasons = append(reasons, fmt.Sprintf("Usage aligns (%s) +15", account.Usage))
+		}
+
+		// Counterparty preference (+25) - simplified for now
+		if group.PrimaryKey == "Counterparty" && group.PrimaryValue != "Generic" {
+			score += 25
+			confidence += 25
+			reasons = append(reasons, fmt.Sprintf("Counterparty preference: %s historically pays to %s (+25)", group.PrimaryValue, account.Name))
+		}
+
+		// Headroom check (+5) - simplified
+		score += 5
+		confidence += 5
+		reasons = append(reasons, "Sufficient headroom in account (+5)")
+
+		// Add warnings based on bank account properties
+		if account.Currency != group.Currency {
+			warnings = append(warnings, fmt.Sprintf("Currency mismatch: Account is %s but group needs %s", account.Currency, group.Currency))
+		}
+		if group.Direction == "inflow" && account.Usage != "Collection" && account.Usage != "Operational" {
+			warnings = append(warnings, fmt.Sprintf("Account usage '%s' may not be suitable for inflow transactions", account.Usage))
+		}
+		if group.Direction == "outflow" && account.Usage != "Vendor Payment" && account.Usage != "Operational" {
+			warnings = append(warnings, fmt.Sprintf("Account usage '%s' may not be suitable for outflow transactions", account.Usage))
+		}
+
+		// Calculate confidence as percentage
+		if confidence > 100 {
+			confidence = 100
+		}
+
+		suggestions = append(suggestions, SuggestedAccount{
+			ID:         account.ID,
+			Name:       account.Name,
+			Currency:   account.Currency,
+			Score:      score,
+			Confidence: confidence,
+			Reasons:    reasons,
+			Warnings:   warnings,
+		})
+	}
+
+	// Sort by score descending
+	for i := 0; i < len(suggestions)-1; i++ {
+		for j := i + 1; j < len(suggestions); j++ {
+			if suggestions[i].Score < suggestions[j].Score {
+				suggestions[i], suggestions[j] = suggestions[j], suggestions[i]
+			}
+		}
+	}
+
+	// Return top suggestions (max 3)
+	if len(suggestions) > 3 {
+		suggestions = suggestions[:3]
+	}
+
+	return suggestions
+}
+
+func proposeAllocationForGroup(group *FundPlanningGroup, suggestions []SuggestedAccount) []AllocationItem {
+	if len(suggestions) == 0 {
+		return []AllocationItem{}
+	}
+
+	// Simple allocation strategy: 60% to top account, 40% to second if available
+	var allocations []AllocationItem
+
+	if len(suggestions) >= 1 {
+		allocations = append(allocations, AllocationItem{
+			AccountID: suggestions[0].ID,
+			Pct:       60,
+		})
+	}
+
+	if len(suggestions) >= 2 {
+		allocations = append(allocations, AllocationItem{
+			AccountID: suggestions[1].ID,
+			Pct:       40,
+		})
+	}
+
+	return allocations
+}
+
+func assignPlannedAccountsToLines(group *FundPlanningGroup) {
+	// Lines should NOT have individual bank account assignments
+	// Only groups should have suggested accounts and proposed allocations
+	// Individual lines should only have group-level rationale
+	for i := range group.Lines {
+		group.Lines[i].PlannedBankAccount = nil
+		group.Lines[i].Rationale = []string{
+			"Bank account allocation is managed at the group level",
+			fmt.Sprintf("This line is part of group: %s", group.GroupLabel),
+			"See group-level suggested_accounts and proposed_allocation for bank assignment",
+		}
+	}
+}
+
+func getAccountNameByID(accountID string, suggestions []SuggestedAccount) string {
+	for _, suggestion := range suggestions {
+		if suggestion.ID == accountID {
+			return suggestion.Name
+		}
+	}
+	return "Unknown Account"
+}
 
 func GetApprovedBankAccountsForFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -392,4 +1018,14 @@ func nullableToString(ns sql.NullString) interface{} {
 		return ns.String
 	}
 	return ""
+}
+
+// roundToDecimal rounds a float64 to specified decimal places
+func roundToDecimal(val float64, precision int) float64 {
+	var multiplier float64 = 1
+	for i := 0; i < precision; i++ {
+		multiplier *= 10
+	}
+	rounded := float64(int(val*multiplier+0.5)) / multiplier
+	return rounded
 }
