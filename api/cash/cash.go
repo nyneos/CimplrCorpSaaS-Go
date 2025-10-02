@@ -44,7 +44,7 @@ func StartCashService(db *sql.DB) {
 	// Unified bulk endpoints for transactions (payables & receivables)
 	mux.Handle("/cash/transactions/bulk-delete", api.BusinessUnitMiddleware(db)(payablerecievable.BulkRequestDeleteTransactions(pgxPool)))
 	mux.Handle("/cash/transactions/bulk-reject", api.BusinessUnitMiddleware(db)(payablerecievable.BulkRejectTransactions(pgxPool)))
-	mux.Handle("/cash/transactions/bulk-approve",api.BusinessUnitMiddleware(db) payablerecievable.BulkApproveTransactions(pgxPool)))
+	mux.Handle("/cash/transactions/bulk-approve",api.BusinessUnitMiddleware(db)(payablerecievable.BulkApproveTransactions(pgxPool)))
 	mux.Handle("/cash/transactions/create", api.BusinessUnitMiddleware(db)(payablerecievable.BulkCreateTransactions(pgxPool)))
 	mux.Handle("/cash/transactions/update", api.BusinessUnitMiddleware(db)(payablerecievable.UpdateTransaction(pgxPool)))
 	mux.Handle("/cash/transactions/upload-payrec-batch", api.BusinessUnitMiddleware(db)(payablerecievable.BatchUploadTransactionsV2(pgxPool)))//twotwo
@@ -90,6 +90,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
