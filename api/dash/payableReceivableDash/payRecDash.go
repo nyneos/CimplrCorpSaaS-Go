@@ -56,11 +56,11 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Payables
 		payQ := `
-			SELECT p.invoice_number, p.due_date, p.amount, p.currency_code, c.counterparty_name, p.entity_id
-			FROM payables p
-			JOIN mastercounterparty c ON p.vendor_id = c.counterparty_id
-			WHERE (SELECT a.processing_status FROM auditactionpayable a WHERE a.payable_id = p.payable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
-			ORDER BY p.due_date
+				SELECT p.invoice_number, p.due_date, p.amount, p.currency_code, c.counterparty_name, p.entity_name
+				FROM tr_payables p
+				JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
+				WHERE (SELECT a.processing_status FROM auditactionpayable a WHERE a.payable_id = p.payable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
+				ORDER BY p.due_date
 		`
 		rows, err := pgxPool.Query(ctx, payQ)
 		if err != nil {
@@ -93,11 +93,11 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Receivables
 		recQ := `
-			SELECT r.invoice_number, r.due_date, r.invoice_amount, r.currency_code, c.counterparty_name, r.entity_id
-			FROM receivables r
-			JOIN mastercounterparty c ON r.customer_id = c.counterparty_id
-			WHERE (SELECT a.processing_status FROM auditactionreceivable a WHERE a.receivable_id = r.receivable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
-			ORDER BY r.due_date
+				SELECT r.invoice_number, r.due_date, r.invoice_amount, r.currency_code, c.counterparty_name, r.entity_name
+				FROM tr_receivables r
+				JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
+				WHERE (SELECT a.processing_status FROM auditactionreceivable a WHERE a.receivable_id = r.receivable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
+				ORDER BY r.due_date
 		`
 		rows2, err := pgxPool.Query(ctx, recQ)
 		if err != nil {
@@ -179,12 +179,12 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch approved payables within max range (start..qEnd)
 		payQ := `
-			SELECT COALESCE(me.entity_name, p.entity_id) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code
-			FROM payables p
-			JOIN mastercounterparty c ON p.vendor_id = c.counterparty_id
-			LEFT JOIN masterentitycash me ON p.entity_id = me.entity_id
-			WHERE p.due_date BETWEEN $1 AND $2
-			  AND (SELECT a.processing_status FROM auditactionpayable a WHERE a.payable_id = p.payable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
+				SELECT COALESCE(me.entity_name, p.entity_name) AS entity_name, c.counterparty_name, p.due_date, p.amount, p.currency_code
+				FROM tr_payables p
+				JOIN mastercounterparty c ON p.counterparty_name = c.counterparty_name
+				LEFT JOIN masterentitycash me ON p.entity_name = me.entity_name
+				WHERE p.due_date BETWEEN $1 AND $2
+				  AND (SELECT a.processing_status FROM auditactionpayable a WHERE a.payable_id = p.payable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
 		`
 		rows, err := pgxPool.Query(ctx, payQ, start, qEnd)
 		if err == nil {
@@ -223,12 +223,12 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch approved receivables within max range
 		recQ := `
-			SELECT COALESCE(me.entity_name, r.entity_id) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code
-			FROM receivables r
-			JOIN mastercounterparty c ON r.customer_id = c.counterparty_id
-			LEFT JOIN masterentitycash me ON r.entity_id = me.entity_id
-			WHERE r.due_date BETWEEN $1 AND $2
-			  AND (SELECT a.processing_status FROM auditactionreceivable a WHERE a.receivable_id = r.receivable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
+				SELECT COALESCE(me.entity_name, r.entity_name) AS entity_name, c.counterparty_name, r.due_date, r.invoice_amount, r.currency_code
+				FROM tr_receivables r
+				JOIN mastercounterparty c ON r.counterparty_name = c.counterparty_name
+				LEFT JOIN masterentitycash me ON r.entity_name = me.entity_name
+				WHERE r.due_date BETWEEN $1 AND $2
+				  AND (SELECT a.processing_status FROM auditactionreceivable a WHERE a.receivable_id = r.receivable_id ORDER BY a.requested_at DESC LIMIT 1) = 'APPROVED'
 		`
 		rows2, err := pgxPool.Query(ctx, recQ, start, qEnd)
 		if err == nil {
