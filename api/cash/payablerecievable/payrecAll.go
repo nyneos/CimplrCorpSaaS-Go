@@ -19,6 +19,158 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
+
+
+// helpers used by bulk update flow
+func nullifyEmpty(s string) interface{} {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
+}
+
+type sqlNullString struct {
+	Valid bool
+	S     string
+}
+
+func (n *sqlNullString) Scan(v interface{}) error {
+	if v == nil {
+		n.Valid = false
+		n.S = ""
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		n.Valid = true
+		n.S = t
+	case []byte:
+		n.Valid = true
+		n.S = string(t)
+	default:
+		n.Valid = true
+		n.S = fmt.Sprint(v)
+	}
+	return nil
+}
+
+func (n sqlNullString) ValueOrZero() interface{} {
+	if n.Valid {
+		return n.S
+	}
+	return ""
+}
+
+type sqlNullFloat struct {
+	Valid bool
+	F     float64
+}
+
+func (n *sqlNullFloat) Scan(v interface{}) error {
+	if v == nil {
+		n.Valid = false
+		n.F = 0
+		return nil
+	}
+	switch t := v.(type) {
+	case float64:
+		n.Valid = true
+		n.F = t
+	case int64:
+		n.Valid = true
+		n.F = float64(t)
+	case []byte:
+		s := string(t)
+		if s == "" {
+			n.Valid = false
+			n.F = 0
+			return nil
+		}
+		var err error
+		n.F, err = strconv.ParseFloat(s, 64)
+		if err != nil {
+			n.Valid = false
+			n.F = 0
+			return nil
+		}
+		n.Valid = true
+	case string:
+		if t == "" {
+			n.Valid = false
+			n.F = 0
+			return nil
+		}
+		var err error
+		n.F, err = strconv.ParseFloat(t, 64)
+		if err != nil {
+			n.Valid = false
+			n.F = 0
+			return nil
+		}
+		n.Valid = true
+	default:
+		n.Valid = true
+		n.F = 0
+	}
+	return nil
+}
+
+func (n sqlNullFloat) ValueOrZero() interface{} {
+	if n.Valid {
+		return n.F
+	}
+	return nil
+}
+
+type sqlNullTime struct {
+	Valid bool
+	T     time.Time
+}
+
+func (n *sqlNullTime) Scan(v interface{}) error {
+	if v == nil {
+		n.Valid = false
+		return nil
+	}
+	switch t := v.(type) {
+	case time.Time:
+		n.Valid = true
+		n.T = t
+	case []byte:
+		s := string(t)
+		if s == "" {
+			n.Valid = false
+			return nil
+		}
+		if parsed, err := time.Parse("2006-01-02", s); err == nil {
+			n.Valid = true
+			n.T = parsed
+		} else {
+			n.Valid = false
+		}
+	case string:
+		if t == "" {
+			n.Valid = false
+			return nil
+		}
+		if parsed, err := time.Parse("2006-01-02", t); err == nil {
+			n.Valid = true
+			n.T = parsed
+		} else {
+			n.Valid = false
+		}
+	default:
+		n.Valid = false
+	}
+	return nil
+}
+
+func (n sqlNullTime) ValueOrZero() interface{} {
+	if n.Valid {
+		return n.T
+	}
+	return nil
+}
 func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID string) (createdBy, createdAt, createdStatus, editedBy, editedAt, editedStatus, deletedBy, deletedAt, deletedStatus string) {
 	auditDetailsQuery := `SELECT actiontype, requested_by, requested_at, processing_status FROM auditactionpayable WHERE payable_id = $1 AND actiontype IN ('CREATE','EDIT','DELETE') ORDER BY requested_at DESC`
 	auditRows, auditErr := pgxPool.Query(ctx, auditDetailsQuery, payableID)
