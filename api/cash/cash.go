@@ -39,8 +39,18 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/create", api.BusinessUnitMiddleware(db)(bankstatement.CreateBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/update", api.BusinessUnitMiddleware(db)(bankstatement.UpdateBankStatement(pgxPool)))
 	mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetAllBankStatements(pgxPool)))
+
 	
-	mux.Handle("/cash/payrec/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
+	// Unified bulk endpoints for transactions (payables & receivables)
+	mux.Handle("/cash/transactions/bulk-delete", api.BusinessUnitMiddleware(db)(payablerecievable.BulkRequestDeleteTransactions(pgxPool)))
+	mux.Handle("/cash/transactions/bulk-reject", api.BusinessUnitMiddleware(db)(payablerecievable.BulkRejectTransactions(pgxPool)))
+	mux.Handle("/cash/transactions/bulk-approve",api.BusinessUnitMiddleware(db) payablerecievable.BulkApproveTransactions(pgxPool)))
+	mux.Handle("/cash/transactions/create", api.BusinessUnitMiddleware(db)(payablerecievable.BulkCreateTransactions(pgxPool)))
+	mux.Handle("/cash/transactions/update", api.BusinessUnitMiddleware(db)(payablerecievable.UpdateTransaction(pgxPool)))
+	mux.Handle("/cash/transactions/upload-payrec-batch", api.BusinessUnitMiddleware(db)(payablerecievable.BatchUploadTransactionsV2(pgxPool)))//twotwo
+	mux.Handle("/cash/transactions/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
+	
+	//fundplanning 
 	mux.Handle("/cash/fund-planning", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanning(pgxPool)))
 	mux.Handle("/cash/fund-planning/bank-accounts", api.BusinessUnitMiddleware(db)(fundplanning.GetApprovedBankAccountsForFundPlanning(pgxPool)))
 
@@ -94,6 +104,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
