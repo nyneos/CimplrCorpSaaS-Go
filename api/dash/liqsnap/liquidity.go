@@ -196,30 +196,28 @@ type EntityCurrencyCash struct {
 	Normalized   float64 `json:"normalized_total"`
 }
 
-// entityFilter and currencyFilter are optional. If empty, returns all data.
 func entitycurrencywiseCash(pgxPool *pgxpool.Pool, entityFilter, currencyFilter string) ([]EntityCurrencyCash, error) {
-	var results []EntityCurrencyCash
-	// date limit: latest balances as of today
+	results := make([]EntityCurrencyCash, 0) // ensures JSON [] instead of null
 	today := time.Now().UTC().Format("2006-01-02")
 
-	// inner select picks latest balance per account
-	// then join to masterbankaccount -> masterentity to get entity_name
-	fetchQuery := `SELECT m.entity_name, t.currency_code, COALESCE(SUM(t.closing_balance),0)::float8 as total_balance
+	fetchQuery := `SELECT me.entity_name, t.currency_code, 
+		COALESCE(SUM(t.balance_amount),0)::float8 as total_balance
 		FROM (
-			SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) account_no, currency_code, closing_balance
+			SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) 
+				account_no, currency_code, balance_amount
 			FROM bank_balances_manual
 			WHERE as_of_date <= $1
 			ORDER BY COALESCE(account_no, iban, nickname), as_of_date DESC, as_of_time DESC
 		) t
 		JOIN masterbankaccount mba ON t.account_no = mba.account_number
-		JOIN masterentity m ON mba.entity_id = m.entity_id
+		JOIN masterentitycash me ON mba.entity_id = me.entity_id
 		WHERE 1=1
-		`
+	`
 
 	args := []interface{}{today}
 	pos := 2
 	if entityFilter != "" {
-		fetchQuery += fmt.Sprintf(" AND m.entity_name = $%d", pos)
+		fetchQuery += fmt.Sprintf(" AND me.entity_name = $%d", pos)
 		args = append(args, entityFilter)
 		pos++
 	}
@@ -228,13 +226,14 @@ func entitycurrencywiseCash(pgxPool *pgxpool.Pool, entityFilter, currencyFilter 
 		args = append(args, currencyFilter)
 		pos++
 	}
-	fetchQuery += ` GROUP BY m.entity_name, t.currency_code ORDER BY m.entity_name, t.currency_code;`
+	fetchQuery += ` GROUP BY me.entity_name, t.currency_code ORDER BY me.entity_name, t.currency_code;`
 
 	rows, err := pgxPool.Query(context.Background(), fetchQuery, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	for rows.Next() {
 		var rec EntityCurrencyCash
 		if err := rows.Scan(&rec.EntityName, &rec.CurrencyCode, &rec.TotalBalance); err != nil {
