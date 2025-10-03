@@ -141,33 +141,35 @@ func GetForecastKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 	endKey := end.Year()*12 + int(end.Month())
 
 	aggQ := `
-        SELECT cpi.cashflow_type, cp.currency_code, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
-        FROM cashflow_projection_monthly cpm
-        JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
-        JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
-        LEFT JOIN LATERAL (
-            SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
-        ) aa ON TRUE
-        WHERE (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
-          AND aa.processing_status = 'APPROVED'
-        GROUP BY cpi.cashflow_type, cp.currency_code
-    `
+		SELECT cpi.cashflow_type, cp.currency_code, COALESCE(SUM(cpm.projected_amount),0)::float8 AS amount
+		FROM cashflow_projection_monthly cpm
+		JOIN cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+		JOIN cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+		LEFT JOIN LATERAL (
+			SELECT processing_status FROM audit_action_cashflow_proposal a2 WHERE a2.proposal_id = cp.proposal_id ORDER BY requested_at DESC LIMIT 1
+		) aa ON TRUE
+		WHERE (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
+		  AND aa.processing_status = 'APPROVED'
+	`
+	// append GROUP BY after optional filters to ensure WHERE clause is complete
+	aggGroup := ` GROUP BY cpi.cashflow_type, cp.currency_code`
 	args := []interface{}{startKey, endKey}
-	pos := 3
 	if entityName != "" {
-		aggQ += fmt.Sprintf(" AND cpi.entity_name = $%d", pos)
+		ph := len(args) + 1
+		aggQ += fmt.Sprintf(" AND cpi.entity_name = $%d", ph)
 		args = append(args, entityName)
-		pos++
 	}
 	if currency != "" {
-		aggQ += fmt.Sprintf(" AND cp.currency_code = $%d", pos)
+		ph := len(args) + 1
+		aggQ += fmt.Sprintf(" AND cp.currency_code = $%d", ph)
 		args = append(args, currency)
-		pos++
 	}
 
-	rows, err := pgxPool.Query(context.Background(), aggQ, args...)
+	// finalize query
+	finalAggQ := aggQ + aggGroup
+	rows, err := pgxPool.Query(context.Background(), finalAggQ, args...)
 	if err != nil {
-		return k, fmt.Errorf("aggregate projections: %w", err)
+		return k, fmt.Errorf("aggregate projections: %v | query: %s | args: %v", err, finalAggQ, args)
 	}
 	defer rows.Close()
 
@@ -218,22 +220,23 @@ func GetForecastRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
           AND aa.processing_status = 'APPROVED'
     `
 	args := []interface{}{startKey, endKey}
-	pos := 3
 	if entityName != "" {
-		fetchQ += fmt.Sprintf(" AND cpi.entity_name = $%d", pos)
+		ph := len(args) + 1
+		fetchQ += fmt.Sprintf(" AND cpi.entity_name = $%d", ph)
 		args = append(args, entityName)
-		pos++
 	}
 	if currency != "" {
-		fetchQ += fmt.Sprintf(" AND cp.currency_code = $%d", pos)
+		ph := len(args) + 1
+		fetchQ += fmt.Sprintf(" AND cp.currency_code = $%d", ph)
 		args = append(args, currency)
-		pos++
 	}
-	fetchQ += ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, cp.currency_code ORDER BY cpm.year, cpm.month;`
+	fetchGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, cp.currency_code ORDER BY cpm.year, cpm.month;`
 
-	prow, err := pgxPool.Query(context.Background(), fetchQ, args...)
+	finalFetchQ := fetchQ + fetchGroup
+
+	prow, err := pgxPool.Query(context.Background(), finalFetchQ, args...)
 	if err != nil {
-		return rowsOut, fmt.Errorf("fetch projections: %w", err)
+		return rowsOut, fmt.Errorf("fetch projections: %v | query: %s | args: %v", err, finalFetchQ, args)
 	}
 	defer prow.Close()
 
@@ -320,22 +323,23 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
           AND (cpm.year * 12 + cpm.month) BETWEEN $1 AND $2
     `
 	margs := []interface{}{startKey, endKey}
-	mpos := 3
 	if entityName != "" {
-		monthlyQ += fmt.Sprintf(" AND cpi.entity_name = $%d", mpos)
+		ph := len(margs) + 1
+		monthlyQ += fmt.Sprintf(" AND cpi.entity_name = $%d", ph)
 		margs = append(margs, entityName)
-		mpos++
 	}
 	if currency != "" {
-		monthlyQ += fmt.Sprintf(" AND cp.currency_code = $%d", mpos)
+		ph := len(margs) + 1
+		monthlyQ += fmt.Sprintf(" AND cp.currency_code = $%d", ph)
 		margs = append(margs, currency)
-		mpos++
 	}
-	monthlyQ += ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date ORDER BY cpm.year, cpm.month;`
+	monthlyGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date ORDER BY cpm.year, cpm.month;`
 
-	mrows, err := pgxPool.Query(context.Background(), monthlyQ, margs...)
+	finalMonthlyQ := monthlyQ + monthlyGroup
+
+	mrows, err := pgxPool.Query(context.Background(), finalMonthlyQ, margs...)
 	if err != nil {
-		return out, fmt.Errorf("fetch monthly projections: %w", err)
+		return out, fmt.Errorf("fetch monthly projections: %v | query: %s | args: %v", err, finalMonthlyQ, margs)
 	}
 	defer mrows.Close()
 
@@ -602,7 +606,9 @@ func GetForecastCategorySums(pgxPool *pgxpool.Pool, horizon int, entityName, cur
 			return nil, err
 		}
 		rate := rates[cur]
-		if rate == 0 { rate = 1.0 }
+		if rate == 0 {
+			rate = 1.0
+		}
 		key := fmt.Sprintf("%s-(%s)", cat, ctype)
 		out[key] += amt * rate
 	}
