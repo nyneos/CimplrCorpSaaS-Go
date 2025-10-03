@@ -1044,65 +1044,21 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// map for monthly projections per item
 		for rows.Next() {
-		var (
-    itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID, entityName, oldEntityName, departmentID, oldDepartmentID, recurrenceFrequency, oldRecurrenceFrequency, counterpartyName, oldCounterpartyName string
-    expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI interface{}
-    recurrencePattern, oldRecurrencePattern interface{}
-    startDate, oldStartDate, endDate, oldEndDate interface{}
-)
-		if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency, &counterpartyName, &oldCounterpartyName); err != nil {
-			continue
-		}
-
-			// convert amounts
-			expectedAmount := 0.0
-			switch v := expectedAmountI.(type) {
-			case float64:
-				expectedAmount = v
-			case int64:
-				expectedAmount = float64(v)
-			case nil:
-				expectedAmount = 0
-			case string:
-				if f, err := strconv.ParseFloat(v, 64); err == nil {
-					expectedAmount = f
-				}
-			}
-			oldExpectedAmount := 0.0
-			switch v := oldExpectedAmountI.(type) {
-			case float64:
-				oldExpectedAmount = v
-			case int64:
-				oldExpectedAmount = float64(v)
-			case nil:
-				oldExpectedAmount = 0
-			case string:
-				if f, err := strconv.ParseFloat(v, 64); err == nil {
-					oldExpectedAmount = f
-				}
+			var (
+				itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID interface{}
+				entityName, oldEntityName, departmentID, oldDepartmentID interface{}
+				recurrenceFrequency, oldRecurrenceFrequency, counterpartyName, oldCounterpartyName interface{}
+				expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI interface{}
+				recurrencePattern, oldRecurrencePattern interface{}
+				startDate, oldStartDate, endDate, oldEndDate interface{}
+			)
+			if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency, &counterpartyName, &oldCounterpartyName); err != nil {
+				continue
 			}
 
-			// recurring flags
-			isRec := false
-			switch v := isRecurringI.(type) {
-			case bool:
-				isRec = v
-			case string:
-				if b, err := strconv.ParseBool(v); err == nil {
-					isRec = b
-				}
-			}
-			oldIsRec := false
-			switch v := oldIsRecurringI.(type) {
-			case bool:
-				oldIsRec = v
-			case string:
-				if b, err := strconv.ParseBool(v); err == nil {
-					oldIsRec = b
-				}
-			}
+			// conversion will be done inline below via iface helpers
 
-			// build entry
+			// build entry using safe interface conversions
 			entry := map[string]interface{}{
 				"item_id":                ifaceToString(itemID),
 				"description":            ifaceToString(description),
@@ -1114,10 +1070,10 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_entity":             ifaceToString(oldEntityName),
 				"department":             ifaceToString(departmentID),
 				"old_department":         ifaceToString(oldDepartmentID),
-				"expectedAmount":         expectedAmount,
-				"old_expectedAmount":     oldExpectedAmount,
-				"recurring":              isRec,
-				"old_recurring":          oldIsRec,
+				"expectedAmount":         ifaceToFloat(expectedAmountI),
+				"old_expectedAmount":     ifaceToFloat(oldExpectedAmountI),
+				"recurring":              ifaceToBool(isRecurringI),
+				"old_recurring":          ifaceToBool(oldIsRecurringI),
 				"frequency":              ifaceToString(recurrenceFrequency),
 				"old_frequency":          ifaceToString(oldRecurrenceFrequency),
 				"recurrence_pattern":     ifaceToString(recurrencePattern),
