@@ -1310,3 +1310,453 @@ func abs(x float64) float64 {
 	}
 	return x
 }
+
+// GetAllFundPlans retrieves all fund plans grouped by plan_id with their groups and audit information
+func GetAllFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+
+		// Get user email from active sessions
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		query := `
+			SELECT 
+				fpg.group_id,
+				fpg.plan_id,
+				fpg.direction,
+				fpg.currency,
+				fpg.primary_key,
+				fpg.primary_value,
+				fpg.total_amount,
+				fpg.entity_name,
+				fpg.horizon,
+				aa.actiontype,
+				aa.processing_status,
+				aa.requested_by,
+				aa.requested_at,
+				aa.checker_by,
+				aa.checker_at,
+				aa.checker_comment,
+				aa.reason
+			FROM fund_plan_groups fpg
+			LEFT JOIN LATERAL (
+				SELECT actiontype, processing_status, requested_by, requested_at, 
+					   checker_by, checker_at, checker_comment, reason
+				FROM auditaction_fund_plan_groups aafpg
+				WHERE aafpg.group_id = fpg.group_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) aa ON TRUE
+			ORDER BY fpg.plan_id, fpg.group_id`
+
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		// Group results by plan_id
+		planMap := make(map[string]*map[string]interface{})
+		var planOrder []string // To maintain order of plans
+
+		for rows.Next() {
+			var groupID, planID, direction, currency, primaryKey, primaryValue, entityName string
+			var totalAmount float64
+			var horizon int
+			var actionType, processingStatus sql.NullString
+			var requestedBy, checkerBy, checkerComment, reason sql.NullString
+			var requestedAt, checkerAt sql.NullTime
+
+			err := rows.Scan(&groupID, &planID, &direction, &currency, &primaryKey, &primaryValue,
+				&totalAmount, &entityName, &horizon, &actionType, &processingStatus,
+				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
+
+			if err != nil {
+				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
+				continue
+			}
+
+			// Create group data
+			group := map[string]interface{}{
+				"group_id":          groupID,
+				"direction":         direction,
+				"currency":          currency,
+				"primary_key":       primaryKey,
+				"primary_value":     primaryValue,
+				"total_amount":      totalAmount,
+				"action_type":       nullableToString(actionType),
+				"processing_status": nullableToString(processingStatus),
+				"requested_by":      nullableToString(requestedBy),
+				"checker_by":        nullableToString(checkerBy),
+				"checker_comment":   nullableToString(checkerComment),
+				"reason":            nullableToString(reason),
+			}
+
+			if requestedAt.Valid {
+				group["requested_at"] = requestedAt.Time.Format("2006-01-02 15:04:05")
+			}
+			if checkerAt.Valid {
+				group["checker_at"] = checkerAt.Time.Format("2006-01-02 15:04:05")
+			}
+
+			// Get or create plan
+			plan, exists := planMap[planID]
+			if !exists {
+				plan = &map[string]interface{}{
+					"plan_id":      planID,
+					"entity_name":  entityName,
+					"horizon":      horizon,
+					"groups":       []map[string]interface{}{},
+					"total_groups": 0,
+					"total_amount": 0.0,
+				}
+				planMap[planID] = plan
+				planOrder = append(planOrder, planID)
+			}
+
+			// Add group to plan
+			groups := (*plan)["groups"].([]map[string]interface{})
+			groups = append(groups, group)
+			(*plan)["groups"] = groups
+			(*plan)["total_groups"] = len(groups)
+			(*plan)["total_amount"] = (*plan)["total_amount"].(float64) + totalAmount
+		}
+
+		// Convert map to slice maintaining order
+		var results []map[string]interface{}
+		for _, planID := range planOrder {
+			plan := *planMap[planID]
+			// Round total amount
+			plan["total_amount"] = roundToDecimal(plan["total_amount"].(float64), 2)
+			results = append(results, plan)
+		}
+
+		api.RespondWithPayload(w, true, "", results)
+	}
+}
+
+// BulkApproveFundPlans approves multiple fund plan groups
+func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID   string   `json:"user_id"`
+			GroupIDs []string `json:"group_ids"`
+			Comment  string   `json:"comment,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if len(req.GroupIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "group_ids is required")
+			return
+		}
+
+		// Get user email from active sessions
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		var results []map[string]interface{}
+		for _, groupID := range req.GroupIDs {
+			result := map[string]interface{}{
+				"group_id": groupID,
+				"success":  false,
+			}
+
+			// Update the audit action to APPROVED
+			updateQuery := `
+				UPDATE auditaction_fund_plan_groups 
+				SET processing_status = 'APPROVED',
+					checker_by = $1,
+					checker_at = now(),
+					checker_comment = $2
+				WHERE group_id = $3 
+				AND processing_status = 'PENDING_APPROVAL'
+				AND actiontype = 'CREATE'`
+
+			cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupID)
+			if err != nil {
+				result["error"] = fmt.Sprintf("failed to approve group: %s", err.Error())
+			} else if cmdTag.RowsAffected() == 0 {
+				result["error"] = "no pending approval found for this group"
+			} else {
+				result["success"] = true
+				result["message"] = "Fund plan group approved successfully"
+			}
+
+			results = append(results, result)
+		}
+
+		// Check if all operations were successful
+		allSuccess := true
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				allSuccess = false
+				break
+			}
+		}
+
+		if allSuccess {
+			if err = tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				return
+			}
+		}
+
+		api.RespondWithPayload(w, allSuccess, "", results)
+	}
+}
+
+// BulkRejectFundPlans rejects multiple fund plan groups
+func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID   string   `json:"user_id"`
+			GroupIDs []string `json:"group_ids"`
+			Comment  string   `json:"comment,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if len(req.GroupIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "group_ids is required")
+			return
+		}
+
+		// Get user email from active sessions
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		var results []map[string]interface{}
+		for _, groupID := range req.GroupIDs {
+			result := map[string]interface{}{
+				"group_id": groupID,
+				"success":  false,
+			}
+
+			// Update the audit action to REJECTED
+			updateQuery := `
+				UPDATE auditaction_fund_plan_groups 
+				SET processing_status = 'REJECTED',
+					checker_by = $1,
+					checker_at = now(),
+					checker_comment = $2
+				WHERE group_id = $3 
+				AND processing_status = 'PENDING_APPROVAL'
+				AND actiontype = 'CREATE'`
+
+			cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupID)
+			if err != nil {
+				result["error"] = fmt.Sprintf("failed to reject group: %s", err.Error())
+			} else if cmdTag.RowsAffected() == 0 {
+				result["error"] = "no pending approval found for this group"
+			} else {
+				result["success"] = true
+				result["message"] = "Fund plan group rejected successfully"
+			}
+
+			results = append(results, result)
+		}
+
+		// Check if all operations were successful
+		allSuccess := true
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				allSuccess = false
+				break
+			}
+		}
+
+		if allSuccess {
+			if err = tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				return
+			}
+		}
+
+		api.RespondWithPayload(w, allSuccess, "", results)
+	}
+}
+
+// BulkRequestDeleteFundPlans creates delete requests for multiple fund plan groups
+func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID   string   `json:"user_id"`
+			GroupIDs []string `json:"group_ids"`
+			Reason   string   `json:"reason,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+		if len(req.GroupIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "group_ids is required")
+			return
+		}
+
+		// Get user email from active sessions
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		var results []map[string]interface{}
+		for _, groupID := range req.GroupIDs {
+			result := map[string]interface{}{
+				"group_id": groupID,
+				"success":  false,
+			}
+
+			// Check if the group exists and is approved
+			var exists bool
+			checkQuery := `
+				SELECT EXISTS(
+					SELECT 1 FROM auditaction_fund_plan_groups 
+					WHERE group_id = $1 
+					AND processing_status = 'APPROVED'
+				)`
+
+			err := tx.QueryRow(ctx, checkQuery, groupID).Scan(&exists)
+			if err != nil {
+				result["error"] = fmt.Sprintf("failed to check group status: %s", err.Error())
+				results = append(results, result)
+				continue
+			}
+
+			if !exists {
+				result["error"] = "group not found or not approved"
+				results = append(results, result)
+				continue
+			}
+
+			// Create delete request audit action
+			insertQuery := `
+				INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
+				RETURNING action_id`
+
+			var actionID string
+			err = tx.QueryRow(ctx, insertQuery, groupID, req.Reason, userEmail).Scan(&actionID)
+			if err != nil {
+				result["error"] = fmt.Sprintf("failed to create delete request: %s", err.Error())
+			} else {
+				result["success"] = true
+				result["action_id"] = actionID
+				result["message"] = "Delete request created successfully"
+			}
+
+			results = append(results, result)
+		}
+
+		// Check if all operations were successful
+		allSuccess := true
+		for _, result := range results {
+			if success, ok := result["success"].(bool); !ok || !success {
+				allSuccess = false
+				break
+			}
+		}
+
+		if allSuccess {
+			if err = tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				return
+			}
+		}
+
+		api.RespondWithPayload(w, allSuccess, "", results)
+	}
+}
