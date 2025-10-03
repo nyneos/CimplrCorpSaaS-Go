@@ -13,6 +13,7 @@ import (
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
 	reports "CimplrCorpSaas/api/dash/reports"
+	forecastVsActual "CimplrCorpSaas/api/dash/forecastVsActual"
 	"context"
 	"database/sql"
 	"fmt"
@@ -103,6 +104,11 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/cash/forecast/rows", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastRowsHandler(pgxPool)))
 	mux.Handle("/dash/cash/forecast/categories", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastCategorySumsHandler(pgxPool)))
 	mux.Handle("/dash/cash/forecast/daily", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastDailyHandler(pgxPool)))
+
+	// Forecast vs Actual
+	mux.Handle("/dash/forecast-vs-actual/rows", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualRowsHandler(pgxPool)))
+	mux.Handle("/dash/forecast-vs-actual/kpi", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualKPIHandler(pgxPool)))
+	mux.Handle("/dash/forecast-vs-actual/by-date", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualByDateHandler(pgxPool)))
 	
 	// --- Reports Dashboard Routes ---
 	mux.Handle("/dash/reports/exposure-summary", api.BusinessUnitMiddleware(db)(reports.GetExposureSummary(db)))
@@ -126,6 +132,7 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
 
 
