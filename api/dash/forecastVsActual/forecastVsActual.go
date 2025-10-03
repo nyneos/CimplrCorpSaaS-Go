@@ -644,11 +644,16 @@ func GetForecastVsActualByMonthRows(
 			amtNorm = math.Abs(amtNorm)
 		}
 
-		// Add this line cumulatively to all anchor months >= today
 		for _, anchor := range anchors {
-			key := fmt.Sprintf("%s|%s", anchor.Format("2006-01-02"), cat)
+			monthKey := anchor.Format("2006-01-02")
+			key := fmt.Sprintf("%s|%s", monthKey, cat)
+			// choose a sensible Type value: prefer computed typ, otherwise fall back to group's direction
+			rowType := typ
+			if rowType == "" && strings.TrimSpace(direction) != "" {
+				rowType = direction
+			}
 			if _, ok := combined[key]; !ok {
-				combined[key] = &DateCatRow{Date: anchor.Format("2006-01-02"), Category: cat}
+				combined[key] = &DateCatRow{Date: monthKey, Category: cat, Type: rowType}
 			}
 			if isForecast {
 				combined[key].Forecast += amtNorm
