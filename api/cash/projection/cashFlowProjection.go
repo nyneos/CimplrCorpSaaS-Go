@@ -14,6 +14,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func ifaceToBool(v interface{}) bool {
+	switch val := v.(type) {
+	case bool:
+		return val
+	case string:
+		b, _ := strconv.ParseBool(val)
+		return b
+	case nil:
+		return false
+	default:
+		return false
+	}
+}
 func ifaceToString(v interface{}) string {
 	if v == nil {
 		return ""
