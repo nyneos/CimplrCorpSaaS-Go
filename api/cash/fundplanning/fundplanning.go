@@ -1311,8 +1311,8 @@ func abs(x float64) float64 {
 	return x
 }
 
-// GetAllFundPlans retrieves all fund plans grouped by plan_id with their groups and audit information
-func GetAllFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// GetFundPlanSummary retrieves plan-level summary with aggregated information
+func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
@@ -1342,6 +1342,134 @@ func GetAllFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Query to get plan-level summary with audit information from any group in the plan
+		query := `
+			SELECT 
+				fpg.plan_id,
+				fpg.entity_name,
+				fpg.horizon,
+				COUNT(*) as total_groups,
+				SUM(fpg.total_amount) as total_amount,
+				STRING_AGG(DISTINCT fpg.primary_key, ', ') as primary_types,
+				STRING_AGG(DISTINCT fpg.primary_value, ', ') as primary_values,
+				aa.actiontype,
+				aa.processing_status,
+				aa.requested_by,
+				aa.requested_at,
+				aa.checker_by,
+				aa.checker_at,
+				aa.checker_comment,
+				aa.reason
+			FROM fund_plan_groups fpg
+			LEFT JOIN LATERAL (
+				SELECT actiontype, processing_status, requested_by, requested_at, 
+					   checker_by, checker_at, checker_comment, reason
+				FROM auditaction_fund_plan_groups aafpg
+				WHERE aafpg.group_id IN (
+					SELECT group_id FROM fund_plan_groups fpg2 WHERE fpg2.plan_id = fpg.plan_id LIMIT 1
+				)
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) aa ON TRUE
+			GROUP BY fpg.plan_id, fpg.entity_name, fpg.horizon, 
+					 aa.actiontype, aa.processing_status, aa.requested_by, aa.requested_at,
+					 aa.checker_by, aa.checker_at, aa.checker_comment, aa.reason
+			ORDER BY fpg.plan_id`
+
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		var results []map[string]interface{}
+
+		for rows.Next() {
+			var planID, entityName, primaryTypes, primaryValues string
+			var horizon, totalGroups int
+			var totalAmount float64
+			var actionType, processingStatus sql.NullString
+			var requestedBy, checkerBy, checkerComment, reason sql.NullString
+			var requestedAt, checkerAt sql.NullTime
+
+			err := rows.Scan(&planID, &entityName, &horizon, &totalGroups, &totalAmount,
+				&primaryTypes, &primaryValues, &actionType, &processingStatus,
+				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
+
+			if err != nil {
+				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
+				continue
+			}
+
+			plan := map[string]interface{}{
+				"plan_id":           planID,
+				"entity_name":       entityName,
+				"horizon":           horizon,
+				"total_groups":      totalGroups,
+				"total_amount":      roundToDecimal(totalAmount, 2),
+				"primary_types":     primaryTypes,
+				"primary_values":    primaryValues,
+				"action_type":       nullableToString(actionType),
+				"processing_status": nullableToString(processingStatus),
+				"requested_by":      nullableToString(requestedBy),
+				"checker_by":        nullableToString(checkerBy),
+				"checker_comment":   nullableToString(checkerComment),
+				"reason":            nullableToString(reason),
+			}
+
+			if requestedAt.Valid {
+				plan["requested_at"] = requestedAt.Time.Format("2006-01-02 15:04:05")
+			}
+			if checkerAt.Valid {
+				plan["checker_at"] = checkerAt.Time.Format("2006-01-02 15:04:05")
+			}
+
+			results = append(results, plan)
+		}
+
+		api.RespondWithPayload(w, true, "", results)
+	}
+}
+
+// GetFundPlanDetails retrieves detailed group information for a specific plan
+func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var req struct {
+			UserID string `json:"user_id"`
+			PlanID string `json:"plan_id"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+
+		if req.PlanID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			return
+		}
+
+		// Get user email from active sessions
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			return
+		}
+
+		// Query to get all groups for a specific plan
 		query := `
 			SELECT 
 				fpg.group_id,
@@ -1370,18 +1498,18 @@ func GetAllFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) aa ON TRUE
-			ORDER BY fpg.plan_id, fpg.group_id`
+			WHERE fpg.plan_id = $1
+			ORDER BY fpg.group_id`
 
-		rows, err := pgxPool.Query(ctx, query)
+		rows, err := pgxPool.Query(ctx, query, req.PlanID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
 
-		// Group results by plan_id
-		planMap := make(map[string]*map[string]interface{})
-		var planOrder []string // To maintain order of plans
+		var groups []map[string]interface{}
+		var planInfo map[string]interface{}
 
 		for rows.Next() {
 			var groupID, planID, direction, currency, primaryKey, primaryValue, entityName string
@@ -1398,6 +1526,15 @@ func GetAllFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
 				continue
+			}
+
+			// Set plan info on first iteration
+			if planInfo == nil {
+				planInfo = map[string]interface{}{
+					"plan_id":     planID,
+					"entity_name": entityName,
+					"horizon":     horizon,
+				}
 			}
 
 			// Create group data
@@ -1423,39 +1560,22 @@ func GetAllFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				group["checker_at"] = checkerAt.Time.Format("2006-01-02 15:04:05")
 			}
 
-			// Get or create plan
-			plan, exists := planMap[planID]
-			if !exists {
-				plan = &map[string]interface{}{
-					"plan_id":      planID,
-					"entity_name":  entityName,
-					"horizon":      horizon,
-					"groups":       []map[string]interface{}{},
-					"total_groups": 0,
-					"total_amount": 0.0,
-				}
-				planMap[planID] = plan
-				planOrder = append(planOrder, planID)
-			}
-
-			// Add group to plan
-			groups := (*plan)["groups"].([]map[string]interface{})
 			groups = append(groups, group)
-			(*plan)["groups"] = groups
-			(*plan)["total_groups"] = len(groups)
-			(*plan)["total_amount"] = (*plan)["total_amount"].(float64) + totalAmount
 		}
 
-		// Convert map to slice maintaining order
-		var results []map[string]interface{}
-		for _, planID := range planOrder {
-			plan := *planMap[planID]
-			// Round total amount
-			plan["total_amount"] = roundToDecimal(plan["total_amount"].(float64), 2)
-			results = append(results, plan)
+		// If no groups found, return empty result with plan info if provided
+		if planInfo == nil {
+			planInfo = map[string]interface{}{
+				"plan_id": req.PlanID,
+			}
 		}
 
-		api.RespondWithPayload(w, true, "", results)
+		result := map[string]interface{}{
+			"plan_info": planInfo,
+			"groups":    groups,
+		}
+
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
 
