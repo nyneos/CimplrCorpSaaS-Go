@@ -1274,7 +1274,6 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// optional user_id accepted but not required
 		_ = json.NewDecoder(r.Body).Decode(new(struct {
 			UserID string `json:"user_id"`
 		}))
@@ -1285,7 +1284,8 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.account_number,
 				a.iban,
 				a.currency,
-				a.account_nickname
+				a.account_nickname,
+				a.account_id
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 			LEFT JOIN LATERAL (
@@ -1312,9 +1312,8 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var iban *string
 			var currency *string
 			var nickname *string
-			if err := rows.Scan(&bankName, &accountNumber, &iban, &currency, &nickname); err != nil {
-				// attempt alternative scan order in case of column ordering differences
-				// but prefer continue to avoid complexity
+			var accountID string
+			if err := rows.Scan(&bankName, &accountNumber, &iban, &currency, &nickname, &accountID); err != nil {
 				continue
 			}
 			out = append(out, map[string]interface{}{
@@ -1343,6 +1342,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return ""
 				}(),
+				"account_id": accountID,
 			})
 		}
 
