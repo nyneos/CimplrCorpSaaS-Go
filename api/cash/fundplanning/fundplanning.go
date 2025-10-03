@@ -1579,14 +1579,14 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// BulkApproveFundPlans approves multiple fund plan groups
+// BulkApproveFundPlans approves all fund plan groups in a specific plan
 func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID   string   `json:"user_id"`
-			GroupIDs []string `json:"group_ids"`
-			Comment  string   `json:"comment,omitempty"`
+			UserID  string `json:"user_id"`
+			PlanID  string `json:"plan_id"`
+			Comment string `json:"comment,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1598,8 +1598,8 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if len(req.GroupIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "group_ids is required")
+		if req.PlanID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
 			return
 		}
 
@@ -1623,65 +1623,82 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		var results []map[string]interface{}
-		for _, groupID := range req.GroupIDs {
-			result := map[string]interface{}{
-				"group_id": groupID,
-				"success":  false,
-			}
+		// Get all group IDs for the plan that are pending approval
+		getGroupsQuery := `
+			SELECT fpg.group_id 
+			FROM fund_plan_groups fpg
+			INNER JOIN auditaction_fund_plan_groups aa ON aa.group_id = fpg.group_id
+			WHERE fpg.plan_id = $1 
+			AND aa.processing_status = 'PENDING_APPROVAL'
+			AND aa.actiontype = 'CREATE'`
 
-			// Update the audit action to APPROVED
-			updateQuery := `
-				UPDATE auditaction_fund_plan_groups 
-				SET processing_status = 'APPROVED',
-					checker_by = $1,
-					checker_at = now(),
-					checker_comment = $2
-				WHERE group_id = $3 
-				AND processing_status = 'PENDING_APPROVAL'
-				AND actiontype = 'CREATE'`
+		rows, err := tx.Query(ctx, getGroupsQuery, req.PlanID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to get groups: "+err.Error())
+			return
+		}
+		defer rows.Close()
 
-			cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupID)
+		var groupIDs []string
+		for rows.Next() {
+			var groupID string
+			err := rows.Scan(&groupID)
 			if err != nil {
-				result["error"] = fmt.Sprintf("failed to approve group: %s", err.Error())
-			} else if cmdTag.RowsAffected() == 0 {
-				result["error"] = "no pending approval found for this group"
-			} else {
-				result["success"] = true
-				result["message"] = "Fund plan group approved successfully"
-			}
-
-			results = append(results, result)
-		}
-
-		// Check if all operations were successful
-		allSuccess := true
-		for _, result := range results {
-			if success, ok := result["success"].(bool); !ok || !success {
-				allSuccess = false
-				break
-			}
-		}
-
-		if allSuccess {
-			if err = tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan group ID: "+err.Error())
 				return
 			}
+			groupIDs = append(groupIDs, groupID)
+		}
+		rows.Close()
+
+		if len(groupIDs) == 0 {
+			api.RespondWithPayload(w, false, "No groups found with pending approval for plan: "+req.PlanID, []map[string]interface{}{})
+			return
 		}
 
-		api.RespondWithPayload(w, allSuccess, "", results)
+		// Update all groups to APPROVED
+		updateQuery := `
+			UPDATE auditaction_fund_plan_groups 
+			SET processing_status = 'APPROVED',
+				checker_by = $1,
+				checker_at = now(),
+				checker_comment = $2
+			WHERE group_id = ANY($3) 
+			AND processing_status = 'PENDING_APPROVAL'
+			AND actiontype = 'CREATE'`
+
+		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to approve groups: "+err.Error())
+			return
+		}
+
+		rowsAffected := cmdTag.RowsAffected()
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+			return
+		}
+
+		result := map[string]interface{}{
+			"plan_id":          req.PlanID,
+			"groups_processed": len(groupIDs),
+			"groups_approved":  rowsAffected,
+			"message":          fmt.Sprintf("Successfully approved %d groups in plan %s", rowsAffected, req.PlanID),
+			"approved_groups":  groupIDs,
+		}
+
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
 
-// BulkRejectFundPlans rejects multiple fund plan groups
+// BulkRejectFundPlans rejects all fund plan groups in a specific plan
 func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID   string   `json:"user_id"`
-			GroupIDs []string `json:"group_ids"`
-			Comment  string   `json:"comment,omitempty"`
+			UserID  string `json:"user_id"`
+			PlanID  string `json:"plan_id"`
+			Comment string `json:"comment,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1693,8 +1710,8 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if len(req.GroupIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "group_ids is required")
+		if req.PlanID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
 			return
 		}
 
@@ -1718,65 +1735,82 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		var results []map[string]interface{}
-		for _, groupID := range req.GroupIDs {
-			result := map[string]interface{}{
-				"group_id": groupID,
-				"success":  false,
-			}
+		// Get all group IDs for the plan that are pending approval
+		getGroupsQuery := `
+			SELECT fpg.group_id 
+			FROM fund_plan_groups fpg
+			INNER JOIN auditaction_fund_plan_groups aa ON aa.group_id = fpg.group_id
+			WHERE fpg.plan_id = $1 
+			AND aa.processing_status = 'PENDING_APPROVAL'
+			AND aa.actiontype = 'CREATE'`
 
-			// Update the audit action to REJECTED
-			updateQuery := `
-				UPDATE auditaction_fund_plan_groups 
-				SET processing_status = 'REJECTED',
-					checker_by = $1,
-					checker_at = now(),
-					checker_comment = $2
-				WHERE group_id = $3 
-				AND processing_status = 'PENDING_APPROVAL'
-				AND actiontype = 'CREATE'`
+		rows, err := tx.Query(ctx, getGroupsQuery, req.PlanID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to get groups: "+err.Error())
+			return
+		}
+		defer rows.Close()
 
-			cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupID)
+		var groupIDs []string
+		for rows.Next() {
+			var groupID string
+			err := rows.Scan(&groupID)
 			if err != nil {
-				result["error"] = fmt.Sprintf("failed to reject group: %s", err.Error())
-			} else if cmdTag.RowsAffected() == 0 {
-				result["error"] = "no pending approval found for this group"
-			} else {
-				result["success"] = true
-				result["message"] = "Fund plan group rejected successfully"
-			}
-
-			results = append(results, result)
-		}
-
-		// Check if all operations were successful
-		allSuccess := true
-		for _, result := range results {
-			if success, ok := result["success"].(bool); !ok || !success {
-				allSuccess = false
-				break
-			}
-		}
-
-		if allSuccess {
-			if err = tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan group ID: "+err.Error())
 				return
 			}
+			groupIDs = append(groupIDs, groupID)
+		}
+		rows.Close()
+
+		if len(groupIDs) == 0 {
+			api.RespondWithPayload(w, false, "No groups found with pending approval for plan: "+req.PlanID, []map[string]interface{}{})
+			return
 		}
 
-		api.RespondWithPayload(w, allSuccess, "", results)
+		// Update all groups to REJECTED
+		updateQuery := `
+			UPDATE auditaction_fund_plan_groups 
+			SET processing_status = 'REJECTED',
+				checker_by = $1,
+				checker_at = now(),
+				checker_comment = $2
+			WHERE group_id = ANY($3) 
+			AND processing_status = 'PENDING_APPROVAL'
+			AND actiontype = 'CREATE'`
+
+		cmdTag, err := tx.Exec(ctx, updateQuery, userEmail, req.Comment, groupIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to reject groups: "+err.Error())
+			return
+		}
+
+		rowsAffected := cmdTag.RowsAffected()
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+			return
+		}
+
+		result := map[string]interface{}{
+			"plan_id":          req.PlanID,
+			"groups_processed": len(groupIDs),
+			"groups_rejected":  rowsAffected,
+			"message":          fmt.Sprintf("Successfully rejected %d groups in plan %s", rowsAffected, req.PlanID),
+			"rejected_groups":  groupIDs,
+		}
+
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
 
-// BulkRequestDeleteFundPlans creates delete requests for multiple fund plan groups
+// BulkRequestDeleteFundPlans creates delete requests for all fund plan groups in a specific plan
 func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID   string   `json:"user_id"`
-			GroupIDs []string `json:"group_ids"`
-			Reason   string   `json:"reason,omitempty"`
+			UserID string `json:"user_id"`
+			PlanID string `json:"plan_id"`
+			Reason string `json:"reason,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1788,8 +1822,8 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
-		if len(req.GroupIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "group_ids is required")
+		if req.PlanID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
 			return
 		}
 
@@ -1813,36 +1847,48 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		var results []map[string]interface{}
-		for _, groupID := range req.GroupIDs {
-			result := map[string]interface{}{
-				"group_id": groupID,
-				"success":  false,
-			}
+		// Get all group IDs for the plan that are approved (can be deleted)
+		getGroupsQuery := `
+			SELECT fpg.group_id 
+			FROM fund_plan_groups fpg
+			INNER JOIN auditaction_fund_plan_groups aa ON aa.group_id = fpg.group_id
+			WHERE fpg.plan_id = $1 
+			AND aa.processing_status = 'APPROVED'
+			AND aa.actiontype = 'CREATE'
+			AND NOT EXISTS (
+				SELECT 1 FROM auditaction_fund_plan_groups aa2 
+				WHERE aa2.group_id = fpg.group_id 
+				AND aa2.actiontype = 'DELETE'
+				AND aa2.processing_status IN ('PENDING_DELETE_APPROVAL', 'APPROVED')
+			)`
 
-			// Check if the group exists and is approved
-			var exists bool
-			checkQuery := `
-				SELECT EXISTS(
-					SELECT 1 FROM auditaction_fund_plan_groups 
-					WHERE group_id = $1 
-					AND processing_status = 'APPROVED'
-				)`
+		rows, err := tx.Query(ctx, getGroupsQuery, req.PlanID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to get groups: "+err.Error())
+			return
+		}
+		defer rows.Close()
 
-			err := tx.QueryRow(ctx, checkQuery, groupID).Scan(&exists)
+		var groupIDs []string
+		for rows.Next() {
+			var groupID string
+			err := rows.Scan(&groupID)
 			if err != nil {
-				result["error"] = fmt.Sprintf("failed to check group status: %s", err.Error())
-				results = append(results, result)
-				continue
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan group ID: "+err.Error())
+				return
 			}
+			groupIDs = append(groupIDs, groupID)
+		}
+		rows.Close()
 
-			if !exists {
-				result["error"] = "group not found or not approved"
-				results = append(results, result)
-				continue
-			}
+		if len(groupIDs) == 0 {
+			api.RespondWithPayload(w, false, "No approved groups available for deletion in plan: "+req.PlanID, []map[string]interface{}{})
+			return
+		}
 
-			// Create delete request audit action
+		// Create delete request audit actions for all groups
+		var actionIDs []string
+		for _, groupID := range groupIDs {
 			insertQuery := `
 				INSERT INTO auditaction_fund_plan_groups (group_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
@@ -1851,32 +1897,26 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var actionID string
 			err = tx.QueryRow(ctx, insertQuery, groupID, req.Reason, userEmail).Scan(&actionID)
 			if err != nil {
-				result["error"] = fmt.Sprintf("failed to create delete request: %s", err.Error())
-			} else {
-				result["success"] = true
-				result["action_id"] = actionID
-				result["message"] = "Delete request created successfully"
-			}
-
-			results = append(results, result)
-		}
-
-		// Check if all operations were successful
-		allSuccess := true
-		for _, result := range results {
-			if success, ok := result["success"].(bool); !ok || !success {
-				allSuccess = false
-				break
-			}
-		}
-
-		if allSuccess {
-			if err = tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create delete request for group %s: %s", groupID, err.Error()))
 				return
 			}
+			actionIDs = append(actionIDs, actionID)
 		}
 
-		api.RespondWithPayload(w, allSuccess, "", results)
+		if err = tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+			return
+		}
+
+		result := map[string]interface{}{
+			"plan_id":                 req.PlanID,
+			"groups_processed":        len(groupIDs),
+			"delete_requests_created": len(actionIDs),
+			"message":                 fmt.Sprintf("Successfully created %d delete requests for plan %s", len(actionIDs), req.PlanID),
+			"affected_groups":         groupIDs,
+			"action_ids":              actionIDs,
+		}
+
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
