@@ -143,6 +143,38 @@ func GetForecastVsActualByDateHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
     }
 }
 
+func GetForecastVsActualByMonthHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	type reqBody struct {
+		UserID     string `json:"user_id"`
+		Horizon    int    `json:"horizon"`
+		EntityName string `json:"entity_name,omitempty"`
+		Currency   string `json:"currency,omitempty"`
+		AccountID  string `json:"account_id,omitempty"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req reqBody
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Horizon <= 0 {
+			req.Horizon = 90
+		}
+		rows, err := GetForecastVsActualByMonthRows(pgxPool, req.Horizon, req.EntityName, req.Currency, req.AccountID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp := map[string]interface{}{"success": true, "rows": rows}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
 func GetForecastVsActualRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency string) ([]CatRow, error) {
 
     today := time.Now().UTC()
@@ -521,3 +553,126 @@ func findLast(s, sub string) int {
     }
     return last
 }
+
+func GetForecastVsActualByMonthRows(
+	pgxPool *pgxpool.Pool,
+	horizon int,
+	entityName, currency, accountID string,
+) ([]DateCatRow, error) {
+
+	if horizon <= 0 {
+		horizon = 3
+	}
+
+	today := time.Now().UTC()
+	anchors := []time.Time{}
+	for i := 0; i < horizon; i++ {
+		anchors = append(anchors, today.AddDate(0, i, 0)) // same day-of-month
+	}
+
+	// Query lines with APPROVED status
+	q := `
+        SELECT fpl.category, fpl.source_ref, fpl.amount::float8, fpl.currency,
+               fg.direction, fg.primary_key, fg.primary_value
+        FROM fund_plan_lines fpl
+        JOIN fund_plan_groups fg ON fpl.group_id = fg.group_id
+        LEFT JOIN LATERAL (
+            SELECT processing_status
+            FROM auditaction_fund_plan_groups a
+            WHERE a.group_id = fg.group_id
+            ORDER BY requested_at DESC LIMIT 1
+        ) aa ON TRUE
+        WHERE aa.processing_status = 'APPROVED'
+          AND (UPPER(fpl.source_ref) LIKE 'TR-PAY-%'
+            OR UPPER(fpl.source_ref) LIKE 'TR-REC-%'
+            OR UPPER(fpl.source_ref) LIKE 'PROP-%')
+    `
+	args := []interface{}{}
+	if currency != "" {
+		q += fmt.Sprintf(" AND fpl.currency = $%d", len(args)+1)
+		args = append(args, currency)
+	}
+	if entityName != "" {
+		q += fmt.Sprintf(" AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d", len(args)+1)
+		args = append(args, entityName)
+	}
+	if accountID != "" {
+		q += fmt.Sprintf(" AND COALESCE(fpl.allocated_account_id::text,'') = $%d", len(args)+1)
+		args = append(args, accountID)
+	}
+
+	rows, err := pgxPool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query fund plan lines: %w", err)
+	}
+	defer rows.Close()
+
+	// Aggregation: key = anchorDate|category
+	combined := map[string]*DateCatRow{}
+	for rows.Next() {
+		var cat, srcRef, cur, direction, pk, pv string
+		var amt float64
+		if err := rows.Scan(&cat, &srcRef, &amt, &cur, &direction, &pk, &pv); err != nil {
+			continue
+		}
+
+		up := strings.ToUpper(srcRef)
+		isForecast := false
+		typ := ""
+		if strings.HasPrefix(up, "TR-PAY-") {
+			typ = "Outflow"
+		} else if strings.HasPrefix(up, "TR-REC-") {
+			typ = "Inflow"
+		} else if strings.HasPrefix(up, "PROP-") {
+			isForecast = true
+			if strings.EqualFold(direction, "Inflow") {
+				typ = "Inflow"
+			} else {
+				typ = "Outflow"
+			}
+		}
+
+		// Normalize by FX rate
+		rate := rates[cur]
+		if rate == 0 {
+			rate = 1.0
+		}
+		amtNorm := amt * rate
+		if typ == "Outflow" {
+			amtNorm = -math.Abs(amtNorm)
+		} else {
+			amtNorm = math.Abs(amtNorm)
+		}
+
+		// Add this line cumulatively to all anchor months >= today
+		for _, anchor := range anchors {
+			key := fmt.Sprintf("%s|%s", anchor.Format("2006-01-02"), cat)
+			if _, ok := combined[key]; !ok {
+				combined[key] = &DateCatRow{Date: anchor.Format("2006-01-02"), Category: cat}
+			}
+			if isForecast {
+				combined[key].Forecast += amtNorm
+			} else {
+				combined[key].Actual += amtNorm
+			}
+		}
+	}
+
+	// Build output
+	out := make([]DateCatRow, 0, len(combined))
+	for _, v := range combined {
+		v.Variance = v.Forecast - v.Actual
+		out = append(out, *v)
+	}
+
+	// Sort by date then category
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date == out[j].Date {
+			return out[i].Category < out[j].Category
+		}
+		return out[i].Date < out[j].Date
+	})
+
+	return out, nil
+}
+
