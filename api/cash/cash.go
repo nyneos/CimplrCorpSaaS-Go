@@ -53,6 +53,11 @@ func StartCashService(db *sql.DB) {
 	//fundplanning 
 	mux.Handle("/cash/fund-planning", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanningEnhanced(pgxPool)))
 	mux.Handle("/cash/fund-planning/create", api.BusinessUnitMiddleware(db)(fundplanning.CreateFundPlan(pgxPool)))
+	mux.Handle("/cash/fund-planning/summary", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanSummary(pgxPool)))
+	mux.Handle("/cash/fund-planning/details", api.BusinessUnitMiddleware(db)(fundplanning.GetFundPlanDetails(pgxPool)))
+	mux.Handle("/cash/fund-planning/bulk-approve", api.BusinessUnitMiddleware(db)(fundplanning.BulkApproveFundPlans(pgxPool)))
+	mux.Handle("/cash/fund-planning/bulk-reject", api.BusinessUnitMiddleware(db)(fundplanning.BulkRejectFundPlans(pgxPool)))
+	mux.Handle("/cash/fund-planning/bulk-delete", api.BusinessUnitMiddleware(db)(fundplanning.BulkRequestDeleteFundPlans(pgxPool)))
 	mux.Handle("/cash/fund-planning/bank-accounts", api.BusinessUnitMiddleware(db)(fundplanning.GetApprovedBankAccountsForFundPlanning(pgxPool)))
 
 	// Sweep configuration routes
@@ -91,6 +96,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
