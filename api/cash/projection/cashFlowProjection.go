@@ -1298,13 +1298,13 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			itemID := ifaceToString(entry["item_id"])
 			var curCat, curDept, curEnt, curType, curRecPat, curRecFreq, curDesc interface{}
-			var curCP, curOldCP interface{}
+			var curCP interface{}
 			var curAmt interface{}
 			var curRec interface{}
 			var curStart interface{}
 			var curEnd interface{}
 			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name FROM cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
-				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd, &curCP, &curOldCP)
+				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd, &curCP)
 			if err != nil {
 				api.RespondWithResult(w, false, "Item not found: "+err.Error())
 				return
