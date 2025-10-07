@@ -26,24 +26,44 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 		err := db.QueryRow(`
 			WITH role_cte AS (
 				SELECT id FROM public.roles WHERE LOWER(name) = LOWER($1)
-			)
-			SELECT COALESCE(
-				jsonb_object_agg(page_name, page_data), '{}'::jsonb
-			)
-			FROM (
+			),
+			page_json AS (
 				SELECT 
 					p.page_name,
 					jsonb_build_object(
-						'pagePermissions', jsonb_object_agg(p.action, COALESCE(rp.allowed, false) FILTER (WHERE p.tab_name IS NULL)),
-						'tabs', jsonb_object_agg(p.tab_name, jsonb_object_agg(p.action, COALESCE(rp.allowed, false))) FILTER (WHERE p.tab_name IS NOT NULL)
+						'pagePermissions',
+							COALESCE((
+								SELECT jsonb_object_agg(subp.action, COALESCE(subrp.allowed, false))
+								FROM public.permissions subp
+								LEFT JOIN public.role_permissions subrp
+									ON subrp.permission_id = subp.id
+									AND subrp.role_id = (SELECT id FROM role_cte)
+								WHERE subp.page_name = p.page_name
+								  AND (subp.tab_name IS NULL OR subp.tab_name = '')
+							), '{}'::jsonb),
+						'tabs',
+							COALESCE((
+								SELECT jsonb_object_agg(tab_group.tab_name, tab_group.tab_actions)
+								FROM (
+									SELECT 
+										subp2.tab_name,
+										jsonb_object_agg(subp2.action, COALESCE(subrp2.allowed, false)) AS tab_actions
+									FROM public.permissions subp2
+									LEFT JOIN public.role_permissions subrp2
+										ON subrp2.permission_id = subp2.id
+										AND subrp2.role_id = (SELECT id FROM role_cte)
+									WHERE subp2.page_name = p.page_name
+									  AND subp2.tab_name IS NOT NULL
+									  AND subp2.tab_name <> ''
+									GROUP BY subp2.tab_name
+								) AS tab_group
+							), '{}'::jsonb)
 					) AS page_data
 				FROM public.permissions p
-				LEFT JOIN public.role_permissions rp
-					ON rp.permission_id = p.id
-					AND rp.role_id = (SELECT id FROM role_cte)
 				GROUP BY p.page_name
-				ORDER BY p.page_name
-			) sub;
+			)
+			SELECT COALESCE(jsonb_object_agg(page_name, page_data), '{}'::jsonb)
+			FROM page_json;
 		`, req.RoleName).Scan(&jsonResult)
 
 		if err == sql.ErrNoRows {
@@ -544,3 +564,4 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
