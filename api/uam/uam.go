@@ -13,8 +13,8 @@ import (
 
 func StartUAMService(db *sql.DB) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/uam/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello from UAM Service"))
+	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("UAM Service is active"))
 	})
 	/*users*/
 	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db))))
@@ -46,4 +46,5 @@ func StartUAMService(db *sql.DB) {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
 }
+
 
