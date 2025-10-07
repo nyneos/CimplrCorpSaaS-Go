@@ -56,7 +56,7 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		   return api.NewGatewayService(cfg)
 	   },
 	   "auth": func(cfg map[string]interface{}) serviceiface.Service {
-		   maxUsers := 2 // or get from cfg
+		   maxUsers := 100 // or get from cfg
 		   return auth.NewAuthService(AuthDB, maxUsers)
 	   },
 }
@@ -230,3 +230,4 @@ func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	}
 	return nil
 }
+
