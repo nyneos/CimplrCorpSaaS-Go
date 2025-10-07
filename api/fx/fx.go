@@ -14,8 +14,8 @@ import (
 
 func StartFXService(db *sql.DB) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/fx/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello from FX Service"))
+	mux.HandleFunc("/fx/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("FX Service is active"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
 	/*-------------     exposures    ;)      --------------------*/
@@ -79,6 +79,7 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
+
 
 
 
