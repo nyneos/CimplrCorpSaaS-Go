@@ -6,95 +6,61 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"strings"
+
+	"github.com/lib/pq"
 )
 
-// Handler: Get role permissions JSON by role name from request body
 func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string `json:"user_id"`
 			RoleName string `json:"roleName"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"error":"invalid request body"}`, http.StatusBadRequest)
-			return
-		}
-		if req.UserID == "" || req.RoleName == "" {
-			http.Error(w, `{"success":false,"error":"user_id and roleName required"}`, http.StatusBadRequest)
+			http.Error(w, `{"success":false,"error":"invalid request"}`, http.StatusBadRequest)
 			return
 		}
 
-		// Find role
-		var roleID int
-		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
+		var jsonResult []byte
+		err := db.QueryRow(`
+			WITH role_cte AS (
+				SELECT id FROM public.roles WHERE LOWER(name) = LOWER($1)
+			)
+			SELECT COALESCE(
+				jsonb_object_agg(page_name, page_data), '{}'::jsonb
+			)
+			FROM (
+				SELECT 
+					p.page_name,
+					jsonb_build_object(
+						'pagePermissions', jsonb_object_agg(p.action, COALESCE(rp.allowed, false) FILTER (WHERE p.tab_name IS NULL)),
+						'tabs', jsonb_object_agg(p.tab_name, jsonb_object_agg(p.action, COALESCE(rp.allowed, false))) FILTER (WHERE p.tab_name IS NOT NULL)
+					) AS page_data
+				FROM public.permissions p
+				LEFT JOIN public.role_permissions rp
+					ON rp.permission_id = p.id
+					AND rp.role_id = (SELECT id FROM role_cte)
+				GROUP BY p.page_name
+				ORDER BY p.page_name
+			) sub;
+		`, req.RoleName).Scan(&jsonResult)
+
 		if err == sql.ErrNoRows {
-			http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
+			http.Error(w, `{"success":false,"error":"role not found"}`, http.StatusNotFound)
 			return
 		} else if err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
 			return
 		}
 
-		// Query permissions (same as before)
-		rows, err := db.Query(`
-		      SELECT p.page_name, p.tab_name, p.action, rp.allowed
-		      FROM role_permissions rp
-		      JOIN permissions p ON rp.permission_id = p.id
-		      WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')`,
-			roleID)
-		if err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-			return
+		resp := map[string]interface{}{
+			"success":  true,
+			"roleName": req.RoleName,
+			"pages":    json.RawMessage(jsonResult),
 		}
-		defer rows.Close()
-
-		// Build pages structure (same as before)
-		pages := make(map[string]interface{})
-		for rows.Next() {
-			var page, action string
-			var tab sql.NullString
-			var allowed bool
-
-			if err := rows.Scan(&page, &tab, &action, &allowed); err != nil {
-				http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-				return
-			}
-
-			// Ensure page object
-			if _, ok := pages[page]; !ok {
-				pages[page] = make(map[string]interface{})
-			}
-			pageObj := pages[page].(map[string]interface{})
-
-			if !tab.Valid { // tab is NULL
-				if _, ok := pageObj["pagePermissions"]; !ok {
-					pageObj["pagePermissions"] = make(map[string]interface{})
-				}
-				pageObj["pagePermissions"].(map[string]interface{})[action] = allowed
-			} else {
-				if _, ok := pageObj["tabs"]; !ok {
-					pageObj["tabs"] = make(map[string]interface{})
-				}
-				if _, ok := pageObj["tabs"].(map[string]interface{})[tab.String]; !ok {
-					pageObj["tabs"].(map[string]interface{})[tab.String] = make(map[string]interface{})
-				}
-				pageObj["tabs"].(map[string]interface{})[tab.String].(map[string]interface{})[action] = allowed
-			}
-		}
-
-		// Final response
-		resp := struct {
-			RoleName string                 `json:"roleName"`
-			Pages    map[string]interface{} `json:"pages"`
-		}{
-			RoleName: req.RoleName,
-			Pages:    pages,
-		}
-
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-		}
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -116,56 +82,68 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			Pages    map[string]interface{} `json:"pages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.RoleName == "" || req.Pages == nil {
-			respondWithError(w, http.StatusBadRequest, "user_id, roleName and pages object required")
+			respondWithError(w, http.StatusBadRequest, "user_id, roleName and pages required")
 			return
 		}
 
 		// Step 1: Get role_id
 		var roleID int
-		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
-		if err != nil {
-			respondWithError(w, http.StatusNotFound, "Role not found")
+		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, req.RoleName).Scan(&roleID); err != nil {
+			respondWithError(w, http.StatusNotFound, "role not found")
 			return
 		}
 
-		// Step 2: Flatten new structure
-		perms := []struct {
-			Page    string
-			Tab     *string
-			Action  string
-			Allowed interface{}
-		}{}
+		// Step 2: Flatten and normalize permissions
+		type permKey struct {
+			Page   string
+			Tab    sql.NullString
+			Action string
+		}
+		type permData struct {
+			Key     permKey
+			Allowed bool
+		}
+		var perms []permData
+		permSet := make(map[string]struct{}) // to deduplicate quickly
+
 		for page, pageObjRaw := range req.Pages {
 			pageObj, ok := pageObjRaw.(map[string]interface{})
 			if !ok {
 				continue
 			}
+
 			// pagePermissions
 			if ppRaw, ok := pageObj["pagePermissions"]; ok {
-				if pagePermissions, ok := ppRaw.(map[string]interface{}); ok {
-					for action, allowed := range pagePermissions {
-						perms = append(perms, struct {
-							Page    string
-							Tab     *string
-							Action  string
-							Allowed interface{}
-						}{Page: page, Tab: nil, Action: action, Allowed: allowed})
+				if pp, ok := ppRaw.(map[string]interface{}); ok {
+					for action, allowedRaw := range pp {
+						key := fmt.Sprintf("%s||%s||%s", page, "", action)
+						if _, exists := permSet[key]; exists {
+							continue
+						}
+						perms = append(perms, permData{
+							Key:     permKey{Page: page, Tab: sql.NullString{}, Action: action},
+							Allowed: parseAllowed(allowedRaw),
+						})
+						permSet[key] = struct{}{}
 					}
 				}
 			}
+
 			// tabs
 			if tabsRaw, ok := pageObj["tabs"]; ok {
 				if tabs, ok := tabsRaw.(map[string]interface{}); ok {
 					for tab, tabObjRaw := range tabs {
 						if tabObj, ok := tabObjRaw.(map[string]interface{}); ok {
-							for action, allowed := range tabObj {
-								tabStr := tab
-								perms = append(perms, struct {
-									Page    string
-									Tab     *string
-									Action  string
-									Allowed interface{}
-								}{Page: page, Tab: &tabStr, Action: action, Allowed: allowed})
+							for action, allowedRaw := range tabObj {
+								key := fmt.Sprintf("%s||%s||%s", page, tab, action)
+								if _, exists := permSet[key]; exists {
+									continue
+								}
+								perms = append(perms, permData{
+									Key:     permKey{Page: page, Tab: sql.NullString{String: tab, Valid: true}, Action: action},
+									Allowed: parseAllowed(allowedRaw),
+								})
+								permSet[key] = struct{}{}
 							}
 						}
 					}
@@ -173,131 +151,160 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		// Step 3: Get all unique permissions (page, tab, action)
-		uniquePermsMap := map[string][3]interface{}{}
+		if len(perms) == 0 {
+			respondWithError(w, http.StatusBadRequest, "no valid permissions found")
+			return
+		}
+
+		// Step 3: Bulk insert or fetch permission IDs using CTE (no duplicates created)
+		tx, err := db.Begin()
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback()
+
+		pageNames := []string{}
+		tabNames := []sql.NullString{}
+		actions := []string{}
 		for _, p := range perms {
-			key := fmt.Sprintf("%s|%v|%s", p.Page, p.Tab, p.Action)
-			uniquePermsMap[key] = [3]interface{}{p.Page, p.Tab, p.Action}
-		}
-		uniquePermsArr := make([][3]interface{}, 0, len(uniquePermsMap))
-		for _, v := range uniquePermsMap {
-			uniquePermsArr = append(uniquePermsArr, v)
+			pageNames = append(pageNames, p.Key.Page)
+			tabNames = append(tabNames, p.Key.Tab)
+			actions = append(actions, p.Key.Action)
 		}
 
-		// Step 4: Bulk select existing permissions
-		permissionIdMap := map[string]int{}
-		if len(uniquePermsArr) > 0 {
-			values := ""
-			args := []interface{}{}
-			for i, perm := range uniquePermsArr {
-				if i > 0 {
-					values += ", "
-				}
-				values += fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3)
-				args = append(args, perm[0], perm[1], perm[2])
-			}
-			selectQuery := fmt.Sprintf(`SELECT id, page_name, tab_name, action 
-				FROM permissions 
-				WHERE (page_name, tab_name, action) IN (%s)`, values)
-			rows, err := db.Query(selectQuery, args...)
-			if err == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var id int
-					var pageName, tabName, action string
-					rows.Scan(&id, &pageName, &tabName, &action)
-					key := fmt.Sprintf("%s|%s|%s", pageName, tabName, action)
-					permissionIdMap[key] = id
-				}
-			}
+		// Use UNNEST for bulk operation
+		rows, err := tx.Query(`
+			WITH input_data AS (
+				SELECT UNNEST($1::text[]) AS page_name,
+					   UNNEST($2::text[]) AS tab_name,
+					   UNNEST($3::text[]) AS action
+			),
+			inserted AS (
+				INSERT INTO public.permissions (page_name, tab_name, action)
+				SELECT page_name, NULLIF(tab_name, ''), action
+				FROM input_data
+				ON CONFLICT (page_name, tab_name, action) DO NOTHING
+				RETURNING id, page_name, tab_name, action
+			)
+			SELECT id, page_name, tab_name, action
+			FROM inserted
+			UNION
+			SELECT id, page_name, tab_name, action
+			FROM permissions
+			WHERE (page_name, tab_name, action) IN (
+				SELECT page_name, NULLIF(tab_name, ''), action FROM input_data
+			)
+		`, pq.Array(pageNames), pq.Array(nullStringToText(tabNames)), pq.Array(actions))
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "permission sync failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		permissionIdMap := make(map[string]int)
+		for rows.Next() {
+			var id int
+			var page, action string
+			var tab sql.NullString
+			rows.Scan(&id, &page, &tab, &action)
+			key := fmt.Sprintf("%s||%s||%s", page, tab.String, action)
+			permissionIdMap[key] = id
 		}
 
-		// Step 5: Bulk insert missing permissions
-		missingPerms := [][3]interface{}{}
-		for _, perm := range uniquePermsArr {
-			tabStr := ""
-			if perm[1] != nil {
-				tabStr = fmt.Sprint(perm[1])
-			}
-			if _, ok := permissionIdMap[fmt.Sprintf("%s|%s|%s", perm[0], tabStr, perm[2])]; !ok {
-				missingPerms = append(missingPerms, perm)
-			}
-		}
-		if len(missingPerms) > 0 {
-			values := ""
-			args := []interface{}{}
-			for i, perm := range missingPerms {
-				if i > 0 {
-					values += ", "
-				}
-				values += fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3)
-				args = append(args, perm[0], perm[1], perm[2])
-			}
-			insertQuery := fmt.Sprintf(`INSERT INTO permissions (page_name, tab_name, action) 
-				VALUES %s 
-				RETURNING id, page_name, tab_name, action`, values)
-			rows, err := db.Query(insertQuery, args...)
-			if err == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var id int
-					var pageName, tabName, action string
-					rows.Scan(&id, &pageName, &tabName, &action)
-					key := fmt.Sprintf("%s|%s|%s", pageName, tabName, action)
-					permissionIdMap[key] = id
-				}
-			}
-		}
+		// Step 4: Bulk upsert role_permissions
+		roleIDs := []int{}
+		permIDs := []int{}
+		alloweds := []bool{}
 
-		// Step 6: Deduplicate before bulk upsert role_permissions
-		rolePermMap := map[string][]interface{}{}
 		for _, p := range perms {
-			tabStr := ""
-			if p.Tab != nil {
-				tabStr = *p.Tab
+			tabVal := ""
+			if p.Key.Tab.Valid {
+				tabVal = p.Key.Tab.String
 			}
-			permission_id := permissionIdMap[fmt.Sprintf("%s|%s|%s", p.Page, tabStr, p.Action)]
-			key := fmt.Sprintf("%d|%d", roleID, permission_id)
-			if _, exists := rolePermMap[key]; !exists {
-				rolePermMap[key] = []interface{}{roleID, permission_id, p.Allowed}
+			key := fmt.Sprintf("%s||%s||%s", p.Key.Page, tabVal, p.Key.Action)
+			if pid, ok := permissionIdMap[key]; ok {
+				roleIDs = append(roleIDs, roleID)
+				permIDs = append(permIDs, pid)
+				alloweds = append(alloweds, p.Allowed)
 			}
 		}
 
-		rolePermValues := [][]interface{}{}
-		for _, v := range rolePermMap {
-			rolePermValues = append(rolePermValues, v)
-		}
-
-		if len(rolePermValues) > 0 {
-			values := ""
-			args := []interface{}{}
-			for i, v := range rolePermValues {
-				if i > 0 {
-					values += ", "
-				}
-				values += fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3)
-				args = append(args, v[0], v[1], v[2])
-			}
-			upsertQuery := fmt.Sprintf(`INSERT INTO role_permissions (role_id, permission_id, allowed) 
-				VALUES %s 
-				ON CONFLICT (role_id, permission_id) 
-				DO UPDATE SET allowed = EXCLUDED.allowed`, values)
-			_, err := db.Exec(upsertQuery, args...)
+		if len(roleIDs) > 0 {
+			_, err = tx.Exec(`
+				INSERT INTO public.role_permissions (role_id, permission_id, allowed)
+				SELECT UNNEST($1::int[]), UNNEST($2::int[]), UNNEST($3::bool[])
+				ON CONFLICT (role_id, permission_id)
+				DO UPDATE SET allowed = EXCLUDED.allowed
+			`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, err.Error())
+				respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
 				return
 			}
 		}
 
+		if err := tx.Commit(); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": perms})
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"count":   len(perms),
+		})
+	}
+}
+
+// helper: convert []sql.NullString -> []string
+func nullStringToText(ns []sql.NullString) []string {
+	out := make([]string, len(ns))
+	for i, n := range ns {
+		if n.Valid {
+			out[i] = n.String
+		} else {
+			out[i] = ""
+		}
+	}
+	return out
+}
+
+func parseAllowed(raw interface{}) bool {
+	switch v := raw.(type) {
+	case bool:
+		return v
+
+	case string:
+		val := strings.TrimSpace(strings.ToLower(v))
+		switch val {
+		case "true", "t", "1", "yes", "y":
+			return true
+		case "false", "f", "0", "no", "n", "":
+			return false
+		default:
+			// handle capitalized or mixed-case (e.g. "True", "TRUE")
+			valUpper := strings.ToUpper(strings.TrimSpace(v))
+			return valUpper == "TRUE" || valUpper == "T"
+		}
+
+	case float64:
+		return v != 0
+
+	case int:
+		return v != 0
+
+	case nil:
+		return false
+
+	default:
+		return false
 	}
 }
 
 func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Parse request body
 		userID := r.Context().Value("user_id")
+
 		var req struct {
 			UserID string `json:"user_id"`
 		}
@@ -305,7 +312,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"success":false,"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		// Prefer userID from context if available
+
 		if ctxUserID, ok := userID.(string); ok && ctxUserID != "" {
 			req.UserID = ctxUserID
 		}
@@ -314,12 +321,12 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get RoleName from session
+		// Get roleName from active session
 		roleName := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				roleName = s.Role // or s.RoleCode, depending on your session struct
+				roleName = s.Role
 				break
 			}
 		}
@@ -328,78 +335,84 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Find role
+		// Get role_id
 		var roleID int
-		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", roleName).Scan(&roleID)
-		if err == sql.ErrNoRows {
-			http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
-			return
-		} else if err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-			return
-		}
-
-		// Query permissions (same as before)
-		rows, err := db.Query(`
-			   SELECT p.page_name, p.tab_name, p.action, rp.allowed
-			   FROM role_permissions rp
-			   JOIN permissions p ON rp.permission_id = p.id
-			   WHERE rp.role_id = $1 AND (rp.status = 'Approved' OR rp.status = 'approved')`,
-			roleID)
-		if err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		// Build pages structure (same as before)
-		pages := make(map[string]interface{})
-		for rows.Next() {
-			var page, action string
-			var tab sql.NullString
-			var allowed bool
-
-			if err := rows.Scan(&page, &tab, &action, &allowed); err != nil {
-				http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-				return
-			}
-
-			// Ensure page object
-			if _, ok := pages[page]; !ok {
-				pages[page] = make(map[string]interface{})
-			}
-			pageObj := pages[page].(map[string]interface{})
-
-			if !tab.Valid { // tab is NULL
-				if _, ok := pageObj["pagePermissions"]; !ok {
-					pageObj["pagePermissions"] = make(map[string]interface{})
-				}
-				pageObj["pagePermissions"].(map[string]interface{})[action] = allowed
+		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, roleName).Scan(&roleID); err != nil {
+			if err == sql.ErrNoRows {
+				http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
 			} else {
-				if _, ok := pageObj["tabs"]; !ok {
-					pageObj["tabs"] = make(map[string]interface{})
-				}
-				if _, ok := pageObj["tabs"].(map[string]interface{})[tab.String]; !ok {
-					pageObj["tabs"].(map[string]interface{})[tab.String] = make(map[string]interface{})
-				}
-				pageObj["tabs"].(map[string]interface{})[tab.String].(map[string]interface{})[action] = allowed
+				http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 			}
-
+			return
 		}
 
-		// Final response
+		query := `
+		WITH rp_data AS (
+			SELECT 
+				p.page_name,
+				p.tab_name,
+				p.action,
+				COALESCE(rp.allowed, false) AS allowed
+			FROM role_permissions rp
+			JOIN permissions p ON rp.permission_id = p.id
+			WHERE rp.role_id = $1
+		),
+		action_json AS (
+			SELECT 
+				page_name,
+				tab_name,
+				jsonb_object_agg(action, allowed) AS actions
+			FROM rp_data
+			GROUP BY page_name, tab_name
+		),
+		page_json AS (
+			SELECT 
+				page_name,
+				jsonb_build_object(
+					'pagePermissions',
+					COALESCE(
+						(SELECT actions FROM action_json WHERE page_name = ad.page_name AND tab_name IS NULL),
+						'{}'::jsonb
+					),
+					'tabs',
+					COALESCE(
+						(
+							SELECT jsonb_object_agg(tab_name, actions)
+							FROM action_json
+							WHERE page_name = ad.page_name AND tab_name IS NOT NULL
+						),
+						'{}'::jsonb
+					)
+				) AS page_data
+			FROM (SELECT DISTINCT page_name FROM rp_data) ad
+		)
+		SELECT jsonb_object_agg(page_name, page_data)
+		FROM page_json;
+		`
+
+		var pagesJSON sql.NullString
+		if err := db.QueryRow(query, roleID).Scan(&pagesJSON); err != nil {
+			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+
 		resp := struct {
 			RoleName string                 `json:"roleName"`
 			Pages    map[string]interface{} `json:"pages"`
 		}{
 			RoleName: roleName,
-			Pages:    pages,
+			Pages:    map[string]interface{}{},
+		}
+
+		if pagesJSON.Valid {
+			if err := json.Unmarshal([]byte(pagesJSON.String), &resp.Pages); err != nil {
+				http.Error(w, `{"success":false,"error":"invalid json returned"}`, http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, `{"success":false,"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-		}
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -531,4 +544,3 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
-
