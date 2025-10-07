@@ -30,8 +30,8 @@ func StartMasterService(db *sql.DB) {
 	// ensure pool is closed when service exits
 	defer pgxPool.Close()
 
-	mux.HandleFunc("/master/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello from Master Service"))
+	mux.HandleFunc("/master/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Masters Service is healthy"))
 	})
 
 	// Cost / Profit Center Master routes
@@ -150,6 +150,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
