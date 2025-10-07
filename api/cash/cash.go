@@ -87,8 +87,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-balances/upload", api.BusinessUnitMiddleware(db)(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/update", api.BusinessUnitMiddleware(db)(bankbalances.UpdateBankBalance(pgxPool)))
 
-	mux.HandleFunc("/cash/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello from Cash Service"))
+	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Cash Service is active"))
 	})
 	log.Println("Cash Service started on :6143")
 	err = http.ListenAndServe(":6143", mux)
@@ -96,6 +96,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
 
 
 
