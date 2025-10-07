@@ -37,8 +37,8 @@ func StartDashService(db *sql.DB) {
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
-	mux.HandleFunc("/dash/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello from Dashboard Service"))
+	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("Dashboard Service is active"))
 	})
 	// mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
 	// mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
@@ -133,6 +133,7 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
+
 
 
 
