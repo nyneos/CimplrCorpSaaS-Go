@@ -240,9 +240,9 @@ func StartGateway() {
 	mux.HandleFunc("/cash/", createReverseProxy("http://localhost:6143"))
 	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
 
-	mux.HandleFunc("/healt", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("API Gateway is healthy"))
+		w.Write([]byte("API Gateway is active"))
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
