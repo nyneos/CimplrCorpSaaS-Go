@@ -55,8 +55,25 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 	   "gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		   return api.NewGatewayService(cfg)
 	   },
-	   "auth": func(cfg map[string]interface{}) serviceiface.Service {
-		   maxUsers := 100 // or get from cfg
+	  "auth": func(cfg map[string]interface{}) serviceiface.Service {
+		   maxUsers := 5
+		   if cfg != nil {
+			   if v, ok := cfg["max_users"]; ok && v != nil {
+				   switch t := v.(type) {
+				   case int:
+					   maxUsers = t
+				   case int64:
+					   maxUsers = int(t)
+				   case float64:
+					   maxUsers = int(t)
+				   case string:
+					   var parsed int
+					   if _, err := fmt.Sscanf(t, "%d", &parsed); err == nil {
+						   maxUsers = parsed
+					   }
+				   }
+			   }
+		   }
 		   return auth.NewAuthService(AuthDB, maxUsers)
 	   },
 }
@@ -230,4 +247,5 @@ func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	}
 	return nil
 }
+
 
