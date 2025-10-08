@@ -59,7 +59,17 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 
 	for _, session := range a.users {
 		if session.Email == username && session.IsLoggedIn {
-			session.LastLoginTime = time.Now().Format(time.RFC3339)
+			var dbPassword sql.NullString
+			err := a.db.QueryRow("SELECT password FROM users WHERE email = $1", username).Scan(&dbPassword)
+			if err != nil {
+				break
+			}
+			if !dbPassword.Valid || dbPassword.String != password {
+				if logger.GlobalLogger != nil {
+					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s attempted re-login with incorrect password", username))
+				}
+				return nil, errors.New("invalid credentials or user not found")
+			}
 			session.ClientIP = clientIP
 			if logger.GlobalLogger != nil {
 				logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s re-logged in, Returning Existing session", username))
@@ -69,6 +79,9 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	}
 
 	if len(a.users) >= a.maxUsers {
+		if logger.GlobalLogger != nil {
+			logger.GlobalLogger.LogAudit("[ERROR] maximum concurrent users reached for login attempt: " + username)
+		}
 		return nil, errors.New("maximum concurrent users reached")
 	}
 
@@ -99,6 +112,11 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		&roleID, &roleName, &roleCode, &roleStatus,
 	)
 	if err != nil {
+		if logger.GlobalLogger != nil {
+			logger.GlobalLogger.LogAudit(fmt.Sprintf("Login DB error for %s: %v", username, err))
+		} else {
+			fmt.Println("Login DB error:", err)
+		}
 		return nil, errors.New("invalid credentials or user not found")
 	}
 
@@ -148,13 +166,9 @@ func (a *AuthService) Logout(UserID string) error {
 }
 
 var globalAuthService *AuthService
-
-// SetGlobalAuthService sets the global AuthService instance
 func SetGlobalAuthService(svc *AuthService) {
 	globalAuthService = svc
 }
-
-// GetActiveSessions returns active sessions from the global AuthService
 func GetActiveSessions() []*UserSession {
 	if globalAuthService == nil {
 		return nil
@@ -180,7 +194,6 @@ func (a *AuthService) sessionCleaner() {
 		case <-a.stopCh:
 			return
 		case <-ticker.C:
-			// session expiry logic can be added here
 		}
 	}
 }
@@ -189,15 +202,3 @@ func generateSessionID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
-// DB initialization helper
-func InitDB() (*sql.DB, error) {
-	connStr := fmt.Sprintf(
-		"user=%s password=%s host=%s port=%s dbname=%s sslmode=disable",
-		"postgres.sgryutycrupiuhovmbfo",
-		"NyneOS@1234$",
-		"aws-0-ap-south-1.pooler.supabase.com",
-		"5432",
-		"postgres",
-	)
-	return sql.Open("postgres", connStr)
-}
