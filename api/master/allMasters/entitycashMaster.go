@@ -1353,7 +1353,6 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionentity a
 				WHERE a.entity_id = m.entity_id
-				  -- pull latest processing_status; we'll filter approved rows in the outer WHERE
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
