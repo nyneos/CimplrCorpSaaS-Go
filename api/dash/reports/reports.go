@@ -368,9 +368,9 @@ func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"forward_bookings":      bookings,
-			"forward_rollovers":     rollovers,
-			"forward_cancellations": cancellations,
+			"Fwd Booking":      fwdBooking,
+			"Fwd Rollovers":    fwdRollovers,
+			"Fwd Cancellation": fwdCancellation,
 		})
 	}
 }
