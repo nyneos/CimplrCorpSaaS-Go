@@ -230,7 +230,9 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if response == nil {
+			response = []map[string]interface{}{}
+		}
+		api.RespondWithPayload(w, true, "", response)
 	}
 }
