@@ -1353,13 +1353,14 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT processing_status
 				FROM auditactionentity a
 				WHERE a.entity_id = m.entity_id
-				  AND a.processing_status = 'APPROVED'
+				  -- pull latest processing_status; we'll filter approved rows in the outer WHERE
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
 			WHERE m.entity_level = $1
 			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
 			  AND LOWER(m.active_status) = 'active'
+			  AND COALESCE(LOWER(a.processing_status),'') = 'approved'
 		`
 
 		rows, err := pgxPool.Query(ctx, query, parentLevel)
