@@ -284,7 +284,9 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 			result = append(result, row)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		if result == nil {
+			result = []ForwardRow{}
+		}
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
