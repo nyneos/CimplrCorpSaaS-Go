@@ -65,11 +65,11 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
-		// Insert entities
-		entityIDs := make(map[string]string) // name -> id
+
+		entityIDs := make(map[string]string) 
 		inserted := []map[string]interface{}{}
 		for _, entity := range req.Entities {
-			// Generate custom entity ID: EC-XXXXXXXX (8 random alphanumeric)
+	
 			const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 			b := make([]byte, 8)
 			for i := range b {
@@ -1251,6 +1251,24 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						allUpdated = append(allUpdated, map[string]interface{}{
 							"entity_id": entityID,
 							"status":    "Marked Deleted",
+						})
+					}
+				}
+
+				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
+				auditRows, aerr := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
+				if aerr != nil {
+					anyError = aerr
+					break
+				}
+				defer auditRows.Close()
+				for auditRows.Next() {
+					var actionID, entityID string
+					if err := auditRows.Scan(&actionID, &entityID); err == nil {
+						allUpdated = append(allUpdated, map[string]interface{}{
+							"entity_id": entityID,
+							"action_id": actionID,
+							"status":    "Delete Approved",
 						})
 					}
 				}
