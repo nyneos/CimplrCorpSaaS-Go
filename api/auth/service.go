@@ -26,7 +26,7 @@ type AuthService struct {
 	db           *sql.DB
 	maxUsers     int
 	users        map[string]*UserSession
-	userPointers map[string]*UserSession
+	userPointers map[string][]*UserSession
 	mu           sync.Mutex
 	stopCh       chan struct{}
 }
@@ -36,7 +36,7 @@ func NewAuthService(db *sql.DB, maxUsers int) serviceiface.Service {
 		db:           db,
 		maxUsers:     maxUsers,
 		users:        make(map[string]*UserSession),
-		userPointers: make(map[string]*UserSession),
+		userPointers: make(map[string][]*UserSession),
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -57,24 +57,41 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	for _, session := range a.users {
-		if session.Email == username && session.IsLoggedIn {
-			var dbPassword sql.NullString
-			err := a.db.QueryRow("SELECT password FROM users WHERE email = $1", username).Scan(&dbPassword)
-			if err != nil {
-				break
-			}
-			if !dbPassword.Valid || dbPassword.String != password {
+	// Allow multiple simultaneous sessions for the same user.
+	// If there's already an active session for this user (by email), verify password and return the existing session.
+	// This prevents creating duplicate sessions for same user from same or different devices if you prefer single session behavior.
+	// We look up existing sessions by scanning userPointers for matching email.
+	for _, sessions := range a.userPointers {
+		for _, s := range sessions {
+			if s.Email == username && s.IsLoggedIn {
+				// If same client IP, reuse existing session without requiring password
+				if s.ClientIP == clientIP {
+					s.LastLoginTime = time.Now().Format(time.RFC3339)
+					if logger.GlobalLogger != nil {
+						logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s re-used existing session (same IP)", username))
+					}
+					return s, nil
+				}
+
+				// Otherwise verify password from DB before re-using session
+				var dbPassword sql.NullString
+				err := a.db.QueryRow("SELECT password FROM users WHERE email = $1", username).Scan(&dbPassword)
+				if err == nil && dbPassword.Valid && dbPassword.String == password {
+					// update session metadata and return existing session
+					s.ClientIP = clientIP
+					s.LastLoginTime = time.Now().Format(time.RFC3339)
+					if logger.GlobalLogger != nil {
+						logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s re-used existing session", username))
+					}
+					return s, nil
+				}
+
+				// password mismatch or db error
 				if logger.GlobalLogger != nil {
 					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s attempted re-login with incorrect password", username))
 				}
 				return nil, errors.New("invalid credentials or user not found")
 			}
-			session.ClientIP = clientIP
-			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s re-logged in, Returning Existing session", username))
-			}
-			return session, nil
 		}
 	}
 
@@ -134,7 +151,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	}
 
 	a.users[sessionID] = session
-	a.userPointers[userID] = session
+	a.userPointers[userID] = append(a.userPointers[userID], session)
 
 	if logger.GlobalLogger != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged in: %s", username))
@@ -152,13 +169,15 @@ func (a *AuthService) Logout(UserID string) error {
 	for sessionID, session := range a.users {
 		if session.UserID == UserID {
 			delete(a.users, sessionID)
-			delete(a.userPointers, session.UserID)
 			found = true
 			if logger.GlobalLogger != nil {
 				logger.GlobalLogger.LogAudit("User logged out: " + session.UserID)
 			}
 		}
 	}
+	// remove the pointers slice for this user (if any)
+	delete(a.userPointers, UserID)
+
 	if !found {
 		return errors.New("no active session found for user")
 	}
