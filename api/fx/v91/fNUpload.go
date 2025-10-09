@@ -67,6 +67,9 @@ type CanonicalPreviewRow struct {
 	Party          string          `json:"party"`
 	Currency       string          `json:"currency"`
 	Source         string          `json:"source"`
+	DocumentDate   string          `json:"document_date,omitempty"`
+	PostingDate    string          `json:"posting_date,omitempty"`
+	NetDueDate     string          `json:"net_due_date,omitempty"`
 	Amount         decimal.Decimal `json:"amount"`
 	Status         string          `json:"status"` // "ok", "non_qualified", "knocked_off"
 	Issues         []string        `json:"issues,omitempty"`
@@ -787,6 +790,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					Party:          q.Party,
 					Currency:       q.DocumentCurrency,
 					Source:         q.Source,
+					DocumentDate:   q.DocumentDate,
+					PostingDate:    q.PostingDate,
+					NetDueDate:     q.NetDueDate,
 					Amount:         q.AmountDoc,
 					Status:         status,
 					Knockoffs:      klist,
@@ -801,6 +807,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					Party:          n.Row.Party,
 					Currency:       n.Row.DocumentCurrency,
 					Source:         n.Row.Source,
+					DocumentDate:   n.Row.DocumentDate,
+					PostingDate:    n.Row.PostingDate,
+					NetDueDate:     n.Row.NetDueDate,
 					Amount:         n.Row.AmountDoc,
 					Status:         "non_qualified",
 					Issues:         n.Issues,
