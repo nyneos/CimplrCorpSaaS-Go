@@ -57,27 +57,19 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Check if user already has active sessions (optional logging only)
 	for _, session := range a.users {
 		if session.Email == username && session.IsLoggedIn {
-			var dbPassword sql.NullString
-			err := a.db.QueryRow("SELECT password FROM users WHERE email = $1", username).Scan(&dbPassword)
-			if err != nil {
-				break
-			}
-			if !dbPassword.Valid || dbPassword.String != password {
-				if logger.GlobalLogger != nil {
-					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s attempted re-login with incorrect password", username))
-				}
-				return nil, errors.New("invalid credentials or user not found")
-			}
-			session.ClientIP = clientIP
 			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s re-logged in, Returning Existing session", username))
+				logger.GlobalLogger.LogAudit(fmt.Sprintf(
+					"User %s is logging in from another device/IP", username))
 			}
-			return session, nil
+			// Do NOT return here; allow new session creation
+			break
 		}
 	}
 
+	// Enforce maximum concurrent sessions
 	if len(a.users) >= a.maxUsers {
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit("[ERROR] maximum concurrent users reached for login attempt: " + username)
@@ -85,6 +77,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		return nil, errors.New("maximum concurrent users reached")
 	}
 
+	// Fetch user and role from DB
 	var (
 		userID, name, email        string
 		roleID, roleName, roleCode sql.NullString
@@ -120,6 +113,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		return nil, errors.New("invalid credentials or user not found")
 	}
 
+	// Create new session
 	sessionID := generateSessionID()
 	session := &UserSession{
 		SessionID:     sessionID,
@@ -142,6 +136,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 
 	return session, nil
 }
+
 
 func (a *AuthService) Logout(UserID string) error {
 	a.mu.Lock()
@@ -201,5 +196,6 @@ func (a *AuthService) sessionCleaner() {
 func generateSessionID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
+
 
 
