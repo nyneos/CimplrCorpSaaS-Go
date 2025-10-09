@@ -74,6 +74,7 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 				   }
 			   }
 		   }
+		  maxUsers := 10
 		   return auth.NewAuthService(AuthDB, maxUsers)
 	   },
 }
@@ -247,6 +248,7 @@ func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	}
 	return nil
 }
+
 
 
 
