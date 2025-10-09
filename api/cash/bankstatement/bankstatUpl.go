@@ -201,15 +201,33 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			srcColsStr := strings.Join(srcCols, ", ")
 			tgtColsStr := strings.Join(tgtCols, ", ")
 
-			_, err = pgxPool.Exec(ctx, fmt.Sprintf(`
-			       INSERT INTO bank_statement (%s)
-			       SELECT %s, $1
-			       FROM input_bank_statement_table s
-			       WHERE s.upload_batch_id = $2
-		       `, tgtColsStr, srcColsStr), userName, batchID)
+			// Insert rows and return generated bankstatement ids so we can create audit entries
+			rows2, err := pgxPool.Query(ctx, fmt.Sprintf(`
+		       INSERT INTO bank_statement (%s)
+		       SELECT %s, $1
+		       FROM input_bank_statement_table s
+		       WHERE s.upload_batch_id = $2
+		       RETURNING bankstatementid
+		   `, tgtColsStr, srcColsStr), userName, batchID)
 			if err != nil {
 				api.RespondWithPayload(w, false, "Final insert error: "+err.Error(), nil)
 				return
+			}
+			var newIDs []string
+			for rows2.Next() {
+				var id string
+				if err := rows2.Scan(&id); err == nil {
+					newIDs = append(newIDs, id)
+				}
+			}
+			rows2.Close()
+			// Insert audit action rows for created bank statements
+			for _, bsid := range newIDs {
+				if _, aerr := pgxPool.Exec(ctx, `INSERT INTO auditactionbankstatement (bankstatementid, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now())`, bsid, userName); aerr != nil {
+					// log but don't fail the entire upload for audit insert error
+					// (could collect and return these later if desired)
+					fmt.Println("audit insert error:", aerr)
+				}
 			}
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"batch_ids": batchIDs, "message": "All bank statements uploaded and processed"})
