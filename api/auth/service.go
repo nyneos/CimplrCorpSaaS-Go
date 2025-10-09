@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -61,11 +62,22 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	// If there's already an active session for this user (by email), verify password and return the existing session.
 	// This prevents creating duplicate sessions for same user from same or different devices if you prefer single session behavior.
 	// We look up existing sessions by scanning userPointers for matching email.
+	// helper to strip port from IP:port (handles IPv6 in brackets)
+	ipOnly := func(addr string) string {
+		if addr == "" {
+			return ""
+		}
+		if h, _, err := net.SplitHostPort(addr); err == nil {
+			return h
+		}
+		return addr
+	}
+
 	for _, sessions := range a.userPointers {
 		for _, s := range sessions {
 			if s.Email == username && s.IsLoggedIn {
-				// If same client IP, reuse existing session without requiring password
-				if s.ClientIP == clientIP {
+				// If same client IP (ignoring ephemeral ports), reuse existing session without requiring password
+				if ipOnly(s.ClientIP) == ipOnly(clientIP) {
 					s.LastLoginTime = time.Now().Format(time.RFC3339)
 					if logger.GlobalLogger != nil {
 						logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s re-used existing session (same IP)", username))
