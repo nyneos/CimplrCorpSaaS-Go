@@ -11,6 +11,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
+	github.com/shopspring/decimal v1.4.0
 	github.com/xuri/excelize/v2 v2.9.1
 	gopkg.in/yaml.v3 v3.0.1
 )
