@@ -17,8 +17,8 @@ import (
 
 func StartFXService(db *sql.DB) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/fx/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello from FX Service"))
+	mux.HandleFunc("/fx/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("FX Service is active"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
 	
@@ -29,6 +29,8 @@ func StartFXService(db *sql.DB) {
 	name := os.Getenv("DB_NAME")
 	if user != "" && pass != "" && host != "" && port != "" && name != "" {
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+
+		// wrapper creates pool per-request and ensures Close() after handler returns
 		v91Wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
@@ -36,12 +38,42 @@ func StartFXService(db *sql.DB) {
 				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
 				return
 			}
+			// ensure pool closed when request processing finishes
 			defer pool.Close()
+
+			// call the v91 handler that uses this pool
 			h := v91.BatchUploadStagingData(pool)
 			h.ServeHTTP(w, r)
 		})
 
+		// dashboard wrappers: create per-request pool and call the v91 dashboard handlers
+		v91DashAll := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.GetAllExposures(pool)
+			h.ServeHTTP(w, r)
+		})
+
+		v91DashByYear := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.GetExposuresByYear(pool)
+			h.ServeHTTP(w, r)
+		})
+
 		mux.Handle("/fx/exposures/upload/v91", api.BusinessUnitMiddleware(db)(v91Wrapper))
+		mux.Handle("/fx/exposures/dashboard/all/v91", api.BusinessUnitMiddleware(db)(v91DashAll))
+		mux.Handle("/fx/exposures/dashboard/by-year/v91", api.BusinessUnitMiddleware(db)(v91DashByYear))
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")
 	}
@@ -109,3 +141,4 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
+
