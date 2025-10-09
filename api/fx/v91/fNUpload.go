@@ -157,12 +157,39 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 		entityMap := map[string]string{}
 		{
-			rows, err := pool.Query(ctx, `SELECT unique_identifier, entity_name FROM public.masterentity WHERE is_deleted IS NOT TRUE`)
+			// rows, err := pool.Query(ctx, `SELECT unique_identifier, entity_name FROM public.masterentity WHERE is_deleted IS NOT TRUE`)
+			// if err == nil {
+			// 	for rows.Next() {
+			// 		var uid, name string
+			// 		if err := rows.Scan(&uid, &name); err == nil {
+			// 			entityMap[strings.TrimSpace(uid)] = strings.TrimSpace(name)
+			// 		}
+			// 	}
+			// 	rows.Close()
+			// }
+			rows, err := pool.Query(ctx, `
+	SELECT COALESCE(NULLIF(unique_identifier,''), entity_id) AS uid,
+	       TRIM(entity_name),
+	       TRIM(COALESCE(company_name, entity_name, '')) AS cname,
+	       TRIM(entity_id)
+	FROM public.masterentity
+	WHERE is_deleted IS NOT TRUE`)
 			if err == nil {
 				for rows.Next() {
-					var uid, name string
-					if err := rows.Scan(&uid, &name); err == nil {
-						entityMap[strings.TrimSpace(uid)] = strings.TrimSpace(name)
+					var uid, entityName, companyName, eid string
+					if err := rows.Scan(&uid, &entityName, &companyName, &eid); err == nil {
+						key1 := strings.TrimSpace(uid)
+						key2 := strings.TrimSpace(companyName)
+						key3 := strings.TrimSpace(eid)
+						if key1 != "" {
+							entityMap[key1] = entityName
+						}
+						if key2 != "" {
+							entityMap[key2] = entityName
+						}
+						if key3 != "" {
+							entityMap[key3] = entityName
+						}
 					}
 				}
 				rows.Close()
@@ -467,13 +494,35 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 				addtl, _ := json.Marshal(q._raw)
 
+				// entityName := ""
+				// if n, ok := entityMap[strings.TrimSpace(q.CompanyCode)]; ok {
+				// 	entityName = n
+				// } else if uidRaw, ok := q._raw["unique_identifier"]; ok {
+				// 	if uid := strings.TrimSpace(fmt.Sprintf("%v", uidRaw)); uid != "" {
+				// 		if n2, ok2 := entityMap[uid]; ok2 {
+				// 			entityName = n2
+				// 		}
+				// 	}
+				// }
 				entityName := ""
-				if n, ok := entityMap[strings.TrimSpace(q.CompanyCode)]; ok {
+				cc := strings.TrimSpace(q.CompanyCode)
+				if n, ok := entityMap[cc]; ok {
 					entityName = n
-				} else if uidRaw, ok := q._raw["unique_identifier"]; ok {
-					if uid := strings.TrimSpace(fmt.Sprintf("%v", uidRaw)); uid != "" {
-						if n2, ok2 := entityMap[uid]; ok2 {
-							entityName = n2
+				} else {
+					candidates := []string{}
+					if v, ok := q._raw["unique_identifier"]; ok {
+						candidates = append(candidates, fmt.Sprintf("%v", v))
+					}
+					if v, ok := q._raw["company_name"]; ok {
+						candidates = append(candidates, fmt.Sprintf("%v", v))
+					}
+					if v, ok := q._raw["entity_name"]; ok {
+						candidates = append(candidates, fmt.Sprintf("%v", v))
+					}
+					for _, c := range candidates {
+						if n, ok := entityMap[strings.TrimSpace(c)]; ok {
+							entityName = n
+							break
 						}
 					}
 				}
