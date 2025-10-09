@@ -28,19 +28,6 @@ import (
 	"golang.org/x/text/transform"
 )
 
-type UploadResult struct {
-	FileName      string                `json:"file_name"`
-	Source        string                `json:"source"`
-	BatchID       uuid.UUID             `json:"batch_id"`
-	TotalRows     int                   `json:"total_rows"`
-	InsertedCount int                   `json:"inserted_count"`
-	NonQualified  []NonQualified        `json:"non_qualified"`
-	Knockoffs     map[string][]Knockoff `json:"knockoffs"` 
-	Errors        []string              `json:"errors"`
-	LineItemsRows int                   `json:"line_items_inserted"`
-	Warnings      []string              `json:"warnings,omitempty"`
-}
-
 type CanonicalRow struct {
 	Source           string                   `json:"Source"`
 	CompanyCode      string                   `json:"CompanyCode"`
@@ -50,8 +37,8 @@ type CanonicalRow struct {
 	DocumentDate     string                   `json:"DocumentDate"`
 	PostingDate      string                   `json:"PostingDate"`
 	NetDueDate       string                   `json:"NetDueDate"`
-	AmountDoc        decimal.Decimal          `json:"AmountDoc"` 
-	AmountFloat      float64                  `json:"-"`        
+	AmountDoc        decimal.Decimal          `json:"AmountDoc"` // for final write + validation
+	AmountFloat      float64                  `json:"-"`         // internal: hot-loop allocation
 	LineItems        []map[string]interface{} `json:"LineItems,omitempty"`
 	_raw             map[string]interface{}
 }
@@ -61,13 +48,36 @@ type NonQualified struct {
 	Issues []string     `json:"issues"`
 }
 
-type Knockoff struct {
+type UploadResult struct {
+	FileName      string                `json:"file_name"`
+	Source        string                `json:"source"`
+	BatchID       uuid.UUID             `json:"batch_id"`
+	TotalRows     int                   `json:"total_rows"`
+	InsertedCount int                   `json:"inserted_count"`
+	LineItemsRows int                   `json:"line_items_inserted"`
+	NonQualified  []NonQualified        `json:"non_qualified"`
+	Rows          []CanonicalPreviewRow `json:"rows"` // detailed per-row view
+	Errors        []string              `json:"errors"`
+	Warnings      []string              `json:"warnings,omitempty"`
+}
+
+type CanonicalPreviewRow struct {
+	DocumentNumber string          `json:"document_number"`
+	CompanyCode    string          `json:"company_code"`
+	Party          string          `json:"party"`
+	Currency       string          `json:"currency"`
+	Amount         decimal.Decimal `json:"amount"`
+	Status         string          `json:"status"` // "ok", "non_qualified", "knocked_off"
+	Issues         []string        `json:"issues,omitempty"`
+	Knockoffs      []KnockoffInfo  `json:"knockoffs,omitempty"`
+}
+
+type KnockoffInfo struct {
 	BaseDoc  string          `json:"base"`
 	KnockDoc string          `json:"knock"`
 	AmtAbs   decimal.Decimal `json:"amt_abs"`
 }
 
-// ---------- CopyFromSource backed by channel ----------
 type chanCopySource struct {
 	ch   <-chan []any
 	cur  []any
@@ -94,7 +104,6 @@ func (c *chanCopySource) Values() ([]any, error) {
 
 func (c *chanCopySource) Err() error { return c.err }
 
-// ---------- date normalizer ----------
 type dateNormalizer struct {
 	mu sync.Mutex
 	m  map[string]string
@@ -121,9 +130,7 @@ func (d *dateNormalizer) NormalizeCached(s string) string {
 	return n
 }
 
-// ---------- Handler ----------
 func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
-	// Server-level tuning
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +154,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Prefetch masterentity map once per request (entity enrichment)
 		entityMap := map[string]string{}
 		{
 			rows, err := pool.Query(ctx, `SELECT unique_identifier, entity_name FROM public.masterentity WHERE is_deleted IS NOT TRUE`)
@@ -177,7 +183,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			fileWarnings := make([]string, 0)
 			fileErrors := make([]string, 0)
 
-			// --- Step 1: open file, save temp + hash ---
 			f, err := fh.Open()
 			if err != nil {
 				httpError(w, http.StatusBadRequest, "open file: "+err.Error())
@@ -201,7 +206,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 			csvR.FieldsPerRecord = -1
 
-			// Read header line (first row)
 			headersRec, err := csvR.Read()
 			if err != nil {
 				tmpFile.Close()
@@ -213,24 +217,18 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				headers[idx] = strings.TrimSpace(h)
 			}
 
-			// Build headerLower map for fast case-insensitive lookups
 			headerLower := map[string]string{}
 			for _, h := range headers {
 				headerLower[strings.ToLower(h)] = h
 			}
 
-			// parse mapping once: allow two shapes
-			// - simple map[string]string
-			// - map[string]interface{} with "LineItems" sub-object
 			headerMap := map[string]string{}
-			lineItemMap := map[string]string{} // mapping CSV header -> line-item target field
+			lineItemMap := map[string]string{} 
 			if len(mappingRaw) > 0 {
-				// try to parse flexible mapping
 				var candidate map[string]interface{}
 				if err := json.Unmarshal(mappingRaw, &candidate); err == nil {
 					for k, v := range candidate {
 						if strings.EqualFold(k, "LineItems") {
-							// parse sub-map
 							if sub, ok := v.(map[string]interface{}); ok {
 								for sk, sv := range sub {
 									lineItemMap[sk] = fmt.Sprintf("%v", sv)
@@ -238,20 +236,17 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 							}
 							continue
 						}
-						// top-level mapping (canonical -> csv header)
 						headerMap[k] = fmt.Sprintf("%v", v)
 					}
 				} else {
-					// fallback: try map[string]string directly
 					var simple map[string]string
-					_ = json.Unmarshal(mappingRaw, &simple) // ignore error: headerMap stays empty
+					_ = json.Unmarshal(mappingRaw, &simple) 
 					for k, v := range simple {
 						headerMap[k] = v
 					}
 				}
 			}
 
-			// Start tx
 			batchID := uuid.New()
 			conn, err := pool.Acquire(ctx)
 			if err != nil {
@@ -275,7 +270,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				tmpFile.Close()
 			}()
 
-			// insert batch metadata
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO public.staging_batches_exposures
 				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json)
@@ -285,7 +279,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// --- staging COPY: create a channel and source, start COPY in goroutine ---
 			stagingCh := make(chan []any, 4096)
 			stagingSrc := &chanCopySource{ch: stagingCh}
 			var stagingErr error
@@ -299,7 +292,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					stagingSrc)
 			}()
 
-			// --- stream rows: map, marshal once, push to stagingCh, collect canonical rows ---
 			canonicals := make([]CanonicalRow, 0, 1024)
 			totalRows := 0
 			dn := newDateNormalizer()
@@ -317,7 +309,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				totalRows++
 
-				// build row map using headers
 				rowMap := make(map[string]string, len(headers))
 				for idx, h := range headers {
 					val := ""
@@ -327,18 +318,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					rowMap[h] = val
 				}
 
-				// fast mapping to canonical keys using headerMap or autoMap fallback
 				mapped := fastMapWithHeaderLower(rowMap, headerLower, headerMap)
 
-				// if user provided lineItemMap (mapping CSV columns to line item fields),
-				// convert to a LineItems single element (so we can load line-items from same row).
 				if len(lineItemMap) > 0 {
-					// Build a single line item per row from mapped CSV fields
 					li := make(map[string]interface{})
 					for liTarget, csvHeader := range lineItemMap {
-						// csvHeader might be either canonical name or CSV header
 						v := ""
-						// prefer canonical mapped fields if present
 						if mv, ok := mapped[csvHeader]; ok {
 							v = fmt.Sprintf("%v", mv)
 						} else if rawV, ok := rowMap[csvHeader]; ok {
@@ -348,15 +333,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 						}
 						li[liTarget] = strings.TrimSpace(v)
 					}
-					// attach to mapped
 					mapped["LineItems"] = []map[string]interface{}{li}
 				}
 
-				// create raw JSON and mapped JSON for staging
 				rawB, _ := json.Marshal(map[string]string(rowMap))
 				mappedB, _ := json.Marshal(mapped)
 
-				// push into staging channel
 				stagingRow := []any{uuid.New(), batchID, src, rawB, mappedB, time.Now(), "pending"}
 				select {
 				case stagingCh <- stagingRow:
@@ -364,10 +346,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					stagingCh <- stagingRow
 				}
 
-				// map to canonical
 				c, _ := mapObjectToCanonical(mapped, src)
 
-				// parse amount once (store decimal + float)
 				if s := fmt.Sprintf("%v", mapped["AmountDoc"]); strings.TrimSpace(s) != "" {
 					s = strings.ReplaceAll(s, ",", "")
 					if f, err := strconv.ParseFloat(s, 64); err == nil {
@@ -401,13 +381,11 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 				c._raw = mapped
 
-				// minimal early validation
 				_, _ = validateSingleExposure(c)
 
 				canonicals = append(canonicals, c)
 			}
 
-			// close staging channel and wait for COPY to finish
 			close(stagingCh)
 			wgCopy.Wait()
 			if stagingErr != nil {
@@ -415,16 +393,13 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// update batch total_records
 			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET total_records=$1 WHERE batch_id=$2`, totalRows, batchID); err != nil {
 				httpError(w, 500, "update batch total_records: "+err.Error())
 				return
 			}
 
-			// --- allocation (hot loop) using float64 ---
 			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals)
 
-			// convert exposuresFloat to CanonicalRow slice with decimal populated
 			exposures := make([]CanonicalRow, 0, len(exposuresFloat))
 			for _, e := range exposuresFloat {
 				if e.AmountFloat == 0 {
@@ -440,12 +415,11 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				exposures = append(exposures, e)
 			}
 
-			// convert knocksFloat to map keyed by base doc
-			knockMap := map[string][]Knockoff{}
+			knockMap := map[string][]KnockoffInfo{}
 			for _, kf := range knocksFloat {
 				afmt := strconv.FormatFloat(kf.AmtFloat, 'f', 4, 64)
 				d, _ := decimal.NewFromString(afmt)
-				k := Knockoff{
+				k := KnockoffInfo{
 					BaseDoc:  kf.BaseDoc,
 					KnockDoc: kf.KnockDoc,
 					AmtAbs:   d,
@@ -453,10 +427,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				knockMap[kf.BaseDoc] = append(knockMap[kf.BaseDoc], k)
 			}
 
-			// --- validate exposures (final full validation) ---
 			qualified, nonQualified := validateExposures(exposures)
 
-			// --- prepare header COPY ---
 			headerCols := []string{
 				"exposure_header_id", "company_code", "entity", "entity1", "entity2", "entity3",
 				"exposure_type", "document_id", "document_date", "counterparty_type", "counterparty_code",
@@ -470,12 +442,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 			docToID := make(map[string]string, len(qualified))
 
-			// Build header source for COPY
-			// We'll log first few rows for debug if needed
 			debugLogLimit := 10
 			headerSrc := pgx.CopyFromSlice(len(qualified), func(i int) ([]any, error) {
 				q := qualified[i]
-				// parse dates into time.Time or nil
 				var docDate interface{}
 				var valDate interface{}
 				var postDate interface{}
@@ -497,7 +466,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 				addtl, _ := json.Marshal(q._raw)
 
-				// enrichment: try CompanyCode then unique_identifier in raw
 				entityName := ""
 				if n, ok := entityMap[strings.TrimSpace(q.CompanyCode)]; ok {
 					entityName = n
@@ -509,19 +477,16 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
-				// exposure_type = logical type, exposure_category = original source
 				srcUpper := strings.ToUpper(strings.TrimSpace(q.Source))
 				exposureCategory := srcUpper
 				exposureType := detectExposureCategory(srcUpper)
 
-				// override exposureType only if CSV provided meaningful Category (not generic "Exposure")
 				if v, ok := q._raw["Category"]; ok {
 					if s := strings.TrimSpace(fmt.Sprintf("%v", v)); s != "" && !strings.EqualFold(s, "Exposure") {
 						exposureType = s
 					}
 				}
 
-				// optional debug logging
 				if i < debugLogLimit {
 					rawCat := ""
 					if v, ok := q._raw["Category"]; ok {
@@ -583,27 +548,20 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				"delivery_date", "payment_terms", "inco_terms", "additional_line_details", "created_at",
 			}
 
-			liRows := make([][]any, 0) 
+			liRows := make([][]any, 0)
 			for _, q := range qualified {
-			
 				hidStr, ok := docToID[q.DocumentNumber]
 				if !ok {
-			
 					continue
 				}
 				hid, _ := uuid.Parse(hidStr)
 
-				
 				if len(q.LineItems) > 0 {
 					for _, lit := range q.LineItems {
 						// build columns
 						lineNumber := asString(lit["line_number"])
 						productID := asString(lit["product_id"])
 						productDesc := asString(lit["product_description"])
-						// quantity := asDecimalOrZero(lit["quantity"])
-						// unitOfMeasure := asString(lit["unit_of_measure"])
-						// unitPrice := asDecimalOrZero(lit["unit_price"])
-						// lineAmount := asDecimalOrZero(lit["line_item_amount"])
 						cleanQuantity := strings.ReplaceAll(asString(lit["quantity"]), ",", "")
 						cleanUnitPrice := strings.ReplaceAll(asString(lit["unit_price"]), ",", "")
 						cleanLineAmount := strings.ReplaceAll(asString(lit["line_item_amount"]), ",", "")
@@ -740,7 +698,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			// prepare response: map knockMap into response structure
 			respKnock := knockMap
 			if respKnock == nil {
-				respKnock = map[string][]Knockoff{}
+				respKnock = map[string][]KnockoffInfo{}
 			}
 			if len(fileWarnings) == 0 {
 				fileWarnings = make([]string, 0)
@@ -756,6 +714,48 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				respNonQ = nonQualified[:maxValidationErrors]
 			}
 
+			previewRows := make([]CanonicalPreviewRow, 0, len(qualified)+len(nonQualified))
+
+			// Add qualified rows first
+			for _, q := range qualified {
+				status := "ok"
+				klist := []KnockoffInfo{}
+				// attach knockoffs if exist
+				if ks, ok := knockMap[q.DocumentNumber]; ok {
+					status = "knocked_off"
+					for _, k := range ks {
+						klist = append(klist, KnockoffInfo{
+							BaseDoc:  k.BaseDoc,
+							KnockDoc: k.KnockDoc,
+							AmtAbs:   k.AmtAbs,
+						})
+					}
+				}
+				previewRows = append(previewRows, CanonicalPreviewRow{
+					DocumentNumber: q.DocumentNumber,
+					CompanyCode:    q.CompanyCode,
+					Party:          q.Party,
+					Currency:       q.DocumentCurrency,
+					Amount:         q.AmountDoc,
+					Status:         status,
+					Knockoffs:      klist,
+				})
+			}
+
+			// Add non-qualified rows
+			for _, n := range nonQualified {
+				previewRows = append(previewRows, CanonicalPreviewRow{
+					DocumentNumber: n.Row.DocumentNumber,
+					CompanyCode:    n.Row.CompanyCode,
+					Party:          n.Row.Party,
+					Currency:       n.Row.DocumentCurrency,
+					Amount:         n.Row.AmountDoc,
+					Status:         "non_qualified",
+					Issues:         n.Issues,
+				})
+			}
+
+			// ---------- Append final result ----------
 			results = append(results, UploadResult{
 				FileName:      fh.Filename,
 				Source:        src,
@@ -763,11 +763,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				TotalRows:     totalRows,
 				InsertedCount: len(qualified),
 				NonQualified:  respNonQ,
-				Knockoffs:     respKnock,
-				Errors:        append(fileErrors, fileWarnings...),
 				LineItemsRows: lineItemsInserted,
+				Rows:          previewRows,
+				Errors:        append(fileErrors, fileWarnings...),
 				Warnings:      fileWarnings,
 			})
+
 		} // end files loop
 
 		writeJSON(w, map[string]interface{}{
@@ -778,6 +779,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// ---------- Utility: allocation using float64 ----------
 type knockFloatInput struct {
 	BaseDoc  string
 	KnockDoc string
@@ -885,12 +887,10 @@ func fastMapWithHeaderLower(row map[string]string, headerLower map[string]string
 	out := make(map[string]interface{})
 	if len(headerMap) > 0 {
 		for canon, header := range headerMap {
-
 			if v, ok := row[header]; ok {
 				out[canon] = strings.TrimSpace(v)
 				continue
 			}
-		
 			if orig, ok := headerLower[strings.ToLower(strings.TrimSpace(header))]; ok {
 				out[canon] = strings.TrimSpace(row[orig])
 			} else {
@@ -899,7 +899,6 @@ func fastMapWithHeaderLower(row map[string]string, headerLower map[string]string
 		}
 		return out
 	}
-
 	lrow := map[string]string{}
 	for k, v := range row {
 		lrow[strings.ToLower(strings.TrimSpace(k))] = v
@@ -963,7 +962,6 @@ func mapObjectToCanonical(obj map[string]interface{}, src string) (CanonicalRow,
 		AmountDoc:        getD("AmountDoc"),
 		_raw:             obj,
 	}
-
 	if v, ok := obj["LineItems"]; ok {
 		switch t := v.(type) {
 		case []map[string]interface{}:
@@ -1071,7 +1069,6 @@ func detectExposureCategory(src string) string {
 	}
 }
 
-// ---------- small helpers for line items ----------
 func asString(v interface{}) string {
 	if v == nil {
 		return ""
