@@ -284,7 +284,7 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_open_amount, currency, document_date FROM exposure_headers WHERE document_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_open_amount, currency, value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
@@ -358,7 +358,7 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT total_original_amount AS amount, currency, document_date, ABS(CAST(document_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE document_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT total_original_amount AS amount, currency, value_date, ABS(CAST(value_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Error calculating Avg Exposure Maturity", http.StatusInternalServerError)
@@ -399,7 +399,7 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, "No accessible business units found", http.StatusForbidden)
 			return
 		}
-		query := `SELECT document_date FROM exposure_headers WHERE document_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
+		query := `SELECT value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
 			http.Error(w, "Failed to query", http.StatusInternalServerError)
