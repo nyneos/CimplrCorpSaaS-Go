@@ -408,7 +408,7 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 				eh.currency,
 				eh.total_open_amount,
 				eh.total_original_amount,
-				eh.document_date
+				eh.value_date
 			FROM exposure_hedge_links ehl
 			JOIN exposure_headers eh ON ehl.exposure_header_id = eh.exposure_header_id
 			WHERE ehl.booking_id = ANY($1)
@@ -716,4 +716,3 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
-
