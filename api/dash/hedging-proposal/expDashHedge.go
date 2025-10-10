@@ -137,7 +137,7 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(`
 			SELECT 
 				entity, currency, exposure_type, document_id, counterparty_name, 
-				total_open_amount, document_date
+				total_open_amount, value_date
 			FROM exposure_headers
 			WHERE entity = ANY($1)
 			  AND LOWER(approval_status) = 'approved'
