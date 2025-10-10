@@ -339,7 +339,10 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 				lineFields[k] = v
 			}
 		}
-
+		if val, ok := headerFields["document_date"]; ok {
+	headerFields["value_date"] = val
+	delete(headerFields, "document_date")
+}
 		// Update header if needed
 		if len(headerFields) > 0 {
 			setParts := []string{}
