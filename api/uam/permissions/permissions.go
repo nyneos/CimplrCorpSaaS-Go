@@ -194,28 +194,54 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Use UNNEST for bulk operation
-		rows, err := tx.Query(`
-			WITH input_data AS (
-				SELECT UNNEST($1::text[]) AS page_name,
-					   UNNEST($2::text[]) AS tab_name,
-					   UNNEST($3::text[]) AS action
-			),
-			inserted AS (
-				INSERT INTO public.permissions (page_name, tab_name, action)
-				SELECT page_name, NULLIF(tab_name, ''), action
-				FROM input_data
-				ON CONFLICT (page_name, tab_name, action) DO NOTHING
-				RETURNING id, page_name, tab_name, action
-			)
-			SELECT id, page_name, tab_name, action
-			FROM inserted
-			UNION
-			SELECT id, page_name, tab_name, action
-			FROM permissions
-			WHERE (page_name, tab_name, action) IN (
-				SELECT page_name, NULLIF(tab_name, ''), action FROM input_data
-			)
-		`, pq.Array(pageNames), pq.Array(nullStringToText(tabNames)), pq.Array(actions))
+		// rows, err := tx.Query(`
+		// 	WITH input_data AS (
+		// 		SELECT UNNEST($1::text[]) AS page_name,
+		// 			   UNNEST($2::text[]) AS tab_name,
+		// 			   UNNEST($3::text[]) AS action
+		// 	),
+		// 	inserted AS (
+		// 		INSERT INTO public.permissions (page_name, tab_name, action)
+		// 		SELECT page_name, NULLIF(tab_name, ''), action
+		// 		FROM input_data
+		// 		ON CONFLICT (page_name, tab_name, action) DO NOTHING
+		// 		RETURNING id, page_name, tab_name, action
+		// 	)
+		// 	SELECT id, page_name, tab_name, action
+		// 	FROM inserted
+		// 	UNION
+		// 	SELECT id, page_name, tab_name, action
+		// 	FROM permissions
+		// 	WHERE (page_name, tab_name, action) IN (
+		// 		SELECT page_name, NULLIF(tab_name, ''), action FROM input_data
+		// 	)
+		// `, pq.Array(pageNames), pq.Array(nullStringToText(tabNames)), pq.Array(actions))
+				rows, err := tx.Query(`
+    WITH input_data AS (
+        SELECT 
+            UNNEST($1::text[]) AS page_name,
+            UNNEST($2::text[]) AS tab_name,
+            UNNEST($3::text[]) AS action
+    ),
+    inserted AS (
+        INSERT INTO public.permissions (page_name, tab_name, action)
+        SELECT 
+            page_name, 
+            NULLIF(NULLIF(tab_name, ''), 'NULL') AS tab_name,
+            action
+        FROM input_data
+        ON CONFLICT (page_name, COALESCE(tab_name, ''), action) DO NOTHING
+        RETURNING id, page_name, tab_name, action
+    )
+    SELECT id, page_name, tab_name, action
+    FROM inserted
+    UNION
+    SELECT id, page_name, tab_name, action
+    FROM public.permissions
+    WHERE (page_name, COALESCE(tab_name, ''), action) IN (
+        SELECT page_name, COALESCE(NULLIF(NULLIF(tab_name, ''), 'NULL'), ''), action FROM input_data
+    )
+`, pq.Array(pageNames), pq.Array(nullStringToText(tabNames)), pq.Array(actions))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "permission sync failed: "+err.Error())
 			return
@@ -710,3 +736,4 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(resp)
 	}
 }
+
