@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	"strings"
 	"strconv"
+	"strings"
+
 	"github.com/lib/pq"
 )
 
@@ -24,13 +25,15 @@ import (
 // Handler: HedgeLinksDetails
 func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct { UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		ct := r.Header.Get("Content-Type")
 		if strings.HasPrefix(ct, "application/json") {
 			_ = json.NewDecoder(r.Body).Decode(&req)
-		// } else if strings.HasPrefix(ct, "multipart/form-data") {
-		// 	r.ParseMultipartForm(32 << 20)
-		// 	req.UserID = r.FormValue("user_id")
+			// } else if strings.HasPrefix(ct, "multipart/form-data") {
+			// 	r.ParseMultipartForm(32 << 20)
+			// 	req.UserID = r.FormValue("user_id")
 		}
 		if req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
@@ -52,15 +55,21 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
 			valPtrs := make([]interface{}, len(cols))
-			for i := range vals { valPtrs[i] = &vals[i] }
-			if err := rows.Scan(valPtrs...); err != nil { continue }
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			if err := rows.Scan(valPtrs...); err != nil {
+				continue
+			}
 			rowMap := map[string]interface{}{}
-			for i, col := range cols { rowMap[col] = vals[i] }
+			for i, col := range cols {
+				rowMap[col] = vals[i]
+			}
 			data = append(data, rowMap)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data": data,
+			"data":    data,
 		})
 	}
 }
@@ -253,7 +262,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
-		headRows, err := db.Query(`SELECT exposure_header_id, entity, exposure_type, currency, document_date, total_open_amount, counterparty_name FROM exposure_headers WHERE approval_status = 'Approved' OR approval_status = 'approved'`)
+		headRows, err := db.Query(`SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name FROM exposure_headers WHERE approval_status = 'Approved' OR approval_status = 'approved'`)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers")
 			return
@@ -330,7 +339,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 					"exposure_header_id": h["exposure_header_id"],
 					"type":               h["exposure_type"],
 					"currency":           h["currency"],
-					"maturity_date":      h["document_date"],
+					"maturity_date":      h["value_date"],
 					"amount":             totalOpen,
 					"hedge_amount":       hedgeAmount,
 					"bu_unit_compliance": buCompliance[entityStr],
@@ -345,6 +354,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
 func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -383,9 +393,9 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		}
 		linkMap := map[string]interface{}{
 			"exposure_header_id": link.ExposureHeaderID,
-			"booking_id":        link.BookingID,
-			"hedged_amount":     link.HedgedAmount,
-			"is_active":         link.IsActive,
+			"booking_id":         link.BookingID,
+			"hedged_amount":      link.HedgedAmount,
+			"is_active":          link.IsActive,
 		}
 		// Get booking amount
 		var bookingAmount float64
@@ -412,7 +422,3 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
-
-
-
-
