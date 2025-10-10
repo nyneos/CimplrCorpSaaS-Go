@@ -71,13 +71,65 @@ func StartFXService(db *sql.DB) {
 			h.ServeHTTP(w, r)
 		})
 
+		v91BulkUpdate := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 bulk-update: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.BulkUpdateValueDates(pool)
+			h.ServeHTTP(w, r)
+		})
+
+		v91BulkApprove := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 bulk-approve: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.BulkApproveExposures(pool)
+			h.ServeHTTP(w, r)
+		})
+
+		v91BulkReject := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 bulk-reject: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.BulkRejectExposures(pool)
+			h.ServeHTTP(w, r)
+		})
+
+		v91BulkDelete := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 bulk-delete: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.BulkDeleteExposures(pool)
+			h.ServeHTTP(w, r)
+		})
+
 		mux.Handle("/fx/exposures/upload/v91", api.BusinessUnitMiddleware(db)(v91Wrapper))
 		mux.Handle("/fx/exposures/dashboard/all/v91", api.BusinessUnitMiddleware(db)(v91DashAll))
 		mux.Handle("/fx/exposures/dashboard/by-year/v91", api.BusinessUnitMiddleware(db)(v91DashByYear))
+		mux.Handle("/fx/exposures/bulk-update-value-dates", api.BusinessUnitMiddleware(db)(v91BulkUpdate))
+		// v91 bulk approve/reject/delete handlers (use per-request pgx pool)
+		mux.Handle("/fx/exposures/bulk-approve", api.BusinessUnitMiddleware(db)(v91BulkApprove))
+		mux.Handle("/fx/exposures/bulk-reject", api.BusinessUnitMiddleware(db)(v91BulkReject))
+		mux.Handle("/fx/exposures/bulk-delete", api.BusinessUnitMiddleware(db)(v91BulkDelete))
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")
-	}
-	
+	}	
 	/*-------------     exposures    ;)      --------------------*/
 	/*upload */
 
@@ -141,4 +193,5 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
+
 
