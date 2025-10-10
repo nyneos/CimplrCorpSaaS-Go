@@ -591,6 +591,151 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		var req struct {
+// 			UserID string `json:"user_id"`
+// 		}
+// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+// 			http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
+// 			return
+// 		}
+// 		allPages := []string{
+// 			"entity",
+// 			"hierarchical",
+// 			"masters",
+// 			"dashboard",
+// 			"cfo-dashboard",
+// 			"fx-ops-dashboard",
+// 			"bu-currency-exposure-dashboard",
+// 			"hedging-dashboard",
+// 			"dashboard-builder",
+// 			"exposure-bucketing",
+// 			"hedging-proposal",
+// 			"roles",
+// 			"permissions",
+// 			"user-creation",
+// 			"exposure-upload",
+// 			"exposure-linkage",
+// 			"fx-forward-booking",
+// 			"forward-confirmation",
+// 			"fx-cancellation",
+// 			"settlement",
+// 		}
+// 		existing := make(map[string]struct{})
+// 		existRows, err := db.Query(`
+// 			SELECT DISTINCT page_name
+// 			FROM public.permissions
+// 			WHERE tab_name IS NULL
+// 			  AND action = 'hasAccess'
+// 			  AND page_name = ANY($1)
+// 		`, pq.Array(allPages))
+// 		if err != nil {
+// 			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 			return
+// 		}
+// 		defer existRows.Close()
+
+// 		for existRows.Next() {
+// 			var name string
+// 			if err := existRows.Scan(&name); err == nil {
+// 				existing[name] = struct{}{}
+// 			}
+// 		}
+// 		var missing []string
+// 		for _, page := range allPages {
+// 			if _, ok := existing[page]; !ok {
+// 				missing = append(missing, page)
+// 			}
+// 		}
+
+// 		if len(missing) > 0 {
+// 			tx, err := db.Begin()
+// 			if err != nil {
+// 				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 				return
+// 			}
+
+// 			stmt, err := tx.Prepare(`
+// 				INSERT INTO public.permissions (page_name, tab_name, action)
+// 				VALUES ($1, NULL, 'hasAccess')
+// 				ON CONFLICT (page_name, tab_name, action) DO NOTHING
+// 			`)
+// 			if err != nil {
+// 				tx.Rollback()
+// 				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 				return
+// 			}
+
+// 			for _, page := range missing {
+// 				if _, err := stmt.Exec(page); err != nil {
+// 					tx.Rollback()
+// 					http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 					return
+// 				}
+// 			}
+
+// 			stmt.Close()
+// 			if err := tx.Commit(); err != nil {
+// 				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 				return
+// 			}
+// 		}
+// 		query := `
+// 			SELECT p.page_name, p.action, rp.allowed
+// 			FROM public.user_roles ur
+// 			JOIN public.roles r ON ur.role_id = r.id
+// 			JOIN public.role_permissions rp ON r.id = rp.role_id
+// 			JOIN public.permissions p ON rp.permission_id = p.id
+// 			WHERE ur.user_id = $1
+// 			  AND LOWER(rp.status) = 'approved'
+// 			  AND LOWER(r.status) = 'approved'
+// 		`
+
+// 		rows, err := db.Query(query, req.UserID)
+// 		if err != nil {
+// 			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 			return
+// 		}
+// 		defer rows.Close()
+
+// 		type PermissionRow struct {
+// 			PageName string
+// 			Action   string
+// 			Allowed  bool
+// 		}
+
+// 		var results []PermissionRow
+// 		for rows.Next() {
+// 			var r PermissionRow
+// 			if err := rows.Scan(&r.PageName, &r.Action, &r.Allowed); err != nil {
+// 				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 				return
+// 			}
+// 			results = append(results, r)
+// 		}
+// 		if err := rows.Err(); err != nil {
+// 			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
+// 			return
+// 		}
+
+// 		pages := make(map[string]bool, len(allPages))
+// 		for _, page := range allPages {
+// 			pages[page] = false
+// 		}
+// 		for _, row := range results {
+// 			if strings.EqualFold(row.Action, "hasAccess") && row.Allowed {
+// 				pages[strings.ToLower(row.PageName)] = true
+// 			}
+// 		}
+// 		resp := map[string]interface{}{
+// 			"success": true,
+// 			"pages":   pages,
+// 		}
+// 		w.Header().Set("Content-Type", "application/json")
+// 		json.NewEncoder(w).Encode(resp)
+// 	}
+// }
 func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -600,89 +745,26 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
 			return
 		}
+
 		allPages := []string{
-			"entity",
-			"hierarchical",
-			"masters",
-			"dashboard",
-			"cfo-dashboard",
-			"fx-ops-dashboard",
-			"bu-currency-exposure-dashboard",
-			"hedging-dashboard",
-			"dashboard-builder",
-			"exposure-bucketing",
-			"hedging-proposal",
-			"roles",
-			"permissions",
-			"user-creation",
-			"exposure-upload",
-			"exposure-linkage",
-			"fx-forward-booking",
-			"forward-confirmation",
-			"fx-cancellation",
-			"settlement",
+			"entity", "hierarchical", "masters", "dashboard", "cfo-dashboard",
+			"fx-ops-dashboard", "bu-currency-exposure-dashboard", "hedging-dashboard",
+			"dashboard-builder", "exposure-bucketing", "hedging-proposal", "roles",
+			"permissions", "user-creation", "exposure-upload", "exposure-linkage",
+			"fx-forward-booking", "forward-confirmation", "fx-cancellation", "settlement",
 		}
-		existing := make(map[string]struct{})
-		existRows, err := db.Query(`
-			SELECT DISTINCT page_name
-			FROM public.permissions
-			WHERE tab_name IS NULL
-			  AND action = 'hasAccess'
-			  AND page_name = ANY($1)
+
+		// ✅ ensure all pages exist (in one upsert query)
+		_, _ = db.Exec(`
+			INSERT INTO public.permissions (page_name, tab_name, action)
+			SELECT p, '', 'hasAccess'
+			FROM unnest($1::text[]) AS p
+			ON CONFLICT (page_name, COALESCE(tab_name, ''), action) DO NOTHING
 		`, pq.Array(allPages))
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-			return
-		}
-		defer existRows.Close()
 
-		for existRows.Next() {
-			var name string
-			if err := existRows.Scan(&name); err == nil {
-				existing[name] = struct{}{}
-			}
-		}
-		var missing []string
-		for _, page := range allPages {
-			if _, ok := existing[page]; !ok {
-				missing = append(missing, page)
-			}
-		}
-
-		if len(missing) > 0 {
-			tx, err := db.Begin()
-			if err != nil {
-				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-				return
-			}
-
-			stmt, err := tx.Prepare(`
-				INSERT INTO public.permissions (page_name, tab_name, action)
-				VALUES ($1, NULL, 'hasAccess')
-				ON CONFLICT (page_name, tab_name, action) DO NOTHING
-			`)
-			if err != nil {
-				tx.Rollback()
-				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-				return
-			}
-
-			for _, page := range missing {
-				if _, err := stmt.Exec(page); err != nil {
-					tx.Rollback()
-					http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-					return
-				}
-			}
-
-			stmt.Close()
-			if err := tx.Commit(); err != nil {
-				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-				return
-			}
-		}
-		query := `
-			SELECT p.page_name, p.action, rp.allowed
+		// ✅ fetch all approved hasAccess permissions for user
+		rows, err := db.Query(`
+			SELECT DISTINCT LOWER(p.page_name)
 			FROM public.user_roles ur
 			JOIN public.roles r ON ur.role_id = r.id
 			JOIN public.role_permissions rp ON r.id = rp.role_id
@@ -690,50 +772,31 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			WHERE ur.user_id = $1
 			  AND LOWER(rp.status) = 'approved'
 			  AND LOWER(r.status) = 'approved'
-		`
-
-		rows, err := db.Query(query, req.UserID)
+			  AND p.action = 'hasAccess'
+			  AND rp.allowed = true
+		`, req.UserID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		type PermissionRow struct {
-			PageName string
-			Action   string
-			Allowed  bool
-		}
-
-		var results []PermissionRow
-		for rows.Next() {
-			var r PermissionRow
-			if err := rows.Scan(&r.PageName, &r.Action, &r.Allowed); err != nil {
-				http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-				return
-			}
-			results = append(results, r)
-		}
-		if err := rows.Err(); err != nil {
-			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
-			return
-		}
-
 		pages := make(map[string]bool, len(allPages))
-		for _, page := range allPages {
-			pages[page] = false
+		for _, p := range allPages {
+			pages[p] = false
 		}
-		for _, row := range results {
-			if strings.EqualFold(row.Action, "hasAccess") && row.Allowed {
-				pages[strings.ToLower(row.PageName)] = true
-			}
+
+		for rows.Next() {
+			var page string
+			_ = rows.Scan(&page)
+			pages[page] = true
 		}
-		resp := map[string]interface{}{
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"pages":   pages,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		})
 	}
 }
 
