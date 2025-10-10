@@ -122,11 +122,11 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/exposures/upload/v91", api.BusinessUnitMiddleware(db)(v91Wrapper))
 		mux.Handle("/fx/exposures/dashboard/all/v91", api.BusinessUnitMiddleware(db)(v91DashAll))
 		mux.Handle("/fx/exposures/dashboard/by-year/v91", api.BusinessUnitMiddleware(db)(v91DashByYear))
-		mux.Handle("/fx/exposures/bulk-update-value-dates", api.BusinessUnitMiddleware(db)(v91BulkUpdate))
+		mux.Handle("/fx/exposures/bulk-update-value-dates/v91", api.BusinessUnitMiddleware(db)(v91BulkUpdate))
 		// v91 bulk approve/reject/delete handlers (use per-request pgx pool)
-		mux.Handle("/fx/exposures/bulk-approve", api.BusinessUnitMiddleware(db)(v91BulkApprove))
-		mux.Handle("/fx/exposures/bulk-reject", api.BusinessUnitMiddleware(db)(v91BulkReject))
-		mux.Handle("/fx/exposures/bulk-delete", api.BusinessUnitMiddleware(db)(v91BulkDelete))
+		mux.Handle("/fx/exposures/bulk-approve/v91", api.BusinessUnitMiddleware(db)(v91BulkApprove))
+		mux.Handle("/fx/exposures/bulk-reject/v91", api.BusinessUnitMiddleware(db)(v91BulkReject))
+		mux.Handle("/fx/exposures/bulk-delete/v91", api.BusinessUnitMiddleware(db)(v91BulkDelete))
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")
 	}	
@@ -193,5 +193,6 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
+
 
 
