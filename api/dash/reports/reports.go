@@ -68,7 +68,7 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		expRows, err := db.Query(`SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, document_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
+		expRows, err := db.Query(`SELECT exposure_header_id, company_code, entity, entity1, entity2, entity3, exposure_type, document_id, value_date, counterparty_name, currency, total_original_amount, total_open_amount, value_date FROM exposure_headers WHERE entity = ANY($1)`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to fetch exposures"})
@@ -162,7 +162,8 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"summary": summary})
 	}
-}	
+}
+
 type ForwardBooking struct {
 	SystemTransactionID         string     `json:"system_transaction_id"`
 	InternalReferenceID         *string    `json:"internal_reference_id,omitempty"`
@@ -199,8 +200,8 @@ type ForwardBooking struct {
 }
 
 type ForwardRollover struct {
-	RolloverID           string `json:"rollover_id"`
-	BookingID            string `json:"booking_id"`
+	RolloverID           string    `json:"rollover_id"`
+	BookingID            string    `json:"booking_id"`
 	AmountRolledOver     float64   `json:"amount_rolled_over"`
 	RolloverDate         time.Time `json:"rollover_date"`
 	OriginalMaturityDate time.Time `json:"original_maturity_date"`
@@ -213,8 +214,8 @@ type ForwardRollover struct {
 }
 
 type ForwardCancellation struct {
-	CancellationID     string `json:"cancellation_id"`
-	BookingID          string `json:"booking_id"`
+	CancellationID     string    `json:"cancellation_id"`
+	BookingID          string    `json:"booking_id"`
 	AmountCancelled    float64   `json:"amount_cancelled"`
 	CancellationDate   time.Time `json:"cancellation_date"`
 	CancellationRate   float64   `json:"cancellation_rate"`
