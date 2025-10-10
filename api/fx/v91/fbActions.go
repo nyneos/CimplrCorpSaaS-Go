@@ -37,7 +37,6 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "empty payload")
 			return
 		}
-
 		requester := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -49,11 +48,8 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, "invalid user/session")
 			return
 		}
-
 		updated := make([]string, 0, len(req.Rows))
 
-		// For simplicity we update each row individually: mark approval_status as 'pending', set requested_by,
-		// append proposed date into additional_header_details JSONB under key proposed_value_date, and set updated_at.
 		for i, p := range req.Rows {
 			if p.ExposureHeaderID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("missing exposure_header_id at index %d", i))
@@ -68,21 +64,28 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err))
 				return
 			}
+			q := `
+				UPDATE public.exposure_headers
+				SET 
+					value_date = $1,
+					approval_status = 'pending',
+					requested_by = $2,
+					updated_at = now()
+				WHERE exposure_header_id = $3
+				RETURNING exposure_header_id
+			`
 
-			// build json to append
-			addJSON := fmt.Sprintf(`{"proposed_value_date":"%s"}`, dt.Format("2006-01-02"))
+			row := pool.QueryRow(ctx, q, dt, requester, p.ExposureHeaderID)
 
-			q := `UPDATE public.exposure_headers SET approval_status=$1, requested_by=$2, additional_header_details = COALESCE(additional_header_details, '{}'::jsonb) || $3::jsonb, updated_at=now() WHERE exposure_header_id = $4 RETURNING exposure_header_id`
-			row := pool.QueryRow(ctx, q, "pending", requester, addJSON, p.ExposureHeaderID)
 			var id string
 			if err := row.Scan(&id); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("db update error at index %d: %v", i, err))
 				return
 			}
+
 			updated = append(updated, id)
 		}
-
-		api.RespondWithPayload(w, true, "", updated)
+		api.RespondWithPayload(w, true, "value_date updated successfully", updated)
 	}
 }
 
