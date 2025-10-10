@@ -18,22 +18,43 @@ import (
 func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		var payload []struct {
-			ExposureHeaderID string `json:"exposure_header_id"`
-			NewValueDate     string `json:"new_value_date"`
+		var req struct {
+			UserID string `json:"user_id"`
+			Rows   []struct {
+				ExposureHeaderID string `json:"exposure_header_id"`
+				NewValueDate     string `json:"new_value_date"`
+			} `json:"payload"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
-		if len(payload) == 0 {
+		if req.UserID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			return
+		}
+		if len(req.Rows) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "empty payload")
 			return
 		}
 
-		uuids := make([]string, 0, len(payload))
-		dates := make([]time.Time, 0, len(payload))
-		for i, p := range payload {
+		requester := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				requester = s.Name
+				break
+			}
+		}
+		if requester == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "invalid user/session")
+			return
+		}
+
+		updated := make([]string, 0, len(req.Rows))
+
+		// For simplicity we update each row individually: mark approval_status as 'pending', set requested_by,
+		// append proposed date into additional_header_details JSONB under key proposed_value_date, and set updated_at.
+		for i, p := range req.Rows {
 			if p.ExposureHeaderID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("missing exposure_header_id at index %d", i))
 				return
@@ -42,41 +63,23 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("missing new_value_date at index %d", i))
 				return
 			}
-
 			dt, err := parseFlexibleDate(p.NewValueDate)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("invalid date at index %d: %v", i, err))
 				return
 			}
-			uuids = append(uuids, p.ExposureHeaderID)
-			dates = append(dates, dt)
-		}
 
-		q := `
-			WITH data AS (
-				SELECT u::uuid AS hdr_id, d::date AS new_val
-				FROM UNNEST($1::text[], $2::date[]) AS t(u,d)
-			)
-			UPDATE public.exposure_headers eh
-			SET value_date = data.new_val, updated_at = now()
-			FROM data
-			WHERE eh.exposure_header_id = data.hdr_id
-			RETURNING eh.exposure_header_id
-		`
+			// build json to append
+			addJSON := fmt.Sprintf(`{"proposed_value_date":"%s"}`, dt.Format("2006-01-02"))
 
-		rows, err := pool.Query(ctx, q, uuids, dates)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "db update error: "+err.Error())
-			return
-		}
-		defer rows.Close()
-
-		updated := make([]string, 0)
-		for rows.Next() {
+			q := `UPDATE public.exposure_headers SET approval_status=$1, requested_by=$2, additional_header_details = COALESCE(additional_header_details, '{}'::jsonb) || $3::jsonb, updated_at=now() WHERE exposure_header_id = $4 RETURNING exposure_header_id`
+			row := pool.QueryRow(ctx, q, "pending", requester, addJSON, p.ExposureHeaderID)
 			var id string
-			if err := rows.Scan(&id); err == nil {
-				updated = append(updated, id)
+			if err := row.Scan(&id); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("db update error at index %d: %v", i, err))
+				return
 			}
+			updated = append(updated, id)
 		}
 
 		api.RespondWithPayload(w, true, "", updated)
