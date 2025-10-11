@@ -25,7 +25,7 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 		var jsonResult []byte
 		err := db.QueryRow(`
 			WITH role_cte AS (
-				SELECT id FROM public.roles WHERE LOWER(name) = LOWER($1)
+				SELECT id FROM public.roles WHERE LOWER(name) = LOWER($1) AND LOWER(status) = 'approved'
 			),
 			page_json AS (
 				SELECT 
@@ -38,6 +38,7 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 								LEFT JOIN public.role_permissions subrp
 									ON subrp.permission_id = subp.id
 									AND subrp.role_id = (SELECT id FROM role_cte)
+									AND LOWER(subrp.status) = 'approved'
 								WHERE subp.page_name = p.page_name
 								  AND (subp.tab_name IS NULL OR subp.tab_name = '')
 							), '{}'::jsonb),
@@ -52,6 +53,7 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 									LEFT JOIN public.role_permissions subrp2
 										ON subrp2.permission_id = subp2.id
 										AND subrp2.role_id = (SELECT id FROM role_cte)
+										AND LOWER(subrp2.status) = 'approved'
 									WHERE subp2.page_name = p.page_name
 									  AND subp2.tab_name IS NOT NULL
 									  AND subp2.tab_name <> ''
@@ -396,12 +398,15 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		WITH rp_data AS (
 			SELECT 
 				p.page_name,
-				p.tab_name,
-				p.action,
-				COALESCE(rp.allowed, false) AS allowed
+			p.tab_name,
+			p.action,
+			COALESCE(rp.allowed, false) AS allowed
 			FROM role_permissions rp
 			JOIN permissions p ON rp.permission_id = p.id
+			JOIN roles r ON rp.role_id = r.id
 			WHERE rp.role_id = $1
+			  AND LOWER(rp.status) = 'approved'
+			  AND LOWER(r.status) = 'approved'
 		),
 		action_json AS (
 			SELECT 
@@ -754,7 +759,6 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			"fx-forward-booking", "forward-confirmation", "fx-cancellation", "settlement",
 		}
 
-		// ✅ ensure all pages exist (in one upsert query)
 		_, _ = db.Exec(`
 			INSERT INTO public.permissions (page_name, tab_name, action)
 			SELECT p, '', 'hasAccess'
@@ -762,7 +766,6 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			ON CONFLICT (page_name, COALESCE(tab_name, ''), action) DO NOTHING
 		`, pq.Array(allPages))
 
-		// ✅ fetch all approved hasAccess permissions for user
 		rows, err := db.Query(`
 			SELECT DISTINCT LOWER(p.page_name)
 			FROM public.user_roles ur
@@ -799,4 +802,5 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 
