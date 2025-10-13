@@ -159,7 +159,8 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				created_at,
 				updated_at
 			FROM public.exposure_headers
-			WHERE exposure_category IS NOT NULL;
+			WHERE exposure_category IS NOT NULL
+			AND lower(coalesce(exposure_creation_status, '')) <> 'approved';
 		`
 
 		rows, err := pool.Query(ctx, query)
@@ -359,6 +360,7 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 				updated_at
 			FROM public.exposure_headers
 			WHERE exposure_category IS NOT NULL
+			AND lower(coalesce(exposure_creation_status, '')) <> 'approved'
 			AND ($1::int IS NULL OR (
 				EXTRACT(YEAR FROM value_date) = $1::int OR
 				EXTRACT(YEAR FROM posting_date) = $1::int OR
