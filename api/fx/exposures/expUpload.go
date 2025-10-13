@@ -510,7 +510,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-			WHERE h.entity = ANY($1)
+			WHERE h.entity = ANY($1) AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch exposure headers/line items")
@@ -733,7 +733,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT h.*, l.*
 			FROM exposure_headers h
 			JOIN exposure_line_items l ON h.exposure_header_id = l.exposure_header_id
-			WHERE h.entity = ANY($1) AND h.approval_status NOT IN ('Approved', 'approved')
+			WHERE h.entity = ANY($1) AND h.approval_status NOT IN ('Approved', 'approved') AND lower(coalesce(h.exposure_creation_status, '')) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to fetch pending approval headers/line items")
