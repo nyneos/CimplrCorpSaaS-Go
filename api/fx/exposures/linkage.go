@@ -63,7 +63,13 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				rowMap[col] = vals[i]
+				// rowMap[col] = vals[i]
+				switch v := vals[i].(type) {
+				case []uint8:
+					rowMap[col] = string(v)
+				default:
+					rowMap[col] = vals[i]
+				}
 			}
 			data = append(data, rowMap)
 		}
@@ -422,3 +428,4 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
+
