@@ -465,6 +465,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				"exposure_type", "document_id", "document_date", "counterparty_type", "counterparty_code",
 				"counterparty_name", "currency", "total_original_amount", "total_open_amount",
 				"value_date", "status", "is_active", "created_at", "updated_at", "approval_status",
+				"exposure_creation_status",
 				"approval_comment", "approved_by", "delete_comment", "requested_by", "rejection_comment",
 				"approved_at", "rejected_by", "rejected_at", "time_based", "amount_in_local_currency",
 				"posting_date", "text", "gl_account", "reference", "additional_header_details",
@@ -575,7 +576,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					"Open",                 // status
 					true,                   // is_active
 					time.Now(), time.Now(), // created_at, updated_at
-					"pending",               // approval_status
+					"Pending",               // approval_status
+					"Pending",               // exposure_creation_status
 					nil, nil, nil, nil, nil, // approval_comment, approved_by, delete_comment, requested_by, rejection_comment
 					nil, nil, // approved_at, rejected_by
 					nil,           // rejected_at
