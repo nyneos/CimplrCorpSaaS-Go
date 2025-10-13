@@ -68,7 +68,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 				UPDATE public.exposure_headers
 				SET 
 					value_date = $1,
-					approval_status = 'pending',
+					exposure_creation_status = 'Pending',
 					requested_by = $2,
 					updated_at = now()
 				WHERE exposure_header_id = $3
@@ -190,7 +190,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		sel := `SELECT exposure_header_id, approval_status FROM public.exposure_headers WHERE exposure_header_id = ANY($1)`
+		sel := `SELECT exposure_header_id, exposure_creation_status FROM public.exposure_headers WHERE exposure_header_id = ANY($1)`
 		rows, err := pool.Query(ctx, sel, req.ExposureIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
@@ -216,8 +216,10 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 		warnings := []string{}
 
 		if len(toApprove) > 0 {
-			uq := `UPDATE public.exposure_headers SET approval_status='Approved', approval_comment=$1, approved_by=$2, approved_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
-			r2, err := pool.Query(ctx, uq, nullifyEmpty(req.Comment), approver, toApprove)
+			// uq := `UPDATE public.exposure_headers SET approval_status='Approved', approval_comment=$1, approved_by=$2, approved_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
+			// r2, err := pool.Query(ctx, uq, nullifyEmpty(req.Comment), approver, toApprove)
+			uq := `UPDATE public.exposure_headers SET exposure_creation_status='Approved', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
+			r2, err := pool.Query(ctx, uq, toApprove)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
 				return
@@ -359,8 +361,10 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
-		rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
+		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
+		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
+		q := `UPDATE public.exposure_headers SET exposure_creation_status='Rejected', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
+	rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
 			return
@@ -401,8 +405,10 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		q := `UPDATE public.exposure_headers SET approval_status='Delete-approval',delete_comment=$1, is_active = FALSE, updated_at=now() WHERE exposure_header_id = ANY($2) RETURNING exposure_header_id`
-		rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), req.ExposureIDs)
+		// q := `UPDATE public.exposure_headers SET approval_status='Delete-approval',delete_comment=$1, is_active = FALSE, updated_at=now() WHERE exposure_header_id = ANY($2) RETURNING exposure_header_id`
+		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), req.ExposureIDs)
+		q := `UPDATE public.exposure_headers SET exposure_creation_status='Delete-Approval', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
+	rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
 			return
@@ -419,9 +425,9 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func nullifyEmpty(s string) interface{} {
-	if s == "" {
-		return nil
-	}
-	return s
-}
+// func nullifyEmpty(s string) interface{} {
+// 	if s == "" {
+// 		return nil
+// 	}
+// 	return s
+// }
