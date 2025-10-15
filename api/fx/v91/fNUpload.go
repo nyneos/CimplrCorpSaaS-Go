@@ -149,6 +149,38 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		files := r.MultipartForm.File["files"]
 		sources := r.MultipartForm.Value["source"]
 		mappings := r.MultipartForm.Value["mapping"]
+		// ----- Logic modes and currency aliases -----
+		receivableLogic := strings.ToLower(strings.TrimSpace(r.FormValue("receivable_logic")))
+		payableLogic := strings.ToLower(strings.TrimSpace(r.FormValue("payable_logic")))
+		currencyAliasesJSON := r.FormValue("currency_aliases")
+
+		currencyAliases := map[string]string{}
+		if strings.TrimSpace(currencyAliasesJSON) != "" {
+			if err := json.Unmarshal([]byte(currencyAliasesJSON), &currencyAliases); err != nil {
+				log.Printf("[WARN] invalid currency_aliases JSON: %v", err)
+				} else {
+				// normalize keys and values to uppercase to make lookups case-insensitive
+				norm := make(map[string]string, len(currencyAliases))
+				for k, v := range currencyAliases {
+					kk := strings.ToUpper(strings.TrimSpace(k))
+					vv := strings.ToUpper(strings.TrimSpace(v))
+					if kk == "" || vv == "" {
+						continue
+					}
+					norm[kk] = vv
+				}
+				currencyAliases = norm
+			}
+		}
+
+		// default fallbacks
+		if receivableLogic == "" {
+			receivableLogic = "standard"
+		}
+		if payableLogic == "" {
+			payableLogic = "standard"
+		}
+
 		userID := r.FormValue("user_id")
 		if userID == "" {
 			userID = "1"
@@ -160,16 +192,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 		entityMap := map[string]string{}
 		{
-			// rows, err := pool.Query(ctx, `SELECT unique_identifier, entity_name FROM public.masterentity WHERE is_deleted IS NOT TRUE`)
-			// if err == nil {
-			// 	for rows.Next() {
-			// 		var uid, name string
-			// 		if err := rows.Scan(&uid, &name); err == nil {
-			// 			entityMap[strings.TrimSpace(uid)] = strings.TrimSpace(name)
-			// 		}
-			// 	}
-			// 	rows.Close()
-			// }
 			rows, err := pool.Query(ctx, `
 	SELECT COALESCE(NULLIF(unique_identifier,''), entity_id) AS uid,
 	       TRIM(entity_name),
@@ -254,7 +276,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			headerMap := map[string]string{}
-			lineItemMap := map[string]string{} 
+			lineItemMap := map[string]string{}
 			if len(mappingRaw) > 0 {
 				var candidate map[string]interface{}
 				if err := json.Unmarshal(mappingRaw, &candidate); err == nil {
@@ -271,7 +293,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				} else {
 					var simple map[string]string
-					_ = json.Unmarshal(mappingRaw, &simple) 
+					_ = json.Unmarshal(mappingRaw, &simple)
 					for k, v := range simple {
 						headerMap[k] = v
 					}
@@ -377,7 +399,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					stagingCh <- stagingRow
 				}
 
-				c, _ := mapObjectToCanonical(mapped, src)
+				// c, _ := mapObjectToCanonical(mapped, src)
+				c, _ := mapObjectToCanonical(mapped, src, currencyAliases)
 
 				if s := fmt.Sprintf("%v", mapped["AmountDoc"]); strings.TrimSpace(s) != "" {
 					s = strings.ReplaceAll(s, ",", "")
@@ -429,7 +452,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals)
+			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
 
 			exposures := make([]CanonicalRow, 0, len(exposuresFloat))
 			for _, e := range exposuresFloat {
@@ -498,16 +521,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 				addtl, _ := json.Marshal(q._raw)
 
-				// entityName := ""
-				// if n, ok := entityMap[strings.TrimSpace(q.CompanyCode)]; ok {
-				// 	entityName = n
-				// } else if uidRaw, ok := q._raw["unique_identifier"]; ok {
-				// 	if uid := strings.TrimSpace(fmt.Sprintf("%v", uidRaw)); uid != "" {
-				// 		if n2, ok2 := entityMap[uid]; ok2 {
-				// 			entityName = n2
-				// 		}
-				// 	}
-				// }
 				entityName := ""
 				cc := strings.TrimSpace(q.CompanyCode)
 				if n, ok := entityMap[cc]; ok {
@@ -660,7 +673,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					return liRows[i], nil
 				})
 				if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_line_items"}, lineItemCols, liSrc); err != nil {
-					// log but don't fail entire batch — choose behavior per your appetite
 					log.Printf("[FBUP] error copying line items: %v", err)
 					fileWarnings = append(fileWarnings, fmt.Sprintf("line items copy failed: %v", err))
 				} else {
@@ -668,7 +680,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// --- If some knockoff docs weren't created in this batch (i.e. docToID missing) query DB for ids ---
 			if len(knockMap) > 0 {
 				needLookup := make([]string, 0)
 				for _, ks := range knockMap {
@@ -711,13 +722,11 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Insert rollovers
 			for _, ks := range knockMap {
 				for _, k := range ks {
 					pidStr, ok1 := docToID[k.BaseDoc]
 					cidStr, ok2 := docToID[k.KnockDoc]
 					if !ok1 || !ok2 {
-						// skip missing
 						continue
 					}
 					pid, perr := uuid.Parse(pidStr)
@@ -736,7 +745,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// update batch processed/failed counts & commit
 			log.Printf("[FBUP] updating staging batch counts processed=%d failed=%d batch=%s file=%s", len(qualified), len(nonQualified), batchID.String(), fh.Filename)
 			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET processed_records=$1, failed_records=$2, status='completed' WHERE batch_id=$3`, len(qualified), len(nonQualified), batchID); err != nil {
 				httpError(w, 500, "update batch: "+err.Error())
@@ -750,7 +758,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			committed = true
 			log.Printf("[FBUP] committed batch %s file=%s processed=%d failed=%d warnings=%d line_items=%d", batchID.String(), fh.Filename, len(qualified), len(nonQualified), len(fileWarnings), lineItemsInserted)
 
-			// prepare response: map knockMap into response structure
 			respKnock := knockMap
 			if respKnock == nil {
 				respKnock = map[string][]KnockoffInfo{}
@@ -761,8 +768,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			if len(fileErrors) == 0 {
 				fileErrors = make([]string, 0)
 			}
-
-			// truncate nonQualified list if too big
 			const maxValidationErrors = 200
 			respNonQ := nonQualified
 			if len(nonQualified) > maxValidationErrors {
@@ -770,12 +775,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			previewRows := make([]CanonicalPreviewRow, 0, len(qualified)+len(nonQualified))
-
-			// Add qualified rows first
 			for _, q := range qualified {
 				status := "ok"
 				klist := []KnockoffInfo{}
-				// attach knockoffs if exist
 				if ks, ok := knockMap[q.DocumentNumber]; ok {
 					status = "knocked_off"
 					for _, k := range ks {
@@ -831,7 +833,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				Errors:        append(fileErrors, fileWarnings...),
 				Warnings:      fileWarnings,
 			})
-
 		} // end files loop
 
 		writeJSON(w, map[string]interface{}{
@@ -842,34 +843,90 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ---------- Utility: allocation using float64 ----------
 type knockFloatInput struct {
 	BaseDoc  string
 	KnockDoc string
 	AmtFloat float64
 }
 
-func allocateFIFOFloat(rows []CanonicalRow) ([]CanonicalRow, []knockFloatInput) {
+// func allocateFIFOFloat(rows []CanonicalRow) ([]CanonicalRow, []knockFloatInput)
+//
+//		bySrc := map[string][]CanonicalRow{}
+//		for _, r := range rows {
+//			bySrc[r.Source] = append(bySrc[r.Source], r)
+//		}
+//		allExps := make([]CanonicalRow, 0)
+//		allKnocks := make([]knockFloatInput, 0)
+//		for src, arr := range bySrc {
+//			credits := filterBySignFloat(arr, -1)
+//			debits := filterBySignFloat(arr, +1)
+//			exps, knocks := allocateFIFOFloatCore(credits, debits)
+//			if src == "FBL5N" {
+//				debits2 := filterBySignFloat(arr, +1)
+//				credits2 := filterBySignFloat(arr, -1)
+//				exps2, knocks2 := allocateFIFOFloatCore(debits2, credits2)
+//				exps = append(exps, exps2...)
+//				knocks = append(knocks, knocks2...)
+//			}
+//			allExps = append(allExps, exps...)
+//			allKnocks = append(allKnocks, knocks...)
+//		}
+//		return allExps, allKnocks
+//	}
+func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string) ([]CanonicalRow, []knockFloatInput) {
 	bySrc := map[string][]CanonicalRow{}
 	for _, r := range rows {
 		bySrc[r.Source] = append(bySrc[r.Source], r)
 	}
+
 	allExps := make([]CanonicalRow, 0)
 	allKnocks := make([]knockFloatInput, 0)
+
 	for src, arr := range bySrc {
 		credits := filterBySignFloat(arr, -1)
 		debits := filterBySignFloat(arr, +1)
-		exps, knocks := allocateFIFOFloatCore(credits, debits)
-		if src == "FBL5N" {
-			debits2 := filterBySignFloat(arr, +1)
-			credits2 := filterBySignFloat(arr, -1)
-			exps2, knocks2 := allocateFIFOFloatCore(debits2, credits2)
-			exps = append(exps, exps2...)
-			knocks = append(knocks, knocks2...)
+
+		switch src {
+		case "FBL1N": // Payables (vendors)
+			if strings.EqualFold(payableLogic, "reverse") {
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				allExps = append(allExps, exps...)
+				allKnocks = append(allKnocks, knocks...)
+			} else {
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				allExps = append(allExps, exps...)
+				allKnocks = append(allKnocks, knocks...)
+			}
+
+		case "FBL5N": // Receivables (customers)
+			if strings.EqualFold(receivableLogic, "reverse") {
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				allExps = append(allExps, exps...)
+				allKnocks = append(allKnocks, knocks...)
+			} else {
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				allExps = append(allExps, exps...)
+				allKnocks = append(allKnocks, knocks...)
+			}
+
+		case "FBL3N": // GR/IR (payable-like)
+			if strings.EqualFold(payableLogic, "reverse") {
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				allExps = append(allExps, exps...)
+				allKnocks = append(allKnocks, knocks...)
+			} else {
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				allExps = append(allExps, exps...)
+				allKnocks = append(allKnocks, knocks...)
+			}
+
+		default:
+			exps, knocks := allocateFIFOFloatCore(credits, debits)
+			allExps = append(allExps, exps...)
+			allKnocks = append(allKnocks, knocks...)
 		}
-		allExps = append(allExps, exps...)
-		allKnocks = append(allKnocks, knocks...)
 	}
+
 	return allExps, allKnocks
 }
 
@@ -987,7 +1044,8 @@ func fastMapWithHeaderLower(row map[string]string, headerLower map[string]string
 	return out
 }
 
-func mapObjectToCanonical(obj map[string]interface{}, src string) (CanonicalRow, error) {
+// func mapObjectToCanonical(obj map[string]interface{}, src string) (CanonicalRow, error)
+func mapObjectToCanonical(obj map[string]interface{}, src string, aliasMap map[string]string) (CanonicalRow, error) {
 	getS := func(k string) string {
 		if v, ok := obj[k]; ok {
 			return strings.TrimSpace(fmt.Sprintf("%v", v))
@@ -1013,11 +1071,16 @@ func mapObjectToCanonical(obj map[string]interface{}, src string) (CanonicalRow,
 		}
 		return decimal.Zero
 	}
+	cur := strings.TrimSpace(strings.ToUpper(getS("DocumentCurrency")))
+	if v, ok := aliasMap[cur]; ok {
+		cur = v
+	}
 	c := CanonicalRow{
-		Source:           src,
-		CompanyCode:      getS("CompanyCode"),
-		Party:            getS("Party"),
-		DocumentCurrency: getS("DocumentCurrency"),
+		Source:      src,
+		CompanyCode: getS("CompanyCode"),
+		Party:       getS("Party"),
+		// DocumentCurrency: getS("DocumentCurrency"),
+		DocumentCurrency: cur,
 		DocumentNumber:   getS("DocumentNumber"),
 		DocumentDate:     getS("DocumentDate"),
 		PostingDate:      getS("PostingDate"),
