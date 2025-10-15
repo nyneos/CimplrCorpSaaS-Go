@@ -201,6 +201,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 				"createdAt":    rMap["created_at"],
 				"status":       rMap["status"],
 				"createdBy":    rMap["created_by"],
+				"roles_permission_status": rMap["roles_permission_status"],
 				"approvedBy":   rMap["approved_by"],
 				"approveddate": rMap["approved_at"],
 			}
@@ -452,6 +453,30 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
+
+		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved')")
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		roleNames := []string{}
+		for rows.Next() {
+			var name string
+			rows.Scan(&name)
+			roleNames = append(roleNames, name)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
+	}
+}
+
 func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -538,6 +563,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 				"createdAt":    rMap["created_at"],
 				"status":       rMap["status"],
 				"createdBy":    rMap["created_by"],
+				"roles_permission_status": rMap["roles_permission_status"],
 				"approvedBy":   rMap["approved_by"],
 				"approveddate": rMap["approved_at"],
 			}
@@ -644,3 +670,4 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
