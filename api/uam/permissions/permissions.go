@@ -510,7 +510,11 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-
+		// Update roles.roles_permission_status to reflect the new aggregated status
+		if _, err := db.Exec("UPDATE roles SET roles_permission_status = $1 WHERE id = $2", req.Status, roleID); err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to update role permission status: "+err.Error())
+			return
+		}
 		// Collect updated permissions
 		updatedPermissions := []map[string]interface{}{}
 		for rows.Next() {
@@ -802,5 +806,6 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
 
 
