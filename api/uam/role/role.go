@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils"
 
 	"github.com/lib/pq"
 )
@@ -21,17 +22,17 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 		"error":   errMsg,
 	})
 }
- 
+
 // Handler: Create role
 func CreateRole(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Name                string `json:"name"`
-			RoleCode            string `json:"rolecode"`
-			Description         string `json:"description"`
-			OfficeStartTimeIST  string `json:"office_start_time_ist"`
-			OfficeEndTimeIST    string `json:"office_end_time_ist"`
-			UserID              string `json:"user_id"`
+			Name               string `json:"name"`
+			RoleCode           string `json:"rolecode"`
+			Description        string `json:"description"`
+			OfficeStartTimeIST string `json:"office_start_time_ist"`
+			OfficeEndTimeIST   string `json:"office_end_time_ist"`
+			UserID             string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
@@ -68,7 +69,6 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Scan result dynamically
 		// Use sql.Rows to get columns and scan
 		rows, err := db.Query(
 			`SELECT * FROM roles WHERE id = (SELECT currval(pg_get_serial_sequence('roles','id')))`,
@@ -159,8 +159,19 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		// Get all roles
-		rows, err := db.Query("SELECT * FROM roles")
+		// Pagination
+		pagination, err := utils.ExtractPagination(r)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Count total
+		total, _ := utils.CountTotal(db, "SELECT COUNT(*) FROM roles")
+		pagination.SetPaginationStats(total)
+
+		// Get roles with pagination
+		rows, err := db.Query("SELECT * FROM roles ORDER BY id LIMIT $1 OFFSET $2", pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -181,16 +192,17 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			}
 			// Map fields as needed
 			role := map[string]interface{}{
-				"id": rMap["id"],
-				"name": rMap["name"],
-				"role_code": rMap["role_code"],
-				"description": rMap["description"],
-				"startTime": rMap["office_start_time_ist"],
-				"endTime": rMap["office_end_time_ist"],
-				"createdAt": rMap["created_at"],
-				"status": rMap["status"],
-				"createdBy": rMap["created_by"],
-				"approvedBy": rMap["approved_by"],
+				"id":           rMap["id"],
+				"name":         rMap["name"],
+				"role_code":    rMap["role_code"],
+				"description":  rMap["description"],
+				"startTime":    rMap["office_start_time_ist"],
+				"endTime":      rMap["office_end_time_ist"],
+				"createdAt":    rMap["created_at"],
+				"status":       rMap["status"],
+				"createdBy":    rMap["created_by"],
+				"roles_permission_status": rMap["roles_permission_status"],
+				"approvedBy":   rMap["approved_by"],
 				"approveddate": rMap["approved_at"],
 			}
 			roleData = append(roleData, role)
@@ -199,6 +211,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
+			"pagination":  pagination,
 		})
 	}
 }
@@ -207,8 +220,8 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID          string `json:"user_id"`
-			RoleIds         []int  `json:"roleIds"`
+			UserID  string `json:"user_id"`
+			RoleIds []int  `json:"roleIds"`
 			// ApprovedBy      string `json:"approved_by"`
 			ApprovalComment string `json:"approval_comment"`
 		}
@@ -269,18 +282,18 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		// Get approved_by from session
-        approvedBy := ""
-        sessions := auth.GetActiveSessions()
-        for _, s := range sessions {
-            if s.UserID == req.UserID {
-                approvedBy = s.Email
-                break
-            }
-        }
-        if approvedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
-            return
-        }
+		approvedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				approvedBy = s.Email
+				break
+			}
+		}
+		if approvedBy == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
 		// Approve roles
 		if len(toApprove) > 0 {
 			appRows, err := db.Query(`UPDATE roles SET status = 'approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
@@ -357,8 +370,8 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID           string `json:"user_id"`
-			RoleIds          []int  `json:"roleIds"`
+			UserID  string `json:"user_id"`
+			RoleIds []int  `json:"roleIds"`
 			// RejectedBy       string `json:"rejected_by"`
 			RejectionComment string `json:"rejection_comment"`
 		}
@@ -373,18 +386,18 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 		//     return
 		// }
 		// Get rejected_by from session
-        rejectedBy := ""
-        sessions := auth.GetActiveSessions()
-        for _, s := range sessions {
-            if s.UserID == req.UserID {
-                rejectedBy = s.Email
-                break
-            }
-        }
-        if rejectedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
-            return
-        }
+		rejectedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				rejectedBy = s.Email
+				break
+			}
+		}
+		if rejectedBy == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
 		rows, err := db.Query(
 			`UPDATE roles SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), rejection_comment = $2 WHERE id = ANY($3) RETURNING *`,
 			rejectedBy, req.RejectionComment, pq.Array(req.RoleIds),
@@ -424,6 +437,30 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
 
 		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		roleNames := []string{}
+		for rows.Next() {
+			var name string
+			rows.Scan(&name)
+			roleNames = append(roleNames, name)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
+	}
+}
+
+func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
+
+		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE (status = 'approved' OR status = 'Approved') AND (roles_permission_status = 'approved' OR roles_permission_status = 'Approved')")
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -486,8 +523,18 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		// Get all pending roles
-		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3)", "pending", "Awaiting-Approval", "Delete-Approval")
+		// Pagination for pending roles
+		pagination, err := utils.ExtractPagination(r)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		totalPendingQuery := "SELECT COUNT(*) FROM roles WHERE status IN ($1, $2, $3)"
+		totalPending, _ := utils.CountTotal(db, totalPendingQuery, "pending", "Awaiting-Approval", "Delete-Approval")
+		pagination.SetPaginationStats(totalPending)
+
+		// Fetch paginated pending roles
+		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) ORDER BY id LIMIT $4 OFFSET $5", "pending", "Awaiting-Approval", "Delete-Approval", pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -507,16 +554,17 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 				rMap[col] = vals[i]
 			}
 			role := map[string]interface{}{
-				"id": rMap["id"],
-				"name": rMap["name"],
-				"role_code": rMap["role_code"],
-				"description": rMap["description"],
-				"startTime": rMap["office_start_time_ist"],
-				"endTime": rMap["office_end_time_ist"],
-				"createdAt": rMap["created_at"],
-				"status": rMap["status"],
-				"createdBy": rMap["created_by"],
-				"approvedBy": rMap["approved_by"],
+				"id":           rMap["id"],
+				"name":         rMap["name"],
+				"role_code":    rMap["role_code"],
+				"description":  rMap["description"],
+				"startTime":    rMap["office_start_time_ist"],
+				"endTime":      rMap["office_end_time_ist"],
+				"createdAt":    rMap["created_at"],
+				"status":       rMap["status"],
+				"createdBy":    rMap["created_by"],
+				"roles_permission_status": rMap["roles_permission_status"],
+				"approvedBy":   rMap["approved_by"],
 				"approveddate": rMap["approved_at"],
 			}
 			roleData = append(roleData, role)
@@ -525,6 +573,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
+			"pagination":  pagination,
 		})
 	}
 }
@@ -621,3 +670,4 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+

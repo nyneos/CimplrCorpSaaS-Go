@@ -3,6 +3,7 @@ package user
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/utils"
 	"database/sql"
 	"encoding/json"
 
@@ -26,15 +27,15 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 func CreateUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			AuthenticationType     string `json:"authentication_type"`
-			EmployeeName           string `json:"employee_name"`
-			Role                   string `json:"role"`
-			UsernameOrEmployeeID   string `json:"username_or_employee_id"`
-			Email                  string `json:"email"`
-			Mobile                 string `json:"mobile"`
-			Address                string `json:"address"`
-			BusinessUnitName       string `json:"business_unit_name"`
-			UserID                 string `json:"user_id"`
+			AuthenticationType   string `json:"authentication_type"`
+			EmployeeName         string `json:"employee_name"`
+			Role                 string `json:"role"`
+			UsernameOrEmployeeID string `json:"username_or_employee_id"`
+			Email                string `json:"email"`
+			Mobile               string `json:"mobile"`
+			Address              string `json:"address"`
+			BusinessUnitName     string `json:"business_unit_name"`
+			UserID               string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
@@ -105,7 +106,6 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-
 // Handler: Get users for accessible business units
 func GetUsers(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -123,14 +123,34 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
-		// Build query
+		// Pagination
+		pagination, err := utils.ExtractPagination(r)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Count total (respect status filter)
+		countQuery := "SELECT COUNT(*) FROM users WHERE business_unit_name = ANY($1)"
+		countArgs := []interface{}{pq.Array(buNames)}
+		if status != "" {
+			countQuery += " AND status = $2"
+			countArgs = append(countArgs, status)
+		}
+		total, _ := utils.CountTotal(db, countQuery, countArgs...)
+		pagination.SetPaginationStats(total)
+
+		// Build paginated query
 		query := "SELECT * FROM users WHERE business_unit_name = ANY($1)"
-		params := []interface{}{pq.Array(buNames)}
+		args := []interface{}{pq.Array(buNames)}
 		if status != "" {
 			query += " AND status = $2"
-			params = append(params, status)
+			args = append(args, status)
 		}
-		rows, err := db.Query(query, params...)
+		query += " ORDER BY id DESC LIMIT $3 OFFSET $4"
+		args = append(args, pagination.Limit, pagination.Offset)
+
+		rows, err := db.Query(query, args...)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -153,8 +173,9 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"users": users,
+			"success":    true,
+			"users":      users,
+			"pagination": pagination,
 		})
 	}
 }
@@ -199,115 +220,114 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"user": userMap,
+			"user":    userMap,
 		})
 	}
 }
 
-
 // Handler: Update user
 func UpdateUser(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        var req map[string]interface{}
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            respondWithError(w, http.StatusBadRequest, "Invalid request body")
-            return
-        }
-        id, idOk := req["id"].(string)
-        userID, userIDOk := req["user_id"].(string)
-        if !idOk || !userIDOk || id == "" || userID == "" {
-            respondWithError(w, http.StatusBadRequest, "Missing id or user_id")
-            return
-        }
-        buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-        if !ok || len(buNames) == 0 {
-            respondWithError(w, http.StatusNotFound, "No accessible business units found")
-            return
-        }
-        // Get updated_by from session
-        updatedBy := ""
-        sessions := auth.GetActiveSessions()
-        for _, s := range sessions {
-            if s.UserID == userID {
-                updatedBy = s.Email
-                break
-            }
-        }
-        if updatedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
-            return
-        }
-        // Allowed fields to update
-        allowed := map[string]bool{
-            "authentication_type": true,
-            "employee_name": true,
-            "username_or_employee_id": true,
-            "email": true,
-            "mobile": true,
-            "address": true,
-            "business_unit_name": true,
-            "status": true,
-            "approved_by": true,
-            "approved_at": true,
-            "rejected_by": true,
-            "rejected_at": true,
-            "approval_comment": true,
-            "password": true,
-        }
-        fields := map[string]interface{}{}
-        for k, v := range req {
-            if allowed[k] {
-                fields[k] = v
-            }
-        }
-        fields["updated_by"] = updatedBy
-        if len(fields) == 0 {
-            respondWithError(w, http.StatusBadRequest, "No valid fields to update")
-            return
-        }
-        // Build query
-        keys := make([]string, 0, len(fields))
-        values := make([]interface{}, 0, len(fields))
-        setClause := ""
-        for k := range fields {
-            keys = append(keys, k)
-        }
-        for idx, k := range keys {
-            if idx > 0 {
-                setClause += ", "
-            }
-            setClause += k + " = $" + fmt.Sprint(idx+1)
-            values = append(values, fields[k])
-        }
-        query := fmt.Sprintf(
-            "UPDATE users SET %s WHERE id = $%d AND business_unit_name = ANY($%d) RETURNING *",
-            setClause, len(keys)+1, len(keys)+2,
-        )
-        values = append(values, id, pq.Array(buNames))
-        rows, err := db.Query(query, values...)
-        if err != nil {
-            respondWithError(w, http.StatusInternalServerError, err.Error())
-            return
-        }
-        defer rows.Close()
-        cols, _ := rows.Columns()
-        if !rows.Next() {
-            respondWithError(w, http.StatusNotFound, "User not found or not accessible")
-            return
-        }
-        vals := make([]interface{}, len(cols))
-        valPtrs := make([]interface{}, len(cols))
-        for i := range vals {
-            valPtrs[i] = &vals[i]
-        }
-        rows.Scan(valPtrs...)
-        userMap := map[string]interface{}{}
-        for i, col := range cols {
-            userMap[col] = vals[i]
-        }
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+		id, idOk := req["id"].(string)
+		userID, userIDOk := req["user_id"].(string)
+		if !idOk || !userIDOk || id == "" || userID == "" {
+			respondWithError(w, http.StatusBadRequest, "Missing id or user_id")
+			return
+		}
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !ok || len(buNames) == 0 {
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			return
+		}
+		// Get updated_by from session
+		updatedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == userID {
+				updatedBy = s.Email
+				break
+			}
+		}
+		if updatedBy == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
+		// Allowed fields to update
+		allowed := map[string]bool{
+			"authentication_type":     true,
+			"employee_name":           true,
+			"username_or_employee_id": true,
+			"email":                   true,
+			"mobile":                  true,
+			"address":                 true,
+			"business_unit_name":      true,
+			"status":                  true,
+			"approved_by":             true,
+			"approved_at":             true,
+			"rejected_by":             true,
+			"rejected_at":             true,
+			"approval_comment":        true,
+			"password":                true,
+		}
+		fields := map[string]interface{}{}
+		for k, v := range req {
+			if allowed[k] {
+				fields[k] = v
+			}
+		}
+		fields["updated_by"] = updatedBy
+		if len(fields) == 0 {
+			respondWithError(w, http.StatusBadRequest, "No valid fields to update")
+			return
+		}
+		// Build query
+		keys := make([]string, 0, len(fields))
+		values := make([]interface{}, 0, len(fields))
+		setClause := ""
+		for k := range fields {
+			keys = append(keys, k)
+		}
+		for idx, k := range keys {
+			if idx > 0 {
+				setClause += ", "
+			}
+			setClause += k + " = $" + fmt.Sprint(idx+1)
+			values = append(values, fields[k])
+		}
+		query := fmt.Sprintf(
+			"UPDATE users SET %s WHERE id = $%d AND business_unit_name = ANY($%d) RETURNING *",
+			setClause, len(keys)+1, len(keys)+2,
+		)
+		values = append(values, id, pq.Array(buNames))
+		rows, err := db.Query(query, values...)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		if !rows.Next() {
+			respondWithError(w, http.StatusNotFound, "User not found or not accessible")
+			return
+		}
+		vals := make([]interface{}, len(cols))
+		valPtrs := make([]interface{}, len(cols))
+		for i := range vals {
+			valPtrs[i] = &vals[i]
+		}
+		rows.Scan(valPtrs...)
+		userMap := map[string]interface{}{}
+		for i, col := range cols {
+			userMap[col] = vals[i]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
+	}
 }
 
 // Helper: convert camelCase to snake_case
@@ -366,18 +386,19 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"user": userMap,
+			"user":    userMap,
 		})
 	}
 }
+
 // Handler: Approve multiple users
 func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID         string   `json:"user_id"` // for middleware
-			Ids            []string `json:"ids"`     // users to approve/delete
+			UserID string   `json:"user_id"` // for middleware
+			Ids    []string `json:"ids"`     // users to approve/delete
 			// ApprovedBy     string   `json:"approved_by"`
-			ApprovalComment string  `json:"approval_comment"`
+			ApprovalComment string `json:"approval_comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0 || req.ApprovalComment == "" {
 			respondWithError(w, http.StatusBadRequest, "ids and approval_comment are required")
@@ -413,52 +434,52 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			"deleted":  []map[string]interface{}{},
 			"approved": []map[string]interface{}{},
 		}
-		   // Delete users and their user_roles
-		   if len(toDelete) > 0 {
-			   // Delete user_roles first for referential integrity
-			   _, err := db.Exec(
-				   "DELETE FROM user_roles WHERE user_id = ANY($1)",
-				   pq.Array(toDelete),
-			   )
-			   if err != nil {
-				   respondWithError(w, http.StatusInternalServerError, "Failed to delete user_roles: "+err.Error())
-				   return
-			   }
-			   delRows, err := db.Query(
-				   "DELETE FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2) RETURNING *",
-				   pq.Array(toDelete), pq.Array(buNames),
-			   )
-			   if err == nil {
-				   defer delRows.Close()
-				   cols, _ := delRows.Columns()
-				   for delRows.Next() {
-					   vals := make([]interface{}, len(cols))
-					   valPtrs := make([]interface{}, len(cols))
-					   for i := range vals {
-						   valPtrs[i] = &vals[i]
-					   }
-					   delRows.Scan(valPtrs...)
-					   userMap := map[string]interface{}{}
-					   for i, col := range cols {
-						   userMap[col] = vals[i]
-					   }
-					   results["deleted"] = append(results["deleted"].([]map[string]interface{}), userMap)
-				   }
-			   }
-		   }
+		// Delete users and their user_roles
+		if len(toDelete) > 0 {
+			// Delete user_roles first for referential integrity
+			_, err := db.Exec(
+				"DELETE FROM user_roles WHERE user_id = ANY($1)",
+				pq.Array(toDelete),
+			)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to delete user_roles: "+err.Error())
+				return
+			}
+			delRows, err := db.Query(
+				"DELETE FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2) RETURNING *",
+				pq.Array(toDelete), pq.Array(buNames),
+			)
+			if err == nil {
+				defer delRows.Close()
+				cols, _ := delRows.Columns()
+				for delRows.Next() {
+					vals := make([]interface{}, len(cols))
+					valPtrs := make([]interface{}, len(cols))
+					for i := range vals {
+						valPtrs[i] = &vals[i]
+					}
+					delRows.Scan(valPtrs...)
+					userMap := map[string]interface{}{}
+					for i, col := range cols {
+						userMap[col] = vals[i]
+					}
+					results["deleted"] = append(results["deleted"].([]map[string]interface{}), userMap)
+				}
+			}
+		}
 		// Get approved_by from session
-        approvedBy := ""
-        sessions := auth.GetActiveSessions()
-        for _, s := range sessions {
-            if s.UserID == req.UserID {
-                approvedBy = s.Email
-                break
-            }
-        }
-        if approvedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
-            return
-        }
+		approvedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				approvedBy = s.Email
+				break
+			}
+		}
+		if approvedBy == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
 		// Approve users
 		if len(toApprove) > 0 {
 			appRows, err := db.Query(
@@ -487,16 +508,17 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": results["deleted"], "approved": results["approved"]})
 	}
 }
+
 // Handler: Reject multiple users
 func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID           string   `json:"user_id"` // for middleware
-			Ids              []string `json:"ids"`     // users to reject
+			UserID string   `json:"user_id"` // for middleware
+			Ids    []string `json:"ids"`     // users to reject
 			// RejectedBy       string   `json:"rejected_by"`
-			RejectionComment string   `json:"rejection_comment"`
+			RejectionComment string `json:"rejection_comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0  {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.Ids) == 0 {
 			respondWithError(w, http.StatusBadRequest, "ids and rejected_by are required")
 			return
 		}
@@ -506,18 +528,18 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Get rejected_by from session
-        rejectedBy := ""
-        sessions := auth.GetActiveSessions()
-        for _, s := range sessions {
-            if s.UserID == req.UserID {
-                rejectedBy = s.Email
-                break
-            }
-        }
-        if rejectedBy == "" {
-            respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
-            return
-        }
+		rejectedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				rejectedBy = s.Email
+				break
+			}
+		}
+		if rejectedBy == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			return
+		}
 		rows, err := db.Query(
 			"UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4) RETURNING *",
 			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(buNames),

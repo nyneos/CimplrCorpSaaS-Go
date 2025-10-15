@@ -32,6 +32,7 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/roles/reject-multiple-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.RejectMultipleRoles(db))))
 	mux.Handle("/uam/roles/update-role", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.UpdateRole(db))))
 	mux.Handle("/uam/roles/get-just-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetJustRoles(db))))
+	mux.Handle("/uam/roles/get-user-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetJustRolesPERMISSIONapproved(db))))
 	mux.Handle("/uam/roles/get-pending-roles", api.BusinessUnitMiddleware(db)(http.HandlerFunc(role.GetPendingRoles(db))))
 	/*Permissions*/
 	mux.Handle("/uam/permissions/upsert-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.UpsertRolePermissions(db))))
@@ -47,6 +48,7 @@ func StartUAMService(db *sql.DB) {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
 }
+
 
 
 
