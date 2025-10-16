@@ -1939,8 +1939,8 @@ LEFT JOIN LATERAL (
 		
 		`
 
-	// exclude soft-deleted accounts from meta
-	baseQuery = strings.Replace(baseQuery, "FROM masterbankaccount a", "FROM masterbankaccount a WHERE COALESCE(a.is_deleted, false) = false\nLEFT JOIN masterbank b ON a.bank_id = b.bank_id", 1)
+	// exclude soft-deleted accounts from meta by adding WHERE after the lateral join
+	baseQuery = strings.Replace(baseQuery, ") aa ON TRUE;", ") aa ON TRUE WHERE COALESCE(a.is_deleted, false) = false;", 1)
 	rows, err := pgxPool.Query(ctx, baseQuery)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
