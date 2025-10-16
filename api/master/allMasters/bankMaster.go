@@ -132,12 +132,13 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		query := `
 			SELECT m.bank_id, m.bank_name, m.bank_short_name, m.swift_bic_code, m.country_of_headquarters, m.connectivity_type, m.active_status,
-				   m.contact_person_name, m.contact_person_email, m.contact_person_phone, m.address_line1, m.address_line2, m.city,
-				   m.state_province, m.postal_code,
-				   m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
-				   m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
-				   m.old_state_province, m.old_postal_code
+			       m.contact_person_name, m.contact_person_email, m.contact_person_phone, m.address_line1, m.address_line2, m.city,
+			       m.state_province, m.postal_code,
+			       m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
+			       m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
+			       m.old_state_province, m.old_postal_code
 			FROM masterbank m
+			WHERE COALESCE(m.is_deleted, false) = false
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -441,7 +442,7 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
-			WHERE m.active_status = 'Active' AND a.processing_status = 'APPROVED'
+			WHERE m.active_status = 'Active' AND a.processing_status = 'APPROVED' AND COALESCE(m.is_deleted, false) = false
 		`
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, query)
@@ -1046,8 +1047,8 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Delete corresponding banks from masterbank
 		if len(bankIDsToDelete) > 0 {
-			delBankQuery := `DELETE FROM masterbank WHERE bank_id = ANY($1)`
-			_, _ = pgxPool.Exec(r.Context(), delBankQuery, pq.Array(bankIDsToDelete))
+			// soft-delete: mark rows as deleted instead of physical delete
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbank SET is_deleted = true WHERE bank_id = ANY($1)`, pq.Array(bankIDsToDelete))
 		}
 
 		// Then, approve the rest by bank_ids
