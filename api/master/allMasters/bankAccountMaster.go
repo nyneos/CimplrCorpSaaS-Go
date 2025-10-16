@@ -882,11 +882,10 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		// Delete associated clearing codes and master account records
+		// Soft-delete associated master account records (mark is_deleted = true)
 		if len(accountIDsToDelete) > 0 {
-			// delete clearing codes first to avoid FK issues
-			_, _ = pgxPool.Exec(r.Context(), `DELETE FROM masterclearingcode WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
-			_, _ = pgxPool.Exec(r.Context(), `DELETE FROM masterbankaccount WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
+			// mark accounts as deleted; keep clearing codes for historical record
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
 		}
 
 		// Approve remaining audit actions (exclude those that were pending delete)
@@ -1006,7 +1005,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active'
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
 		`
 		rows, err := pgxPool.Query(r.Context(), query)
 		if err != nil {
@@ -1301,7 +1300,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active'
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
 		`
 
 		rows, err := pgxPool.Query(r.Context(), query)
@@ -1500,7 +1499,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
         LEFT JOIN masterbank b ON a.bank_id = b.bank_id
         LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
         LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-        WHERE a.account_id = $1
+	WHERE a.account_id = $1 AND COALESCE(a.is_deleted, false) = false
         `
 
 		rows, err := pgxPool.Query(ctx, query, req.AccountID)
@@ -1940,7 +1939,9 @@ LEFT JOIN LATERAL (
 		
 		`
 
-		rows, err := pgxPool.Query(ctx, baseQuery)
+	// exclude soft-deleted accounts from meta
+	baseQuery = strings.Replace(baseQuery, "FROM masterbankaccount a", "FROM masterbankaccount a WHERE COALESCE(a.is_deleted, false) = false\nLEFT JOIN masterbank b ON a.bank_id = b.bank_id", 1)
+	rows, err := pgxPool.Query(ctx, baseQuery)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
