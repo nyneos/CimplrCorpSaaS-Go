@@ -298,11 +298,24 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				headers = append(headers, row)
 			}
 		}
-		headerIds := []interface{}{}
+		// normalize header ids to strings for safe map keys
+		headerIds := []string{}
 		for _, h := range headers {
-			headerIds = append(headerIds, h["exposure_header_id"])
+			// convert possible []uint8 or string to string
+			var idStr string
+			switch v := h["exposure_header_id"].(type) {
+			case string:
+				idStr = v
+			case []uint8:
+				idStr = string(v)
+			default:
+				idStr = fmt.Sprintf("%v", v)
+			}
+			if idStr != "" {
+				headerIds = append(headerIds, idStr)
+			}
 		}
-		hedgeMap := map[interface{}]float64{}
+		hedgeMap := map[string]float64{}
 		if len(headerIds) > 0 {
 			hedgeRows, err := db.Query(`SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(headerIds))
 			if err == nil {
@@ -310,13 +323,25 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 					var exposure_header_id interface{}
 					var hedge_amount float64
 					hedgeRows.Scan(&exposure_header_id, &hedge_amount)
-					hedgeMap[exposure_header_id] = hedge_amount
+					// normalize key to string
+					var key string
+					switch v := exposure_header_id.(type) {
+					case string:
+						key = v
+					case []uint8:
+						key = string(v)
+					default:
+						key = fmt.Sprintf("%v", v)
+					}
+					if key != "" {
+						hedgeMap[key] = hedge_amount
+					}
 				}
 				hedgeRows.Close()
 			}
 		}
 		buCompliance := map[string]bool{}
-		buRows, err := db.Query(`SELECT entity_name FROM masterEntity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)`)
+		buRows, err := db.Query(`SELECT entity_name FROM masterentity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)`)
 		if err == nil {
 			for buRows.Next() {
 				var name string
@@ -327,7 +352,17 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		}
 		response := []map[string]interface{}{}
 		for _, h := range headers {
-			hedgeAmount := hedgeMap[h["exposure_header_id"]]
+			// lookup by normalized string key
+			var key string
+			switch v := h["exposure_header_id"].(type) {
+			case string:
+				key = v
+			case []uint8:
+				key = string(v)
+			default:
+				key = fmt.Sprintf("%v", v)
+			}
+			hedgeAmount := hedgeMap[key]
 			// Safe total_open_amount conversion
 			var totalOpen float64
 			switch v := h["total_open_amount"].(type) {
@@ -360,7 +395,6 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
-
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
 func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -428,4 +462,5 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
+
 

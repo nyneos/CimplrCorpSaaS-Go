@@ -965,12 +965,12 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string   `json:"user_id"`
-			ActionIDs []string `json:"action_ids"`
-			Comment   string   `json:"comment"`
+			UserID  string   `json:"user_id"`
+			BankIDs []string `json:"bank_ids"`
+			Comment string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide bank_ids")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -985,8 +985,8 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
-		query := `UPDATE auditactionbank SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,bank_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
+		query := `UPDATE auditactionbank SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) RETURNING action_id,bank_id`
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1010,12 +1010,12 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string   `json:"user_id"`
-			ActionIDs []string `json:"action_ids"`
-			Comment   string   `json:"comment"`
+			UserID  string   `json:"user_id"`
+			BankIDs []string `json:"bank_ids"`
+			Comment string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide bank_ids")
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -1030,9 +1030,9 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
-		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
-		delQuery := `DELETE FROM auditactionbank WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
-		delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.ActionIDs))
+		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given bank_ids
+		delQuery := `DELETE FROM auditactionbank WHERE bank_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
+		delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.BankIDs))
 		var deleted []string
 		var bankIDsToDelete []string
 		if delErr == nil {
@@ -1050,9 +1050,9 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = pgxPool.Exec(r.Context(), delBankQuery, pq.Array(bankIDsToDelete))
 		}
 
-		// Then, approve the rest
-		query := `UPDATE auditactionbank SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,bank_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
+		// Then, approve the rest by bank_ids
+		query := `UPDATE auditactionbank SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,bank_id`
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
