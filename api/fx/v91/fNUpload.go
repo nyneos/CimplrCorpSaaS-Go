@@ -40,7 +40,12 @@ type CanonicalRow struct {
 	AmountDoc        decimal.Decimal          `json:"AmountDoc"` // for final write + validation
 	AmountFloat      float64                  `json:"-"`         // internal: hot-loop allocation
 	LineItems        []map[string]interface{} `json:"LineItems,omitempty"`
-	_raw             map[string]interface{}
+	// Structured non-qualified metadata (preferred)
+	IsNonQualified     bool   `json:"is_non_qualified,omitempty"`
+	NonQualifiedReason string `json:"non_qualified_reason,omitempty"`
+
+	// Backing raw mapped values (legacy/compat)
+	_raw map[string]interface{}
 }
 
 type NonQualified struct {
@@ -158,7 +163,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 		if strings.TrimSpace(currencyAliasesJSON) != "" {
 			if err := json.Unmarshal([]byte(currencyAliasesJSON), &currencyAliases); err != nil {
 				log.Printf("[WARN] invalid currency_aliases JSON: %v", err)
-				} else {
+			} else {
 				// normalize keys and values to uppercase to make lookups case-insensitive
 				norm := make(map[string]string, len(currencyAliases))
 				for k, v := range currencyAliases {
@@ -192,6 +197,16 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 		entityMap := map[string]string{}
 		{
+			// rows, err := pool.Query(ctx, `SELECT unique_identifier, entity_name FROM public.masterentity WHERE is_deleted IS NOT TRUE`)
+			// if err == nil {
+			// 	for rows.Next() {
+			// 		var uid, name string
+			// 		if err := rows.Scan(&uid, &name); err == nil {
+			// 			entityMap[strings.TrimSpace(uid)] = strings.TrimSpace(name)
+			// 		}
+			// 	}
+			// 	rows.Close()
+			// }
 			rows, err := pool.Query(ctx, `
 	SELECT COALESCE(NULLIF(unique_identifier,''), entity_id) AS uid,
 	       TRIM(entity_name),
@@ -452,7 +467,48 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
+			// exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals)
 			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
+
+			// --- Apply Non-Qualified rules based on net exposure per (Source,CompanyCode,Party) ---
+			// Rule: For vendors (FBL1N & FBL3N) if net > 0 => Non-Qualified
+			//       For customers (FBL5N) if net < 0 => Non-Qualified
+			netMap := make(map[string]float64)
+			for _, e := range exposuresFloat {
+				key := fmt.Sprintf("%s|%s|%s", e.Source, e.CompanyCode, e.Party)
+				netMap[key] += e.AmountFloat
+			}
+			for i := range exposuresFloat {
+				e := &exposuresFloat[i]
+				key := fmt.Sprintf("%s|%s|%s", e.Source, e.CompanyCode, e.Party)
+				net := netMap[key]
+				switch e.Source {
+				case "FBL1N", "FBL3N":
+					if net > 0 {
+						// set structured fields
+						e.IsNonQualified = true
+						e.NonQualifiedReason = fmt.Sprintf("Vendor net exposure %.4f > 0", net)
+						// preserve legacy raw map keys for compatibility
+						if e._raw == nil {
+							e._raw = make(map[string]interface{})
+						}
+						e._raw["is_non_qualified"] = true
+						e._raw["non_qualified_reason"] = e.NonQualifiedReason
+					}
+				case "FBL5N":
+					if net < 0 {
+						// set structured fields
+						e.IsNonQualified = true
+						e.NonQualifiedReason = fmt.Sprintf("Customer net exposure %.4f < 0", net)
+						// preserve legacy raw map keys for compatibility
+						if e._raw == nil {
+							e._raw = make(map[string]interface{})
+						}
+						e._raw["is_non_qualified"] = true
+						e._raw["non_qualified_reason"] = e.NonQualifiedReason
+					}
+				}
+			}
 
 			exposures := make([]CanonicalRow, 0, len(exposuresFloat))
 			for _, e := range exposuresFloat {
@@ -521,6 +577,16 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 				addtl, _ := json.Marshal(q._raw)
 
+				// entityName := ""
+				// if n, ok := entityMap[strings.TrimSpace(q.CompanyCode)]; ok {
+				// 	entityName = n
+				// } else if uidRaw, ok := q._raw["unique_identifier"]; ok {
+				// 	if uid := strings.TrimSpace(fmt.Sprintf("%v", uidRaw)); uid != "" {
+				// 		if n2, ok2 := entityMap[uid]; ok2 {
+				// 			entityName = n2
+				// 		}
+				// 	}
+				// }
 				entityName := ""
 				cc := strings.TrimSpace(q.CompanyCode)
 				if n, ok := entityMap[cc]; ok {
@@ -673,6 +739,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					return liRows[i], nil
 				})
 				if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_line_items"}, lineItemCols, liSrc); err != nil {
+					// log but don't fail entire batch — choose behavior per your appetite
 					log.Printf("[FBUP] error copying line items: %v", err)
 					fileWarnings = append(fileWarnings, fmt.Sprintf("line items copy failed: %v", err))
 				} else {
@@ -680,6 +747,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// --- If some knockoff docs weren't created in this batch (i.e. docToID missing) query DB for ids ---
 			if len(knockMap) > 0 {
 				needLookup := make([]string, 0)
 				for _, ks := range knockMap {
@@ -722,11 +790,13 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// Insert rollovers
 			for _, ks := range knockMap {
 				for _, k := range ks {
 					pidStr, ok1 := docToID[k.BaseDoc]
 					cidStr, ok2 := docToID[k.KnockDoc]
 					if !ok1 || !ok2 {
+						// skip missing
 						continue
 					}
 					pid, perr := uuid.Parse(pidStr)
@@ -745,6 +815,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// update batch processed/failed counts & commit
 			log.Printf("[FBUP] updating staging batch counts processed=%d failed=%d batch=%s file=%s", len(qualified), len(nonQualified), batchID.String(), fh.Filename)
 			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET processed_records=$1, failed_records=$2, status='completed' WHERE batch_id=$3`, len(qualified), len(nonQualified), batchID); err != nil {
 				httpError(w, 500, "update batch: "+err.Error())
@@ -758,6 +829,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			committed = true
 			log.Printf("[FBUP] committed batch %s file=%s processed=%d failed=%d warnings=%d line_items=%d", batchID.String(), fh.Filename, len(qualified), len(nonQualified), len(fileWarnings), lineItemsInserted)
 
+			// prepare response: map knockMap into response structure
 			respKnock := knockMap
 			if respKnock == nil {
 				respKnock = map[string][]KnockoffInfo{}
@@ -768,6 +840,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			if len(fileErrors) == 0 {
 				fileErrors = make([]string, 0)
 			}
+
+			// truncate nonQualified list if too big
 			const maxValidationErrors = 200
 			respNonQ := nonQualified
 			if len(nonQualified) > maxValidationErrors {
@@ -775,9 +849,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			previewRows := make([]CanonicalPreviewRow, 0, len(qualified)+len(nonQualified))
+
+			// Add qualified rows first
 			for _, q := range qualified {
 				status := "ok"
 				klist := []KnockoffInfo{}
+				// attach knockoffs if exist
 				if ks, ok := knockMap[q.DocumentNumber]; ok {
 					status = "knocked_off"
 					for _, k := range ks {
@@ -833,6 +910,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				Errors:        append(fileErrors, fileWarnings...),
 				Warnings:      fileWarnings,
 			})
+
 		} // end files loop
 
 		writeJSON(w, map[string]interface{}{
@@ -843,6 +921,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// ---------- Utility: allocation using float64 ----------
 type knockFloatInput struct {
 	BaseDoc  string
 	KnockDoc string
@@ -888,34 +967,39 @@ func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string
 
 		switch src {
 		case "FBL1N": // Payables (vendors)
+			// Standard for vendors: DEBIT (+ve) values are considered first
+			// Reverse logic flips the direction
 			if strings.EqualFold(payableLogic, "reverse") {
-				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			} else {
-				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			}
 
 		case "FBL5N": // Receivables (customers)
+			// Standard for customers: CREDIT (-ve) values are considered first
+			// Reverse logic flips the direction
 			if strings.EqualFold(receivableLogic, "reverse") {
-				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			} else {
-				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			}
 
 		case "FBL3N": // GR/IR (payable-like)
+			// Treat like vendors: DEBIT (+ve) first in standard mode
 			if strings.EqualFold(payableLogic, "reverse") {
-				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			} else {
-				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			}
@@ -1160,6 +1244,14 @@ func validateExposures(inputs []CanonicalRow) ([]CanonicalRow, []NonQualified) {
 		}
 		if it.AmountDoc.Equal(decimal.Zero) {
 			issues = append(issues, "Amount invalid or zero")
+		}
+		// honor programmatic non-qualified flag (structured)
+		if it.IsNonQualified {
+			if it.NonQualifiedReason != "" {
+				issues = append(issues, it.NonQualifiedReason)
+			} else {
+				issues = append(issues, "Marked non-qualified by rules")
+			}
 		}
 		if len(issues) > 0 {
 			bad = append(bad, NonQualified{Row: it, Issues: issues})

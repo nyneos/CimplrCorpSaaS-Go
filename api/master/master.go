@@ -45,6 +45,9 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/costprofit-center/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCostProfitCenterActions(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCostProfitCenterActions(pgxPool)))
 
+
+	mux.Handle("/master/costprofit-center/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCostProfitCenterSimple(pgxPool)))
+
 	// Payable/Receivable Master routes
 	mux.Handle("/master/v2/payablereceivable/create", api.BusinessUnitMiddleware(db)(allMaster.CreatePayableReceivableTypes(pgxPool)))
 	mux.Handle("/master/v2/payablereceivable/names", api.BusinessUnitMiddleware(db)(allMaster.GetPayableReceivableNamesWithID(pgxPool)))
@@ -78,6 +81,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/glaccount/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccount(pgxPool)))
 	mux.Handle("/master/glaccount/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentGLAccountAtLevel(pgxPool)))
+	mux.Handle("/master/glaccount/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccountSimple(pgxPool)))
 
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -150,6 +154,8 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
+
 
 
 
