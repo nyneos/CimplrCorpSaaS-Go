@@ -45,6 +45,9 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/costprofit-center/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCostProfitCenterActions(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCostProfitCenterActions(pgxPool)))
 
+
+	mux.Handle("/master/costprofit-center/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCostProfitCenterSimple(pgxPool)))
+
 	// Payable/Receivable Master routes
 	mux.Handle("/master/v2/payablereceivable/create", api.BusinessUnitMiddleware(db)(allMaster.CreatePayableReceivableTypes(pgxPool)))
 	mux.Handle("/master/v2/payablereceivable/names", api.BusinessUnitMiddleware(db)(allMaster.GetPayableReceivableNamesWithID(pgxPool)))
@@ -151,6 +154,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
