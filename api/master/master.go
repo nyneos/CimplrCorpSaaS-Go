@@ -78,6 +78,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/glaccount/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccount(pgxPool)))
 	mux.Handle("/master/glaccount/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentGLAccountAtLevel(pgxPool)))
+	mux.Handle("/master/glaccount/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccountSimple(pgxPool)))
 
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -150,6 +151,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
