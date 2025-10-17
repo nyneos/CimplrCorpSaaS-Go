@@ -53,6 +53,7 @@ type CostProfitCenterRequest struct {
 	CentreLevel      int  `json:"centre_level,omitempty"`
 	IsTopLevelCentre bool `json:"is_top_level_centre,omitempty"`
 }
+
 func ifaceToDateString(val interface{}) string {
 	if val == nil {
 		return ""
@@ -68,38 +69,38 @@ func ifaceToDateString(val interface{}) string {
 	}
 }
 func NormalizeDate(dateStr string) string {
-    dateStr = strings.TrimSpace(dateStr)
-    if dateStr == "" {
-        return ""
-    }
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return ""
+	}
 
-    layouts := []string{
-        "2006-01-02",
-        "02-01-2006",
-        "2006/01/02",
-        "02/01/2006",
-        "2006.01.02",
-        "02.01.2006",
-        time.RFC3339,
-        "2006-01-02 15:04:05",
-        "2006-01-02T15:04:05",
-    }
-	
-	    layouts = append(layouts, []string{
-        "02-Jan-2006",
-        "02-Jan-06",
-        "2-Jan-2006",
-        "2-Jan-06",
-        "02-Jan-2006 15:04:05",
-    }...)
+	layouts := []string{
+		"2006-01-02",
+		"02-01-2006",
+		"2006/01/02",
+		"02/01/2006",
+		"2006.01.02",
+		"02.01.2006",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	}
 
-    for _, l := range layouts {
-        if t, err := time.Parse(l, dateStr); err == nil {
-            return t.Format("2006-01-02")
-        }
-    }
+	layouts = append(layouts, []string{
+		"02-Jan-2006",
+		"02-Jan-06",
+		"2-Jan-2006",
+		"2-Jan-06",
+		"02-Jan-2006 15:04:05",
+	}...)
 
-    return ""
+	for _, l := range layouts {
+		if t, err := time.Parse(l, dateStr); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+
+	return ""
 }
 func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -166,12 +167,8 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}()
 
-				// Generate CPC ID using DB sequence
+				// Let DB generate centre_id (default on mastercostprofitcenter). We'll capture it with RETURNING.
 				var centreID string
-				if err := tx.QueryRow(ctx, `SELECT 'CPC-' || LPAD(nextval('cost_profit_center_seq')::text, 6, '0')`).Scan(&centreID); err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": "failed to generate centre_id: " + err.Error()})
-					return
-				}
 
 				// Parse dates
 				var effectiveFrom, effectiveTo interface{}
@@ -190,18 +187,18 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
-				// Insert CPC
+				// Insert CPC (without centre_id so DB default applies) and capture generated centre_id
 				ins := `INSERT INTO mastercostprofitcenter (
-					centre_id, centre_code, centre_name, centre_type, parent_centre_id, 
+					centre_code, centre_name, centre_type, parent_centre_id, 
 					entity_name, status, source, erp_type, centre_level, is_top_level_centre,
 					default_currency, owner, owner_email, effective_from, effective_to, 
 					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
 					oracle_ledger, oracle_dept, oracle_profit_center, tally_ledger_name, 
 					tally_ledger_group, sage_department_code, sage_cost_centre_code
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+				RETURNING centre_id`
 
-				_, err := tx.Exec(ctx, ins,
-					centreID,
+				if err := tx.QueryRow(ctx, ins,
 					rrow.CentreCode,
 					rrow.CentreName,
 					rrow.CentreType,
@@ -231,18 +228,21 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rrow.TallyLedgerGroup,
 					rrow.SageDeptCode,
 					rrow.SageCostCentreCode,
-				)
+				).Scan(&centreID); err != nil {
+					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
+					return
+				}
 				if err != nil {
 					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
 					return
 				}
 
-				// Insert relationship if parent exists
+				// Insert relationship if parent exists. Relationships table now stores centre codes (parent_centre_code, child_centre_code)
 				if parentID != nil {
-					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id)
-                             VALUES ($1, $2)
-                             ON CONFLICT (parent_centre_id, child_centre_id) DO NOTHING`
-					if _, err := tx.Exec(ctx, relQ, *parentID, centreID); err != nil {
+					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code)
+							 VALUES ($1, $2)
+							 ON CONFLICT (parent_centre_code, child_centre_code) DO NOTHING`
+					if _, err := tx.Exec(ctx, relQ, rrow.ParentCode, rrow.CentreCode); err != nil {
 						created = append(created, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "centre_code": rrow.CentreCode})
 						return
 					}
@@ -625,14 +625,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		batchIDs := make([]string, 0, len(files))
 
-		// Get the starting sequence number for CPC IDs
-		var seqNumber int
-		err := pgxPool.QueryRow(ctx, `SELECT nextval('cost_profit_center_seq')`).Scan(&seqNumber)
-		if err != nil {
-			// If sequence doesn't exist, create it and try again
-			_, _ = pgxPool.Exec(ctx, `CREATE SEQUENCE IF NOT EXISTS cost_profit_center_seq START WITH 1`)
-			_ = pgxPool.QueryRow(ctx, `SELECT nextval('cost_profit_center_seq')`).Scan(&seqNumber)
-		}
+		// DB will generate centre_id by default; no client-side sequence required
 
 		for _, fh := range files {
 			f, err := fh.Open()
@@ -749,20 +742,16 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// Insert into master table; generate centre_id server-side using sequence to avoid PK collisions.
-			// Use RETURNING to get centre_id and centre_code for the newly inserted rows.
-			tgtColsStr := strings.Join(append([]string{"centre_id"}, tgtCols...), ", ")
-
-			// Build SELECT expressions: for centre_id use sequence-generated value, then map source columns
+			// Insert into master table letting DB set centre_id; capture centre_id and centre_code for inserted rows
+			tgtColsStr := strings.Join(tgtCols, ", ")
 			var selectExprs []string
-			selectExprs = append(selectExprs, "('CPC-' || LPAD(nextval('cost_profit_center_seq')::text, 6, '0')) AS centre_id")
 			for i, src := range srcCols {
 				tgt := tgtCols[i]
 				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
-			// Use ON CONFLICT (centre_code) DO NOTHING to skip existing centre_codes
+			// Build insert: don't include centre_id column (DB default will populate it). Use ON CONFLICT DO NOTHING.
 			insertSQL := fmt.Sprintf(`INSERT INTO mastercostprofitcenter (%s) SELECT %s FROM input_costprofitcenter s WHERE s.upload_batch_id = $1 ON CONFLICT (centre_code) DO NOTHING RETURNING centre_id, centre_code`, tgtColsStr, srcColsStr)
 
 			insertedRows, err := tx.Query(ctx, insertSQL, batchID)
@@ -1256,17 +1245,40 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_id, child_centre_id FROM costprofitcenterrelationships`)
+	// relationships table stores centre codes now; fetch codes and resolve to IDs
+	relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithResult(w, false, err.Error())
 			return
 		}
 		defer relRows.Close()
+		// parentMap maps parentCentreID -> []childCentreID
 		parentMap := map[string][]string{}
+		// We'll need to resolve codes to IDs; cache lookups
+		codeToID := map[string]string{}
 		for relRows.Next() {
-			var p, c string
-			if err := relRows.Scan(&p, &c); err == nil {
-				parentMap[p] = append(parentMap[p], c)
+			var pcode, ccode string
+			if err := relRows.Scan(&pcode, &ccode); err == nil {
+				// resolve parent code to id
+				if _, ok := codeToID[pcode]; !ok {
+					var pid string
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&pid); err == nil {
+						codeToID[pcode] = pid
+					} else {
+						// skip if parent code not found
+						continue
+					}
+				}
+				if _, ok := codeToID[ccode]; !ok {
+					var cid string
+					if err := pgxPool.QueryRow(ctx, `SELECT centre_id FROM mastercostprofitcenter WHERE centre_code=$1`, ccode).Scan(&cid); err == nil {
+						codeToID[ccode] = cid
+					} else {
+						// skip if child not found
+						continue
+					}
+				}
+				parentMap[codeToID[pcode]] = append(parentMap[codeToID[pcode]], codeToID[ccode])
 			}
 		}
 		if len(hideIds) > 0 {
@@ -1385,7 +1397,6 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-
 func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1466,6 +1477,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "queued_count": len(allList)})
 	}
 }
+
 // BulkRejectCostProfitCenterActions rejects latest audit actions for centre_ids
 func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1671,4 +1683,241 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// UploadCostProfitCenterSimple is a lightweight ingestion endpoint that copies
+// CSV directly into mastercostprofitcenter and runs hierarchy sync + audit
+// asynchronously to avoid blocking the HTTP request.
+func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			userID = req.UserID
+		}
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			return
+		}
+
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			return
+		}
+
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			return
+		}
+
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			return
+		}
+
+		allowed := map[string]bool{
+			"centre_code": true, "centre_name": true, "centre_type": true,
+			"parent_centre_code": true, "entity_name": true, "status": true, "source": true,
+			"default_currency": true, "erp_type": true, "owner": true, "owner_email": true,
+			"effective_from": true, "effective_to": true, "tags": true,
+			"segment": true, "sap_kokrs": true, "sap_bukrs": true,
+			"sap_kostl": true, "sap_prctr": true, "oracle_ledger": true,
+			"oracle_dept": true, "oracle_profit_center": true,
+			"tally_ledger_name": true, "tally_ledger_group": true,
+			"sage_department_code": true, "sage_cost_centre_code": true,
+			"centre_level": true, "is_top_level_centre": true, "is_deleted": true,
+		}
+
+		batchIDs := []string{}
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				return
+			}
+			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			f.Close()
+			if err != nil || len(records) < 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid CSV file")
+				return
+			}
+
+			headers := make([]string, len(records[0]))
+			for i, h := range records[0] {
+				h = strings.ToLower(strings.TrimSpace(strings.ReplaceAll(h, " ", "_")))
+				h = strings.Trim(h, "\"',")
+				headers[i] = h
+			}
+
+			validCols := []string{}
+			for _, h := range headers {
+				if allowed[h] {
+					validCols = append(validCols, h)
+				}
+			}
+			if !(contains(validCols, "centre_code") && contains(validCols, "centre_name") && contains(validCols, "centre_type")) {
+				api.RespondWithError(w, http.StatusBadRequest, "CSV must include centre_code, centre_name, centre_type")
+				return
+			}
+
+			rows := records[1:]
+			copyRows := make([][]interface{}, len(rows))
+			// collect centre_codes from the CSV so async audit can locate the inserted rows
+			centreCodes := make([]string, 0, len(rows))
+			headerPos := map[string]int{}
+			for i, h := range headers {
+				headerPos[h] = i
+			}
+
+			for i, row := range rows {
+				vals := make([]interface{}, len(validCols))
+				for j, c := range validCols {
+					if pos, ok := headerPos[c]; ok && pos < len(row) {
+						cell := strings.TrimSpace(row[pos])
+						if cell == "" {
+							vals[j] = nil
+						} else if c == "effective_from" || c == "effective_to" {
+							if norm := NormalizeDate(cell); norm != "" {
+								if t, err := time.Parse("2006-01-02", norm); err == nil {
+									vals[j] = t
+								} else {
+									vals[j] = norm
+								}
+							}
+						} else {
+							vals[j] = cell
+						}
+					}
+				}
+
+				// capture centre_code value (if present) for audit selection later
+				if pos, ok := headerPos["centre_code"]; ok && pos < len(row) {
+					cc := strings.TrimSpace(row[pos])
+					if cc != "" {
+						centreCodes = append(centreCodes, cc)
+					}
+				}
+
+				copyRows[i] = vals
+			}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed")
+				return
+			}
+			defer tx.Rollback(ctx)
+
+			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
+			}
+
+			_, err = tx.CopyFrom(ctx, pgx.Identifier{"mastercostprofitcenter"}, validCols, pgx.CopyFromRows(copyRows))
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+
+			// Async sync + audit - pass the centre codes so we can find the newly inserted rows
+			go func(userName string, centreCodes []string) {
+				ctx2 := context.Background()
+				tx2, err := pgxPool.Begin(ctx2)
+				if err != nil {
+					log.Printf("Async tx begin failed: %v", err)
+					return
+				}
+				defer tx2.Rollback(ctx2)
+
+				_, err = tx2.Exec(ctx2, `
+					-- Set root levels (use parent_centre_code -> centre_code)
+					UPDATE mastercostprofitcenter
+					SET centre_level = 0, is_top_level_centre = true
+					WHERE parent_centre_code IS NULL OR TRIM(parent_centre_code) = ''
+					   OR parent_centre_code NOT IN (SELECT centre_code FROM mastercostprofitcenter);
+
+					-- Build recursive levels using centre_code link
+					WITH RECURSIVE cte AS (
+						SELECT centre_id, centre_code, parent_centre_code, 0 lvl
+						FROM mastercostprofitcenter
+						WHERE parent_centre_code IS NULL OR TRIM(parent_centre_code) = ''
+						UNION ALL
+						SELECT c.centre_id, c.centre_code, c.parent_centre_code, p.lvl + 1
+						FROM mastercostprofitcenter c
+						JOIN cte p ON c.parent_centre_code = p.centre_code
+					)
+					UPDATE mastercostprofitcenter m
+					SET centre_level = cte.lvl,
+						is_top_level_centre = (cte.lvl=0)
+					FROM cte WHERE m.centre_id = cte.centre_id;
+
+					-- Relationships (store codes in relationships table)
+					INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code, status)
+					SELECT DISTINCT p.centre_code, c.centre_code, 'Active'
+					FROM mastercostprofitcenter c
+					JOIN mastercostprofitcenter p ON c.parent_centre_code = p.centre_code
+					ON CONFLICT DO NOTHING;
+				`)
+				if err != nil {
+					log.Printf("Hierarchy sync failed: %v", err)
+				}
+
+				// Insert audit rows for the centre_codes we just uploaded. Use centre_code to locate rows
+				if len(centreCodes) > 0 {
+					// dedupe centreCodes
+					uniq := make(map[string]bool)
+					uniqList := make([]string, 0, len(centreCodes))
+					for _, c := range centreCodes {
+						if c == "" {
+							continue
+						}
+						if !uniq[c] {
+							uniq[c] = true
+							uniqList = append(uniqList, c)
+						}
+					}
+					if len(uniqList) > 0 {
+						if _, err := tx2.Exec(ctx2, `
+						INSERT INTO auditactioncostprofitcenter(centre_id, actiontype, processing_status, requested_by, requested_at)
+						SELECT centre_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
+						FROM mastercostprofitcenter
+						WHERE centre_code = ANY($2)
+						`, userName, uniqList); err != nil {
+							log.Printf("Audit insert failed: %v", err)
+						}
+					}
+				}
+				tx2.Commit(ctx2)
+			}(userName, centreCodes)
+
+			batchIDs = append(batchIDs, uuid.New().String())
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "batch_ids": batchIDs})
+	}
+}
+
+func contains(arr []string, v string) bool {
+	for _, s := range arr {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
