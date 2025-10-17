@@ -242,24 +242,36 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// insQ := `INSERT INTO masterglaccount (
+			// 		gl_account_id, gl_account_code, gl_account_name, gl_account_type, status, source,
+			// 	account_class, normal_balance, default_currency, effective_from, effective_to, tags, erp_type, external_code, segment,
+			// 	sap_bukrs, sap_ktopl, sap_saknr, sap_ktoks, oracle_ledger, oracle_coa, oracle_balancing_seg, oracle_natural_account,
+			// 	tally_ledger_name, tally_ledger_group, sage_nominal_code, sage_cost_centre, sage_department, posting_allowed,
+			// 	reconciliation_required, is_cash_bank, gl_account_level, is_top_level_gl_account, is_deleted, parent_gl_code
+			// ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34) RETURNING gl_account_id`
+			// var id string
+			// if err := tx.QueryRow(ctx, `SELECT 'GLA-' || LPAD(nextval('gl_account_seq')::text, 6, '0')`).Scan(&id); err != nil {
+			// 	tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
+			// 	created = append(created, map[string]interface{}{"success": false, "error": "failed to generate gl_account_id: " + err.Error(), "gl_account_code": rrow.GLAccountCode})
+			// 	continue
+			// }
+			// insQ = strings.Replace(insQ, "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)", "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)", 1)
+
+			// if err := tx.QueryRow(ctx, insQ,
+			// 	id,
+			// 	rrow.GLAccountCode,
 			insQ := `INSERT INTO masterglaccount (
-					gl_account_id, gl_account_code, gl_account_name, gl_account_type, status, source,
+					gl_account_code, gl_account_name, gl_account_type, status, source,
 				account_class, normal_balance, default_currency, effective_from, effective_to, tags, erp_type, external_code, segment,
 				sap_bukrs, sap_ktopl, sap_saknr, sap_ktoks, oracle_ledger, oracle_coa, oracle_balancing_seg, oracle_natural_account,
 				tally_ledger_name, tally_ledger_group, sage_nominal_code, sage_cost_centre, sage_department, posting_allowed,
 				reconciliation_required, is_cash_bank, gl_account_level, is_top_level_gl_account, is_deleted, parent_gl_code
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34) RETURNING gl_account_id`
 			var id string
-			if err := tx.QueryRow(ctx, `SELECT 'GLA-' || LPAD(nextval('gl_account_seq')::text, 6, '0')`).Scan(&id); err != nil {
-				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{"success": false, "error": "failed to generate gl_account_id: " + err.Error(), "gl_account_code": rrow.GLAccountCode})
-				continue
-			}
-			insQ = strings.Replace(insQ, "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)", "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)", 1)
 
 			if err := tx.QueryRow(ctx, insQ,
-				id,
 				rrow.GLAccountCode,
+
 				rrow.GLAccountName,
 				rrow.GLAccountType,
 				rrow.Status,
