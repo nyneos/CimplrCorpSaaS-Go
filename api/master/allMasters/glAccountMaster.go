@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +15,32 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func normalizeDateLocal(dateStr string) string {
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return ""
+	}
+
+	layouts := []string{
+		"2006-01-02",
+		"02-01-2006",
+		"2006/01/02",
+		"02/01/2006",
+		"2006.01.02",
+		"02.01.2006",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	}
+	layouts = append(layouts, []string{"02-Jan-2006", "02-Jan-06", "2-Jan-2006", "2-Jan-06", "02-Jan-2006 15:04:05"}...)
+	for _, l := range layouts {
+		if t, err := time.Parse(l, dateStr); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+	return ""
+}
 
 type GLAccountRequest struct {
 	GLAccountCode          string `json:"gl_account_code"`
@@ -1419,6 +1446,356 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+	}
+}
+
+func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// Get user
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			userID = req.UserID
+		}
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			return
+		}
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			return
+		}
+
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			return
+		}
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			return
+		}
+
+		batchIDs := make([]string, 0, len(files))
+
+		// Allowed columns (subset from masterglaccount DDL). Unknown headers are ignored.
+		allowed := map[string]bool{
+			"gl_account_code": true, "gl_account_name": true, "gl_account_type": true,
+			"status": true, "source": true, "parent_gl_code": true,
+			"effective_from": true, "effective_to": true,
+			"tags": true, "account_class": true, "default_currency": true,
+			"external_code": true, "segment": true, "erp_type": true,
+			"sap_bukrs": true, "sap_ktopl": true, "sap_saknr": true, "sap_ktoks": true,
+			"oracle_ledger": true, "oracle_coa": true, "oracle_balancing_seg": true, "oracle_natural_account": true,
+			"tally_ledger_name": true, "tally_ledger_group": true, "sage_nominal_code": true, "sage_cost_centre": true, "sage_department": true,
+			"posting_allowed": true, "reconciliation_required": true, "is_cash_bank": true,
+			"gl_account_level": true, "is_top_level_gl_account": true, "is_deleted": true,
+		}
+
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file: "+fh.Filename)
+				return
+			}
+			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			f.Close()
+			if err != nil || len(records) < 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+				return
+			}
+
+			headerRow := records[0]
+			dataRows := records[1:]
+			batchID := uuid.New().String()
+			batchIDs = append(batchIDs, batchID)
+
+			// normalize header
+			headerNorm := make([]string, len(headerRow))
+			for i, h := range headerRow {
+				hn := strings.TrimSpace(h)
+				hn = strings.Trim(hn, ", ")
+				hn = strings.ToLower(hn)
+				hn = strings.ReplaceAll(hn, " ", "_")
+				hn = strings.Trim(hn, "\"'`")
+				headerNorm[i] = hn
+			}
+
+			// decide which columns map to master columns (ignore unknowns)
+			tgtCols := []string{}
+			srcIdx := []int{}
+			for i, hn := range headerNorm {
+				if allowed[hn] {
+					tgtCols = append(tgtCols, hn)
+					srcIdx = append(srcIdx, i)
+				}
+			}
+			if len(tgtCols) == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "No acceptable columns found in file")
+				return
+			}
+
+			// Prepare copy rows for input_glaccount_table: upload_batch_id + all original headers
+			colCount := len(headerRow)
+			copyRows := make([][]interface{}, len(dataRows))
+			for i, row := range dataRows {
+				vals := make([]interface{}, colCount+1)
+				vals[0] = batchID
+				for j := 0; j < colCount; j++ {
+					if j < len(row) {
+						cell := strings.TrimSpace(row[j])
+						if cell == "" {
+							vals[j+1] = nil
+						} else {
+							vals[j+1] = cell
+						}
+					} else {
+						vals[j+1] = nil
+					}
+				}
+				copyRows[i] = vals
+			}
+
+			// Normalize date-like columns in-place for the columns that will be inserted into master
+			headerIndex := map[string]int{}
+			for i, h := range headerNorm {
+				headerIndex[h] = i + 1 // +1 because copyRows has batchID at pos 0
+			}
+			dateKeys := map[string]bool{"effective_from": true, "effective_to": true, "eff_from": true, "eff_to": true, "effectivefrom": true, "effectiveto": true}
+			for _, row := range copyRows {
+				for key := range dateKeys {
+					if idx, ok := headerIndex[key]; ok {
+						if idx < len(row) {
+							if v := row[idx]; v != nil {
+								s := fmt.Sprint(v)
+								if norm := normalizeDateLocal(s); norm != "" {
+									if tval, err := time.Parse("2006-01-02", norm); err == nil {
+										row[idx] = tval
+									} else {
+										row[idx] = norm
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// Begin tx and insert directly into masterglaccount (no staging table)
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				return
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			// Increase statement timeout locally for this transaction to avoid 57014 on large uploads
+			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
+				// non-fatal: continue but log
+			}
+
+			// Build column list and ensure required columns exist
+			// We'll copy directly into masterglaccount using the sanitized header names
+			cols := []string{}
+			for _, h := range headerNorm {
+				if allowed[h] {
+					cols = append(cols, h)
+				}
+			}
+			// must have core required columns
+			hasCode := false
+			hasName := false
+			hasType := false
+			for _, c := range cols {
+				switch c {
+				case "gl_account_code":
+					hasCode = true
+				case "gl_account_name":
+					hasName = true
+				case "gl_account_type":
+					hasType = true
+				}
+			}
+			if !hasCode || !hasName || !hasType {
+				api.RespondWithError(w, http.StatusBadRequest, "CSV must include gl_account_code, gl_account_name and gl_account_type columns")
+				return
+			}
+
+			// Prepare copyRows aligned to cols order
+			copyRowsMaster := make([][]interface{}, len(dataRows))
+			// build header index map from headerNorm to position in original row
+			headerPos := map[string]int{}
+			for i, h := range headerNorm {
+				headerPos[h] = i
+			}
+			for i, row := range dataRows {
+				vals := make([]interface{}, len(cols))
+				for j, col := range cols {
+					if pos, ok := headerPos[col]; ok && pos < len(row) {
+						cell := strings.TrimSpace(row[pos])
+						if cell == "" {
+							vals[j] = nil
+						} else {
+							// normalize dates if this is a date column
+							if col == "effective_from" || col == "effective_to" || col == "eff_from" || col == "eff_to" || col == "effectivefrom" || col == "effectiveto" {
+								if norm := normalizeDateLocal(cell); norm != "" {
+									if tval, perr := time.Parse("2006-01-02", norm); perr == nil {
+										vals[j] = tval
+									} else {
+										vals[j] = norm
+									}
+								} else {
+									vals[j] = nil
+								}
+							} else {
+								vals[j] = cell
+							}
+						}
+					} else {
+						vals[j] = nil
+					}
+				}
+				copyRowsMaster[i] = vals
+			}
+
+			tStartCopy := time.Now()
+			// Use CopyFrom directly into masterglaccount
+			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"masterglaccount"}, cols, pgx.CopyFromRows(copyRowsMaster)); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert into masterglaccount: "+err.Error())
+				return
+			}
+			log.Printf("UploadGLAccountSimple: COPY inserted %d rows in %v", len(copyRowsMaster), time.Since(tStartCopy))
+
+			// Collect gl_account_code values we inserted to look up IDs for audit
+			codes := make([]string, 0, len(copyRowsMaster))
+			for _, row := range copyRowsMaster {
+				for j, c := range cols {
+					if c == "gl_account_code" {
+						if row[j] != nil {
+							codes = append(codes, fmt.Sprint(row[j]))
+						}
+						break
+					}
+				}
+			}
+
+			// Fetch inserted IDs (small cost) - do this inside tx to ensure we see newly inserted rows
+			var newIDs []string
+			var newCodes []string
+			if len(codes) > 0 {
+				q := `SELECT gl_account_id, gl_account_code FROM masterglaccount WHERE gl_account_code = ANY($1)`
+				rrows, err := tx.Query(ctx, q, codes)
+				if err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch inserted IDs: "+err.Error())
+					return
+				}
+				for rrows.Next() {
+					var id, code string
+					if err := rrows.Scan(&id, &code); err == nil {
+						newIDs = append(newIDs, id)
+						newCodes = append(newCodes, code)
+					}
+				}
+				rrows.Close()
+			}
+
+			// Commit tx now to free locks; run heavyweight sync and audit asynchronously to avoid blocking the client
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+			committed = true
+
+			// Run sync + audit async
+			go func(codesForAudit []string) {
+				ctx2 := context.Background()
+				// open a new transaction for sync and audit
+				tx2, err := pgxPool.Begin(ctx2)
+				if err != nil {
+					log.Printf("UploadGLAccountSimple: async sync begin failed: %v", err)
+					return
+				}
+				defer func() {
+					if tx2 != nil {
+						tx2.Rollback(ctx2)
+					}
+				}()
+
+				syncSQL := `
+				-- Mark roots
+				UPDATE masterglaccount m
+				SET gl_account_level = 0,
+					is_top_level_gl_account = true
+				WHERE parent_gl_code IS NULL
+				   OR TRIM(parent_gl_code) = ''
+				   OR parent_gl_code NOT IN (SELECT gl_account_code FROM masterglaccount);
+
+				-- Build recursive hierarchy
+				WITH RECURSIVE gl_hierarchy AS (
+				  SELECT gl_account_id, gl_account_code, parent_gl_code, 0 AS lvl
+				  FROM masterglaccount
+				  WHERE parent_gl_code IS NULL OR TRIM(parent_gl_code) = ''
+
+				  UNION ALL
+
+				  SELECT c.gl_account_id, c.gl_account_code, c.parent_gl_code, p.lvl + 1
+				  FROM masterglaccount c
+				  JOIN gl_hierarchy p ON c.parent_gl_code = p.gl_account_code
+				)
+				UPDATE masterglaccount m
+				SET gl_account_level = gh.lvl,
+					is_top_level_gl_account = (gh.lvl = 0)
+				FROM gl_hierarchy gh
+				WHERE m.gl_account_id = gh.gl_account_id;
+
+				-- Insert relationships
+				INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id, status)
+				SELECT DISTINCT p.gl_account_id, c.gl_account_id, 'Active'
+				FROM masterglaccount c
+				JOIN masterglaccount p ON c.parent_gl_code = p.gl_account_code
+				ON CONFLICT (parent_gl_account_id, child_gl_account_id) DO NOTHING;
+			`
+				if _, err := tx2.Exec(ctx2, syncSQL); err != nil {
+					log.Printf("UploadGLAccountSimple: async sync failed: %v", err)
+					return
+				}
+
+				if len(codesForAudit) > 0 {
+					auditSQL := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT gl_account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterglaccount WHERE gl_account_code = ANY($2)`
+					if _, err := tx2.Exec(ctx2, auditSQL, userName, codesForAudit); err != nil {
+						log.Printf("UploadGLAccountSimple: async audit insert failed: %v", err)
+						// continue to commit/close
+					}
+				}
+
+				if err := tx2.Commit(ctx2); err != nil {
+					log.Printf("UploadGLAccountSimple: async commit failed: %v", err)
+					return
+				}
+				tx2 = nil
+				log.Printf("UploadGLAccountSimple: async sync+audit finished for %d codes", len(codesForAudit))
+			}(newCodes)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "batch_ids": batchIDs})
 	}
 }
 
