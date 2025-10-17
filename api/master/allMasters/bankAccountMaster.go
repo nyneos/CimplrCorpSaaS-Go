@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	exposures "CimplrCorpSaas/api/fx/exposures"
 
 	// "mime/multipart"
 	"net/http"
@@ -1078,6 +1079,8 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
+
+		// Step 1: Get user_id
 		userID := ""
 		if r.Header.Get("Content-Type") == "application/json" {
 			var req struct {
@@ -1096,10 +1099,9 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Fetch user name from active sessions
+		// Step 2: Fetch user name from active sessions
 		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
+		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == userID {
 				userName = s.Name
 				break
@@ -1110,6 +1112,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Step 3: Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
 			return
@@ -1119,7 +1122,12 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
 			return
 		}
-		batchIDs := make([]string, 0, len(files))
+
+		// Step 4: Single batch ID per upload session
+		batchID := uuid.New().String()
+		batchIDs := []string{batchID}
+
+		// Step 5: Process files
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
@@ -1133,11 +1141,12 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
 			}
+
 			headerRow := records[0]
 			dataRows := records[1:]
-			batchID := uuid.New().String()
-			batchIDs = append(batchIDs, batchID)
 			colCount := len(headerRow)
+
+			// Add batch ID to every row
 			copyRows := make([][]interface{}, len(dataRows))
 			for i, row := range dataRows {
 				vals := make([]interface{}, colCount+1)
@@ -1157,19 +1166,16 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
-			// normalize header names to match staging table column names
+			// Normalize headers (CSV header -> lookup key)
 			headerNorm := make([]string, len(headerRow))
 			for i, h := range headerRow {
-				hn := strings.TrimSpace(h)
-				hn = strings.Trim(hn, ", ")
-				hn = strings.ToLower(hn)
+				hn := strings.ToLower(strings.TrimSpace(h))
 				hn = strings.ReplaceAll(hn, " ", "_")
-				hn = strings.Trim(hn, "\"'`")
+				hn = strings.Trim(hn, "\"'`,")
 				headerNorm[i] = hn
 			}
 
-			columns := append([]string{"upload_batch_id"}, headerNorm...)
-
+			// Begin TX
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
@@ -1182,83 +1188,204 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}()
 
-			// stage
-			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bankaccount_table"}, columns, pgx.CopyFromRows(copyRows))
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
-				return
-			}
-
-			// read mapping
+			// Read mapping (use transaction to keep consistent)
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bankaccount`)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
+				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
 				return
 			}
+
 			mapping := make(map[string]string)
 			for mapRows.Next() {
 				var src, tgt string
 				if err := mapRows.Scan(&src, &tgt); err == nil {
 					key := strings.ToLower(strings.TrimSpace(src))
 					key = strings.ReplaceAll(key, " ", "_")
-					tt := strings.TrimSpace(tgt)
-					tt = strings.Trim(tt, ", \"'`")
-					tt = strings.ReplaceAll(tt, " ", "_")
-					mapping[key] = tt
+					mapping[key] = strings.ToLower(strings.TrimSpace(tgt))
 				}
 			}
 			mapRows.Close()
 
-			var srcCols []string
-			var tgtCols []string
-			for i, h := range headerRow {
+			// Build target column list (these must exist in input_bankaccount_table)
+			var mappedTargets []string
+			var selectedIdx []int
+			for i := range headerRow {
 				key := headerNorm[i]
 				if t, ok := mapping[key]; ok {
-					srcCols = append(srcCols, key)
-					tgtCols = append(tgtCols, t)
+					mappedTargets = append(mappedTargets, t)
+					selectedIdx = append(selectedIdx, i)
 				} else {
-					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
-					return
+					// skip unmapped columns (user requested tolerant behavior)
+					continue
 				}
 			}
-			tgtColsStr := strings.Join(tgtCols, ", ")
 
+			if len(mappedTargets) == 0 {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, "No mapped columns found in uploaded file")
+				return
+			}
+
+			columns := append([]string{"upload_batch_id"}, mappedTargets...)
+
+			// Build reduced copyRows which only includes selected (mapped) columns
+			newCopyRows := make([][]interface{}, len(copyRows))
+			for i, row := range copyRows {
+				vals := make([]interface{}, len(mappedTargets)+1)
+				// batch id stays at position 0
+				if len(row) > 0 {
+					vals[0] = row[0]
+				} else {
+					vals[0] = batchID
+				}
+				for j, origIdx := range selectedIdx {
+					// original value is at origIdx+1 in row (since row[0] is batchID)
+					if len(row) > origIdx+1 {
+						vals[j+1] = row[origIdx+1]
+					} else {
+						vals[j+1] = nil
+					}
+				}
+				newCopyRows[i] = vals
+			}
+
+			// Normalize date columns (eff_from, eff_to) in reduced rows before staging
+			dateCols := map[string]bool{"eff_from": true, "eff_to": true}
+			for colIdx, colName := range mappedTargets {
+				if _, ok := dateCols[colName]; ok {
+					for i := range newCopyRows {
+						if len(newCopyRows[i]) <= colIdx+1 {
+							continue
+						}
+						v := newCopyRows[i][colIdx+1]
+						if v == nil {
+							continue
+						}
+						if s, ok := v.(string); ok {
+							norm := exposures.NormalizeDate(s)
+							if norm == "" {
+								newCopyRows[i][colIdx+1] = nil
+							} else {
+								newCopyRows[i][colIdx+1] = norm
+							}
+						}
+					}
+				}
+			}
+
+			// Stage into input table using mapped target column names
+			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bankaccount_table"}, columns, pgx.CopyFromRows(newCopyRows))
+			if err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				return
+			}
+
+			// Build insert/select expressions: map only columns that belong to masterbankaccount.
+			// Clearing-code related columns should not be inserted into masterbankaccount; they go to masterclearingcode.
+			exclude := map[string]bool{
+				"clearing_code_type":  true,
+				"clearing_code_value": true,
+				"optional_code_type":  true,
+				"optional_code_value": true,
+			}
+			masterCols := []string{}
+			for _, col := range mappedTargets {
+				if !exclude[col] {
+					masterCols = append(masterCols, col)
+				}
+			}
+			if len(masterCols) == 0 {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, "No target columns available for masterbankaccount insert")
+				return
+			}
+			tgtColsStr := strings.Join(masterCols, ", ")
 			var selectExprs []string
-			for i, src := range srcCols {
-				tgt := tgtCols[i]
-				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+			for _, col := range masterCols {
+				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", col, col))
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
+			// Insert into masterbankaccount
 			insertSQL := fmt.Sprintf(`
 				INSERT INTO masterbankaccount (%s)
 				SELECT %s
 				FROM input_bankaccount_table s
 				WHERE s.upload_batch_id = $1
-				RETURNING account_id
+				RETURNING account_id, account_number, bank_id
 			`, tgtColsStr, srcColsStr)
+
 			rows, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
 				return
 			}
-			var newIDs []string
+
+			type inserted struct {
+				AccountID     string
+				AccountNumber string
+				BankID        string
+			}
+			var insertedRows []inserted
 			for rows.Next() {
-				var id string
-				if err := rows.Scan(&id); err == nil {
-					newIDs = append(newIDs, id)
+				var x inserted
+				if err := rows.Scan(&x.AccountID, &x.AccountNumber, &x.BankID); err == nil {
+					insertedRows = append(insertedRows, x)
+				} else {
+					// capture scan errors
+					rows.Close()
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to read inserted rows: "+err.Error())
+					return
 				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
+				return
 			}
 			rows.Close()
 
-			if len(newIDs) > 0 {
-				auditSQL := `INSERT INTO auditactionbankaccount (account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterbankaccount WHERE account_id = ANY($2)`
-				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
+			// Insert into auditactionbankaccount
+			if len(insertedRows) > 0 {
+				ids := make([]string, 0, len(insertedRows))
+				for _, x := range insertedRows {
+					ids = append(ids, x.AccountID)
+				}
+				auditSQL := `INSERT INTO auditactionbankaccount (account_id, actiontype, processing_status, reason, requested_by, requested_at)
+					SELECT account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now()
+					FROM masterbankaccount WHERE account_id = ANY($2)`
+				if _, err := tx.Exec(ctx, auditSQL, userName, ids); err != nil {
 					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					return
+				}
+
+				// Insert into masterclearingcode (NEW) only when master rows were created
+				_, err = tx.Exec(ctx, `
+					INSERT INTO masterclearingcode (
+						account_id, code_type, code_value, optional_code_type, optional_code_value
+					)
+					SELECT
+						m.account_id,
+						i.clearing_code_type,
+						i.clearing_code_value,
+						i.optional_code_type,
+						i.optional_code_value
+					FROM input_bankaccount_table i
+					JOIN masterbankaccount m
+						ON m.account_number = i.account_number
+						AND m.bank_id::text = i.bank_id::text
+					WHERE i.upload_batch_id = $1
+					AND i.clearing_code_type IS NOT NULL
+				`, batchID)
+				if err != nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert clearing codes: "+err.Error())
 					return
 				}
 			}
@@ -1271,12 +1398,16 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			committed = true
 		}
 
+		// Success Response
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"batch_ids":    batchIDs,
+			"uploaded":     len(files),
+			"requested_by": userName,
+		})
 	}
 }
-
-
 func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(new(struct {
