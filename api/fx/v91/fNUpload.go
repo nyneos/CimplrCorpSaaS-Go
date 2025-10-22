@@ -655,13 +655,16 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// If allocation consumed everything (no exposures) but produced knockoffs,
-			// surface a friendly, actionable message to the caller so they understand
-			// why inserted_count is zero.
-			if len(exposures) == 0 && len(knocksFloat) > 0 {
-				msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
-				fileErrors = append(fileErrors, msg)
-				log.Printf("[INFO] %s", msg)
+			if len(exposures) == 0 {
+				if len(knocksFloat) > 0 {
+					msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
+					fileErrors = append(fileErrors, msg)
+					log.Printf("[INFO] %s", msg)
+				} else {
+					msg := fmt.Sprintf("No exposures were written: allocation produced no base or knock items. Likely causes: amounts all share the same sign (no debits or no credits), amounts parsed as zero, or mapping produced empty AmountDoc values. Check mapping, amount signs (+/-), and NetDueDate; try 'receivable_logic'/'payable_logic' = reverse to flip allocation direction or upload a small unbalanced test file.")
+					fileErrors = append(fileErrors, msg)
+					log.Printf("[INFO] %s", msg)
+				}
 			}
 
 			headerCols := []string{
