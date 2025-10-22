@@ -236,6 +236,30 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+			// Build currency map (active or with approved audit action)
+			currencyMap := map[string]struct{}{}
+			rowsCur, err := pool.Query(ctx, `
+				SELECT mc.currency_code
+				FROM public.mastercurrency mc
+				WHERE (lower(mc.status) = 'active'
+				   OR EXISTS (
+				       SELECT 1 FROM public.auditactioncurrency a
+				       WHERE a.currency_id = mc.currency_id AND a.processing_status = 'APPROVED'
+				   )
+				)
+			`)
+			if err == nil {
+				for rowsCur.Next() {
+					var code string
+					if err := rowsCur.Scan(&code); err == nil {
+						if code = strings.TrimSpace(code); code != "" {
+							currencyMap[strings.ToUpper(code)] = struct{}{}
+						}
+					}
+				}
+				rowsCur.Close()
+			}
+
 		results := make([]UploadResult, 0, len(files))
 
 		for i, fh := range files {
@@ -467,8 +491,36 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
+			log.Printf("[DEBUG] After CSV parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
+			if len(canonicals) > 0 {
+				sample := canonicals[0]
+				log.Printf("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
+					sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.AmountFloat, sample.NetDueDate)
+			}
+
 			// exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals)
 			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
+
+			log.Printf("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
+			// print a small sample of knock events for debugging (base, knock, amount)
+			if len(knocksFloat) > 0 {
+				limit := 10
+				if len(knocksFloat) < limit {
+					limit = len(knocksFloat)
+				}
+				for i := 0; i < limit; i++ {
+					kf := knocksFloat[i]
+					log.Printf("[DEBUG] knock[%d]: base=%s knock=%s amt=%f", i, kf.BaseDoc, kf.KnockDoc, kf.AmtFloat)
+				}
+				// also log number of unique base docs in knocks
+				uniqBases := map[string]struct{}{}
+				for _, k := range knocksFloat {
+					if k.BaseDoc != "" {
+						uniqBases[k.BaseDoc] = struct{}{}
+					}
+				}
+				log.Printf("[DEBUG] knocksFloat unique base docs=%d", len(uniqBases))
+			}
 
 			// --- Apply Non-Qualified rules based on net exposure per (Source,CompanyCode,Party) ---
 			// Rule: For vendors (FBL1N & FBL3N) if net > 0 => Non-Qualified
@@ -478,6 +530,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				key := fmt.Sprintf("%s|%s|%s", e.Source, e.CompanyCode, e.Party)
 				netMap[key] += e.AmountFloat
 			}
+			flaggedCount := 0
 			for i := range exposuresFloat {
 				e := &exposuresFloat[i]
 				key := fmt.Sprintf("%s|%s|%s", e.Source, e.CompanyCode, e.Party)
@@ -494,6 +547,7 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 						}
 						e._raw["is_non_qualified"] = true
 						e._raw["non_qualified_reason"] = e.NonQualifiedReason
+						flaggedCount++
 					}
 				case "FBL5N":
 					if net < 0 {
@@ -506,9 +560,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 						}
 						e._raw["is_non_qualified"] = true
 						e._raw["non_qualified_reason"] = e.NonQualifiedReason
+						flaggedCount++
 					}
 				}
 			}
+
+			log.Printf("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
 
 			exposures := make([]CanonicalRow, 0, len(exposuresFloat))
 			for _, e := range exposuresFloat {
@@ -525,6 +582,58 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				exposures = append(exposures, e)
 			}
 
+			log.Printf("[DEBUG] After building exposures: exposures=%d, batch=%s", len(exposures), batchID.String())
+
+			// Mark exposures non-qualified when entity or currency not found in maps
+			entityMiss := 0
+			currencyMiss := 0
+			if len(exposures) > 0 {
+				for i := range exposures {
+					e := &exposures[i]
+					cc := strings.TrimSpace(e.CompanyCode)
+					if _, ok := entityMap[cc]; !ok || cc == "" {
+						// mark non-qualified
+						e.IsNonQualified = true
+						reason := fmt.Sprintf("No entity found for company_code: %s", cc)
+						if e.NonQualifiedReason != "" {
+							e.NonQualifiedReason = e.NonQualifiedReason + "; " + reason
+						} else {
+							e.NonQualifiedReason = reason
+						}
+						if e._raw == nil {
+							e._raw = make(map[string]interface{})
+						}
+						e._raw["is_non_qualified"] = true
+						e._raw["non_qualified_reason"] = e.NonQualifiedReason
+						entityMiss++
+					}
+					cur := strings.ToUpper(strings.TrimSpace(e.DocumentCurrency))
+					if len(currencyMap) > 0 {
+						if _, ok := currencyMap[cur]; !ok {
+							// currency not found
+							e.IsNonQualified = true
+							reason := fmt.Sprintf("Currency %s not found or inactive/approved", cur)
+							if e.NonQualifiedReason != "" {
+								e.NonQualifiedReason = e.NonQualifiedReason + "; " + reason
+							} else {
+								e.NonQualifiedReason = reason
+							}
+							if e._raw == nil {
+								e._raw = make(map[string]interface{})
+							}
+							e._raw["is_non_qualified"] = true
+							e._raw["non_qualified_reason"] = e.NonQualifiedReason
+							currencyMiss++
+						}
+					}
+				}
+				if entityMiss > 0 || currencyMiss > 0 {
+					msg2 := fmt.Sprintf("Marked %d rows non-qualified due to missing entity and %d due to missing currency (company_code/currency).", entityMiss, currencyMiss)
+					fileErrors = append(fileErrors, msg2)
+					log.Printf("[INFO] %s", msg2)
+				}
+			}
+
 			knockMap := map[string][]KnockoffInfo{}
 			for _, kf := range knocksFloat {
 				afmt := strconv.FormatFloat(kf.AmtFloat, 'f', 4, 64)
@@ -538,6 +647,22 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			qualified, nonQualified := validateExposures(exposures)
+
+			log.Printf("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
+			if len(nonQualified) > 0 && len(nonQualified) <= 5 {
+				for i, nq := range nonQualified {
+					log.Printf("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
+				}
+			}
+
+			// If allocation consumed everything (no exposures) but produced knockoffs,
+			// surface a friendly, actionable message to the caller so they understand
+			// why inserted_count is zero.
+			if len(exposures) == 0 && len(knocksFloat) > 0 {
+				msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
+				fileErrors = append(fileErrors, msg)
+				log.Printf("[INFO] %s", msg)
+			}
 
 			headerCols := []string{
 				"exposure_header_id", "company_code", "entity", "entity1", "entity2", "entity3",
@@ -967,39 +1092,34 @@ func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string
 
 		switch src {
 		case "FBL1N": // Payables (vendors)
-			// Standard for vendors: DEBIT (+ve) values are considered first
-			// Reverse logic flips the direction
 			if strings.EqualFold(payableLogic, "reverse") {
-				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			} else {
-				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			}
 
 		case "FBL5N": // Receivables (customers)
-			// Standard for customers: CREDIT (-ve) values are considered first
-			// Reverse logic flips the direction
 			if strings.EqualFold(receivableLogic, "reverse") {
-				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			} else {
-				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			}
 
 		case "FBL3N": // GR/IR (payable-like)
-			// Treat like vendors: DEBIT (+ve) first in standard mode
 			if strings.EqualFold(payableLogic, "reverse") {
-				exps, knocks := allocateFIFOFloatCore(credits, debits)
+				exps, knocks := allocateFIFOFloatCore(debits, credits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			} else {
-				exps, knocks := allocateFIFOFloatCore(debits, credits)
+				exps, knocks := allocateFIFOFloatCore(credits, debits)
 				allExps = append(allExps, exps...)
 				allKnocks = append(allKnocks, knocks...)
 			}
