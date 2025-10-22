@@ -71,7 +71,8 @@ type NormalizedExposure struct {
 	DeleteComment       string  `json:"delete_comment"`
 	CreatedAt           string  `json:"created_at"`
 	UpdatedAt           string  `json:"updated_at"`
-	Year                string  `json:"year"`
+	Month               string  `json:"month"`
+	Year                int     `json:"year"`
 	PayAmount           float64 `json:"pay_amount"`
 	RecAmount           float64 `json:"rec_amount"`
 	ExposureType        string  `json:"exposure_type"`
@@ -269,12 +270,24 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				e.PayAmount = math.Abs(amt) * rate
 			}
 
+			// populate Month (e.g. "Jan-25") and Year (e.g. 2025) from ValueDate/PostinDate/DocumentDate
+			var monthStr string
+			var yearInt int
+			var dateForMonth *time.Time
 			if e.ValueDate != nil {
+				dateForMonth = e.ValueDate
+			} else if e.PostingDate != nil {
+				dateForMonth = e.PostingDate
+			} else if e.DocumentDate != nil {
+				dateForMonth = e.DocumentDate
+			}
+			if dateForMonth != nil {
 				if e.PostingDate != nil {
 					days := int(e.ValueDate.Sub(*e.PostingDate).Hours() / 24)
 					e.AgingDays = &days
 				}
-				e.Year = e.ValueDate.Format("Jan-06")
+				monthStr = dateForMonth.Format("Jan-06")
+				yearInt = dateForMonth.Year()
 			}
 
 			ne := NormalizedExposure{
@@ -301,7 +314,8 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				DeleteComment:       e.DeleteComment,
 				CreatedAt:           timeToString(e.CreatedAt),
 				UpdatedAt:           timeToString(e.UpdatedAt),
-				Year:                e.Year,
+				Month:               monthStr,
+				Year:                yearInt,
 				PayAmount:           e.PayAmount,
 				RecAmount:           e.RecAmount,
 				ExposureType:        e.ExposureType,
@@ -477,12 +491,24 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 				e.PayAmount = math.Abs(amt) * rate
 			}
 
+			// populate Month and Year for this record
+			var monthStr string
+			var yearInt int
+			var dateForMonth *time.Time
 			if e.ValueDate != nil {
-				if e.PostingDate != nil {
+				dateForMonth = e.ValueDate
+			} else if e.PostingDate != nil {
+				dateForMonth = e.PostingDate
+			} else if e.DocumentDate != nil {
+				dateForMonth = e.DocumentDate
+			}
+			if dateForMonth != nil {
+				if e.PostingDate != nil && e.ValueDate != nil {
 					days := int(e.ValueDate.Sub(*e.PostingDate).Hours() / 24)
 					e.AgingDays = &days
 				}
-				e.Year = e.ValueDate.Format("Jan-06")
+				monthStr = dateForMonth.Format("Jan-06")
+				yearInt = dateForMonth.Year()
 			}
 
 			ne := NormalizedExposure{
@@ -509,7 +535,8 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 				DeleteComment:       e.DeleteComment,
 				CreatedAt:           timeToString(e.CreatedAt),
 				UpdatedAt:           timeToString(e.UpdatedAt),
-				Year:                e.Year,
+				Month:               monthStr,
+				Year:                yearInt,
 				PayAmount:           e.PayAmount,
 				RecAmount:           e.RecAmount,
 				ExposureType:        e.ExposureType,
