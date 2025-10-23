@@ -9,8 +9,6 @@ import (
 	"log"
 	"net/http"
 	"regexp"
-
-	// "strconv"
 	"strings"
 	"time"
 
@@ -135,15 +133,12 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Compute parent id and level
-			var parentID *string
+			// Compute parent and level
 			centreLevel := rrow.CentreLevel
 			isTop := rrow.IsTopLevelCentre
 			if strings.TrimSpace(rrow.ParentCode) != "" {
-				var pid string
 				var plevel int
-				if err := pgxPool.QueryRow(ctx, `SELECT centre_id, centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, rrow.ParentCode).Scan(&pid, &plevel); err == nil {
-					parentID = &pid
+				if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, rrow.ParentCode).Scan(&plevel); err == nil {
 					centreLevel = plevel + 1
 					isTop = false
 				} else {
@@ -189,7 +184,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Insert CPC (without centre_id so DB default applies) and capture generated centre_id
 				ins := `INSERT INTO mastercostprofitcenter (
-					centre_code, centre_name, centre_type, parent_centre_id, 
+					centre_code, centre_name, centre_type, parent_centre_code, 
 					entity_name, status, source, erp_type, centre_level, is_top_level_centre,
 					default_currency, owner, owner_email, effective_from, effective_to, 
 					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
@@ -202,7 +197,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rrow.CentreCode,
 					rrow.CentreName,
 					rrow.CentreType,
-					parentID,
+					rrow.ParentCode,
 					rrow.EntityCode,
 					rrow.Status,
 					rrow.Source,
@@ -238,7 +233,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Insert relationship if parent exists. Relationships table now stores centre codes (parent_centre_code, child_centre_code)
-				if parentID != nil {
+				if strings.TrimSpace(rrow.ParentCode) != "" {
 					relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code)
 							 VALUES ($1, $2)
 							 ON CONFLICT (parent_centre_code, child_centre_code) DO NOTHING`
@@ -323,7 +318,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}()
 
 				// fetch existing full row for old_* population and locking
-				var existingCode, existingName, existingType, existingParentID, existingEntity, existingStatus, existingSource, existingErp interface{}
+				var existingCode, existingName, existingType, existingParentCode, existingEntity, existingStatus, existingSource, existingErp interface{}
 				var existingLevel interface{}
 				var existingIsTop interface{}
 				var existingCurrency, existingOwner, existingOwnerEmail interface{}
@@ -334,7 +329,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var existingSageDept, existingSageCost interface{}
 
 				qSel := `SELECT 
-					centre_code, centre_name, centre_type, parent_centre_id, entity_name, 
+					centre_code, centre_name, centre_type, parent_centre_code, entity_name, 
 					status, source, erp_type, centre_level, is_top_level_centre,
 					default_currency, owner, owner_email, effective_from, effective_to,
 					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
@@ -343,7 +338,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM mastercostprofitcenter WHERE centre_id = $1 FOR UPDATE`
 
 				if err := tx.QueryRow(ctx, qSel, row.CentreID).Scan(
-					&existingCode, &existingName, &existingType, &existingParentID, &existingEntity,
+					&existingCode, &existingName, &existingType, &existingParentCode, &existingEntity,
 					&existingStatus, &existingSource, &existingErp, &existingLevel, &existingIsTop,
 					&existingCurrency, &existingOwner, &existingOwnerEmail, &existingEffFrom, &existingEffTo,
 					&existingTags, &existingExtCode, &existingSegment, &existingSAPKOKRS, &existingSAPBUKRS,
@@ -357,7 +352,6 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var sets []string
 				var args []interface{}
 				pos := 1
-				var newParentID interface{}
 				var computedLevel interface{}
 				var computedIsTop interface{}
 
@@ -405,23 +399,20 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						pcode := strings.TrimSpace(fmt.Sprint(v))
 						if pcode == "" {
 							// removing parent
-							newParentID = nil
 							computedLevel = 0
 							computedIsTop = true
 						} else {
-							var pid string
 							var plevel int
-							if err := pgxPool.QueryRow(ctx, `SELECT centre_id, centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&pid, &plevel); err != nil {
+							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&plevel); err != nil {
 								results = append(results, map[string]interface{}{"success": false, "error": "parent centre not found: " + pcode, "centre_id": row.CentreID})
 								return
 							}
-							newParentID = pid
 							computedLevel = plevel + 1
 							computedIsTop = false
 						}
 						// set parent and old_parent and update level fields
-						sets = append(sets, fmt.Sprintf("parent_centre_id=$%d, old_parent_centre_id=$%d, centre_level=$%d, old_centre_level=$%d, is_top_level_centre=$%d", pos, pos+1, pos+2, pos+3, pos+4))
-						args = append(args, newParentID, ifaceToString(existingParentID), computedLevel, existingLevel, computedIsTop)
+						sets = append(sets, fmt.Sprintf("parent_centre_code=$%d, old_parent_centre_code=$%d, centre_level=$%d, old_centre_level=$%d, is_top_level_centre=$%d", pos, pos+1, pos+2, pos+3, pos+4))
+						args = append(args, pcode, ifaceToString(existingParentCode), computedLevel, existingLevel, computedIsTop)
 						pos += 5
 
 					// New fields - add old_* values for tracking changes
@@ -532,30 +523,34 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 
-				// sync relationships when parent changed
-				// compare existingParent and newParentID
-				parentChanged := false
-				if newParentID != nil {
-					if ifaceToString(existingParentID) != fmt.Sprint(newParentID) {
-						parentChanged = true
+				// sync relationships when parent changed - now comparing centre codes
+				if computedLevel != nil || computedIsTop != nil {
+					// Parent was changed, sync the relationships
+					// Get current centre_code for this centre
+					var currentCentreCode string
+					if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_id=$1`, updatedID).Scan(&currentCentreCode); err != nil {
+						results = append(results, map[string]interface{}{"success": false, "error": "failed to get centre code: " + err.Error(), "centre_id": updatedID})
+						return
 					}
-				} else {
-					if existingParentID != nil {
-						parentChanged = true
-					}
-				}
 
-				if parentChanged {
-					// remove any relationship entries where this child has a different parent
-					delQ := `DELETE FROM costprofitcenterrelationships WHERE child_centre_id=$1 AND parent_centre_id IS DISTINCT FROM $2`
-					if _, err := tx.Exec(ctx, delQ, updatedID, newParentID); err != nil {
+					// remove existing relationships for this child
+					delQ := `DELETE FROM costprofitcenterrelationships WHERE child_centre_code=$1`
+					if _, err := tx.Exec(ctx, delQ, currentCentreCode); err != nil {
 						results = append(results, map[string]interface{}{"success": false, "error": "failed to remove old relationships: " + err.Error(), "centre_id": updatedID})
 						return
 					}
+
 					// insert new relationship if parent exists
-					if newParentID != nil {
-						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM costprofitcenterrelationships WHERE parent_centre_id=$1 AND child_centre_id=$2)`
-						if _, err := tx.Exec(ctx, relQ, newParentID, updatedID); err != nil {
+					newParentCode := ""
+					for k, v := range row.Fields {
+						if k == "parent_centre_code" {
+							newParentCode = strings.TrimSpace(fmt.Sprint(v))
+							break
+						}
+					}
+					if newParentCode != "" {
+						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code) VALUES ($1, $2) ON CONFLICT (parent_centre_code, child_centre_code) DO NOTHING`
+						if _, err := tx.Exec(ctx, relQ, newParentCode, currentCentreCode); err != nil {
 							results = append(results, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "centre_id": updatedID})
 							return
 						}
@@ -793,7 +788,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// create relationships from input rows using the actual source columns that map to centre_code and parent info
 			// find source column names for centre_code and parent (if mapped)
 			childSrcCol := "centre_code"
-			parentSrcCol := "parent_centre_id"
+			parentSrcCol := "parent_centre_code"
 			// try to locate in mapping: srcCols[i] maps to tgtCols[i]
 			for i, tgt := range tgtCols {
 				lt := strings.ToLower(strings.TrimSpace(tgt))
@@ -801,7 +796,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					childSrcCol = srcCols[i]
 				}
 				// accept multiple possible parent target names
-				if lt == "parent_centre_id" || lt == "parent_centre_code" || lt == "parent_centre" || lt == "parent" {
+				if lt == "parent_centre_code" || lt == "parent_centre" || lt == "parent" {
 					parentSrcCol = srcCols[i]
 				}
 			}
@@ -816,7 +811,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if !foundParent {
 				// try common fallback names
-				for _, cand := range []string{"parent_centre_code", "parent_centre_id", "parent_centre", "parent"} {
+				for _, cand := range []string{"parent_centre_code", "parent_centre", "parent"} {
 					for _, hn := range headerNorm {
 						if hn == cand {
 							parentSrcCol = cand
@@ -872,8 +867,8 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 
 						// Insert relationship (no-op if exists)
-						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_id, child_centre_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`
-						if _, err := tx.Exec(ctx, relQ, parentID, childID); err != nil {
+						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code) VALUES ($1,$2) ON CONFLICT DO NOTHING`
+						if _, err := tx.Exec(ctx, relQ, pc, cc); err != nil {
 							tx.Rollback(ctx)
 							api.RespondWithResult(w, false, "relationship insert failed: "+err.Error())
 							return
@@ -881,15 +876,15 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 						// Update child master: set parent and compute level
 						var parentLevel int
-						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_id=$1`, parentID).Scan(&parentLevel); err == nil {
-							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_id=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, parentID, parentLevel+1, childID)
+						if err := tx.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pc).Scan(&parentLevel); err == nil {
+							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1, centre_level=$2, is_top_level_centre=false WHERE centre_id=$3`, pc, parentLevel+1, childID)
 						} else {
-							// parent exists but level unknown - at least set parent id
-							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_id=$1 WHERE centre_id=$2`, parentID, childID)
+							// parent exists but level unknown - at least set parent code
+							_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=$1 WHERE centre_id=$2`, pc, childID)
 						}
 					} else {
-						// No parent specified: ensure this child is marked top-level with level 1
-						_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_id=NULL, centre_level=1, is_top_level_centre=true WHERE centre_id=$1`, childID)
+						// No parent specified: ensure this child is marked top-level with level 0
+						_, _ = tx.Exec(ctx, `UPDATE mastercostprofitcenter SET parent_centre_code=NULL, centre_level=0, is_top_level_centre=true WHERE centre_id=$1`, childID)
 					}
 				}
 			}
@@ -998,9 +993,9 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		query := `
             SELECT 
-                m.centre_id, m.centre_code, m.centre_name, m.centre_type, m.parent_centre_id, 
+                m.centre_id, m.centre_code, m.centre_name, m.centre_type, m.parent_centre_code, 
                 m.entity_name, m.status, m.source, m.erp_type,
-                m.old_centre_code, m.old_centre_name, m.old_centre_type, m.old_parent_centre_id, 
+                m.old_centre_code, m.old_centre_name, m.old_centre_type, m.old_parent_centre_code, 
                 m.old_entity_name, m.old_status, m.old_source, m.old_erp_type,
                 m.centre_level, m.old_centre_level, m.is_top_level_centre, m.is_deleted,
                 m.default_currency, m.old_default_currency,
@@ -1110,25 +1105,25 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"name": ifaceToString(centreNameI),
 				"data": map[string]interface{}{
 					// Basic fields
-					"centre_id":        centreID,
-					"centre_code":      ifaceToString(centreCodeI),
-					"centre_name":      ifaceToString(centreNameI),
-					"centre_type":      ifaceToString(centreTypeI),
-					"parent_centre_id": ifaceToString(parentCentreIDI),
-					"entity_name":      ifaceToString(entityNameI),
-					"status":           ifaceToString(statusI),
-					"source":           ifaceToString(sourceI),
-					"erp_type":         ifaceToString(erpTypeI),
+					"centre_id":          centreID,
+					"centre_code":        ifaceToString(centreCodeI),
+					"centre_name":        ifaceToString(centreNameI),
+					"centre_type":        ifaceToString(centreTypeI),
+					"parent_centre_code": ifaceToString(parentCentreIDI),
+					"entity_name":        ifaceToString(entityNameI),
+					"status":             ifaceToString(statusI),
+					"source":             ifaceToString(sourceI),
+					"erp_type":           ifaceToString(erpTypeI),
 
 					// Old values
-					"old_centre_code":      ifaceToString(oldCodeI),
-					"old_centre_name":      ifaceToString(oldNameI),
-					"old_centre_type":      ifaceToString(oldTypeI),
-					"old_parent_centre_id": ifaceToString(oldParentI),
-					"old_entity_name":      ifaceToString(oldEntityI),
-					"old_status":           ifaceToString(oldStatusI),
-					"old_source":           ifaceToString(oldSourceI),
-					"old_erp_type":         ifaceToString(oldErpTypeI),
+					"old_centre_code":        ifaceToString(oldCodeI),
+					"old_centre_name":        ifaceToString(oldNameI),
+					"old_centre_type":        ifaceToString(oldTypeI),
+					"old_parent_centre_code": ifaceToString(oldParentI),
+					"old_entity_name":        ifaceToString(oldEntityI),
+					"old_status":             ifaceToString(oldStatusI),
+					"old_source":             ifaceToString(oldSourceI),
+					"old_erp_type":           ifaceToString(oldErpTypeI),
 
 					// Level and flags
 					"centre_level":        ifaceToInt(centreLevelI),
@@ -1245,8 +1240,8 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-	// relationships table stores centre codes now; fetch codes and resolve to IDs
-	relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
+		// relationships table stores centre codes now; fetch codes and resolve to IDs
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithResult(w, false, err.Error())
 			return
@@ -1426,17 +1421,38 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fetch relationships and compute descendants so we add audit actions for all descendants as well
 		ctx := r.Context()
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_id, child_centre_id FROM costprofitcenterrelationships`)
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer relRows.Close()
 		parentMap := map[string][]string{}
+		codeToIDMap := map[string]string{}
+
+		// First get all centre_code to centre_id mappings
+		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer codeRows.Close()
+		for codeRows.Next() {
+			var id, code string
+			if err := codeRows.Scan(&id, &code); err == nil {
+				codeToIDMap[code] = id
+			}
+		}
+
+		// Build parent map using centre IDs
 		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
+			var parentCode, childCode string
+			if err := relRows.Scan(&parentCode, &childCode); err == nil {
+				if parentID, ok := codeToIDMap[parentCode]; ok {
+					if childID, ok := codeToIDMap[childCode]; ok {
+						parentMap[parentID] = append(parentMap[parentID], childID)
+					}
+				}
 			}
 		}
 
@@ -1504,17 +1520,38 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch relationships and compute descendants, then update audit rows by centre_id
 		ctx := context.Background()
 
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_id, child_centre_id FROM costprofitcenterrelationships`)
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer relRows.Close()
 		parentMap := map[string][]string{}
+		codeToIDMap := map[string]string{}
+
+		// Get centre_code to centre_id mappings
+		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer codeRows.Close()
+		for codeRows.Next() {
+			var id, code string
+			if err := codeRows.Scan(&id, &code); err == nil {
+				codeToIDMap[code] = id
+			}
+		}
+
+		// Build parent map using centre IDs
 		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
+			var parentCode, childCode string
+			if err := relRows.Scan(&parentCode, &childCode); err == nil {
+				if parentID, ok := codeToIDMap[parentCode]; ok {
+					if childID, ok := codeToIDMap[childCode]; ok {
+						parentMap[parentID] = append(parentMap[parentID], childID)
+					}
+				}
 			}
 		}
 
@@ -1601,17 +1638,38 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		ctx := context.Background()
 
 		// Fetch relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_id, child_centre_id FROM costprofitcenterrelationships`)
+		relRows, err := pgxPool.Query(ctx, `SELECT parent_centre_code, child_centre_code FROM costprofitcenterrelationships`)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer relRows.Close()
 		parentMap := map[string][]string{}
+		codeToIDMap := map[string]string{}
+
+		// Get centre_code to centre_id mappings
+		codeRows, err := pgxPool.Query(ctx, `SELECT centre_id, centre_code FROM mastercostprofitcenter`)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer codeRows.Close()
+		for codeRows.Next() {
+			var id, code string
+			if err := codeRows.Scan(&id, &code); err == nil {
+				codeToIDMap[code] = id
+			}
+		}
+
+		// Build parent map using centre IDs
 		for relRows.Next() {
-			var parentID, childID string
-			if err := relRows.Scan(&parentID, &childID); err == nil {
-				parentMap[parentID] = append(parentMap[parentID], childID)
+			var parentCode, childCode string
+			if err := relRows.Scan(&parentCode, &childCode); err == nil {
+				if parentID, ok := codeToIDMap[parentCode]; ok {
+					if childID, ok := codeToIDMap[childCode]; ok {
+						parentMap[parentID] = append(parentMap[parentID], childID)
+					}
+				}
 			}
 		}
 

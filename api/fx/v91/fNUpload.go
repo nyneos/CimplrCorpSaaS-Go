@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,12 +21,11 @@ import (
 
 	"math"
 
+	"github.com/xuri/excelize/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
-	"golang.org/x/text/encoding/charmap"
-	"golang.org/x/text/transform"
 )
 
 type CanonicalRow struct {
@@ -293,17 +293,25 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				httpError(w, http.StatusInternalServerError, "open tmp: "+err.Error())
 				return
 			}
-			utf8Reader := transform.NewReader(tmpFile, charmap.Windows1252.NewDecoder())
-			csvR := csv.NewReader(utf8Reader)
+			defer tmpFile.Close()
 
-			csvR.FieldsPerRecord = -1
-
-			headersRec, err := csvR.Read()
+			// Get file extension and parse using helper function
+			fileExt := strings.ToLower(filepath.Ext(fh.Filename))
+			
+			// Use the helper function to parse both CSV and Excel files
+			allRows, err := ubParseUploadFile(tmpFile, fileExt)
 			if err != nil {
-				tmpFile.Close()
-				httpError(w, http.StatusBadRequest, "csv read header: "+err.Error())
+				httpError(w, http.StatusBadRequest, "file parse error: "+err.Error())
 				return
 			}
+			
+			if len(allRows) == 0 {
+				httpError(w, http.StatusBadRequest, "empty file or no data rows")
+				return
+			}
+
+			// First row is headers
+			headersRec := allRows[0]
 			headers := make([]string, len(headersRec))
 			for idx, h := range headersRec {
 				headers[idx] = strings.TrimSpace(h)
@@ -342,14 +350,12 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			batchID := uuid.New()
 			conn, err := pool.Acquire(ctx)
 			if err != nil {
-				tmpFile.Close()
 				httpError(w, 500, "db acquire: "+err.Error())
 				return
 			}
 			tx, err := conn.Begin(ctx)
 			if err != nil {
 				conn.Release()
-				tmpFile.Close()
 				httpError(w, 500, "tx begin: "+err.Error())
 				return
 			}
@@ -359,7 +365,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					_ = tx.Rollback(ctx)
 				}
 				conn.Release()
-				tmpFile.Close()
 			}()
 
 			if _, err := tx.Exec(ctx, `
@@ -388,17 +393,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			totalRows := 0
 			dn := newDateNormalizer()
 
-			for {
-				rec, err := csvR.Read()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					close(stagingCh)
-					wgCopy.Wait()
-					httpError(w, http.StatusBadRequest, "csv parse row: "+err.Error())
-					return
-				}
+			// Process data rows (skip header row at index 0)
+			for rowIdx := 1; rowIdx < len(allRows); rowIdx++ {
+				rec := allRows[rowIdx]
 				totalRows++
 
 				rowMap := make(map[string]string, len(headers))
@@ -655,13 +652,16 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// If allocation consumed everything (no exposures) but produced knockoffs,
-			// surface a friendly, actionable message to the caller so they understand
-			// why inserted_count is zero.
-			if len(exposures) == 0 && len(knocksFloat) > 0 {
-				msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
-				fileErrors = append(fileErrors, msg)
-				log.Printf("[INFO] %s", msg)
+			if len(exposures) == 0 {
+				if len(knocksFloat) > 0 {
+					msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
+					fileErrors = append(fileErrors, msg)
+					log.Printf("[INFO] %s", msg)
+				} else {
+					msg := fmt.Sprintf("No exposures were written: allocation produced no base or knock items. Likely causes: amounts all share the same sign (no debits or no credits), amounts parsed as zero, or mapping produced empty AmountDoc values. Check mapping, amount signs (+/-), and NetDueDate; try 'receivable_logic'/'payable_logic' = reverse to flip allocation direction or upload a small unbalanced test file.")
+					fileErrors = append(fileErrors, msg)
+					log.Printf("[INFO] %s", msg)
+				}
 			}
 
 			headerCols := []string{
@@ -1454,4 +1454,25 @@ func parseDateOrNil(s string) interface{} {
 		return t
 	}
 	return nil
+}
+
+// Helper: parse uploaded file into [][]string
+func ubParseUploadFile(file multipart.File, ext string) ([][]string, error) {
+	if ext == ".csv" {
+		r := csv.NewReader(file)
+		return r.ReadAll()
+	}
+	if ext == ".xlsx" || ext == ".xls" {
+		f, err := excelize.OpenReader(file)
+		if err != nil {
+			return nil, err
+		}
+		sheet := f.GetSheetName(0)
+		rows, err := f.GetRows(sheet)
+		if err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+	return nil, errors.New("unsupported file type")
 }
