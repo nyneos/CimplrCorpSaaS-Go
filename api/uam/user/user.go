@@ -130,24 +130,29 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Count total (respect status filter)
-		countQuery := "SELECT COUNT(*) FROM users WHERE business_unit_name = ANY($1)"
+		// Count total (respect status filter) - build paramized query with dynamic placeholders
 		countArgs := []interface{}{pq.Array(buNames)}
+		paramIdx := 2
+		countQuery := "SELECT COUNT(*) FROM users WHERE business_unit_name = ANY($1::text[])"
 		if status != "" {
-			countQuery += " AND status = $2"
+			countQuery += fmt.Sprintf(" AND status = $%d", paramIdx)
 			countArgs = append(countArgs, status)
+			paramIdx++
 		}
 		total, _ := utils.CountTotal(db, countQuery, countArgs...)
 		pagination.SetPaginationStats(total)
 
-		// Build paginated query
-		query := "SELECT * FROM users WHERE business_unit_name = ANY($1)"
+		// Build paginated query with dynamic parameter positions
 		args := []interface{}{pq.Array(buNames)}
+		pIdx := 2
+		query := "SELECT * FROM users WHERE business_unit_name = ANY($1::text[])"
 		if status != "" {
-			query += " AND status = $2"
+			query += fmt.Sprintf(" AND status = $%d", pIdx)
 			args = append(args, status)
+			pIdx++
 		}
-		query += " ORDER BY id DESC LIMIT $3 OFFSET $4"
+		// limit and offset take the next two parameter positions
+		query += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d OFFSET $%d", pIdx, pIdx+1)
 		args = append(args, pagination.Limit, pagination.Offset)
 
 		rows, err := db.Query(query, args...)
@@ -197,7 +202,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		// Query for user by ID, restrict to accessible business units
-		rows, err := db.Query("SELECT * FROM users WHERE id = $1 AND business_unit_name = ANY($2)", req.UserID, pq.Array(buNames))
+	rows, err := db.Query("SELECT * FROM users WHERE id = $1 AND business_unit_name = ANY($2::text[])", req.UserID, pq.Array(buNames))
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -360,7 +365,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		rows, err := db.Query(
-			"UPDATE users SET status = 'Delete-Approval' WHERE id = $1 AND business_unit_name = ANY($2) RETURNING *",
+			"UPDATE users SET status = 'Delete-Approval' WHERE id = $1 AND business_unit_name = ANY($2::text[]) RETURNING *",
 			req.ID, pq.Array(buNames),
 		)
 		if err != nil {
@@ -411,7 +416,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		}
 		// Get existing users and their status
 		rows, err := db.Query(
-			"SELECT id, status FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2)",
+			"SELECT id, status FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2::text[])",
 			pq.Array(req.Ids), pq.Array(buNames),
 		)
 		if err != nil {
@@ -446,7 +451,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				return
 			}
 			delRows, err := db.Query(
-				"DELETE FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2) RETURNING *",
+				"DELETE FROM users WHERE id = ANY($1) AND business_unit_name = ANY($2::text[]) RETURNING *",
 				pq.Array(toDelete), pq.Array(buNames),
 			)
 			if err == nil {
@@ -483,7 +488,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		// Approve users
 		if len(toApprove) > 0 {
 			appRows, err := db.Query(
-				"UPDATE users SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4) RETURNING *",
+				"UPDATE users SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4::text[]) RETURNING *",
 				approvedBy, req.ApprovalComment, pq.Array(toApprove), pq.Array(buNames),
 			)
 			if err == nil {
@@ -541,7 +546,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		rows, err := db.Query(
-			"UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4) RETURNING *",
+			"UPDATE users SET status = 'Rejected', rejected_by = $1, rejected_at = NOW(), approval_comment = $2 WHERE id = ANY($3) AND business_unit_name = ANY($4::text[]) RETURNING *",
 			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(buNames),
 		)
 		if err != nil {
