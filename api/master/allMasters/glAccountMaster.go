@@ -104,7 +104,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		parentLevel := req.Level 
+		parentLevel := req.Level - 1
 		q := `
 			SELECT m.gl_account_name, m.gl_account_id, m.gl_account_code
 			FROM masterglaccount m
