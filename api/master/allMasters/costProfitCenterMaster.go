@@ -222,7 +222,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rrow.TallyLedgerName,
 					rrow.TallyLedgerGroup,
 					rrow.SageDeptCode,
-					rrow.SageCostCentreCode,
+					rrow.SageCostCentreCode
 				).Scan(&centreID); err != nil {
 					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
 					return
