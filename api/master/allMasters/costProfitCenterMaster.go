@@ -190,7 +190,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
 					oracle_ledger, oracle_dept, oracle_profit_center, tally_ledger_name, 
 					tally_ledger_group, sage_department_code, sage_cost_centre_code
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
 				RETURNING centre_id`
 
 				if err := tx.QueryRow(ctx, ins,
@@ -222,7 +222,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rrow.TallyLedgerName,
 					rrow.TallyLedgerGroup,
 					rrow.SageDeptCode,
-					rrow.SageCostCentreCode
+					rrow.SageCostCentreCode,
 				).Scan(&centreID); err != nil {
 					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
 					return
