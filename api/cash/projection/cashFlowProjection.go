@@ -10,7 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
+	"log"
+	
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
