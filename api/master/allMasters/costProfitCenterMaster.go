@@ -23,10 +23,10 @@ type CostProfitCenterRequest struct {
 	CentreName string `json:"centre_name"`
 	CentreType string `json:"centre_type"`
 	ParentCode string `json:"parent_centre_code"`
-	EntityCode string `json:"entity_code"`
+	EntityCode string `json:"entity_name"`
 	Status     string `json:"status"`
 	Source     string `json:"source"`
-	ErpRef     string `json:"erp_ref"`
+	ErpRef     string `json:"erp_type"`
 	// New optional fields
 	DefaultCurrency    string `json:"default_currency,omitempty"`
 	Owner              string `json:"owner,omitempty"`
