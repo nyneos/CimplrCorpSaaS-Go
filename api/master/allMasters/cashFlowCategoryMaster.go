@@ -631,6 +631,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE m.category_level = $1
 			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
 			  AND LOWER(m.status) = 'active'
+			  AND UPPER(COALESCE(a.processing_status, '')) = 'APPROVED'
 		`
 
 		rows, err := pgxPool.Query(context.Background(), query, parentLevel)
