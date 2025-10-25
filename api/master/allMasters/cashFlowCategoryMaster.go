@@ -314,10 +314,10 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		query := `
-			SELECT m.category_id, m.category_name, m.category_type, m.parent_category_id,
-			       m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status,
-			       m.old_category_name, m.old_category_type, m.old_parent_category_id,
-			       m.old_default_mapping, m.old_cashflow_nature, m.old_usage_flag, m.old_description, m.old_status,
+			SELECT m.category_id, m.category_name, m.category_type, m.parent_category_name,
+				   m.default_mapping, m.cashflow_nature, m.usage_flag, m.description, m.status,
+				   m.old_category_name, m.old_category_type, m.old_parent_category_name,
+				   m.old_default_mapping, m.old_cashflow_nature, m.old_usage_flag, m.old_description, m.old_status,
 			       m.is_top_level_category, m.is_deleted, m.category_level, m.old_category_level,
 			       m.erp_type, m.erp_ext, m.erp_segment, m.old_erp_type, m.old_erp_ext, m.old_erp_segment,
 			       m.sap_fsv, m.sap_node, m.sap_bukrs, m.sap_notes, m.old_sap_fsv, m.old_sap_node, m.old_sap_bukrs, m.old_sap_notes,
@@ -352,10 +352,10 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var (
 				categoryID, actionIDI                                                              string
 				categoryNameI, categoryTypeI                                                       interface{}
-				parentCategoryIDI                                                                  *string
+				parentCategoryNameI                                                                *string
 				defaultMappingI, cashflowNatureI, usageFlagI, descriptionI, statusI                interface{}
 				oldCategoryNameI, oldCategoryTypeI                                                 interface{}
-				oldParentCategoryIDI                                                               *string
+				oldParentCategoryNameI                                                             *string
 				oldDefaultMappingI, oldCashflowNatureI, oldUsageFlagI, oldDescriptionI, oldStatusI interface{}
 				isTopLevelCategory, isDeleted                                                      bool
 				categoryLevelI, oldCategoryLevelI, processingStatusI                               interface{}
@@ -374,9 +374,9 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 
 			if err := rows.Scan(
-				&categoryID, &categoryNameI, &categoryTypeI, &parentCategoryIDI,
+				&categoryID, &categoryNameI, &categoryTypeI, &parentCategoryNameI,
 				&defaultMappingI, &cashflowNatureI, &usageFlagI, &descriptionI, &statusI,
-				&oldCategoryNameI, &oldCategoryTypeI, &oldParentCategoryIDI,
+				&oldCategoryNameI, &oldCategoryTypeI, &oldParentCategoryNameI,
 				&oldDefaultMappingI, &oldCashflowNatureI, &oldUsageFlagI,
 				&oldDescriptionI, &oldStatusI,
 				&isTopLevelCategory, &isDeleted, &categoryLevelI, &oldCategoryLevelI,
@@ -398,12 +398,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"category_id":   categoryID,
 					"category_name": ifaceToString(categoryNameI),
 					"category_type": ifaceToString(categoryTypeI),
-					"parent_category_id": func() string {
-						if parentCategoryIDI == nil {
-							return ""
-						}
-						return *parentCategoryIDI
-					}(),
+					"parent_category_name": ifaceToString(parentCategoryNameI),
 					"default_mapping":   ifaceToString(defaultMappingI),
 					"cashflow_nature":   ifaceToString(cashflowNatureI),
 					"usage_flag":        ifaceToString(usageFlagI),
@@ -411,12 +406,7 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"status":            ifaceToString(statusI),
 					"old_category_name": ifaceToString(oldCategoryNameI),
 					"old_category_type": ifaceToString(oldCategoryTypeI),
-					"old_parent_category_id": func() string {
-						if oldParentCategoryIDI == nil {
-							return ""
-						}
-						return *oldParentCategoryIDI
-					}(),
+					"old_parent_category_name": ifaceToString(oldParentCategoryNameI),
 					"old_default_mapping":   ifaceToString(oldDefaultMappingI),
 					"old_cashflow_nature":   ifaceToString(oldCashflowNatureI),
 					"old_usage_flag":        ifaceToString(oldUsageFlagI),
@@ -790,7 +780,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var (
 					existingCategoryNameI                                                                    interface{}
 					existingCategoryTypeI                                                                    interface{}
-					existingParentCategoryIDI                                                                *string
+					existingParentCategoryNameI                                                            *string
 					existingDefaultMappingI                                                                  interface{}
 					existingCashflowNatureI                                                                  interface{}
 					existingUsageFlagI                                                                       interface{}
@@ -805,12 +795,12 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					existingTallyGroupI, existingTallyVoucherI, existingTallyNotesI                          interface{}
 					existingSageSectionI, existingSageLineI, existingSageNotesI                              interface{}
 				)
-				sel := `SELECT category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, is_top_level_category, is_deleted, category_level,
+				sel := `SELECT category_name, category_type, parent_category_name, default_mapping, cashflow_nature, usage_flag, description, status, is_top_level_category, is_deleted, category_level,
 							   erp_type, erp_ext, erp_segment, sap_fsv, sap_node, sap_bukrs, sap_notes,
 							   oracle_ledger, oracle_cf_code, oracle_cf_name, oracle_line,
 							   tally_group, tally_voucher, tally_notes, sage_section, sage_line, sage_notes
 						FROM mastercashflowcategory WHERE category_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, cat.CategoryID).Scan(&existingCategoryNameI, &existingCategoryTypeI, &existingParentCategoryIDI, &existingDefaultMappingI, &existingCashflowNatureI, &existingUsageFlagI, &existingDescriptionI, &existingStatusI, &existingIsTopLevel, &existingIsDeleted, &existingCategoryLevelI,
+				if err := tx.QueryRow(ctx, sel, cat.CategoryID).Scan(&existingCategoryNameI, &existingCategoryTypeI, &existingParentCategoryNameI, &existingDefaultMappingI, &existingCashflowNatureI, &existingUsageFlagI, &existingDescriptionI, &existingStatusI, &existingIsTopLevel, &existingIsDeleted, &existingCategoryLevelI,
 					&existingErpTypeI, &existingErpExtI, &existingErpSegmentI, &existingSapFsvI, &existingSapNodeI, &existingSapBukrsI, &existingSapNotesI,
 					&existingOracleLedgerI, &existingOracleCFCodeI, &existingOracleCFNameI, &existingOracleLineI,
 					&existingTallyGroupI, &existingTallyVoucherI, &existingTallyNotesI, &existingSageSectionI, &existingSageLineI, &existingSageNotesI); err != nil {
@@ -831,13 +821,13 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("category_type=$%d, old_category_type=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingCategoryTypeI))
 						pos += 2
-					case "parent_category_id":
+					case "parent_category_name":
 						newParent := fmt.Sprint(v)
 						parentProvided = newParent
-						sets = append(sets, fmt.Sprintf("parent_category_id=$%d, old_parent_category_id=$%d", pos, pos+1))
+						sets = append(sets, fmt.Sprintf("parent_category_name=$%d, old_parent_category_name=$%d", pos, pos+1))
 						oldParentVal := ""
-						if existingParentCategoryIDI != nil {
-							oldParentVal = *existingParentCategoryIDI
+						if existingParentCategoryNameI != nil {
+							oldParentVal = *existingParentCategoryNameI
 						}
 						args = append(args, newParent, oldParentVal)
 						pos += 2
@@ -1004,11 +994,11 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if parentProvided != "" {
 					var exists bool
-					err := tx.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_id=$1 AND child_category_id=$2`, parentProvided, updatedCategoryID).Scan(&exists)
+					err := tx.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2`, parentProvided, ifaceToString(existingCategoryNameI)).Scan(&exists)
 					if err == nil && exists {
 					} else {
-						if _, err := tx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_id, child_category_id, status) VALUES ($1,$2,'Active')`, parentProvided, updatedCategoryID); err == nil {
-							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "parent_category_id": parentProvided, "child_category_id": updatedCategoryID})
+						if _, err := tx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status) VALUES ($1,$2,'Active')`, parentProvided, ifaceToString(existingCategoryNameI)); err == nil {
+							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "parent_category_name": parentProvided, "child_category_name": ifaceToString(existingCategoryNameI)})
 						}
 					}
 				}
