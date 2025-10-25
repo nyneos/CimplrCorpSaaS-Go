@@ -23,10 +23,10 @@ type CostProfitCenterRequest struct {
 	CentreName string `json:"centre_name"`
 	CentreType string `json:"centre_type"`
 	ParentCode string `json:"parent_centre_code"`
-	EntityCode string `json:"entity_code"`
+	EntityCode string `json:"entity_name"`
 	Status     string `json:"status"`
 	Source     string `json:"source"`
-	ErpRef     string `json:"erp_ref"`
+	ErpRef     string `json:"erp_type"`
 	// New optional fields
 	DefaultCurrency    string `json:"default_currency,omitempty"`
 	Owner              string `json:"owner,omitempty"`
@@ -190,7 +190,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tags, external_code, segment, sap_kokrs, sap_bukrs, sap_kostl, sap_prctr,
 					oracle_ledger, oracle_dept, oracle_profit_center, tally_ledger_name, 
 					tally_ledger_group, sage_department_code, sage_cost_centre_code
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
 				RETURNING centre_id`
 
 				if err := tx.QueryRow(ctx, ins,
