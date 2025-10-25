@@ -3,12 +3,36 @@ package plannedinflowoutflowdash
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Currency conversion rates to USD
+var rates = map[string]float64{
+	"USD": 1.0,
+	"AUD": 0.68,
+	"CAD": 0.75,
+	"CHF": 1.1,
+	"CNY": 0.14,
+	"RMB": 0.14,
+	"EUR": 1.09,
+	"GBP": 1.28,
+	"JPY": 0.0067,
+	"SEK": 0.095,
+	"INR": 0.0117,
+}
+
+func getCurrencyRate(currency string) float64 {
+	if rate, ok := rates[currency]; ok {
+		return rate
+	}
+	log.Printf("Unknown currency encountered: %s, using default rate 1.0", currency)
+	return 1.0
+}
 
 type PlannedIODashEntity struct {
 	Entity  string  `json:"entity"`
@@ -54,9 +78,10 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		out := make([]PlannedInflowOutflowData, 0, len(ranges))
 		for _, dr := range ranges {
-			// Entities inflow/outflow
+			// Entities inflow/outflow with currency conversion
 			entityQ := `
 				SELECT COALESCE(i.entity_name, '') AS entity,
+					   p.currency_code,
 					   SUM(CASE WHEN i.cashflow_type = 'Inflow' THEN i.expected_amount ELSE 0 END) AS inflow,
 					   SUM(CASE WHEN i.cashflow_type = 'Outflow' THEN i.expected_amount ELSE 0 END) AS outflow
 				FROM cashflow_proposal_item i
@@ -68,7 +93,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE a.proposal_id = p.proposal_id
 					ORDER BY a.requested_at DESC LIMIT 1
 				  ) = 'APPROVED'
-				GROUP BY i.entity_name
+				GROUP BY i.entity_name, p.currency_code
 			`
 			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End)
 			if err != nil {
@@ -76,23 +101,44 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
 				return
 			}
-			entities := []PlannedIODashEntity{}
+
+			// Aggregate by entity and convert to USD
+			entityMap := make(map[string]*PlannedIODashEntity)
 			for rows.Next() {
-				var entity string
+				var entity, currency string
 				var inflow, outflow float64
-				if err := rows.Scan(&entity, &inflow, &outflow); err != nil {
+				if err := rows.Scan(&entity, &currency, &inflow, &outflow); err != nil {
 					continue
 				}
-				entities = append(entities, PlannedIODashEntity{
-					Entity:  entity,
-					Inflow:  math.Abs(inflow),
-					Outflow: math.Abs(outflow),
-				})
+
+				// Get conversion rate with better error handling
+				rate := getCurrencyRate(currency)
+
+				// Convert to USD
+				inflowUSD := math.Abs(inflow) * rate
+				outflowUSD := math.Abs(outflow) * rate
+
+				if entityMap[entity] == nil {
+					entityMap[entity] = &PlannedIODashEntity{
+						Entity:  entity,
+						Inflow:  0,
+						Outflow: 0,
+					}
+				}
+				entityMap[entity].Inflow += inflowUSD
+				entityMap[entity].Outflow += outflowUSD
 			}
 			rows.Close()
-			// Cashflow nature inflow/outflow
+
+			// Convert map to slice
+			entities := []PlannedIODashEntity{}
+			for _, entity := range entityMap {
+				entities = append(entities, *entity)
+			}
+			// Cashflow nature inflow/outflow with currency conversion
 			cashflowQ := `
 				SELECT COALESCE(i.cashflow_type, '') AS cashflow_nature,
+					   p.currency_code,
 					   SUM(CASE WHEN i.cashflow_type = 'Inflow' THEN i.expected_amount ELSE 0 END) AS inflow,
 					   SUM(CASE WHEN i.cashflow_type = 'Outflow' THEN i.expected_amount ELSE 0 END) AS outflow
 				FROM cashflow_proposal_item i
@@ -104,7 +150,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE a.proposal_id = p.proposal_id
 					ORDER BY a.requested_at DESC LIMIT 1
 				  ) = 'APPROVED'
-				GROUP BY i.cashflow_type
+				GROUP BY i.cashflow_type, p.currency_code
 			`
 			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End)
 			if err != nil {
@@ -112,20 +158,40 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
 				return
 			}
-			cashflows := []PlannedIODashCashflow{}
+
+			// Aggregate by cashflow nature and convert to USD
+			cashflowMap := make(map[string]*PlannedIODashCashflow)
 			for rows2.Next() {
-				var nature string
+				var nature, currency string
 				var inflow, outflow float64
-				if err := rows2.Scan(&nature, &inflow, &outflow); err != nil {
+				if err := rows2.Scan(&nature, &currency, &inflow, &outflow); err != nil {
 					continue
 				}
-				cashflows = append(cashflows, PlannedIODashCashflow{
-					CashflowNature: nature,
-					Inflow:         math.Abs(inflow),
-					Outflow:        math.Abs(outflow),
-				})
+
+				// Get conversion rate with better error handling
+				rate := getCurrencyRate(currency)
+
+				// Convert to USD
+				inflowUSD := math.Abs(inflow) * rate
+				outflowUSD := math.Abs(outflow) * rate
+
+				if cashflowMap[nature] == nil {
+					cashflowMap[nature] = &PlannedIODashCashflow{
+						CashflowNature: nature,
+						Inflow:         0,
+						Outflow:        0,
+					}
+				}
+				cashflowMap[nature].Inflow += inflowUSD
+				cashflowMap[nature].Outflow += outflowUSD
 			}
 			rows2.Close()
+
+			// Convert map to slice
+			cashflows := []PlannedIODashCashflow{}
+			for _, cashflow := range cashflowMap {
+				cashflows = append(cashflows, *cashflow)
+			}
 			out = append(out, PlannedInflowOutflowData{
 				DateRange: dr.Label,
 				Entities:  entities,

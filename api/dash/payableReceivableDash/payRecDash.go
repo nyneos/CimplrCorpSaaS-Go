@@ -25,17 +25,17 @@ type PayRecRow struct {
 func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// static spot rates to USD (example/fallback)
 	spotRates := map[string]float64{
-		"USD": 85.47,
-		"AUD": 58.12,
-		"CAD": 64.10,
-		"CHF": 94.02,
-		"CNY": 11.97,
-		"RMB": 11.97,
-		"EUR": 93.16,
-		"GBP": 109.40,
-		"JPY": 0.57,
-		"SEK": 8.12,
-		"INR": 1.00,
+		"USD": 1.0,
+	"AUD": 0.68,
+	"CAD": 0.75,
+	"CHF": 1.1,
+	"CNY": 0.14,
+	"RMB": 0.14,
+	"EUR": 1.09,
+	"GBP": 1.28,
+	"JPY": 0.0067,
+	"SEK": 0.095,
+	"INR": 0.0117,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
