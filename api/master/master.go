@@ -148,6 +148,7 @@ func StartMasterService(db *sql.DB) {
 	// Entity Cash Master routes (pgx-backed)
 	mux.Handle("/master/entitycash/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashEntities(pgxPool)))
 	mux.Handle("/master/entitycash/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadEntityCash(pgxPool)))
+	mux.Handle("/master/entitycash/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadEntitySimple(pgxPool)))
 	mux.Handle("/master/entitycash/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityHierarchy(pgxPool)))
 	mux.Handle("/master/entitycash/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateCashEntityBulk(pgxPool)))
 	mux.Handle("/master/entitycash/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCashEntityAtLevel(pgxPool)))
@@ -160,6 +161,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
