@@ -44,6 +44,15 @@ type BankRequest struct {
 	Category string `json:"category,omitempty"`
 	Status   string `json:"status,omitempty"`
 }
+func normalizeHeader(headers []string) []string {
+	out := make([]string, len(headers))
+	for i, h := range headers {
+		v := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(h, " ", "_")))
+		v = strings.Trim(v, "\"',")
+		out[i] = v
+	}
+	return out
+}
 
 // CreateCounterparties inserts rows into mastercounterparty and creates audit entries
 func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
