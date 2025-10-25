@@ -66,6 +66,10 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/v2/counterparty/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCounterpartyActions(pgxPool)))
 	mux.Handle("/master/counterparty/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCounterpartyActions(pgxPool)))
 	mux.Handle("/master/v2/counterparty/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterparty(pgxPool)))
+
+	mux.Handle("/master/counterparty/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterpartySimple(pgxPool)))
+	mux.Handle("/master/counterparty/banks/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterpartyBankSimple(pgxPool)))
+	
 	mux.Handle("/master/counterparty/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveCounterparties(pgxPool)))
 
 	mux.Handle("/master/v2/counterparty/banks", api.BusinessUnitMiddleware(db)(allMaster.GetCounterpartyBanks(pgxPool)))
@@ -94,6 +98,8 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadCashFlowCategory(pgxPool)))
 
+	
+	mux.Handle("/master/cashflow-category/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
 	mux.Handle("/master/currency/create", api.BusinessUnitMiddleware(db)(allMaster.CreateCurrencyMaster(pgxPool)))
 	mux.Handle("/master/currency/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllCurrencyMaster(pgxPool)))
@@ -154,6 +160,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
