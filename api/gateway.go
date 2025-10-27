@@ -2,6 +2,7 @@ package api
 
 import (
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"encoding/json"
@@ -12,7 +13,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -48,23 +48,6 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
-}
-
-
-func stripPathPrefix(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
-		if strings.HasPrefix(r.URL.Path, "/cimplrapigateway/") {
-	
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/cimplrapigateway")
-			
-			if !strings.HasPrefix(r.URL.Path, "/") {
-				r.URL.Path = "/" + r.URL.Path
-			}
-			
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +110,11 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 	session, err := authService.Login(req.Username, req.Password, clientIP) // Pass IP here
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		// Log and return JSON error to aid debugging (temporary)
+		log.Printf("Login failed for %s from %s: %v", req.Username, clientIP, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -225,6 +212,13 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 // LoggingMiddleware is a middleware for logging HTTP requests
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events" {
+			// SSE endpoints don't need wrapped response writers
+			// Just log the connection and pass through
+			fmt.Printf("[GATEWAY] Incoming SSE connection request from %s query=%s\n", r.RemoteAddr, r.URL.RawQuery)
+			next.ServeHTTP(w, r)
+			return
+		}
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
 		var body string
@@ -232,6 +226,28 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 			b, _ := io.ReadAll(r.Body)
 			body = string(b)
 			r.Body = io.NopCloser(bytes.NewBuffer(b))
+			// If there is a user_id field, call authService to log different-IP requests
+			if authService != nil && len(b) > 0 {
+				var raw map[string]interface{}
+				if err := json.Unmarshal(b, &raw); err == nil {
+					if uid, ok := raw["user_id"]; ok && uid != nil {
+						var userID string
+						switch v := uid.(type) {
+						case string:
+							userID = v
+						case float64:
+							userID = fmt.Sprintf("%.0f", v)
+						}
+						if userID != "" {
+							clientIP := extractClientIP(r)
+							go authService.LogDifferentIPRequest(userID, clientIP)
+						}
+					}
+				}
+				// restore body for downstream handlers
+				r.Body = io.NopCloser(bytes.NewBuffer(b))
+				body = string(b)
+			}
 		}
 		next.ServeHTTP(rw, r)
 		duration := time.Since(start)
@@ -247,6 +263,40 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 // StartGateway starts the API gateway server
 func StartGateway() {
 	mux := http.NewServeMux()
+
+	// Initialize and register the SSE server at /events
+	sseServer := dashboard.NewSSEServer()
+	mux.HandleFunc("/events", sseServer.HandleSSE)
+
+	// Debug endpoint to force logout a user via SSE (for testing only)
+	mux.HandleFunc("/debug/force-logout", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			UserID string `json:"user_id"`
+			Reason string `json:"reason"`
+			NewIP  string `json:"new_ip"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+			http.Error(w, "invalid body, require {user_id}", http.StatusBadRequest)
+			return
+		}
+		dashboard.SendForceLogout(req.UserID, req.Reason, req.NewIP)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+
+	// Debug endpoint to list connected SSE clients
+	mux.HandleFunc("/debug/sse-clients", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		clients := dashboard.GetClients()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"clients": clients,
+			"count":   dashboard.GetClientCount(),
+		})
+	}))
 
 	// Auth endpoints
 	mux.HandleFunc("/auth/login", withCORS(LoginHandler))
@@ -282,9 +332,8 @@ func StartGateway() {
 		port = "8081"
 	}
 	log.Printf("API Gateway started on :%s", port)
-	// Chain middlewares: first strip path prefix, then add logging
-	handler := stripPathPrefix(LoggingMiddleware(mux))
-	err := http.ListenAndServe(":"+port, handler)
+	// err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, LoggingMiddleware(mux))
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
