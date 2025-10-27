@@ -174,7 +174,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		start := time.Now()
 
-		// === 1️⃣ Fetch entities and latest audit info
+		// === 1️⃣ Fetch entities with latest audit info
 		entityQuery := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.entity_id)
@@ -208,16 +208,16 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
+		// === Struct with exported fields for JSON
 		type EntityNode struct {
-			ID       string
-			Name     string
-			Parent   string
-			Data     map[string]interface{}
-			Children []*EntityNode
+			ID       string                 `json:"id"`
+			Name     string                 `json:"name"`
+			Parent   string                 `json:"parent"`
+			Data     map[string]interface{} `json:"data"`
+			Children []*EntityNode          `json:"children"`
 		}
 
 		entityMap := make(map[string]*EntityNode)
-		// deletedIDs := make(map[string]bool)
 		hideIDs := make(map[string]bool)
 		allIDs := []string{}
 
@@ -248,7 +248,9 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			allIDs = append(allIDs, id.String)
+			if id.Valid {
+				allIDs = append(allIDs, id.String)
+			}
 
 			data := map[string]interface{}{
 				"entity_id":                      id.String,
@@ -319,21 +321,13 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			entityMap[id.String] = node
 
-			// if isDel {
-			// 	deletedIDs[id.String] = true
-			// 	if strings.EqualFold(procStatus.String, "APPROVED") {
-			// 		hideIDs[id.String] = true
-			// 	}
-			// }
-
 			// Only hide if deletion is fully approved
 			if isDel && strings.EqualFold(procStatus.String, "APPROVED") {
 				hideIDs[id.String] = true
 			}
-
 		}
 
-		// === 2️⃣ Fetch all audit history at once for created/edited/deleted
+		// === 2️⃣ Fetch audit history
 		auditQuery := `
 			SELECT entity_id, actiontype, requested_by, requested_at
 			FROM auditactionentity
@@ -368,7 +362,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// === 3️⃣ Fetch hierarchy relationships (by entity name → resolve IDs)
+		// === 3️⃣ Fetch hierarchy relationships
 		relRows, err := pgxPool.Query(ctx, "SELECT parent_entity_name, child_entity_name FROM cashentityrelationships")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -392,7 +386,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// === 4️⃣ Remove deleted and descendants
+		// === 4️⃣ Remove deleted + descendants
 		getDescendants := func(ids []string) []string {
 			all := map[string]bool{}
 			queue := append([]string{}, ids...)
@@ -436,7 +430,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// === 6️⃣ Gather top-level nodes
+		// === 6️⃣ Find top-level nodes
 		childSet := map[string]bool{}
 		for _, children := range parentMap {
 			for _, c := range children {
@@ -451,18 +445,20 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// === 7️⃣ Response
+		// === 7️⃣ Return compressed JSON
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
 
-		json.NewEncoder(gz).Encode(top)
+		if err := json.NewEncoder(gz).Encode(top); err != nil {
+			http.Error(w, "encode failed: "+err.Error(), 500)
+			return
+		}
 
 		log.Printf("✅ Hierarchy built (%d entities, %d roots) in %v", len(entityMap), len(top), time.Since(start))
 	}
 }
-
 // Bulk update handler for entity cash master
 func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

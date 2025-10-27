@@ -3,7 +3,8 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
-	"bufio"
+	// "bufio"
+	"log"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -1547,8 +1548,9 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		startOverall := time.Now()
+			ctx := r.Context()
+			startOverall := time.Now()
+			timings := make([]map[string]interface{}, 0)
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
@@ -1566,6 +1568,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
 			return
 		}
+
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form: "+err.Error())
 			return
@@ -1577,15 +1580,18 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer file.Close()
 
-		reader := csv.NewReader(bufio.NewReader(file))
-		reader.FieldsPerRecord = -1
-		reader.ReuseRecord = true
-
-		header, err := reader.Read()
+		records, err := parseCashFlowCategoryFile(file, getFileExt(fh.Filename))
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to read header: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
 			return
 		}
+		if len(records) < 2 {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file")
+			return
+		}
+		header := records[0]
+		dataRows := records[1:]
+
 		for i, h := range header {
 			header[i] = strings.ToLower(strings.TrimSpace(h))
 		}
@@ -1613,28 +1619,26 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "CSV must include category_name and category_type")
 			return
 		}
-
-		copyRows := make([][]interface{}, 0, 10240)
-		rowCount := 0
-		for {
-			record, err := reader.Read()
-			if err != nil {
-				break
-			}
-			rowCount++
-			row := make([]interface{}, len(copyCols))
+		copyRows := make([][]interface{}, len(dataRows))
+		rowCount := len(dataRows)
+		fileStart := time.Now()
+		for i, row := range dataRows {
+			vals := make([]interface{}, len(copyCols))
 			for j, col := range copyCols {
-				if pos, ok := headerPos[col]; ok && pos < len(record) {
-					cell := strings.TrimSpace(record[pos])
+				if pos, ok := headerPos[col]; ok && pos < len(row) {
+					cell := strings.TrimSpace(row[pos])
 					if cell == "" {
-						row[j] = nil
+						vals[j] = nil
 					} else {
-						row[j] = cell
+						vals[j] = cell
 					}
 				}
 			}
-			copyRows = append(copyRows, row)
+			copyRows[i] = vals
 		}
+		readDur := time.Since(fileStart)
+		timings = append(timings, map[string]interface{}{"phase": "read_csv", "rows": rowCount, "ms": readDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] read rows=%d elapsed=%v file=%s", rowCount, readDur, fh.Filename)
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -1659,16 +1663,18 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Temp table failed: "+err.Error())
 			return
 		}
-
-		// Bulk copy data into tmp_mcc
+		copyStart := time.Now()
 		_, err = tx.CopyFrom(ctx, pgx.Identifier{"tmp_mcc"}, copyCols, pgx.CopyFromRows(copyRows))
+		copyDur := time.Since(copyStart)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
 			return
 		}
+		timings = append(timings, map[string]interface{}{"phase": "copy_to_tmp", "rows": rowCount, "ms": copyDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] COPY rows=%d elapsed=%v file=%s", rowCount, copyDur, fh.Filename)
 
-		// Create an index for join speed
 		_, _ = tx.Exec(ctx, `CREATE INDEX ON tmp_mcc (category_name)`)
+
 		insertSQL := `
 INSERT INTO mastercashflowcategory (
 	category_name, category_type, parent_category_name, default_mapping,
@@ -1689,10 +1695,14 @@ FROM tmp_mcc t
 LEFT JOIN mastercashflowcategory m ON m.category_name = t.category_name
 WHERE m.category_name IS NULL;
 `
+		insertStart := time.Now()
 		if _, err := tx.Exec(ctx, insertSQL); err != nil {
 			api.RespondWithError(w, 500, "Insert failed: "+err.Error())
 			return
 		}
+		insertDur := time.Since(insertStart)
+		timings = append(timings, map[string]interface{}{"phase": "insert", "ms": insertDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] insert elapsed=%v file=%s", insertDur, fh.Filename)
 
 		updateSQL := `
 UPDATE mastercashflowcategory m
@@ -1712,10 +1722,15 @@ AND (
 	m.is_deleted IS DISTINCT FROM t.is_deleted
 );
 `
+		updateStart := time.Now()
 		if _, err := tx.Exec(ctx, updateSQL); err != nil {
 			api.RespondWithError(w, 500, "Update failed: "+err.Error())
 			return
 		}
+		updateDur := time.Since(updateStart)
+		timings = append(timings, map[string]interface{}{"phase": "update", "ms": updateDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] update elapsed=%v file=%s", updateDur, fh.Filename)
+
 		hierarchySQL := `
 WITH RECURSIVE affected AS (
 	SELECT m.category_id, m.category_name, m.parent_category_name, 0 AS lvl
@@ -1734,10 +1749,14 @@ SET category_level = a.lvl,
 FROM affected a
 WHERE m.category_id = a.category_id;
 `
+		hierarchyStart := time.Now()
 		if _, err := tx.Exec(ctx, hierarchySQL); err != nil {
 			api.RespondWithError(w, 500, "Hierarchy failed: "+err.Error())
 			return
 		}
+		hierarchyDur := time.Since(hierarchyStart)
+		timings = append(timings, map[string]interface{}{"phase": "hierarchy", "ms": hierarchyDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] hierarchy elapsed=%v file=%s", hierarchyDur, fh.Filename)
 
 		relationshipSQL := `
 INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status)
@@ -1748,10 +1767,15 @@ WHERE (p.category_name IN (SELECT category_name FROM tmp_mcc)
 	OR c.category_name IN (SELECT category_name FROM tmp_mcc))
 ON CONFLICT (parent_category_name, child_category_name) DO NOTHING;
 `
+		relStart := time.Now()
 		if _, err := tx.Exec(ctx, relationshipSQL); err != nil {
 			api.RespondWithError(w, 500, "Relationships failed: "+err.Error())
 			return
 		}
+		relDur := time.Since(relStart)
+		timings = append(timings, map[string]interface{}{"phase": "relationships", "ms": relDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] relationships elapsed=%v file=%s", relDur, fh.Filename)
+
 		auditSQL := `
 INSERT INTO auditactioncashflowcategory(category_id, actiontype, processing_status, requested_by, requested_at)
 SELECT m.category_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
@@ -1759,25 +1783,36 @@ FROM mastercashflowcategory m
 WHERE m.category_name IN (SELECT category_name FROM tmp_mcc)
 ON CONFLICT DO NOTHING;
 `
+		auditStart := time.Now()
 		if _, err := tx.Exec(ctx, auditSQL, userName); err != nil {
 			api.RespondWithError(w, 500, "Audit insert failed: "+err.Error())
 			return
 		}
+		auditDur := time.Since(auditStart)
+		timings = append(timings, map[string]interface{}{"phase": "audit", "ms": auditDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] audit elapsed=%v file=%s", auditDur, fh.Filename)
+
+		commitStart := time.Now()
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
 			return
 		}
+		commitDur := time.Since(commitStart)
+		timings = append(timings, map[string]interface{}{"phase": "commit", "ms": commitDur.Milliseconds()})
+		log.Printf("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
 		tx = nil
-
-		// --- Step 6. Respond ---
+		
 		dur := time.Since(startOverall)
+		timings = append(timings, map[string]interface{}{"phase": "total", "ms": dur.Milliseconds()})
 		resp := map[string]interface{}{
 			"success":     true,
 			"file":        fh.Filename,
 			"rows":        rowCount,
 			"duration_ms": dur.Milliseconds(),
 			"batch_id":    uuid.New().String(),
+			"timings":     timings,
 		}
+		log.Printf("[UploadCashFlowCategorySimple] finished rows=%d total_ms=%d file=%s", rowCount, dur.Milliseconds(), fh.Filename)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
