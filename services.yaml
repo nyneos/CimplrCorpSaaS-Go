@@ -18,32 +18,31 @@ services:
   - name: auth
     start_order: 4
     config:
-      max_users: 100
-  - name: dashboard
-    start_order: 5
-    config:
-      ws_port: 9090
+      max_users: 2
+      session_timeout: 1
+      max_login_attempts : 2
+      account_lock_duration: 1
+      session_cleaner_period : 1
   - name: session
-    start_order: 6
+    start_order: 5
   - name: fx
-    start_order: 7
+    start_order: 6
     config:
       port: 3143
   - name: dash
-    start_order: 8
+    start_order: 7
     config:
       port: 4143
   - name: uam
-    start_order: 9
+    start_order: 8
     config:
       port: 5143
   - name: cash
-    start_order: 10
+    start_order: 9
     config:
       port: 6143
   - name: master
-    start_order: 11
+    start_order: 10
     config:
-
       port: 2143
 
