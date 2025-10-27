@@ -187,12 +187,24 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/dp/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDPSingle(pgxPool)))
 	mux.Handle("/master/dp/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDPBulk(pgxPool)))
 	mux.Handle("/master/dp/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDP(pgxPool)))
-	mux.Handle("/master/dp/update-bulk", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDPBulk(pgxPool)))
+	mux.Handle("/master/dp/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDPBulk(pgxPool)))
 	mux.Handle("/master/dp/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteDP(pgxPool)))
 	mux.Handle("/master/dp/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveDPActions(pgxPool)))
 	mux.Handle("/master/dp/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectDPActions(pgxPool)))
 	mux.Handle("/master/dp/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveDPs(pgxPool)))
 	mux.Handle("/master/dp/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetDPsWithAudit(pgxPool)))
+
+	// Demat Master routes
+	mux.Handle("/master/demat/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadDematSimple(pgxPool)))
+	mux.Handle("/master/demat/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDematSingle(pgxPool)))
+	mux.Handle("/master/demat/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDematBulk(pgxPool)))
+	mux.Handle("/master/demat/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDemat(pgxPool)))
+	mux.Handle("/master/demat/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDematBulk(pgxPool)))
+	mux.Handle("/master/demat/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteDemat(pgxPool)))
+	mux.Handle("/master/demat/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveDematActions(pgxPool)))
+	mux.Handle("/master/demat/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectDematActions(pgxPool)))
+	mux.Handle("/master/demat/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveDemats(pgxPool)))
+	mux.Handle("/master/demat/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetDematsWithAudit(pgxPool)))
 
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
@@ -204,6 +216,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
