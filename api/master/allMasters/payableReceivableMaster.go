@@ -7,7 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
+	exposures "CimplrCorpSaas/api/fx/exposures"
+	
 	// "mime/multipart"
 	"net/http"
 	"strings"
@@ -1338,8 +1339,6 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				headerNorm[i] = hn
 			}
 
-			columns := append([]string{"upload_batch_id"}, headerNorm...)
-
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
@@ -1351,18 +1350,11 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tx.Rollback(ctx)
 				}
 			}()
-
-			// stage
-			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_payablereceivable_table"}, columns, pgx.CopyFromRows(copyRows))
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
-				return
-			}
-
-			// read mapping
+			// read mapping BEFORE staging so we can stage only mapped columns
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_payablereceivable`)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
 				return
 			}
 			mapping := make(map[string]string)
@@ -1378,26 +1370,100 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			mapRows.Close()
-			var srcCols []string
-			var tgtCols []string
-			for i, h := range headerRow {
+
+			// Build list of mapped target columns and source indices; skip unmapped columns
+			var mappedTargets []string
+			var srcIndices []int
+			for i := range headerRow {
 				key := headerNorm[i]
 				if t, ok := mapping[key]; ok {
-					srcCols = append(srcCols, key)
-					tgtCols = append(tgtCols, t)
+					mappedTargets = append(mappedTargets, t)
+					srcIndices = append(srcIndices, i)
 				} else {
-					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
-					return
+					// skip extra column
+					continue
 				}
 			}
-			tgtColsStr := strings.Join(tgtCols, ", ")
-
-			var selectExprs []string
-			for i, src := range srcCols {
-				tgt := tgtCols[i]
-				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+			if len(mappedTargets) == 0 {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, "No mapped columns found in uploaded file")
+				return
 			}
+
+			// Build reduced copyRows which only includes selected (mapped) columns
+			reducedRows := make([][]interface{}, len(copyRows))
+			dateCols := map[string]bool{"effective_from": true, "effective_to": true}
+			for rIdx, orig := range copyRows {
+				vals := make([]interface{}, len(mappedTargets)+1)
+				vals[0] = orig[0] // batch id
+				for k, srcIdx := range srcIndices {
+					// original columns are offset by 1
+					if srcIdx+1 < len(orig) {
+						v := orig[srcIdx+1]
+						// Normalize date-like fields
+						tgt := mappedTargets[k]
+						if v != nil {
+							if s, ok := v.(string); ok && dateCols[tgt] {
+								norm := exposures.NormalizeDate(s)
+								if norm == "" {
+									vals[k+1] = nil
+								} else {
+									vals[k+1] = norm
+								}
+								continue
+							}
+						}
+						vals[k+1] = v
+					} else {
+						vals[k+1] = nil
+					}
+				}
+				reducedRows[rIdx] = vals
+			}
+
+			columns := append([]string{"upload_batch_id"}, mappedTargets...)
+
+			// stage using reduced rows
+			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_payablereceivable_table"}, columns, pgx.CopyFromRows(reducedRows))
+			if err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				return
+			}
+
+			// Build insert/select expressions using mapped target columns
+			tgtCols := mappedTargets
+
+			// Ensure 'status' is provided (master requires NOT NULL). Use COALESCE to default to 'Active'.
+			hasStatus := false
+			for _, c := range tgtCols {
+				if c == "status" {
+					hasStatus = true
+					break
+				}
+			}
+
+			var finalCols []string
+			var selectExprs []string
+			if !hasStatus {
+				// prepend status column with default
+				finalCols = append([]string{"status"}, tgtCols...)
+				selectExprs = append(selectExprs, "COALESCE(s.status, 'Active') AS status")
+				for _, col := range tgtCols {
+					selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", col, col))
+				}
+			} else {
+				finalCols = tgtCols
+				for _, col := range tgtCols {
+					if col == "status" {
+						selectExprs = append(selectExprs, "COALESCE(s.status, 'Active') AS status")
+					} else {
+						selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", col, col))
+					}
+				}
+			}
+
+			tgtColsStr := strings.Join(finalCols, ", ")
 			srcColsStr := strings.Join(selectExprs, ", ")
 
 			insertSQL := fmt.Sprintf(`
@@ -1409,6 +1475,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
             `, tgtColsStr, srcColsStr)
 			rows, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
+				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
 				return
 			}
@@ -1417,13 +1484,25 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var id string
 				if err := rows.Scan(&id); err == nil {
 					newIDs = append(newIDs, id)
+				} else {
+					rows.Close()
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed reading inserted ids: "+err.Error())
+					return
 				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
+				return
 			}
 			rows.Close()
 
 			if len(newIDs) > 0 {
 				auditSQL := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT type_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterpayablereceivabletype WHERE type_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
+					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
 					return
 				}

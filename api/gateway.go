@@ -5,14 +5,15 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
-	"fmt"
-	"io"
 	"time"
 )
 
@@ -37,16 +38,33 @@ func extractClientIP(r *http.Request) string {
 }
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        w.Header().Set("Access-Control-Allow-Origin", "*")
-        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        if r.Method == "OPTIONS" {
-            w.WriteHeader(http.StatusOK)
-            return
-        }
-        h(w, r)
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h(w, r)
+	}
+}
+
+
+func stripPathPrefix(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		if strings.HasPrefix(r.URL.Path, "/cimplrapigateway/") {
+	
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/cimplrapigateway")
+			
+			if !strings.HasPrefix(r.URL.Path, "/") {
+				r.URL.Path = "/" + r.URL.Path
+			}
+			
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +76,7 @@ func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sessions)
 }
+
 // GetSessionByUserIDHandler returns session info for a specific user_id
 func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -155,7 +174,6 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"message":"logout successful"}`))
 }
 
-
 // createReverseProxy returns a reverse proxy handler for the given target URL
 func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +221,7 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	rw.body.Write(b)
 	return rw.ResponseWriter.Write(b)
 }
+
 // LoggingMiddleware is a middleware for logging HTTP requests
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,8 +282,9 @@ func StartGateway() {
 		port = "8081"
 	}
 	log.Printf("API Gateway started on :%s", port)
-	// err := http.ListenAndServe(":"+port, mux)
-	err := http.ListenAndServe(":"+port, LoggingMiddleware(mux))
+	// Chain middlewares: first strip path prefix, then add logging
+	handler := stripPathPrefix(LoggingMiddleware(mux))
+	err := http.ListenAndServe(":"+port, handler)
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)

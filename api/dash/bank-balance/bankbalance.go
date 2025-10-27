@@ -14,10 +14,17 @@ import (
 func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// Spot rates for conversion
 	var spotRates = map[string]float64{
-		"USD": 82.5,
-		"EUR": 89.5,
-		"INR": 1.0,
-		// Add more as needed
+		"USD": 1.0,
+	"AUD": 0.68,
+	"CAD": 0.75,
+	"CHF": 1.1,
+	"CNY": 0.14,
+	"RMB": 0.14,
+	"EUR": 1.09,
+	"GBP": 1.28,
+	"JPY": 0.0067,
+	"SEK": 0.095,
+	"INR": 0.0117,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -184,17 +191,17 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Aggregates balances from bank_balances_manual using the latest audit status (only APPROVED)
 func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	var spotRates = map[string]float64{
-		"USD": 85.47,
-		"AUD": 58.12,
-		"CAD": 64.10,
-		"CHF": 94.02,
-		"CNY": 11.97,
-		"RMB": 11.97,
-		"EUR": 93.16,
-		"GBP": 109.40,
-		"JPY": 0.57,
-		"SEK": 8.12,
-		"INR": 1.00,
+		"USD": 1.0,
+	"AUD": 0.68,
+	"CAD": 0.75,
+	"CHF": 1.1,
+	"CNY": 0.14,
+	"RMB": 0.14,
+	"EUR": 1.09,
+	"GBP": 1.28,
+	"JPY": 0.0067,
+	"SEK": 0.095,
+	"INR": 0.0117,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -283,7 +290,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		// join bank_balances_manual to masterbankaccount to get entity_id, then entity name from masterentity, filter by entity_name
 		rows, err := pgxPool.Query(ctx, `
-			SELECT e.entity_name, mb.bank_name, mb.currency_code, SUM(mb.balance_amount) AS total_closing_balance
+			SELECT e.entity_short_name as entity_name, mb.bank_name, mb.currency_code, SUM(mb.balance_amount) AS total_closing_balance
 			FROM bank_balances_manual mb
 			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
@@ -293,7 +300,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY balance_id, requested_at DESC
 			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
 		
-			GROUP BY e.entity_name, mb.bank_name, mb.currency_code;
+			GROUP BY e.entity_short_name, mb.bank_name, mb.currency_code;
 		`)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +43,15 @@ type BankRequest struct {
 	Currency string `json:"currency"`
 	Category string `json:"category,omitempty"`
 	Status   string `json:"status,omitempty"`
+}
+func normalizeHeader(headers []string) []string {
+	out := make([]string, len(headers))
+	for i, h := range headers {
+		v := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(h, " ", "_")))
+		v = strings.Trim(v, "\"',")
+		out[i] = v
+	}
+	return out
 }
 
 // CreateCounterparties inserts rows into mastercounterparty and creates audit entries
@@ -1293,6 +1303,364 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed = true
 		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+	}
+}
+
+func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// === Step 1: Identify user ===
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			userID = req.UserID
+		}
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			return
+		}
+
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			return
+		}
+
+		// === Step 2: Parse uploaded CSV ===
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			return
+		}
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			return
+		}
+
+		// === Step 3: Allowed fields ===
+		allowed := map[string]bool{
+			"counterparty_name": true,
+			"counterparty_code": true,
+			"counterparty_type": true,
+			"address":           true,
+			"status":            true,
+			"country":           true,
+			"contact":           true,
+			"email":             true,
+			"eff_from":          true,
+			"eff_to":            true,
+			"tags":              true,
+		}
+
+		batchIDs := []string{}
+
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				return
+			}
+			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			f.Close()
+			if err != nil || len(records) < 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty CSV file")
+				return
+			}
+
+			// === Step 4: Normalize headers ===
+			headers := normalizeHeader(records[0])
+			dataRows := records[1:]
+
+			validCols := []string{}
+			for _, h := range headers {
+				if allowed[h] {
+					validCols = append(validCols, h)
+				}
+			}
+
+			// Required columns check
+			if !(slices.Contains(validCols, "counterparty_code") &&
+				slices.Contains(validCols, "counterparty_name") &&
+				slices.Contains(validCols, "counterparty_type")) {
+				api.RespondWithError(w, http.StatusBadRequest,
+					"CSV must include counterparty_code, counterparty_name, counterparty_type")
+				return
+			}
+
+			headerPos := map[string]int{}
+			for i, h := range headers {
+				headerPos[h] = i
+			}
+
+			copyRows := make([][]interface{}, len(dataRows))
+			counterpartyCodes := make([]string, 0, len(dataRows))
+
+			for i, row := range dataRows {
+				vals := make([]interface{}, len(validCols))
+				for j, c := range validCols {
+					if pos, ok := headerPos[c]; ok && pos < len(row) {
+						cell := strings.TrimSpace(row[pos])
+						if cell == "" {
+							vals[j] = nil
+						} else if c == "eff_from" || c == "eff_to" {
+							if norm := NormalizeDate(cell); norm != "" {
+								if t, err := time.Parse("2006-01-02", norm); err == nil {
+									vals[j] = t
+								} else {
+									vals[j] = norm
+								}
+							}
+						} else {
+							vals[j] = cell
+						}
+					}
+				}
+				if pos, ok := headerPos["counterparty_code"]; ok && pos < len(row) {
+					code := strings.TrimSpace(row[pos])
+					if code != "" {
+						counterpartyCodes = append(counterpartyCodes, code)
+					}
+				}
+				copyRows[i] = vals
+			}
+
+			// === Step 5: Transaction (sync all inserts) ===
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+				return
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
+
+			// Bulk insert counterparties
+			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"mastercounterparty"},
+				validCols, pgx.CopyFromRows(copyRows)); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError,
+					"Failed to insert into mastercounterparty: "+err.Error())
+				return
+			}
+
+			// Insert audit records immediately (sync)
+			if len(counterpartyCodes) > 0 {
+				auditSQL := `
+					INSERT INTO auditactioncounterparty(counterparty_id, actiontype, processing_status, requested_by, requested_at)
+					SELECT counterparty_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
+					FROM mastercounterparty
+					WHERE counterparty_code = ANY($2);
+				`
+				if _, err := tx.Exec(ctx, auditSQL, userName, counterpartyCodes); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError,
+						"Failed to insert audit records: "+err.Error())
+					return
+				}
+			}
+
+			// Final commit (sync)
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+			committed = true
+
+			batchIDs = append(batchIDs, uuid.New().String())
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success":   true,
+			"batch_ids": batchIDs,
+		})
+	}
+}
+
+func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// --- user ---
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			var req struct {
+				UserID string `json:"user_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			userID = req.UserID
+		}
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			return
+		}
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
+		if userName == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			return
+		}
+
+		// --- counterparty_id (from form, required) ---
+		counterpartyID := strings.TrimSpace(r.FormValue("counterparty_id"))
+		if counterpartyID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "counterparty_id required in form")
+			return
+		}
+
+		// --- parse multipart ---
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			return
+		}
+		files := r.MultipartForm.File["file"]
+		if len(files) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
+			return
+		}
+
+		allowed := map[string]bool{
+			"bank_id":  true,
+			"bank":     true,
+			"country":  true,
+			"branch":   true,
+			"account":  true,
+			"swift":    true,
+			"rel":      true,
+			"currency": true,
+			"category": true,
+			"status":   true,
+		}
+
+		batchIDs := []string{}
+
+		for _, fh := range files {
+			f, err := fh.Open()
+			if err != nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				return
+			}
+			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			f.Close()
+			if err != nil || len(records) < 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty CSV file")
+				return
+			}
+
+			// normalize headers
+			headers := make([]string, len(records[0]))
+			for i, h := range records[0] {
+				hn := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(h, " ", "_")))
+				hn = strings.Trim(hn, "\"',")
+				headers[i] = hn
+			}
+
+			// build validCols from headers (only allowed columns)
+			validCols := []string{}
+			headerPos := map[string]int{}
+			for i, h := range headers {
+				headerPos[h] = i
+				if allowed[h] {
+					validCols = append(validCols, h)
+				}
+			}
+
+			if len(validCols) == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "No acceptable columns found in file")
+				return
+			}
+
+			if !slices.Contains(validCols, "counterparty_id") {
+				validCols = append(validCols, "counterparty_id")
+			}
+
+			rows := records[1:]
+			copyRows := make([][]interface{}, len(rows))
+			for i, row := range rows {
+				vals := make([]interface{}, len(validCols))
+				for j, col := range validCols {
+					// if col is counterparty_id, set from form
+					if col == "counterparty_id" {
+						vals[j] = counterpartyID
+						continue
+					}
+					// otherwise pull from CSV if present
+					if pos, ok := headerPos[col]; ok && pos < len(row) {
+						cell := strings.TrimSpace(row[pos])
+						if cell == "" {
+							vals[j] = nil
+						} else {
+							vals[j] = cell
+						}
+					} else {
+						vals[j] = nil
+					}
+				}
+				copyRows[i] = vals
+			}
+
+			// --- Sync transaction: COPY + single audit INSERT ---
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+				return
+			}
+			committed := false
+			defer func() {
+				if !committed {
+					tx.Rollback(ctx)
+				}
+			}()
+
+			// allow longer running COPY
+			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
+
+			// COPY into mastercounterpartybanks
+			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"mastercounterpartybanks"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+				return
+			}
+
+			auditSQL := `
+				INSERT INTO auditactioncounterparty(counterparty_id, actiontype, processing_status, requested_by, requested_at)
+				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, now())
+			`
+			if _, err := tx.Exec(ctx, auditSQL, counterpartyID, userName); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit record: "+err.Error())
+				return
+			}
+
+			// commit
+			if err := tx.Commit(ctx); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				return
+			}
+			committed = true
+
+			batchIDs = append(batchIDs, uuid.New().String())
+		}
+
+		// respond
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
 	}

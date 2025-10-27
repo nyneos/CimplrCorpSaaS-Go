@@ -5,6 +5,8 @@ import (
 	// "CimplrCorpSaas/api/master/allMaster"
 
 	allMaster "CimplrCorpSaas/api/master/allMasters"
+	
+	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	"context"
 	"database/sql"
 	"fmt"
@@ -45,6 +47,9 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/costprofit-center/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCostProfitCenterActions(pgxPool)))
 	mux.Handle("/master/costprofit-center/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCostProfitCenterActions(pgxPool)))
 
+
+	mux.Handle("/master/costprofit-center/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCostProfitCenterSimple(pgxPool)))
+
 	// Payable/Receivable Master routes
 	mux.Handle("/master/v2/payablereceivable/create", api.BusinessUnitMiddleware(db)(allMaster.CreatePayableReceivableTypes(pgxPool)))
 	mux.Handle("/master/v2/payablereceivable/names", api.BusinessUnitMiddleware(db)(allMaster.GetPayableReceivableNamesWithID(pgxPool)))
@@ -63,6 +68,10 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/v2/counterparty/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCounterpartyActions(pgxPool)))
 	mux.Handle("/master/counterparty/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCounterpartyActions(pgxPool)))
 	mux.Handle("/master/v2/counterparty/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterparty(pgxPool)))
+
+	mux.Handle("/master/counterparty/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterpartySimple(pgxPool)))
+	mux.Handle("/master/counterparty/banks/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCounterpartyBankSimple(pgxPool)))
+	
 	mux.Handle("/master/counterparty/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveCounterparties(pgxPool)))
 
 	mux.Handle("/master/v2/counterparty/banks", api.BusinessUnitMiddleware(db)(allMaster.GetCounterpartyBanks(pgxPool)))
@@ -78,6 +87,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/glaccount/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccount(pgxPool)))
 	mux.Handle("/master/glaccount/approved-active", api.BusinessUnitMiddleware(db)(allMaster.GetApprovedActiveGLAccounts(pgxPool)))
 	mux.Handle("/master/v2/glaccount/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentGLAccountAtLevel(pgxPool)))
+	mux.Handle("/master/glaccount/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadGLAccountSimple(pgxPool)))
 
 	// Cash Flow Category Master routes
 	mux.Handle("/master/cashflow-category/delete", api.BusinessUnitMiddleware(db)(allMaster.DeleteCashFlowCategory(pgxPool)))
@@ -90,6 +100,8 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadCashFlowCategory(pgxPool)))
 
+	
+	mux.Handle("/master/cashflow-category/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
 	mux.Handle("/master/currency/create", api.BusinessUnitMiddleware(db)(allMaster.CreateCurrencyMaster(pgxPool)))
 	mux.Handle("/master/currency/all", api.BusinessUnitMiddleware(db)(allMaster.GetAllCurrencyMaster(pgxPool)))
@@ -138,6 +150,7 @@ func StartMasterService(db *sql.DB) {
 	// Entity Cash Master routes (pgx-backed)
 	mux.Handle("/master/entitycash/bulk-create-sync", api.BusinessUnitMiddleware(db)(allMaster.CreateAndSyncCashEntities(pgxPool)))
 	mux.Handle("/master/entitycash/upload", api.BusinessUnitMiddleware(db)(allMaster.UploadEntityCash(pgxPool)))
+	mux.Handle("/master/entitycash/upload-simple", api.BusinessUnitMiddleware(db)(allMaster.UploadEntitySimple(pgxPool)))
 	mux.Handle("/master/entitycash/hierarchy", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityHierarchy(pgxPool)))
 	mux.Handle("/master/entitycash/updatebulk", api.BusinessUnitMiddleware(db)(allMaster.UpdateCashEntityBulk(pgxPool)))
 	mux.Handle("/master/entitycash/find-parent-at-level", api.BusinessUnitMiddleware(db)(allMaster.FindParentCashEntityAtLevel(pgxPool)))
@@ -145,11 +158,71 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/entitycash/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityNamesWithID(pgxPool)))
+
+	mux.Handle("/master/amc/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateAMCsingle(pgxPool)))
+	mux.Handle("/master/amc/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateAMCBulk(pgxPool)))
+	mux.Handle("/master/amc/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveAMCActions(pgxPool)))
+	mux.Handle("/master/amc/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectAMCActions(pgxPool)))
+	mux.Handle("/master/amc/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMCsWithAudit(pgxPool)))
+	mux.Handle("/master/amc/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveAMCs(pgxPool)))
+	mux.Handle("/master/amc/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadAMCSimple(pgxPool)))
+
+	// Scheme Master routes
+	mux.Handle("/master/scheme/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadSchemeSimple(pgxPool)))
+	mux.Handle("/master/scheme/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateSchemeSingle(pgxPool)))
+	mux.Handle("/master/scheme/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateScheme(pgxPool)))
+	mux.Handle("/master/scheme/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateScheme(pgxPool)))
+	mux.Handle("/master/scheme/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateSchemeBulk(pgxPool)))
+	mux.Handle("/master/scheme/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteScheme(pgxPool)))
+	mux.Handle("/master/scheme/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveSchemeActions(pgxPool)))
+	mux.Handle("/master/scheme/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectSchemeActions(pgxPool)))
+	mux.Handle("/master/scheme/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveSchemes(pgxPool)))
+	mux.Handle("/master/scheme/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetSchemesWithAudit(pgxPool)))
+	
+	// DP Master routes
+	mux.Handle("/master/dp/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadDPSimple(pgxPool)))
+	mux.Handle("/master/dp/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDPSingle(pgxPool)))
+	mux.Handle("/master/dp/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDPBulk(pgxPool)))
+	mux.Handle("/master/dp/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDP(pgxPool)))
+	mux.Handle("/master/dp/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDPBulk(pgxPool)))
+	mux.Handle("/master/dp/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteDP(pgxPool)))
+	mux.Handle("/master/dp/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveDPActions(pgxPool)))
+	mux.Handle("/master/dp/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectDPActions(pgxPool)))
+	mux.Handle("/master/dp/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveDPs(pgxPool)))
+	mux.Handle("/master/dp/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetDPsWithAudit(pgxPool)))
+
+	// Demat Master routes
+	mux.Handle("/master/demat/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadDematSimple(pgxPool)))
+	mux.Handle("/master/demat/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDematSingle(pgxPool)))
+	mux.Handle("/master/demat/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateDematBulk(pgxPool)))
+	mux.Handle("/master/demat/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDemat(pgxPool)))
+	mux.Handle("/master/demat/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateDematBulk(pgxPool)))
+	mux.Handle("/master/demat/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteDemat(pgxPool)))
+	mux.Handle("/master/demat/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveDematActions(pgxPool)))
+	mux.Handle("/master/demat/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectDematActions(pgxPool)))
+	mux.Handle("/master/demat/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveDemats(pgxPool)))
+	mux.Handle("/master/demat/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetDematsWithAudit(pgxPool)))
+
+	// AMFI Config Master routes
+	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
+	mux.Handle("/master/amfi/nav", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFINavStagingSimple(pgxPool)))
+
+	
 	err = http.ListenAndServe(":2143", mux)
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
+
+
+
+
+
+
 
 
 

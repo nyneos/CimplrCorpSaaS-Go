@@ -10,7 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
+	"log"
+	
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -931,8 +932,6 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
 			return
 		}
-
-		// validate session
 		valid := false
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -951,7 +950,6 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// 1) Fetch proposal header with latest audit processing_status
 		hq := `
 			SELECT
 				p.proposal_id,
@@ -974,7 +972,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) a ON TRUE
 			WHERE p.proposal_id = $1
 			LIMIT 1;
-			`
+		`
 
 		var (
 			h_proposalID, h_proposalName, h_oldProposalName, h_currency, h_oldCurrency, h_proposalType, h_oldProposalType, h_processingStatus interface{}
@@ -1009,7 +1007,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"old_projection_type": ifaceToString(h_oldProposalType),
 			"processing_status":   ifaceToString(h_processingStatus),
 		}
-		// fetch audit actions for this proposal
+
 		actions := make([]map[string]interface{}, 0)
 		aq := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment FROM audit_action_cashflow_proposal WHERE proposal_id = $1 ORDER BY requested_at DESC`
 		if aRows, aErr := pgxPool.Query(ctx, aq, req.ProposalID); aErr == nil {
@@ -1038,95 +1036,75 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// 2) Fetch items for the proposal
 		itemQ := `
-			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id, CAST(expected_amount AS float8), CAST(old_expected_amount AS float8), is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern, start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name, department_id, old_department_id, recurrence_frequency, old_recurrence_frequency, counterparty_name, old_counterparty_name
+			SELECT item_id, description, cashflow_type, old_cashflow_type, category_id, old_category_id,
+			       CAST(expected_amount AS float8), CAST(old_expected_amount AS float8),
+				   is_recurring, old_is_recurring, recurrence_pattern, old_recurrence_pattern,
+				   start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name,
+				   department_id, old_department_id, recurrence_frequency, old_recurrence_frequency,
+				   counterparty_name, old_counterparty_name
 			FROM cashflow_proposal_item
 			WHERE proposal_id = $1
 			ORDER BY created_at
-			`
-
+		`
 		rows, err := pgxPool.Query(ctx, itemQ, req.ProposalID)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to query proposal items: "+err.Error())
 			return
 		}
 		defer rows.Close()
+		type ItemRow struct {
+			ItemID                 string
+			Description            string
+			CashflowType           string
+			OldCashflowType        interface{}
+			CategoryID             string
+			OldCategoryID          interface{}
+			ExpectedAmount         float64
+			OldExpectedAmount      float64
+			IsRecurring            bool
+			OldIsRecurring         bool
+			RecurrencePattern      string
+			OldRecurrencePattern   interface{}
+			StartDate              interface{}
+			OldStartDate           interface{}
+			EndDate                interface{}
+			OldEndDate             interface{}
+			EntityName             string
+			OldEntityName          interface{}
+			DepartmentID           string
+			OldDepartmentID        interface{}
+			RecurrenceFrequency    string
+			OldRecurrenceFrequency interface{}
+			CounterpartyName       string
+			OldCounterpartyName    interface{}
+		}
 
-		projections := make([]map[string]interface{}, 0)
+		items := make([]ItemRow, 0)
+		itemIDs := make([]string, 0)
 
-		// map for monthly projections per item
 		for rows.Next() {
-			var (
-				itemID, description, cashflowType, oldCashflowType, categoryID, oldCategoryID interface{}
-				entityName, oldEntityName, departmentID, oldDepartmentID interface{}
-				recurrenceFrequency, oldRecurrenceFrequency, counterpartyName, oldCounterpartyName interface{}
-				expectedAmountI, oldExpectedAmountI, isRecurringI, oldIsRecurringI interface{}
-				recurrencePattern, oldRecurrencePattern interface{}
-				startDate, oldStartDate, endDate, oldEndDate interface{}
-			)
-			if err := rows.Scan(&itemID, &description, &cashflowType, &oldCashflowType, &categoryID, &oldCategoryID, &expectedAmountI, &oldExpectedAmountI, &isRecurringI, &oldIsRecurringI, &recurrencePattern, &oldRecurrencePattern, &startDate, &oldStartDate, &endDate, &oldEndDate, &entityName, &oldEntityName, &departmentID, &oldDepartmentID, &recurrenceFrequency, &oldRecurrenceFrequency, &counterpartyName, &oldCounterpartyName); err != nil {
+			var it ItemRow
+			var expectedI, oldExpectedI interface{}
+			var isRecI, oldIsRecI interface{}
+			if err := rows.Scan(
+				&it.ItemID, &it.Description, &it.CashflowType, &it.OldCashflowType,
+				&it.CategoryID, &it.OldCategoryID, &expectedI, &oldExpectedI,
+				&isRecI, &oldIsRecI, &it.RecurrencePattern, &it.OldRecurrencePattern,
+				&it.StartDate, &it.OldStartDate, &it.EndDate, &it.OldEndDate,
+				&it.EntityName, &it.OldEntityName, &it.DepartmentID, &it.OldDepartmentID,
+				&it.RecurrenceFrequency, &it.OldRecurrenceFrequency, &it.CounterpartyName, &it.OldCounterpartyName,
+			); err != nil {
+				log.Printf("row scan skip: %v", err)
 				continue
 			}
 
-			// conversion will be done inline below via iface helpers
-
-			// build entry using safe interface conversions
-			entry := map[string]interface{}{
-				"item_id":                ifaceToString(itemID),
-				"description":            ifaceToString(description),
-				"type":                   ifaceToString(cashflowType),
-				"old_type":               ifaceToString(oldCashflowType),
-				"categoryName":           ifaceToString(categoryID),
-				"old_categoryName":       ifaceToString(oldCategoryID),
-				"entity":                 ifaceToString(entityName),
-				"old_entity":             ifaceToString(oldEntityName),
-				"department":             ifaceToString(departmentID),
-				"old_department":         ifaceToString(oldDepartmentID),
-				"expectedAmount":         ifaceToFloat(expectedAmountI),
-				"old_expectedAmount":     ifaceToFloat(oldExpectedAmountI),
-				"recurring":              ifaceToBool(isRecurringI),
-				"old_recurring":          ifaceToBool(oldIsRecurringI),
-				"frequency":              ifaceToString(recurrenceFrequency),
-				"old_frequency":          ifaceToString(oldRecurrenceFrequency),
-				"recurrence_pattern":     ifaceToString(recurrencePattern),
-				"old_recurrence_pattern": ifaceToString(oldRecurrencePattern),
-				"start_date":             ifaceToTimeString(startDate),
-				"old_start_date":         ifaceToTimeString(oldStartDate),
-				"end_date":               ifaceToTimeString(endDate),
-				"old_end_date":           ifaceToTimeString(oldEndDate),
-				"counterparty_name":      ifaceToString(counterpartyName),
-				"old_counterparty_name":  ifaceToString(oldCounterpartyName),
-			}
-
-			// fetch monthly projections for this item
-			monthlyQ := `SELECT year, month, projected_amount FROM cashflow_projection_monthly WHERE item_id = $1 ORDER BY year, month`
-			mrows, err := pgxPool.Query(ctx, monthlyQ, ifaceToString(itemID))
-			if err != nil {
-				// still append entry without monthly data
-				projections = append(projections, map[string]interface{}{"entry": entry, "projection": map[string]interface{}{"type": ifaceToString(cashflowType), "categoryName": ifaceToString(categoryID)}})
-				continue
-			}
-
-			projMap := map[string]interface{}{
-				"type":         ifaceToString(cashflowType),
-				"categoryName": ifaceToString(categoryID),
-				"item_id":      ifaceToString(itemID),
-			}
-			monthNames := map[int]string{1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun", 7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-			for mrows.Next() {
-				var year, month int
-				var amt float64
-				if err := mrows.Scan(&year, &month, &amt); err != nil {
-					continue
-				}
-				mn := monthNames[month]
-				key := fmt.Sprintf("%s-%02d", mn, year%100)
-				projMap[key] = amt
-			}
-			mrows.Close()
-
-			projections = append(projections, map[string]interface{}{"entry": entry, "projection": projMap})
+			it.ExpectedAmount = ifaceToFloat(expectedI)
+			it.OldExpectedAmount = ifaceToFloat(oldExpectedI)
+			it.IsRecurring = ifaceToBool(isRecI)
+			it.OldIsRecurring = ifaceToBool(oldIsRecI)
+			items = append(items, it)
+			itemIDs = append(itemIDs, it.ItemID)
 		}
 
 		if err := rows.Err(); err != nil {
@@ -1134,19 +1112,119 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// build response
-		resp := map[string]interface{}{
-			"success":     true,
-			"header":      header,
-			"projections": projections,
-			"actions":     actions,
-			// "user_id":     req.UserID,
+		if len(items) == 0 {
+			resp := map[string]interface{}{
+				"success":     true,
+				"header":      header,
+				"projections": []interface{}{},
+				"actions":     actions,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		projQuery := `
+			SELECT item_id, year, month, projected_amount
+			FROM cashflow_projection_monthly
+			WHERE item_id = ANY($1)
+			ORDER BY item_id, year, month
+		`
+		projRows, err := pgxPool.Query(ctx, projQuery, itemIDs)
+		if err != nil {
+			projRows = nil
+		}
+
+		monthlyMap := make(map[string]map[string]float64)
+		monthNames := map[int]string{1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun", 7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
+		if projRows != nil {
+			defer projRows.Close()
+			for projRows.Next() {
+				var itemID string
+				var year, month int
+				var amt float64
+				if err := projRows.Scan(&itemID, &year, &month, &amt); err != nil {
+					continue
+				}
+				if monthlyMap[itemID] == nil {
+					monthlyMap[itemID] = make(map[string]float64)
+				}
+				key := fmt.Sprintf("%s-%02d", monthNames[month], year%100)
+				monthlyMap[itemID][key] = amt
+			}
+			_ = projRows.Err()
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		enc := json.NewEncoder(w)
+		w.Write([]byte(`{"success":true,"header":`))
+		if err := enc.Encode(header); err != nil {
+			return
+		}
+		w.Write([]byte(`,"actions":`))
+		if err := enc.Encode(actions); err != nil {
+			return
+		}
+		w.Write([]byte(`,"projections":[`))
+
+		first := true
+		for _, it := range items {
+			entry := map[string]interface{}{
+				"item_id":                ifaceToString(it.ItemID),
+				"description":            ifaceToString(it.Description),
+				"type":                   ifaceToString(it.CashflowType),
+				"old_type":               ifaceToString(it.OldCashflowType),
+				"categoryName":           ifaceToString(it.CategoryID),
+				"old_categoryName":       ifaceToString(it.OldCategoryID),
+				"entity":                 ifaceToString(it.EntityName),
+				"old_entity":             ifaceToString(it.OldEntityName),
+				"department":             ifaceToString(it.DepartmentID),
+				"old_department":         ifaceToString(it.OldDepartmentID),
+				"expectedAmount":         it.ExpectedAmount,
+				"old_expectedAmount":     it.OldExpectedAmount,
+				"recurring":              it.IsRecurring,
+				"old_recurring":          it.OldIsRecurring,
+				"frequency":              ifaceToString(it.RecurrenceFrequency),
+				"old_frequency":          ifaceToString(it.OldRecurrenceFrequency),
+				"recurrence_pattern":     ifaceToString(it.RecurrencePattern),
+				"old_recurrence_pattern": ifaceToString(it.OldRecurrencePattern),
+				"start_date":             ifaceToTimeString(it.StartDate),
+				"old_start_date":         ifaceToTimeString(it.OldStartDate),
+				"end_date":               ifaceToTimeString(it.EndDate),
+				"old_end_date":           ifaceToTimeString(it.OldEndDate),
+				"counterparty_name":      ifaceToString(it.CounterpartyName),
+				"old_counterparty_name":  ifaceToString(it.OldCounterpartyName),
+			}
+
+			projMap := map[string]interface{}{
+				"type":         it.CashflowType,
+				"categoryName": it.CategoryID,
+				"item_id":      it.ItemID,
+			}
+			if mm, ok := monthlyMap[it.ItemID]; ok {
+				for k, v := range mm {
+					projMap[k] = v
+				}
+			}
+
+			outObj := map[string]interface{}{
+				"entry":      entry,
+				"projection": projMap,
+			}
+
+			if !first {
+				w.Write([]byte(","))
+			}
+			first = false
+
+			if err := enc.Encode(outObj); err != nil {
+				break
+			}
+		}
+		w.Write([]byte(`]}`))
 	}
 }
+
 
 func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1158,7 +1236,6 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// validate session
 		valid := false
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -1174,12 +1251,13 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		q := `
-			SELECT p.proposal_id,
-			       p.recurrence_type,
-			       p.proposal_name,
-			       p.effective_date,
-			       p.currency_code,
-			       a.processing_status
+			SELECT 
+				p.proposal_id,
+				p.recurrence_type,
+				p.proposal_name,
+				p.effective_date,
+				p.currency_code,
+				a.processing_status
 			FROM cashflow_proposal p
 			LEFT JOIN LATERAL (
 				SELECT processing_status
@@ -1200,20 +1278,29 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var proposalID, recurrenceType, proposalName, currencyCode, processingStatus string
-			var effectiveDate time.Time
-			if err := rows.Scan(&proposalID, &recurrenceType, &proposalName, &effectiveDate, &currencyCode, &processingStatus); err != nil {
+			var (
+				proposalID, recurrenceType, proposalName, currencyCode, processingStatus interface{}
+				effectiveDate                                                            interface{}
+			)
+
+			if err := rows.Scan(
+				&proposalID,
+				&recurrenceType,
+				&proposalName,
+				&effectiveDate,
+				&currencyCode,
+				&processingStatus,
+			); err != nil {
 				continue
 			}
 
-			// Build header matching cashflow_proposal table fields
 			header := map[string]interface{}{
-				"proposal_id":       proposalID,
-				"proposal_type":     recurrenceType,
-				"proposal_name":     proposalName,
-				"effective_date":    effectiveDate.Format("2006-01-02"),
-				"currency":          currencyCode,
-				"processing_status": processingStatus,
+				"proposal_id":       ifaceToString(proposalID),
+				"proposal_type":     ifaceToString(recurrenceType),
+				"proposal_name":     ifaceToString(proposalName),
+				"effective_date":    ifaceToTimeString(effectiveDate),
+				"currency":          ifaceToString(currencyCode),
+				"processing_status": ifaceToString(processingStatus),
 			}
 
 			out = append(out, header)
@@ -1225,7 +1312,10 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "header": out})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"header":  out,
+		})
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	exposures "CimplrCorpSaas/api/fx/exposures"
 
 	// "mime/multipart"
 	"net/http"
@@ -882,11 +883,10 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		// Delete associated clearing codes and master account records
+		// Soft-delete associated master account records (mark is_deleted = true)
 		if len(accountIDsToDelete) > 0 {
-			// delete clearing codes first to avoid FK issues
-			_, _ = pgxPool.Exec(r.Context(), `DELETE FROM masterclearingcode WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
-			_, _ = pgxPool.Exec(r.Context(), `DELETE FROM masterbankaccount WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
+			// mark accounts as deleted; keep clearing codes for historical record
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE masterbankaccount SET is_deleted = true WHERE account_id = ANY($1)`, pq.Array(accountIDsToDelete))
 		}
 
 		// Approve remaining audit actions (exclude those that were pending delete)
@@ -983,10 +983,23 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		// accept optional user_id in body for parity with other handlers
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		query := `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (aa.account_id)
+					aa.account_id,
+					aa.processing_status
+				FROM auditactionbankaccount aa
+				ORDER BY aa.account_id, aa.requested_at DESC
+			),
+			clearing AS (
+				SELECT 
+					c.account_id,
+					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
+				FROM public.masterclearingcode c
+				GROUP BY c.account_id
+			)
 			SELECT
 				a.account_id,
 				a.account_number,
@@ -994,37 +1007,47 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				b.bank_id,
 				b.bank_name,
 				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
-				COALESCE(e.entity_name, ec.entity_name) AS entity_name
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				cl.clearing_codes
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
 			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-			LEFT JOIN LATERAL (
-				SELECT processing_status
-				FROM auditactionbankaccount aa
-				WHERE aa.account_id = a.account_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active'
+			LEFT JOIN latest_audit la ON la.account_id = a.account_id
+			LEFT JOIN clearing cl ON cl.account_id = a.account_id
+			WHERE 
+				la.processing_status = 'APPROVED'
+				AND a.status = 'Active'
+				AND COALESCE(a.is_deleted, false) = false
+			ORDER BY a.account_nickname NULLS LAST, a.account_number;
 		`
+
 		rows, err := pgxPool.Query(r.Context(), query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
 
 		var results []map[string]interface{}
-		var anyErr error
 		for rows.Next() {
 			var accountID, accountNumber string
-			var accountNickname *string
-			var bankID, bankName, entityID, entityName *string
-			if err := rows.Scan(&accountID, &accountNumber, &accountNickname, &bankID, &bankName, &entityID, &entityName); err != nil {
-				anyErr = err
-				break
+			var accountNickname, bankID, bankName, entityID, entityName, clearingCodes *string
+
+			if err := rows.Scan(
+				&accountID,
+				&accountNumber,
+				&accountNickname,
+				&bankID,
+				&bankName,
+				&entityID,
+				&entityName,
+				&clearingCodes,
+			); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+err.Error())
+				return
 			}
+
 			results = append(results, map[string]interface{}{
 				"account_id":     accountID,
 				"account_number": accountNumber,
@@ -1058,14 +1081,21 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					}
 					return ""
 				}(),
+				"clearing_codes": func() string {
+					if clearingCodes != nil {
+						return *clearingCodes
+					}
+					return ""
+				}(),
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		if anyErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyErr.Error())
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "rows iteration failed: "+rows.Err().Error())
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/json")
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
@@ -1076,9 +1106,109 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 	}
 }
 
+// func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		var req struct {
+// 			UserID string `json:"user_id"`
+// 		}
+// 		// accept optional user_id in body for parity with other handlers
+// 		_ = json.NewDecoder(r.Body).Decode(&req)
+
+// 		query := `
+// 			SELECT
+// 				a.account_id,
+// 				a.account_number,
+// 				a.account_nickname,
+// 				b.bank_id,
+// 				b.bank_name,
+// 				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
+// 				COALESCE(e.entity_name, ec.entity_name) AS entity_name
+// 			FROM masterbankaccount a
+// 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+// 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+// 			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+// 			LEFT JOIN LATERAL (
+// 				SELECT processing_status
+// 				FROM auditactionbankaccount aa
+// 				WHERE aa.account_id = a.account_id
+// 				ORDER BY requested_at DESC
+// 				LIMIT 1
+// 			) astatus ON TRUE
+// 			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
+// 		`
+// 		rows, err := pgxPool.Query(r.Context(), query)
+// 		if err != nil {
+// 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+// 			return
+// 		}
+// 		defer rows.Close()
+
+// 		var results []map[string]interface{}
+// 		var anyErr error
+// 		for rows.Next() {
+// 			var accountID, accountNumber string
+// 			var accountNickname *string
+// 			var bankID, bankName, entityID, entityName *string
+// 			if err := rows.Scan(&accountID, &accountNumber, &accountNickname, &bankID, &bankName, &entityID, &entityName); err != nil {
+// 				anyErr = err
+// 				break
+// 			}
+// 			results = append(results, map[string]interface{}{
+// 				"account_id":     accountID,
+// 				"account_number": accountNumber,
+// 				"account_nickname": func() string {
+// 					if accountNickname != nil {
+// 						return *accountNickname
+// 					}
+// 					return ""
+// 				}(),
+// 				"bank_id": func() string {
+// 					if bankID != nil {
+// 						return *bankID
+// 					}
+// 					return ""
+// 				}(),
+// 				"bank_name": func() string {
+// 					if bankName != nil {
+// 						return *bankName
+// 					}
+// 					return ""
+// 				}(),
+// 				"entity_id": func() string {
+// 					if entityID != nil {
+// 						return *entityID
+// 					}
+// 					return ""
+// 				}(),
+// 				"entity_name": func() string {
+// 					if entityName != nil {
+// 						return *entityName
+// 					}
+// 					return ""
+// 				}(),
+// 			})
+// 		}
+
+// 		w.Header().Set("Content-Type", "application/json")
+// 		if anyErr != nil {
+// 			api.RespondWithError(w, http.StatusInternalServerError, anyErr.Error())
+// 			return
+// 		}
+// 		if results == nil {
+// 			results = make([]map[string]interface{}, 0)
+// 		}
+// 		json.NewEncoder(w).Encode(map[string]interface{}{
+// 			"success": true,
+// 			"results": results,
+// 		})
+// 	}
+// }
+
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
+
+		// Step 1: Get user_id
 		userID := ""
 		if r.Header.Get("Content-Type") == "application/json" {
 			var req struct {
@@ -1097,10 +1227,9 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Fetch user name from active sessions
+		// Step 2: Fetch user name from active sessions
 		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
+		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == userID {
 				userName = s.Name
 				break
@@ -1111,6 +1240,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Step 3: Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
 			return
@@ -1120,7 +1250,12 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
 			return
 		}
-		batchIDs := make([]string, 0, len(files))
+
+		// Step 4: Single batch ID per upload session
+		batchID := uuid.New().String()
+		batchIDs := []string{batchID}
+
+		// Step 5: Process files
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
@@ -1134,11 +1269,12 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 				return
 			}
+
 			headerRow := records[0]
 			dataRows := records[1:]
-			batchID := uuid.New().String()
-			batchIDs = append(batchIDs, batchID)
 			colCount := len(headerRow)
+
+			// Add batch ID to every row
 			copyRows := make([][]interface{}, len(dataRows))
 			for i, row := range dataRows {
 				vals := make([]interface{}, colCount+1)
@@ -1158,19 +1294,16 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				copyRows[i] = vals
 			}
 
-			// normalize header names to match staging table column names
+			// Normalize headers (CSV header -> lookup key)
 			headerNorm := make([]string, len(headerRow))
 			for i, h := range headerRow {
-				hn := strings.TrimSpace(h)
-				hn = strings.Trim(hn, ", ")
-				hn = strings.ToLower(hn)
+				hn := strings.ToLower(strings.TrimSpace(h))
 				hn = strings.ReplaceAll(hn, " ", "_")
-				hn = strings.Trim(hn, "\"'`")
+				hn = strings.Trim(hn, "\"'`,")
 				headerNorm[i] = hn
 			}
 
-			columns := append([]string{"upload_batch_id"}, headerNorm...)
-
+			// Begin TX
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
@@ -1183,83 +1316,204 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}()
 
-			// stage
-			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bankaccount_table"}, columns, pgx.CopyFromRows(copyRows))
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
-				return
-			}
-
-			// read mapping
+			// Read mapping (use transaction to keep consistent)
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bankaccount`)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
+				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error: "+err.Error())
 				return
 			}
+
 			mapping := make(map[string]string)
 			for mapRows.Next() {
 				var src, tgt string
 				if err := mapRows.Scan(&src, &tgt); err == nil {
 					key := strings.ToLower(strings.TrimSpace(src))
 					key = strings.ReplaceAll(key, " ", "_")
-					tt := strings.TrimSpace(tgt)
-					tt = strings.Trim(tt, ", \"'`")
-					tt = strings.ReplaceAll(tt, " ", "_")
-					mapping[key] = tt
+					mapping[key] = strings.ToLower(strings.TrimSpace(tgt))
 				}
 			}
 			mapRows.Close()
 
-			var srcCols []string
-			var tgtCols []string
-			for i, h := range headerRow {
+			// Build target column list (these must exist in input_bankaccount_table)
+			var mappedTargets []string
+			var selectedIdx []int
+			for i := range headerRow {
 				key := headerNorm[i]
 				if t, ok := mapping[key]; ok {
-					srcCols = append(srcCols, key)
-					tgtCols = append(tgtCols, t)
+					mappedTargets = append(mappedTargets, t)
+					selectedIdx = append(selectedIdx, i)
 				} else {
-					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
-					return
+					// skip unmapped columns (user requested tolerant behavior)
+					continue
 				}
 			}
-			tgtColsStr := strings.Join(tgtCols, ", ")
 
+			if len(mappedTargets) == 0 {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, "No mapped columns found in uploaded file")
+				return
+			}
+
+			columns := append([]string{"upload_batch_id"}, mappedTargets...)
+
+			// Build reduced copyRows which only includes selected (mapped) columns
+			newCopyRows := make([][]interface{}, len(copyRows))
+			for i, row := range copyRows {
+				vals := make([]interface{}, len(mappedTargets)+1)
+				// batch id stays at position 0
+				if len(row) > 0 {
+					vals[0] = row[0]
+				} else {
+					vals[0] = batchID
+				}
+				for j, origIdx := range selectedIdx {
+					// original value is at origIdx+1 in row (since row[0] is batchID)
+					if len(row) > origIdx+1 {
+						vals[j+1] = row[origIdx+1]
+					} else {
+						vals[j+1] = nil
+					}
+				}
+				newCopyRows[i] = vals
+			}
+
+			// Normalize date columns (eff_from, eff_to) in reduced rows before staging
+			dateCols := map[string]bool{"eff_from": true, "eff_to": true}
+			for colIdx, colName := range mappedTargets {
+				if _, ok := dateCols[colName]; ok {
+					for i := range newCopyRows {
+						if len(newCopyRows[i]) <= colIdx+1 {
+							continue
+						}
+						v := newCopyRows[i][colIdx+1]
+						if v == nil {
+							continue
+						}
+						if s, ok := v.(string); ok {
+							norm := exposures.NormalizeDate(s)
+							if norm == "" {
+								newCopyRows[i][colIdx+1] = nil
+							} else {
+								newCopyRows[i][colIdx+1] = norm
+							}
+						}
+					}
+				}
+			}
+
+			// Stage into input table using mapped target column names
+			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bankaccount_table"}, columns, pgx.CopyFromRows(newCopyRows))
+			if err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				return
+			}
+
+			// Build insert/select expressions: map only columns that belong to masterbankaccount.
+			// Clearing-code related columns should not be inserted into masterbankaccount; they go to masterclearingcode.
+			exclude := map[string]bool{
+				"clearing_code_type":  true,
+				"clearing_code_value": true,
+				"optional_code_type":  true,
+				"optional_code_value": true,
+			}
+			masterCols := []string{}
+			for _, col := range mappedTargets {
+				if !exclude[col] {
+					masterCols = append(masterCols, col)
+				}
+			}
+			if len(masterCols) == 0 {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusBadRequest, "No target columns available for masterbankaccount insert")
+				return
+			}
+			tgtColsStr := strings.Join(masterCols, ", ")
 			var selectExprs []string
-			for i, src := range srcCols {
-				tgt := tgtCols[i]
-				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", src, tgt))
+			for _, col := range masterCols {
+				selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", col, col))
 			}
 			srcColsStr := strings.Join(selectExprs, ", ")
 
+			// Insert into masterbankaccount
 			insertSQL := fmt.Sprintf(`
 				INSERT INTO masterbankaccount (%s)
 				SELECT %s
 				FROM input_bankaccount_table s
 				WHERE s.upload_batch_id = $1
-				RETURNING account_id
+				RETURNING account_id, account_number, bank_id
 			`, tgtColsStr, srcColsStr)
+
 			rows, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
 				return
 			}
-			var newIDs []string
+
+			type inserted struct {
+				AccountID     string
+				AccountNumber string
+				BankID        string
+			}
+			var insertedRows []inserted
 			for rows.Next() {
-				var id string
-				if err := rows.Scan(&id); err == nil {
-					newIDs = append(newIDs, id)
+				var x inserted
+				if err := rows.Scan(&x.AccountID, &x.AccountNumber, &x.BankID); err == nil {
+					insertedRows = append(insertedRows, x)
+				} else {
+					// capture scan errors
+					rows.Close()
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to read inserted rows: "+err.Error())
+					return
 				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, "Error iterating inserted rows: "+err.Error())
+				return
 			}
 			rows.Close()
 
-			if len(newIDs) > 0 {
-				auditSQL := `INSERT INTO auditactionbankaccount (account_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterbankaccount WHERE account_id = ANY($2)`
-				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
+			// Insert into auditactionbankaccount
+			if len(insertedRows) > 0 {
+				ids := make([]string, 0, len(insertedRows))
+				for _, x := range insertedRows {
+					ids = append(ids, x.AccountID)
+				}
+				auditSQL := `INSERT INTO auditactionbankaccount (account_id, actiontype, processing_status, reason, requested_by, requested_at)
+					SELECT account_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now()
+					FROM masterbankaccount WHERE account_id = ANY($2)`
+				if _, err := tx.Exec(ctx, auditSQL, userName, ids); err != nil {
 					tx.Rollback(ctx)
 					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					return
+				}
+
+				// Insert into masterclearingcode (NEW) only when master rows were created
+				_, err = tx.Exec(ctx, `
+					INSERT INTO masterclearingcode (
+						account_id, code_type, code_value, optional_code_type, optional_code_value
+					)
+					SELECT
+						m.account_id,
+						i.clearing_code_type,
+						i.clearing_code_value,
+						i.optional_code_type,
+						i.optional_code_value
+					FROM input_bankaccount_table i
+					JOIN masterbankaccount m
+						ON m.account_number = i.account_number
+						AND m.bank_id::text = i.bank_id::text
+					WHERE i.upload_batch_id = $1
+					AND i.clearing_code_type IS NOT NULL
+				`, batchID)
+				if err != nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert clearing codes: "+err.Error())
 					return
 				}
 			}
@@ -1272,12 +1526,16 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			committed = true
 		}
 
+		// Success Response
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"batch_ids":    batchIDs,
+			"uploaded":     len(files),
+			"requested_by": userName,
+		})
 	}
 }
-
-
 func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(new(struct {
@@ -1301,7 +1559,7 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active'
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
 		`
 
 		rows, err := pgxPool.Query(r.Context(), query)
@@ -1500,7 +1758,7 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
         LEFT JOIN masterbank b ON a.bank_id = b.bank_id
         LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
         LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-        WHERE a.account_id = $1
+	WHERE a.account_id = $1 AND COALESCE(a.is_deleted, false) = false
         `
 
 		rows, err := pgxPool.Query(ctx, query, req.AccountID)
@@ -1940,7 +2198,9 @@ LEFT JOIN LATERAL (
 		
 		`
 
-		rows, err := pgxPool.Query(ctx, baseQuery)
+	// exclude soft-deleted accounts from meta by adding WHERE after the lateral join
+	baseQuery = strings.Replace(baseQuery, ") aa ON TRUE;", ") aa ON TRUE WHERE COALESCE(a.is_deleted, false) = false;", 1)
+	rows, err := pgxPool.Query(ctx, baseQuery)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
