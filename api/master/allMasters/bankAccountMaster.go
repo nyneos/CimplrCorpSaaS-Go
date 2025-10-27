@@ -915,6 +915,69 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 }
 
 // GET handler to fetch all bank_id, bank_name (bank_short_name) for banks used by accounts
+func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+		query := `
+			SELECT DISTINCT m.bank_id, m.bank_name, m.bank_short_name
+			FROM masterbank m
+			JOIN masterbankaccount a ON a.bank_id = m.bank_id
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM auditactionbank a2
+				WHERE a2.bank_id = m.bank_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) astatus ON TRUE
+			WHERE m.active_status = 'Active' AND astatus.processing_status = 'APPROVED'
+		`
+		rows, err := pgxPool.Query(r.Context(), query)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		var results []map[string]interface{}
+		var anyError error
+		for rows.Next() {
+			var bankID, bankName, bankShortName string
+			if err := rows.Scan(&bankID, &bankName, &bankShortName); err != nil {
+				anyError = err
+				break
+			}
+			results = append(results, map[string]interface{}{
+				"bank_id":   bankID,
+				"bank_name": bankName,
+				"bank_short_name": func() string {
+					if bankShortName != "" {
+						return bankShortName
+					}
+					return ""
+				}(),
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if anyError != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			return
+		}
+		if results == nil {
+			results = make([]map[string]interface{}, 0)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"results": results,
+		})
+	}
+}
+
 func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1043,103 +1106,103 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 	}
 }
 
-func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID string `json:"user_id"`
-		}
-		// accept optional user_id in body for parity with other handlers
-		_ = json.NewDecoder(r.Body).Decode(&req)
+// func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		var req struct {
+// 			UserID string `json:"user_id"`
+// 		}
+// 		// accept optional user_id in body for parity with other handlers
+// 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		query := `
-			SELECT
-				a.account_id,
-				a.account_number,
-				a.account_nickname,
-				b.bank_id,
-				b.bank_name,
-				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
-				COALESCE(e.entity_name, ec.entity_name) AS entity_name
-			FROM masterbankaccount a
-			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
-			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
-			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-			LEFT JOIN LATERAL (
-				SELECT processing_status
-				FROM auditactionbankaccount aa
-				WHERE aa.account_id = a.account_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
-		`
-		rows, err := pgxPool.Query(r.Context(), query)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer rows.Close()
+// 		query := `
+// 			SELECT
+// 				a.account_id,
+// 				a.account_number,
+// 				a.account_nickname,
+// 				b.bank_id,
+// 				b.bank_name,
+// 				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
+// 				COALESCE(e.entity_name, ec.entity_name) AS entity_name
+// 			FROM masterbankaccount a
+// 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+// 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+// 			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+// 			LEFT JOIN LATERAL (
+// 				SELECT processing_status
+// 				FROM auditactionbankaccount aa
+// 				WHERE aa.account_id = a.account_id
+// 				ORDER BY requested_at DESC
+// 				LIMIT 1
+// 			) astatus ON TRUE
+// 			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
+// 		`
+// 		rows, err := pgxPool.Query(r.Context(), query)
+// 		if err != nil {
+// 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+// 			return
+// 		}
+// 		defer rows.Close()
 
-		var results []map[string]interface{}
-		var anyErr error
-		for rows.Next() {
-			var accountID, accountNumber string
-			var accountNickname *string
-			var bankID, bankName, entityID, entityName *string
-			if err := rows.Scan(&accountID, &accountNumber, &accountNickname, &bankID, &bankName, &entityID, &entityName); err != nil {
-				anyErr = err
-				break
-			}
-			results = append(results, map[string]interface{}{
-				"account_id":     accountID,
-				"account_number": accountNumber,
-				"account_nickname": func() string {
-					if accountNickname != nil {
-						return *accountNickname
-					}
-					return ""
-				}(),
-				"bank_id": func() string {
-					if bankID != nil {
-						return *bankID
-					}
-					return ""
-				}(),
-				"bank_name": func() string {
-					if bankName != nil {
-						return *bankName
-					}
-					return ""
-				}(),
-				"entity_id": func() string {
-					if entityID != nil {
-						return *entityID
-					}
-					return ""
-				}(),
-				"entity_name": func() string {
-					if entityName != nil {
-						return *entityName
-					}
-					return ""
-				}(),
-			})
-		}
+// 		var results []map[string]interface{}
+// 		var anyErr error
+// 		for rows.Next() {
+// 			var accountID, accountNumber string
+// 			var accountNickname *string
+// 			var bankID, bankName, entityID, entityName *string
+// 			if err := rows.Scan(&accountID, &accountNumber, &accountNickname, &bankID, &bankName, &entityID, &entityName); err != nil {
+// 				anyErr = err
+// 				break
+// 			}
+// 			results = append(results, map[string]interface{}{
+// 				"account_id":     accountID,
+// 				"account_number": accountNumber,
+// 				"account_nickname": func() string {
+// 					if accountNickname != nil {
+// 						return *accountNickname
+// 					}
+// 					return ""
+// 				}(),
+// 				"bank_id": func() string {
+// 					if bankID != nil {
+// 						return *bankID
+// 					}
+// 					return ""
+// 				}(),
+// 				"bank_name": func() string {
+// 					if bankName != nil {
+// 						return *bankName
+// 					}
+// 					return ""
+// 				}(),
+// 				"entity_id": func() string {
+// 					if entityID != nil {
+// 						return *entityID
+// 					}
+// 					return ""
+// 				}(),
+// 				"entity_name": func() string {
+// 					if entityName != nil {
+// 						return *entityName
+// 					}
+// 					return ""
+// 				}(),
+// 			})
+// 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		if anyErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyErr.Error())
-			return
-		}
-		if results == nil {
-			results = make([]map[string]interface{}, 0)
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
-		})
-	}
-}
+// 		w.Header().Set("Content-Type", "application/json")
+// 		if anyErr != nil {
+// 			api.RespondWithError(w, http.StatusInternalServerError, anyErr.Error())
+// 			return
+// 		}
+// 		if results == nil {
+// 			results = make([]map[string]interface{}, 0)
+// 		}
+// 		json.NewEncoder(w).Encode(map[string]interface{}{
+// 			"success": true,
+// 			"results": results,
+// 		})
+// 	}
+// }
 
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
