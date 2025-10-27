@@ -915,59 +915,124 @@ func BulkApproveBankAccountAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 }
 
 // GET handler to fetch all bank_id, bank_name (bank_short_name) for banks used by accounts
-func GetBankNamesWithIDForAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
+func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
-			return
-		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
 		query := `
-			SELECT DISTINCT m.bank_id, m.bank_name, m.bank_short_name
-			FROM masterbank m
-			JOIN masterbankaccount a ON a.bank_id = m.bank_id
-			LEFT JOIN LATERAL (
-				SELECT processing_status
-				FROM auditactionbank a2
-				WHERE a2.bank_id = m.bank_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) astatus ON TRUE
-			WHERE m.active_status = 'Active' AND astatus.processing_status = 'APPROVED'
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (aa.account_id)
+					aa.account_id,
+					aa.processing_status
+				FROM auditactionbankaccount aa
+				ORDER BY aa.account_id, aa.requested_at DESC
+			),
+			clearing AS (
+				SELECT 
+					c.account_id,
+					STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
+				FROM public.masterclearingcode c
+				GROUP BY c.account_id
+			)
+			SELECT
+				a.account_id,
+				a.account_number,
+				a.account_nickname,
+				b.bank_id,
+				b.bank_name,
+				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
+				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				cl.clearing_codes
+			FROM masterbankaccount a
+			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
+			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
+			LEFT JOIN latest_audit la ON la.account_id = a.account_id
+			LEFT JOIN clearing cl ON cl.account_id = a.account_id
+			WHERE 
+				la.processing_status = 'APPROVED'
+				AND a.status = 'Active'
+				AND COALESCE(a.is_deleted, false) = false
+			ORDER BY a.account_nickname NULLS LAST, a.account_number;
 		`
+
 		rows, err := pgxPool.Query(r.Context(), query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
 
 		var results []map[string]interface{}
-		var anyError error
 		for rows.Next() {
-			var bankID, bankName, bankShortName string
-			if err := rows.Scan(&bankID, &bankName, &bankShortName); err != nil {
-				anyError = err
-				break
+			var accountID, accountNumber string
+			var accountNickname, bankID, bankName, entityID, entityName, clearingCodes *string
+
+			if err := rows.Scan(
+				&accountID,
+				&accountNumber,
+				&accountNickname,
+				&bankID,
+				&bankName,
+				&entityID,
+				&entityName,
+				&clearingCodes,
+			); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+err.Error())
+				return
 			}
+
 			results = append(results, map[string]interface{}{
-				"bank_id":   bankID,
-				"bank_name": bankName,
-				"bank_short_name": func() string {
-					if bankShortName != "" {
-						return bankShortName
+				"account_id":     accountID,
+				"account_number": accountNumber,
+				"account_nickname": func() string {
+					if accountNickname != nil {
+						return *accountNickname
+					}
+					return ""
+				}(),
+				"bank_id": func() string {
+					if bankID != nil {
+						return *bankID
+					}
+					return ""
+				}(),
+				"bank_name": func() string {
+					if bankName != nil {
+						return *bankName
+					}
+					return ""
+				}(),
+				"entity_id": func() string {
+					if entityID != nil {
+						return *entityID
+					}
+					return ""
+				}(),
+				"entity_name": func() string {
+					if entityName != nil {
+						return *entityName
+					}
+					return ""
+				}(),
+				"clearing_codes": func() string {
+					if clearingCodes != nil {
+						return *clearingCodes
 					}
 					return ""
 				}(),
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if anyError != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "rows iteration failed: "+rows.Err().Error())
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/json")
 		if results == nil {
 			results = make([]map[string]interface{}, 0)
 		}
