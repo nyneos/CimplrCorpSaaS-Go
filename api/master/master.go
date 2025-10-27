@@ -5,6 +5,8 @@ import (
 	// "CimplrCorpSaas/api/master/allMaster"
 
 	allMaster "CimplrCorpSaas/api/master/allMasters"
+	
+	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	"context"
 	"database/sql"
 	"fmt"
@@ -156,11 +158,24 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/entitycash/bulk-approve", api.BusinessUnitMiddleware(db)(allMaster.BulkApproveCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-reject", api.BusinessUnitMiddleware(db)(allMaster.BulkRejectCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/all-names", api.BusinessUnitMiddleware(db)(allMaster.GetCashEntityNamesWithID(pgxPool)))
+
+	mux.Handle("/master/amc/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateAMCsingle(pgxPool)))
+	mux.Handle("/master/amc/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateAMCBulk(pgxPool)))
+	mux.Handle("/master/amc/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteAMC(pgxPool)))
+	mux.Handle("/master/amc/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveAMCActions(pgxPool)))
+	mux.Handle("/master/amc/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectAMCActions(pgxPool)))
+	mux.Handle("/master/amc/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMCsWithAudit(pgxPool)))
+	mux.Handle("/master/amc/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveAMCs(pgxPool)))
+	mux.Handle("/master/amc/upload-simple", api.BusinessUnitMiddleware(db)(investmentMasters.UploadAMCSimple(pgxPool)))
+	
 	err = http.ListenAndServe(":2143", mux)
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
