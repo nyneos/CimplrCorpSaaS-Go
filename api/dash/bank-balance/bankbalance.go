@@ -290,7 +290,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		// join bank_balances_manual to masterbankaccount to get entity_id, then entity name from masterentity, filter by entity_name
 		rows, err := pgxPool.Query(ctx, `
-			SELECT e.entity_name, mb.bank_name, mb.currency_code, SUM(mb.balance_amount) AS total_closing_balance
+			SELECT e.entity_short_name as entity_name, mb.bank_name, mb.currency_code, SUM(mb.balance_amount) AS total_closing_balance
 			FROM bank_balances_manual mb
 			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
@@ -300,7 +300,7 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY balance_id, requested_at DESC
 			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
 		
-			GROUP BY e.entity_name, mb.bank_name, mb.currency_code;
+			GROUP BY e.entity_short_name, mb.bank_name, mb.currency_code;
 		`)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
