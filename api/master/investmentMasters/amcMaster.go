@@ -3,11 +3,14 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -26,13 +29,51 @@ func getFileExt(filename string) string {
 }
 
 func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, error) {
-	if ext == ".csv" {
-		r := csv.NewReader(file)
-		r.FieldsPerRecord = -1
-		return r.ReadAll()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
 	}
-	if ext == ".xlsx" || ext == ".xls" {
-		f, err := excelize.OpenReader(file)
+	r := bytes.NewReader(data)
+
+	switch strings.ToLower(ext) {
+	case ".csv", "csv":
+		br := bufio.NewReader(r)
+		peek, _ := br.Peek(1024)
+		delimiter := ','
+		if bytes.Contains(peek, []byte(";")) {
+			delimiter = ';'
+		} else if bytes.Contains(peek, []byte("\t")) {
+			delimiter = '\t'
+		}
+
+		if len(peek) >= 3 && peek[0] == 0xEF && peek[1] == 0xBB && peek[2] == 0xBF {
+			br.Discard(3)
+		}
+
+		csvr := csv.NewReader(br)
+		csvr.Comma = delimiter
+		csvr.TrimLeadingSpace = true
+		csvr.FieldsPerRecord = -1 // allow variable length rows
+		csvr.ReuseRecord = false
+
+		records, err := csvr.ReadAll()
+		if err != nil {
+			return nil, err
+		}
+
+		// remove any empty rows
+		clean := make([][]string, 0, len(records))
+		for _, row := range records {
+			if len(strings.Join(row, "")) == 0 {
+				continue
+			}
+			clean = append(clean, row)
+		}
+
+		return clean, nil
+
+	case ".xlsx", ".xls", "xlsx", "xls":
+		f, err := excelize.OpenReader(bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
@@ -42,8 +83,10 @@ func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, err
 			return nil, err
 		}
 		return rows, nil
+
+	default:
+		return nil, errors.New("unsupported file type")
 	}
-	return nil, errors.New("unsupported file type")
 }
 
 func normalizeHeader(row []string) []string {
