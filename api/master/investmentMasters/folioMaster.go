@@ -18,8 +18,9 @@ import (
 
 func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
 		startOverall := time.Now()
+		ctx := r.Context()
+		timings := []map[string]interface{}{}
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
@@ -30,7 +31,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = tmp.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, 400, "user_id required")
 			return
 		}
 
@@ -42,195 +43,248 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, 401, "invalid session")
 			return
 		}
 
-		// Parse upload
-		if err := r.ParseMultipartForm(128 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "parse form: "+err.Error())
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			api.RespondWithError(w, 400, "form parse: "+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no file uploaded")
+			api.RespondWithError(w, 400, "no file uploaded")
 			return
 		}
 
-		results := make([]map[string]any, 0, len(files))
+		results := []map[string]interface{}{}
+
 		for _, fh := range files {
-			start := time.Now()
-			f, _ := fh.Open()
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
-			f.Close()
-			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "invalid or empty file")
+			fileStart := time.Now()
+			f, err := fh.Open()
+			if err != nil {
+				api.RespondWithError(w, 400, "open file: "+err.Error())
 				return
 			}
+			defer f.Close()
+
+			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
+			if err != nil || len(records) < 2 {
+				api.RespondWithError(w, 400, "invalid csv")
+				return
+			}
+
+			readDur := time.Since(fileStart)
+			timings = append(timings, map[string]interface{}{"phase": "read_csv", "rows": len(records) - 1, "ms": readDur.Milliseconds()})
+
 			headers := normalizeHeader(records[0])
 			dataRows := records[1:]
-
-			// Required headers
 			headerPos := map[string]int{}
 			for i, h := range headers {
 				headerPos[h] = i
 			}
-			reqCols := []string{"entity_name", "amc_name", "folio_number", "first_holder_name", "default_subscription_account", "default_redemption_account"}
-			for _, c := range reqCols {
+
+			required := []string{"entity_name", "amc_name", "folio_number", "first_holder_name", "default_subscription_account", "default_redemption_account"}
+			for _, c := range required {
 				if _, ok := headerPos[c]; !ok {
-					api.RespondWithError(w, 400, "missing column: "+c)
+					api.RespondWithError(w, 400, fmt.Sprintf("missing column: %s", c))
 					return
 				}
 			}
 
-			// Build COPY rows
-			copyCols := []string{
-				"entity_name", "amc_name", "folio_number",
-				"first_holder_name", "default_subscription_account", "default_redemption_account",
-				"status", "source",
-			}
-			copyRows := make([][]any, 0, len(dataRows))
-			for _, r := range dataRows {
-				row := make([]any, len(copyCols))
-				for i, col := range copyCols {
-					if pos, ok := headerPos[col]; ok && pos < len(r) {
-						val := strings.TrimSpace(r[pos])
-						if val != "" {
-							row[i] = val
-						} else {
-							if col == "status" {
-								row[i] = "Active"
-							} else if col == "source" {
-								row[i] = "Upload"
-							} else {
-								row[i] = nil
+			schemeRefs := map[string]struct{}{}
+			hasSchemeCol := false
+			if pos, ok := headerPos["scheme_ids"]; ok {
+				hasSchemeCol = true
+				for _, r := range dataRows {
+					if pos < len(r) {
+						for _, ref := range strings.Split(r[pos], ",") {
+							ref = strings.TrimSpace(ref)
+							if ref != "" {
+								schemeRefs[ref] = struct{}{}
 							}
 						}
-					} else if col == "status" {
-						row[i] = "Active"
-					} else if col == "source" {
-						row[i] = "Upload"
-					} else {
-						row[i] = nil
+					}
+				}
+			}
+
+			schemeMap := map[string]string{}
+			if len(schemeRefs) > 0 {
+				refList := make([]string, 0, len(schemeRefs))
+				for r := range schemeRefs {
+					refList = append(refList, r)
+				}
+				rows, err := pgxPool.Query(ctx, `
+					SELECT scheme_id, scheme_name, isin, internal_scheme_code
+					FROM investment.masterscheme
+					WHERE COALESCE(is_deleted,false)=false
+					  AND (scheme_id = ANY($1) OR scheme_name = ANY($1) OR isin = ANY($1) OR internal_scheme_code = ANY($1))
+				`, refList)
+				if err == nil {
+					for rows.Next() {
+						var sid, sname, isin, icode string
+						_ = rows.Scan(&sid, &sname, &isin, &icode)
+						for _, k := range []string{sid, sname, isin, icode} {
+							if k != "" {
+								schemeMap[strings.TrimSpace(k)] = sid
+							}
+						}
+					}
+					rows.Close()
+				}
+			}
+
+			copyCols := []string{
+				"entity_name", "amc_name", "folio_number", "first_holder_name",
+				"default_subscription_account", "default_redemption_account", "status", "source",
+			}
+			copyRows := make([][]interface{}, 0, len(dataRows))
+			for _, r := range dataRows {
+				row := make([]interface{}, len(copyCols))
+				for j, c := range copyCols {
+					switch c {
+					case "status":
+						row[j] = "Active"
+					case "source":
+						row[j] = "Upload"
+					default:
+						if pos, ok := headerPos[c]; ok && pos < len(r) {
+							row[j] = strings.TrimSpace(r[pos])
+						} else {
+							row[j] = nil
+						}
 					}
 				}
 				copyRows = append(copyRows, row)
 			}
 
-			// Begin TX
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, 500, "tx begin: "+err.Error())
+				api.RespondWithError(w, 500, "tx: "+err.Error())
 				return
 			}
 			defer tx.Rollback(ctx)
-
 			_, _ = tx.Exec(ctx, "SET LOCAL synchronous_commit TO OFF")
-			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '5min'")
 
-			// Create unlogged temp table
 			_, err = tx.Exec(ctx, `
-				CREATE UNLOGGED TABLE tmp_folio (
-					entity_name varchar(50),
-					amc_name varchar(50),
-					folio_number varchar(50),
-					first_holder_name varchar(255),
-					default_subscription_account varchar(50),
-					default_redemption_account varchar(50),
-					status varchar(20) DEFAULT 'Active',
-					source varchar(20) DEFAULT 'Upload'
-				);
+				DROP TABLE IF EXISTS tmp_folio;
+				CREATE TEMP TABLE tmp_folio (LIKE investment.masterfolio INCLUDING DEFAULTS) ON COMMIT DROP;
 			`)
 			if err != nil {
-				api.RespondWithError(w, 500, "temp table create: "+err.Error())
+				api.RespondWithError(w, 500, "tmp table: "+err.Error())
 				return
 			}
 
-			// COPY into tmp_folio
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_folio"}, copyCols, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, 500, "copy tmp_folio: "+err.Error())
+				api.RespondWithError(w, 500, "copy: "+err.Error())
 				return
 			}
+
 			upsertSQL := `
 				INSERT INTO investment.masterfolio (
-					entity_name, amc_name, folio_number,
-					first_holder_name, default_subscription_account, default_redemption_account,
+					entity_name, amc_name, folio_number, first_holder_name,
+					default_subscription_account, default_redemption_account,
 					status, source
 				)
-				SELECT 
-					entity_name, amc_name, folio_number,
-					first_holder_name, default_subscription_account, default_redemption_account,
-					COALESCE(status, 'Active'), COALESCE(source, 'Upload')
+				SELECT entity_name, amc_name, folio_number, first_holder_name,
+					   default_subscription_account, default_redemption_account,
+					   COALESCE(status,'Active'), COALESCE(source,'Upload')
 				FROM tmp_folio
 				ON CONFLICT (entity_name, amc_name, folio_number)
 				DO UPDATE SET
+					entity_name = EXCLUDED.entity_name,
+					amc_name = EXCLUDED.amc_name,
 					first_holder_name = EXCLUDED.first_holder_name,
 					default_subscription_account = EXCLUDED.default_subscription_account,
 					default_redemption_account = EXCLUDED.default_redemption_account,
-					status = COALESCE(EXCLUDED.status, 'Active'),
-					source = COALESCE(EXCLUDED.source, 'Upload');
+					status = EXCLUDED.status,
+					source = EXCLUDED.source;
 			`
 			if _, err := tx.Exec(ctx, upsertSQL); err != nil {
 				api.RespondWithError(w, 500, "upsert masterfolio: "+err.Error())
 				return
 			}
 
-			createAuditSQL := `
-	INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
-	SELECT m.folio_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
-	FROM investment.masterfolio m
-	JOIN tmp_folio t USING (folio_number)
-	WHERE NOT EXISTS (
-		SELECT 1 FROM investment.auditactionfolio a
-		WHERE a.folio_id = m.folio_id
-		  AND a.actiontype = 'CREATE'
-		  AND a.processing_status IN ('PENDING_APPROVAL', 'APPROVED')
-	)
-	ON CONFLICT DO NOTHING;
-`
-
-			editAuditSQL := `
-	INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
-	SELECT m.folio_id, 'EDIT', 'PENDING_EDIT_APPROVAL', $1, now()
-	FROM investment.masterfolio m
-	JOIN tmp_folio t USING (folio_number)
-	WHERE EXISTS (
-		SELECT 1 FROM investment.auditactionfolio a
-		WHERE a.folio_id = m.folio_id
-		  AND a.actiontype = 'CREATE'
-		  AND a.processing_status = 'APPROVED'
-	)
-	ON CONFLICT DO NOTHING;
-`
-
-			if _, err := tx.Exec(ctx, createAuditSQL, userEmail); err != nil {
-				api.RespondWithError(w, 500, "audit insert (CREATE): "+err.Error())
-				return
-			}
-			if _, err := tx.Exec(ctx, editAuditSQL, userEmail); err != nil {
-				api.RespondWithError(w, 500, "audit insert (EDIT): "+err.Error())
+			auditSQL := `
+				INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
+				SELECT m.folio_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
+				FROM investment.masterfolio m
+				JOIN tmp_folio t USING (folio_number)
+				ON CONFLICT DO NOTHING;
+			`
+			if _, err := tx.Exec(ctx, auditSQL, userEmail); err != nil {
+				api.RespondWithError(w, 500, "audit insert: "+err.Error())
 				return
 			}
 
-			// Commit
+			if hasSchemeCol && len(schemeMap) > 0 {
+				_, err = tx.Exec(ctx, `
+					DROP TABLE IF EXISTS tmp_folio_scheme;
+					CREATE TEMP TABLE tmp_folio_scheme (
+						folio_number varchar(50),
+						scheme_id varchar(50),
+						status varchar(20)
+					) ON COMMIT DROP;
+				`)
+				if err != nil {
+					api.RespondWithError(w, 500, "mapping tmp: "+err.Error())
+					return
+				}
+
+				pos := headerPos["scheme_ids"]
+				mappingRows := [][]interface{}{}
+				for _, r := range dataRows {
+					folioNum := strings.TrimSpace(r[headerPos["folio_number"]])
+					if pos < len(r) {
+						for _, ref := range strings.Split(r[pos], ",") {
+							ref = strings.TrimSpace(ref)
+							if sid, ok := schemeMap[ref]; ok && sid != "" {
+								mappingRows = append(mappingRows, []interface{}{folioNum, sid, "Active"})
+							}
+						}
+					}
+				}
+
+				if len(mappingRows) > 0 {
+					if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_folio_scheme"},
+						[]string{"folio_number", "scheme_id", "status"},
+						pgx.CopyFromRows(mappingRows)); err != nil {
+						api.RespondWithError(w, 500, "mapping copy: "+err.Error())
+						return
+					}
+
+					if _, err := tx.Exec(ctx, `
+						INSERT INTO investment.folioschememapping (folio_id, scheme_id, status)
+						SELECT m.folio_id, t.scheme_id, t.status
+						FROM tmp_folio_scheme t
+						JOIN investment.masterfolio m ON m.folio_number = t.folio_number
+						ON CONFLICT (folio_id, scheme_id) DO NOTHING;
+					`); err != nil {
+						api.RespondWithError(w, 500, "mapping insert: "+err.Error())
+						return
+					}
+				}
+			}
 			if err := tx.Commit(ctx); err != nil {
 				api.RespondWithError(w, 500, "commit: "+err.Error())
 				return
 			}
 
-			results = append(results, map[string]any{
-				"success":  true,
+			results = append(results, map[string]interface{}{
 				"batch_id": uuid.New().String(),
 				"rows":     len(copyRows),
-				"elapsed":  time.Since(start).Milliseconds(),
+				"success":  true,
+				"elapsed":  time.Since(fileStart).Milliseconds(),
 			})
 		}
 
+		total := time.Since(startOverall).Milliseconds()
 		api.RespondWithPayload(w, true, "", map[string]any{
-			"success":   true,
-			"batches":   results,
-			"total_ms":  time.Since(startOverall).Milliseconds(),
-			"processed": len(results),
+			"success":    true,
+			"processed":  len(results),
+			"batches":    results,
+			"total_ms":   total,
+			"rows_count": len(results),
 		})
 	}
 }
