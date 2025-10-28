@@ -223,7 +223,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			categoryID := "CFC-" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:7]
 			insertSQL := `INSERT INTO mastercashflowcategory (
-		    category_id, category_name, category_type, parent_category_id, default_mapping, cashflow_nature, usage_flag, description, status, category_level,
+		    category_id, category_name, category_type, parent_category_name, default_mapping, cashflow_nature, usage_flag, description, status, category_level,
 					erp_type, erp_ext, erp_segment, sap_fsv, sap_node, sap_bukrs, sap_notes,
 					oracle_ledger, oracle_cf_code, oracle_cf_name, oracle_line,
 					tally_group, tally_voucher, tally_notes, sage_section, sage_line, sage_notes
