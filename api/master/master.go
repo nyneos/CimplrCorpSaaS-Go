@@ -206,6 +206,19 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/demat/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveDemats(pgxPool)))
 	mux.Handle("/master/demat/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetDematsWithAudit(pgxPool)))
 
+	// Folio Master routes
+	mux.Handle("/master/folio/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadFolio(pgxPool)))
+	mux.Handle("/master/folio/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetFoliosWithAudit(pgxPool)))
+	mux.Handle("/master/folio/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveFolios(pgxPool)))
+	mux.Handle("/master/folio/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateFolioSingle(pgxPool)))
+	mux.Handle("/master/folio/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateFolioBulk(pgxPool)))
+	mux.Handle("/master/folio/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateFolio(pgxPool)))
+	mux.Handle("/master/folio/bulk-update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateFolioBulk(pgxPool)))
+	mux.Handle("/master/folio/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteFolio(pgxPool)))
+	mux.Handle("/master/folio/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveFolioActions(pgxPool)))
+	mux.Handle("/master/folio/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectFolioActions(pgxPool)))
+
+	
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
 	mux.Handle("/master/amfi/nav", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFINavStagingSimple(pgxPool)))
@@ -216,20 +229,3 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
