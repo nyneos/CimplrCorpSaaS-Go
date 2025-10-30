@@ -1530,22 +1530,23 @@ func ubParseUploadFile(file multipart.File, ext string) ([][]string, error) {
 
 // --- Request payload ---
 type EditAllocationRequest struct {
-	UserID  string `json:"user_id"`
-	BatchID string `json:"batch_id"`
-	Groups  []struct {
-		Source      string `json:"source"`
-		CompanyCode string `json:"company_code"`
-		Party       string `json:"party"`
-		Currency    string `json:"currency"`
-		Allocations []struct {
-			BaseDoc                string  `json:"base_document_id"`
-			KnockDoc               string  `json:"knockoff_document_id"`
-			AllocationAmountAbs    float64 `json:"allocation_amount_abs"`
-			AllocationAmountSigned float64 `json:"allocation_amount_signed"`
-			Note                   string  `json:"note,omitempty"`
-		} `json:"allocations"`
-	} `json:"groups"`
+    UserID  string `json:"user_id"`
+    BatchID string `json:"batch_id"`
+    Groups  []struct {
+        Source      string `json:"source"`
+        CompanyCode string `json:"company_code"`
+        Party       string `json:"party"`
+        Currency    string `json:"currency"`
+        Allocations []struct {
+            BaseDoc                string   `json:"base_doc"`
+            KnockDoc               string   `json:"knock_doc"`
+            AllocationAmountAbs    float64  `json:"allocation_amount_abs"`
+            AllocationAmountSigned *float64 `json:"allocation_amount_signed"`
+            Note                   string   `json:"note,omitempty"`
+        } `json:"allocations"`
+    } `json:"groups"`
 }
+
 
 func EditAllocationHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
