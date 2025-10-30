@@ -119,6 +119,31 @@ func StartFXService(db *sql.DB) {
 			h.ServeHTTP(w, r)
 		})
 
+		v91BatchesMinimal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 batches minimal: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.GetExposureUploadBatchesMinimal(pool)
+			h.ServeHTTP(w, r)
+		})
+
+		// per-request wrapper for EditAllocationHandler (v91)
+		v91EditAllocation := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pool, err := pgxpool.New(context.Background(), dsn)
+			if err != nil {
+				log.Printf("v91 edit-allocation: failed to create pgx pool: %v", err)
+				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				return
+			}
+			defer pool.Close()
+			h := v91.EditAllocationHandler(pool)
+			h.ServeHTTP(w, r)
+		})
+
 		mux.Handle("/fx/exposures/upload/v91", api.BusinessUnitMiddleware(db)(v91Wrapper))
 		mux.Handle("/fx/exposures/dashboard/all/v91", api.BusinessUnitMiddleware(db)(v91DashAll))
 		mux.Handle("/fx/exposures/dashboard/by-year/v91", api.BusinessUnitMiddleware(db)(v91DashByYear))
@@ -127,6 +152,8 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/exposures/bulk-approve/v91", api.BusinessUnitMiddleware(db)(v91BulkApprove))
 		mux.Handle("/fx/exposures/bulk-reject/v91", api.BusinessUnitMiddleware(db)(v91BulkReject))
 		mux.Handle("/fx/exposures/bulk-delete/v91", api.BusinessUnitMiddleware(db)(v91BulkDelete))
+		mux.Handle("/fx/exposures/edit-allocation/v91", api.BusinessUnitMiddleware(db)(v91EditAllocation))
+		mux.Handle("/fx/exposures/get-file/v91", api.BusinessUnitMiddleware(db)(v91BatchesMinimal))
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")
 	}	
