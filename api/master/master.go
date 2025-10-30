@@ -217,7 +217,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/folio/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteFolio(pgxPool)))
 	mux.Handle("/master/folio/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveFolioActions(pgxPool)))
 	mux.Handle("/master/folio/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectFolioActions(pgxPool)))
-
+	mux.Handle("/master/folio/meta", api.BusinessUnitMiddleware(db)(investmentMasters.GetSingleFolioWithAudit(pgxPool)))
 	
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
@@ -229,3 +229,4 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
