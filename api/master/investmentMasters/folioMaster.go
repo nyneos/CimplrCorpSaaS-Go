@@ -1278,3 +1278,155 @@ func BulkRejectFolioActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
 	}
 }
+
+func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	type reqStruct struct {
+		FolioID string `json:"folio_id"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		var req reqStruct
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.FolioID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "folio_id is required in body")
+			return
+		}
+
+		q := `
+            WITH latest_audit AS (
+                SELECT DISTINCT ON (a.folio_id)
+                    a.folio_id, a.actiontype, a.processing_status, a.action_id,
+                    a.requested_by, a.requested_at, a.checker_by, a.checker_at,
+                    a.checker_comment, a.reason
+                FROM investment.auditactionfolio a
+                ORDER BY a.folio_id, a.requested_at DESC
+            ),
+            history AS (
+                SELECT folio_id,
+                    MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+                    MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+                    MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+                    MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+                    MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+                    MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+                FROM investment.auditactionfolio
+                GROUP BY folio_id
+            ),
+            schemes AS (
+                SELECT fsm.folio_id,
+                    json_agg(
+                        json_build_object(
+                            'scheme_id', s.scheme_id,
+                            'scheme_name', s.scheme_name,
+                            'isin', s.isin,
+                            'internal_scheme_code', s.internal_scheme_code,
+                            'mapping_status', fsm.status
+                        )
+                    ) AS scheme_list
+                FROM investment.folioschememapping fsm
+                JOIN investment.masterscheme s ON s.scheme_id = fsm.scheme_id
+                GROUP BY fsm.folio_id
+            ),
+            clearing AS (
+                SELECT account_id, STRING_AGG(code_type || ':' || code_value, ', ') AS clearing_codes
+                FROM public.masterclearingcode GROUP BY account_id
+            ),
+            sub_ac AS (
+                SELECT ba.account_number, ba.account_nickname, ba.account_id,
+                       b.bank_name, COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+                       cl.clearing_codes
+                FROM public.masterbankaccount ba
+                LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+                LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+                LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+                LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+            ),
+            red_ac AS (
+                SELECT ba.account_number, ba.account_nickname, ba.account_id,
+                       b.bank_name, COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+                       cl.clearing_codes
+                FROM public.masterbankaccount ba
+                LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+                LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+                LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+                LEFT JOIN clearing cl ON cl.account_id = ba.account_id
+            )
+            SELECT
+                m.folio_id, m.entity_name, m.old_entity_name, m.amc_name, m.old_amc_name,
+                m.folio_number, m.old_folio_number, m.first_holder_name, m.old_first_holder_name,
+                m.default_subscription_account, m.old_default_subscription_account,
+                m.default_redemption_account, m.old_default_redemption_account,
+                m.status, m.old_status, m.source, m.old_source, m.is_deleted,
+
+                COALESCE(l.actiontype,'') AS action_type,
+                COALESCE(l.processing_status,'') AS processing_status,
+                COALESCE(l.action_id::text,'') AS action_id,
+                COALESCE(l.requested_by,'') AS requested_by,
+                TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+                COALESCE(l.checker_by,'') AS checker_by,
+                TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+                COALESCE(l.checker_comment,'') AS checker_comment,
+                COALESCE(l.reason,'') AS reason,
+
+                COALESCE(h.created_by,'') AS created_by, COALESCE(h.created_at,'') AS created_at,
+                COALESCE(h.edited_by,'') AS edited_by, COALESCE(h.edited_at,'') AS edited_at,
+                COALESCE(h.deleted_by,'') AS deleted_by, COALESCE(h.deleted_at,'') AS deleted_at,
+
+                sub.account_number AS sub_account_number, sub.account_nickname AS sub_account_nickname,
+                sub.bank_name AS sub_bank_name, sub.entity_name AS sub_entity_name,
+                sub.clearing_codes AS sub_clearing_codes,
+
+                red.account_number AS red_account_number, red.account_nickname AS red_account_nickname,
+                red.bank_name AS red_bank_name, red.entity_name AS red_entity_name,
+                red.clearing_codes AS red_clearing_codes,
+
+                COALESCE(sch.scheme_list, '[]') AS schemes
+
+            FROM investment.masterfolio m
+            LEFT JOIN latest_audit l ON l.folio_id = m.folio_id
+            LEFT JOIN history h ON h.folio_id = m.folio_id
+            LEFT JOIN sub_ac sub ON sub.account_number = m.default_subscription_account
+            LEFT JOIN red_ac red ON red.account_number = m.default_redemption_account
+            LEFT JOIN schemes sch ON sch.folio_id = m.folio_id
+
+            WHERE COALESCE(m.is_deleted,false)=false
+              AND m.folio_id = $1
+
+            ORDER BY m.entity_name, m.folio_number;
+        `
+
+		rows, err := pgxPool.Query(ctx, q, req.FolioID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		fields := rows.FieldDescriptions()
+		out := make([]map[string]interface{}, 0, 1)
+
+		for rows.Next() {
+			vals, _ := rows.Values()
+			rec := make(map[string]interface{})
+			for i, f := range fields {
+				name := string(f.Name)
+				if vals[i] == nil {
+					rec[name] = ""
+				} else if t, ok := vals[i].(time.Time); ok {
+					rec[name] = t.Format("2006-01-02 15:04:05")
+				} else {
+					rec[name] = vals[i]
+				}
+			}
+			out = append(out, rec)
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+rows.Err().Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
