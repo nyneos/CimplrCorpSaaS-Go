@@ -14,12 +14,14 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 
 		query := `
-			SELECT 
-				amc_name,
-				scheme_name,
-				isin_div_payout_growth
+			SELECT DISTINCT ON (amc_name, scheme_name)
+			amc_name,
+			scheme_name,
+			isin_div_payout_growth
 			FROM investment.amfi_scheme_master_staging
-			ORDER BY amc_name, scheme_name
+			WHERE isin_div_payout_growth IS NOT NULL 
+ 			AND isin_div_payout_growth <> ''
+			ORDER BY amc_name, scheme_name, isin_div_payout_growth;
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
