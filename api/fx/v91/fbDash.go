@@ -127,6 +127,7 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 }
 
 type ExposureFilter struct {
+	BatchID  string `json:"batch_id"`
 	FileHash string `json:"file_hash"`
 	Year     string `json:"year,omitempty"`
 }
@@ -140,6 +141,11 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var payload ExposureFilter
 		_ = json.NewDecoder(r.Body).Decode(&payload)
+
+		if strings.TrimSpace(payload.BatchID) == "" || strings.TrimSpace(payload.FileHash) == "" {
+			api.RespondWithPayload(w, false, "batch_id and file_hash are required", nil)
+			return
+		}
 
 		args := []any{}
 		query := `
@@ -173,10 +179,11 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			AND lower(coalesce(approval_status, '')) <> 'approved'
 		`
 
-		if payload.FileHash != "" {
-			query += ` AND file_hash = $1`
-			args = append(args, payload.FileHash)
-		}
+		query += ` AND batch_id = $` + strconv.Itoa(len(args)+1)
+		args = append(args, payload.BatchID)
+
+		query += ` AND file_hash = $` + strconv.Itoa(len(args)+1)
+		args = append(args, payload.FileHash)
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
@@ -352,6 +359,11 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 		var payload ExposureFilter
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 
+		if strings.TrimSpace(payload.BatchID) == "" || strings.TrimSpace(payload.FileHash) == "" {
+			api.RespondWithPayload(w, false, "batch_id and file_hash are required", nil)
+			return
+		}
+
 		args := []any{}
 		argIndex := 1
 
@@ -386,11 +398,13 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 			AND lower(coalesce(approval_status, '')) <> 'approved'
 		`
 
-		if payload.FileHash != "" {
-			query += ` AND file_hash = $` + strconv.Itoa(argIndex)
-			args = append(args, payload.FileHash)
-			argIndex++
-		}
+		query += ` AND batch_id = $` + strconv.Itoa(argIndex)
+		args = append(args, payload.BatchID)
+		argIndex++
+
+		query += ` AND file_hash = $` + strconv.Itoa(argIndex)
+		args = append(args, payload.FileHash)
+		argIndex++
 
 		if payload.Year != "" {
 			year, _ := strconv.Atoi(payload.Year)
