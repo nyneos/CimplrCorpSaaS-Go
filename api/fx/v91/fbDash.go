@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-
 type ExposureResponse struct {
 	ExposureHeaderID    string     `json:"exposure_header_id"`
 	CompanyCode         string     `json:"company_code"`
@@ -127,12 +126,22 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 	w.Write([]byte(`]}`))
 }
 
+type ExposureFilter struct {
+	FileHash string `json:"file_hash"`
+	Year     string `json:"year,omitempty"`
+}
+
 // --------------------- HANDLERS -----------------------
 
 // GetAllExposures - streams all exposures (headers only)
 func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+
+		var payload ExposureFilter
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+
+		args := []any{}
 		query := `
 			SELECT
 				exposure_header_id,
@@ -161,10 +170,15 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 				updated_at
 			FROM public.exposure_headers
 			WHERE exposure_category IS NOT NULL
-			AND lower(coalesce(exposure_creation_status, '')) <> 'approved';
+			AND lower(coalesce(approval_status, '')) <> 'approved'
 		`
 
-		rows, err := pool.Query(ctx, query)
+		if payload.FileHash != "" {
+			query += ` AND file_hash = $1`
+			args = append(args, payload.FileHash)
+		}
+
+		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -334,17 +348,12 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		var payload struct {
-			Year string `json:"year"`
-		}
+
+		var payload ExposureFilter
 		_ = json.NewDecoder(r.Body).Decode(&payload)
 
-		var yParam any
-		if payload.Year != "" {
-			if y, err := strconv.Atoi(payload.Year); err == nil {
-				yParam = y
-			}
-		}
+		args := []any{}
+		argIndex := 1
 
 		query := `
 			SELECT
@@ -374,16 +383,29 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 				updated_at
 			FROM public.exposure_headers
 			WHERE exposure_category IS NOT NULL
-			AND lower(coalesce(exposure_creation_status, '')) <> 'approved'
-			AND ($1::int IS NULL OR (
-				EXTRACT(YEAR FROM value_date) = $1::int OR
-				EXTRACT(YEAR FROM posting_date) = $1::int OR
-				EXTRACT(YEAR FROM document_date) = $1::int
-			))
-			ORDER BY value_date DESC;
+			AND lower(coalesce(approval_status, '')) <> 'approved'
 		`
 
-		rows, err := pool.Query(ctx, query, yParam)
+		if payload.FileHash != "" {
+			query += ` AND file_hash = $` + strconv.Itoa(argIndex)
+			args = append(args, payload.FileHash)
+			argIndex++
+		}
+
+		if payload.Year != "" {
+			year, _ := strconv.Atoi(payload.Year)
+			query += `
+			AND (
+				EXTRACT(YEAR FROM value_date) = $` + strconv.Itoa(argIndex) + ` OR
+				EXTRACT(YEAR FROM posting_date) = $` + strconv.Itoa(argIndex) + ` OR
+				EXTRACT(YEAR FROM document_date) = $` + strconv.Itoa(argIndex) + `
+			)`
+			args = append(args, year)
+		}
+
+		query += " ORDER BY value_date DESC"
+
+		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -548,5 +570,85 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 
 			return ne, nil
 		})
+	}
+}
+
+type ExposureBatchMinimal struct {
+	BatchID    string    `json:"batch_id"`
+	FileHash   string    `json:"file_hash"`
+	FileName   string    `json:"file_name"`
+	UploadedAt time.Time `json:"uploaded_at"`
+}
+
+func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		batchID := r.URL.Query().Get("batch_id")
+		fileHash := r.URL.Query().Get("file_hash")
+
+		query := `
+			SELECT DISTINCT ON (batch_id)
+				batch_id,
+				file_hash,
+				file_name,
+				ingestion_timestamp
+			FROM public.staging_batches_exposures
+			WHERE batch_id IS NOT NULL
+		`
+
+		args := []any{}
+		cond := ""
+
+		if batchID != "" {
+			cond += " AND batch_id = $" + strconv.Itoa(len(args)+1)
+			args = append(args, batchID)
+		}
+		if fileHash != "" {
+			cond += " AND file_hash = $" + strconv.Itoa(len(args)+1)
+			args = append(args, fileHash)
+		}
+
+		query = query + cond + ` ORDER BY batch_id , ingestion_timestamp DESC`
+
+		rows, err := pool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithPayload(w, false, err.Error(), nil)
+			return
+		}
+		defer rows.Close()
+
+		var list []ExposureBatchMinimal
+
+		for rows.Next() {
+			var rec ExposureBatchMinimal
+			var (
+				nbatch, nfileHash, nfileName *string
+				ningestion                   *time.Time
+			)
+
+			err := rows.Scan(&nbatch, &nfileHash, &nfileName, &ningestion)
+			if err != nil {
+				log.Println("[SCAN ERROR]", err)
+				continue
+			}
+
+			if nbatch != nil {
+				rec.BatchID = *nbatch
+			}
+			if nfileHash != nil {
+				rec.FileHash = *nfileHash
+			}
+			if nfileName != nil {
+				rec.FileName = *nfileName
+			}
+			if ningestion != nil {
+				rec.UploadedAt = *ningestion
+			}
+
+			list = append(list, rec)
+		}
+
+		api.RespondWithPayload(w, true, "OK", list)
 	}
 }
