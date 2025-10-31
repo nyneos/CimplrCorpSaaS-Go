@@ -197,7 +197,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				createdBy = s.Email
+				createdBy = s.Name
 				break
 			}
 		}
@@ -746,7 +746,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				updatedBy = s.Email
+				updatedBy = s.Name
 				break
 			}
 		}
@@ -1042,7 +1042,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				requestedBy = s.Email
+				requestedBy = s.Name
 				break
 			}
 		}
@@ -1161,7 +1161,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -1258,7 +1258,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}

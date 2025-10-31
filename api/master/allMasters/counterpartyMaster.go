@@ -70,7 +70,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		createdBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				createdBy = s.Email
+				createdBy = s.Name
 				break
 			}
 		}
@@ -548,7 +548,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		updatedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				updatedBy = s.Email
+				updatedBy = s.Name
 				break
 			}
 		}
@@ -724,7 +724,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		updatedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				updatedBy = s.Email
+				updatedBy = s.Name
 				break
 			}
 		}
@@ -857,7 +857,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == body.UserID {
-				requestedBy = s.Email
+				requestedBy = s.Name
 				break
 			}
 		}
@@ -918,7 +918,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -1022,7 +1022,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
