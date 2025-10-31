@@ -52,7 +52,7 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 
 		query := `
-			SELECT 
+			SELECT DISTINCT
 				amc_name,
 				scheme_name,
 				isin_div_payout_growth
