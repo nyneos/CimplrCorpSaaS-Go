@@ -1538,8 +1538,8 @@ type EditAllocationRequest struct {
         Party       string `json:"party"`
         Currency    string `json:"currency"`
         Allocations []struct {
-            BaseDoc                string   `json:"base_doc"`
-            KnockDoc               string   `json:"knock_doc"`
+            BaseDoc                string   `json:"base_document_id"`
+            KnockDoc               string   `json:"knockoff_document_id"`
             AllocationAmountAbs    float64  `json:"allocation_amount_abs"`
             AllocationAmountSigned *float64 `json:"allocation_amount_signed"`
             Note                   string   `json:"note,omitempty"`
