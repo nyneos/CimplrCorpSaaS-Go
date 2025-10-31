@@ -50,7 +50,7 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == userID {
-				createdBy = s.Email
+				createdBy = s.Name
 				break
 			}
 		}
@@ -258,7 +258,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == userID {
-				updatedBy = s.Email
+				updatedBy = s.Name
 				break
 			}
 		}
@@ -395,19 +395,19 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string   `json:"user_id"`
-			ActionIDs []string `json:"action_ids"`
-			Comment   string   `json:"comment"`
+			UserID      string   `json:"user_id"`
+			CurrencyIDs []string `json:"currency_ids"`
+			Comment     string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide currency_ids")
 			return
 		}
 		sessions := auth.GetActiveSessions()
 		checkerBy := ""
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -415,8 +415,8 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
-		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) RETURNING action_id,currency_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
+	query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
+	rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -440,19 +440,19 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string   `json:"user_id"`
-			ActionIDs []string `json:"action_ids"`
-			Comment   string   `json:"comment"`
+			UserID      string   `json:"user_id"`
+			CurrencyIDs []string `json:"currency_ids"`
+			Comment     string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ActionIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide currency_ids")
 			return
 		}
 		sessions := auth.GetActiveSessions()
 		checkerBy := ""
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -461,8 +461,8 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
-		delQuery := `DELETE FROM auditactioncurrency WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, currency_id`
-		delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.ActionIDs))
+	delQuery := `DELETE FROM auditactioncurrency WHERE currency_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, currency_id`
+	delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.CurrencyIDs))
 		var deleted []string
 		var currencyIDsToDelete []string
 		if delErr == nil {
@@ -476,13 +476,13 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Delete corresponding currencies from mastercurrency
 		if len(currencyIDsToDelete) > 0 {
-			delCurQuery := `DELETE FROM mastercurrency WHERE currency_id = ANY($1)`
-			_, _ = pgxPool.Exec(r.Context(), delCurQuery, pq.Array(currencyIDsToDelete))
+			// soft-delete: mark rows as deleted
+			_, _ = pgxPool.Exec(r.Context(), `UPDATE mastercurrency SET is_deleted = true WHERE currency_id = ANY($1)`, pq.Array(currencyIDsToDelete))
 		}
 
 		// Then, approve the rest
-		query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
-		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.ActionIDs))
+	query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
+	rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -518,7 +518,7 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedBy := ""
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				requestedBy = s.Email
+				requestedBy = s.Name
 				break
 			}
 		}

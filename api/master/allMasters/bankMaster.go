@@ -52,12 +52,12 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == userID {
-				createdBy = s.Email
+				createdBy = s.Name
 				break
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "User session not found or email missing")
+			api.RespondWithError(w, http.StatusBadRequest, "User session not found or Name missing")
 			return
 		}
 		// Basic validation (add more as needed)
@@ -707,7 +707,7 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == userID {
-				updatedBy = s.Email
+				updatedBy = s.Name
 				break
 			}
 		}
@@ -935,7 +935,7 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedBy := ""
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				requestedBy = s.Email
+				requestedBy = s.Name
 				break
 			}
 		}
@@ -978,7 +978,7 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := ""
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -1023,7 +1023,7 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		checkerBy := ""
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
