@@ -223,10 +223,35 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
 	mux.Handle("/master/amfi/nav", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFINavStagingSimple(pgxPool)))
 
+	)
+
+	// Holiday calendar exports (ICS/feed/share links)
+	mux.Handle("/master/calendar/export/ics/", api.BusinessUnitMiddleware(db)(investmentMasters.ExportCalendarICS(pgxPool)))
+	mux.Handle("/master/calendar/feed/", api.BusinessUnitMiddleware(db)(investmentMasters.CalendarFeedICS(pgxPool)))
+	mux.Handle("/master/calendar/share-links/", api.BusinessUnitMiddleware(db)(investmentMasters.ShareLinksCalendar(pgxPool)))
+
+	// Calendar Master routes (pgx-backed)
+	mux.Handle("/master/calendar/create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateCalendarSingle(pgxPool)))
+	mux.Handle("/master/calendar/holiday/bulk-create", api.BusinessUnitMiddleware(db)(investmentMasters.CreateHolidayBulk(pgxPool)))
+	mux.Handle("/master/calendar/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadCalendarBulk(pgxPool)))
+	mux.Handle("/master/calendar/holiday/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadHolidayBulk(pgxPool)))
+	mux.Handle("/master/calendar/meta", api.BusinessUnitMiddleware(db)(investmentMasters.GetCalendarsWithAudit(pgxPool)))
+	mux.Handle("/master/calendar/list", api.BusinessUnitMiddleware(db)(investmentMasters.GetCalendarListLite(pgxPool)))
+	mux.Handle("/master/calendar/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetCalendarWithHolidays(pgxPool)))
+	mux.Handle("/master/calendar/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveCalendars(pgxPool)))
+	mux.Handle("/master/calendar/view", api.BusinessUnitMiddleware(db)(investmentMasters.GetCalendarWithHolidaysApproved(pgxPool)))
+	mux.Handle("/master/calendar/bulk-delete", api.BusinessUnitMiddleware(db)(investmentMasters.DeleteCalendar(pgxPool)))
+	mux.Handle("/master/calendar/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveCalendarActions(pgxPool)))
+	mux.Handle("/master/calendar/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectCalendarActions(pgxPool)))
+	mux.Handle("/master/calendar/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateCalendar(pgxPool)))
+	mux.Handle("/master/calendar/holiday/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateHoliday(pgxPool)))
+	mux.Handle("/master/calendar/update-with-holidays", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateCalendarWithHolidays(pgxPool)))
+
 	
 	err = http.ListenAndServe(":2143", mux)
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
