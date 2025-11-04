@@ -244,6 +244,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/calendar/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateCalendar(pgxPool)))
 	mux.Handle("/master/calendar/holiday/update", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateHoliday(pgxPool)))
 	mux.Handle("/master/calendar/update-with-holidays", api.BusinessUnitMiddleware(db)(investmentMasters.UpdateCalendarWithHolidays(pgxPool)))
+	mux.Handle("/master/calendar/years", api.BusinessUnitMiddleware(db)(investmentMasters.GetPastYearsHolidays(pgxPool)))
 
 	
 	err = http.ListenAndServe(":2143", mux)
@@ -251,6 +252,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
