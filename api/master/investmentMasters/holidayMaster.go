@@ -1793,12 +1793,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"calendar_id":  req.CalendarID,
-			"requested_by": userEmail,
-		})
-	}
-}
-
-func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
+			"requested_by": userEmail,func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		var req struct {
@@ -1881,10 +1876,6 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
-		var newDateVal interface{} = oldVals["holiday_date"]
-		newName := fmt.Sprint(oldVals["holiday_name"])
-		newType := fmt.Sprint(oldVals["holiday_type"])
-
 		var newDateVal interface{} = oldVals["holiday_date"]
 		newName := fmt.Sprint(oldVals["holiday_name"])
 		newType := fmt.Sprint(oldVals["holiday_type"])
@@ -2038,6 +2029,11 @@ func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+
+		})
+	}
+}
+
 
 func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
