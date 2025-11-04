@@ -11,72 +11,97 @@ import (
 	"CimplrCorpSaas/api/cash"
 	"CimplrCorpSaas/api/dash"
 	"CimplrCorpSaas/api/fx"
+	"CimplrCorpSaas/api/investment"
 	"CimplrCorpSaas/api/master"
 	"CimplrCorpSaas/api/uam"
+
+	// "CimplrCorpSaas/internal/jobs"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/resource"
 	"CimplrCorpSaas/internal/serviceiface"
+
 	"database/sql"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"gopkg.in/yaml.v3"
 )
 
 var AuthDB *sql.DB
 var db *sql.DB
+var pgxPool *pgxpool.Pool
 
 func SetDB(database *sql.DB) {
 	db = database
 	AuthDB = database
 }
 
+func SetPgxPool(pool *pgxpool.Pool) {
+	pgxPool = pool
+}
+
+// GetDB returns the database connection
+func GetDB() *sql.DB {
+	return db
+}
+
+// GetPgxPool returns the pgx pool connection
+func GetPgxPool() *pgxpool.Pool {
+	return pgxPool
+}
+
 var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.Service{
-	   "logger": func(cfg map[string]interface{}) serviceiface.Service {
-		   return logger.NewLoggerService(cfg)
-	   },
-	   "resourcemanager": func(cfg map[string]interface{}) serviceiface.Service {
-		   return resource.NewResourceManagerService(cfg)
-	   },
-	   "fx": func(cfg map[string]interface{}) serviceiface.Service {
-		   return fx.NewFXService(cfg, db) // Pass db here
-	   },
-	   "dash": func(cfg map[string]interface{}) serviceiface.Service {
-		   return dash.NewDashService(cfg, db) // Pass db here
-	   },
-	   "cash": func(cfg map[string]interface{}) serviceiface.Service {
-		   return cash.NewCashService(cfg, db) // Pass db here
-	   },
-	   "uam": func(cfg map[string]interface{}) serviceiface.Service {
-		   return uam.NewUAMService(cfg, db)
-	   },
-	   "master": func(cfg map[string]interface{}) serviceiface.Service {
-		   // Import master package at top: "CimplrCorpSaas/api/master"
-		   return master.NewMasterService(cfg, db)
-	   },
-	   "gateway": func(cfg map[string]interface{}) serviceiface.Service {
-		   return api.NewGatewayService(cfg)
-	   },
-	  "auth": func(cfg map[string]interface{}) serviceiface.Service {
-		   maxUsers := 10
-		   if cfg != nil {
-			   if v, ok := cfg["max_users"]; ok && v != nil {
-				   switch t := v.(type) {
-				   case int:
-					   maxUsers = t
-				   case int64:
-					   maxUsers = int(t)
-				   case float64:
-					   maxUsers = int(t)
-				   case string:
-					   var parsed int
-					   if _, err := fmt.Sscanf(t, "%d", &parsed); err == nil {
-						   maxUsers = parsed
-					   }
-				   }
-			   }
-		   }
-		  maxUsers = 100
-		   return auth.NewAuthService(AuthDB, maxUsers)
-	   },
+	"logger": func(cfg map[string]interface{}) serviceiface.Service {
+		return logger.NewLoggerService(cfg)
+	},
+	"resourcemanager": func(cfg map[string]interface{}) serviceiface.Service {
+		return resource.NewResourceManagerService(cfg)
+	},
+	"fx": func(cfg map[string]interface{}) serviceiface.Service {
+		return fx.NewFXService(cfg, db) // Pass db here
+	},
+	"dash": func(cfg map[string]interface{}) serviceiface.Service {
+		return dash.NewDashService(cfg, db) // Pass db here
+	},
+	"cash": func(cfg map[string]interface{}) serviceiface.Service {
+		return cash.NewCashService(cfg, db) // Pass db here
+	},
+	"uam": func(cfg map[string]interface{}) serviceiface.Service {
+		return uam.NewUAMService(cfg, db)
+	},
+	"master": func(cfg map[string]interface{}) serviceiface.Service {
+		return master.NewMasterService(cfg, db)
+	},
+	"investment": func(cfg map[string]interface{}) serviceiface.Service {
+		return investment.NewInvestmentService(cfg, pgxPool)
+	},
+	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
+		return api.NewGatewayService(cfg)
+	},
+	"auth": func(cfg map[string]interface{}) serviceiface.Service {
+		maxUsers := 10
+		if cfg != nil {
+			if v, ok := cfg["max_users"]; ok && v != nil {
+				switch t := v.(type) {
+				case int:
+					maxUsers = t
+				case int64:
+					maxUsers = int(t)
+				case float64:
+					maxUsers = int(t)
+				case string:
+					var parsed int
+					if _, err := fmt.Sscanf(t, "%d", &parsed); err == nil {
+						maxUsers = parsed
+					}
+				}
+			}
+		}
+		maxUsers = 100
+		return auth.NewAuthService(AuthDB, maxUsers)
+	},
+	// "cron": func(cfg map[string]interface{}) serviceiface.Service {
+	// 	return jobs.NewCronService(cfg, pgxPool)
+	// },
 }
 
 // ------------------- MANAGER -------------------
@@ -248,9 +273,3 @@ func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	}
 	return nil
 }
-
-
-
-
-
-
