@@ -11,22 +11,42 @@ import (
 	"CimplrCorpSaas/api/cash"
 	"CimplrCorpSaas/api/dash"
 	"CimplrCorpSaas/api/fx"
+	"CimplrCorpSaas/api/investment"
 	"CimplrCorpSaas/api/master"
 	"CimplrCorpSaas/api/uam"
+
+	// "CimplrCorpSaas/internal/jobs"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/resource"
 	"CimplrCorpSaas/internal/serviceiface"
+
 	"database/sql"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"gopkg.in/yaml.v3"
 )
 
 var AuthDB *sql.DB
 var db *sql.DB
+var pgxPool *pgxpool.Pool
 
 func SetDB(database *sql.DB) {
 	db = database
 	AuthDB = database
+}
+
+func SetPgxPool(pool *pgxpool.Pool) {
+	pgxPool = pool
+}
+
+// GetDB returns the database connection
+func GetDB() *sql.DB {
+	return db
+}
+
+// GetPgxPool returns the pgx pool connection
+func GetPgxPool() *pgxpool.Pool {
+	return pgxPool
 }
 
 var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.Service{
@@ -49,8 +69,10 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		return uam.NewUAMService(cfg, db)
 	},
 	"master": func(cfg map[string]interface{}) serviceiface.Service {
-		// Import master package at top: "CimplrCorpSaas/api/master"
 		return master.NewMasterService(cfg, db)
+	},
+	"investment": func(cfg map[string]interface{}) serviceiface.Service {
+		return investment.NewInvestmentService(cfg, pgxPool)
 	},
 	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		return api.NewGatewayService(cfg)

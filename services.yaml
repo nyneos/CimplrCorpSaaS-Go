@@ -45,5 +45,11 @@ services:
     start_order: 10
     config:
       port: 2143
-
-
+  - name: investment
+    start_order: 12
+    config:
+      port: 7143
+  - name: cron
+    start_order: 13
+    config:
+      batch_size: 1000
