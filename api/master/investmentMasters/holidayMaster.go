@@ -1793,7 +1793,12 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"calendar_id":  req.CalendarID,
-			"requested_by": userEmail,func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
+			"requested_by": userEmail,
+		})
+	}
+}
+
+func UpdateHoliday(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		var req struct {
@@ -1835,6 +1840,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
 		var calendarID string
 		oldVals := make(map[string]interface{})
 		sel := `
@@ -1876,10 +1882,12 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
+
 		var newDateVal interface{} = oldVals["holiday_date"]
 		newName := fmt.Sprint(oldVals["holiday_name"])
 		newType := fmt.Sprint(oldVals["holiday_type"])
 
+		// helper to canonicalize a date value to YYYY-MM-DD for reliable comparison
 		toDateStr := func(x interface{}) string {
 			if x == nil {
 				return ""
@@ -1891,7 +1899,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if t == nil {
 					return ""
 				}
-				return t.Format("2006-01-02")
+				return t.Format(constants.DateFormat)
 			case string:
 				return NormalizeDate(t)
 			default:
@@ -1915,17 +1923,20 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						api.RespondWithError(w, 400, "invalid holiday_date")
 						return
 					}
+					// try NormalizeDate to get YYYY-MM-DD
 					nd := NormalizeDate(s)
 					if nd != "" {
+						// keep as normalized date string (Postgres accepts 'YYYY-MM-DD')
 						v = nd
 						newDateVal = nd
 					} else {
+						// try RFC3339/time.Parse fallback and convert to YYYY-MM-DD string
 						if tt, err := time.Parse(time.RFC3339, s); err == nil {
-							v = tt
-							newDateVal = tt
-						} else if tt2, err2 := time.Parse("2006-01-02 15:04:05", s); err2 == nil {
-							v = tt2
-							newDateVal = tt2
+							v = tt.Format(constants.DateFormat)
+							newDateVal = v
+						} else if tt2, err2 := time.Parse(constants.DateTimeFormat, s); err2 == nil {
+							v = tt2.Format(constants.DateFormat)
+							newDateVal = v
 						} else {
 							tx.Rollback(ctx)
 							api.RespondWithError(w, 400, "invalid holiday_date format")
@@ -1933,14 +1944,18 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 				case time.Time:
-					newDateVal = tv
+					// convert to plain date string to avoid timezone formatting issues
+					v = tv.Format(constants.DateFormat)
+					newDateVal = v
 				case *time.Time:
 					if tv != nil {
-						newDateVal = *tv
+						v = tv.Format(constants.DateFormat)
+						newDateVal = v
 					} else {
 						newDateVal = nil
 					}
 				default:
+					// try stringifying and normalizing
 					s := strings.TrimSpace(fmt.Sprint(tv))
 					nd := NormalizeDate(s)
 					if nd != "" {
@@ -1967,11 +1982,11 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sets) == 0 {
+			// ensure transaction is rolled back before returning
 			tx.Rollback(ctx)
 			api.RespondWithError(w, 400, "no valid editable fields")
 			return
 		}
-
 		if toDateStr(newDateVal) != toDateStr(oldVals["holiday_date"]) ||
 			newName != fmt.Sprint(oldVals["holiday_name"]) ||
 			newType != fmt.Sprint(oldVals["holiday_type"]) {
@@ -1995,6 +2010,7 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
+
 		q := fmt.Sprintf(`UPDATE investment.masterholiday SET %s WHERE holiday_id=$%d`,
 			strings.Join(sets, ", "), pos)
 		args = append(args, req.HolidayID)
@@ -2029,11 +2045,6 @@ func UpdateCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
-
-		})
-	}
-}
-
 
 func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
