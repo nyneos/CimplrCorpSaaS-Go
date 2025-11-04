@@ -78,30 +78,48 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		return api.NewGatewayService(cfg)
 	},
 	"auth": func(cfg map[string]interface{}) serviceiface.Service {
-		maxUsers := 10
-		if cfg != nil {
-			if v, ok := cfg["max_users"]; ok && v != nil {
-				switch t := v.(type) {
-				case int:
-					maxUsers = t
-				case int64:
-					maxUsers = int(t)
-				case float64:
-					maxUsers = int(t)
-				case string:
-					var parsed int
-					if _, err := fmt.Sscanf(t, "%d", &parsed); err == nil {
-						maxUsers = parsed
-					}
+		var maxUsers int
+		var sessionTimeout int
+		var maxLoginAttempts int
+		var accountLockDuration int
+		var sessionCleanerPeriod int
+
+		toInt := func(v interface{}) int {
+			switch t := v.(type) {
+			case int:
+				return t
+			case int64:
+				return int(t)
+			case float64:
+				return int(t)
+			case string:
+				var parsed int
+				if _, err := fmt.Sscanf(t, "%d", &parsed); err == nil {
+					return parsed
 				}
 			}
+			return 0
 		}
-		maxUsers = 100
-		return auth.NewAuthService(AuthDB, maxUsers)
+
+		if cfg != nil {
+			if v, ok := cfg["max_users"]; ok && v != nil {
+				maxUsers = toInt(v)
+			}
+			if v, ok := cfg["session_timeout"]; ok && v != nil {
+				sessionTimeout = toInt(v)
+			}
+			if v, ok := cfg["max_login_attempts"]; ok && v != nil {
+				maxLoginAttempts = toInt(v)
+			}
+			if v, ok := cfg["account_lock_duration"]; ok && v != nil {
+				accountLockDuration = toInt(v)
+			}
+			if v, ok := cfg["session_cleaner_period"]; ok && v != nil {
+				sessionCleanerPeriod = toInt(v)
+			}
+		}
+		return auth.NewAuthService(AuthDB, maxUsers, sessionTimeout, maxLoginAttempts, accountLockDuration, sessionCleanerPeriod)
 	},
-	// "cron": func(cfg map[string]interface{}) serviceiface.Service {
-	// 	return jobs.NewCronService(cfg, pgxPool)
-	// },
 }
 
 // ------------------- MANAGER -------------------
