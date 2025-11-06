@@ -2,15 +2,15 @@ package fx
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/fx/exposures"
+	"CimplrCorpSaas/api/fx/forwards"
+	v91 "CimplrCorpSaas/api/fx/v91"
 	"context"
-	"os"
-	"CimplrCorpSaas/api/fx/exposures" 
-	"CimplrCorpSaas/api/fx/forwards" 
-	v91 "CimplrCorpSaas/api/fx/v91"  
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,7 +21,7 @@ func StartFXService(db *sql.DB) {
 		w.Write([]byte("FX Service is active"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
-	
+
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
@@ -140,7 +140,7 @@ func StartFXService(db *sql.DB) {
 				return
 			}
 			defer pool.Close()
-			h := v91.EditAllocationHandler(pool)
+			h := v91.EditAllocationsHandler(pool)
 			h.ServeHTTP(w, r)
 		})
 
@@ -156,7 +156,7 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/exposures/get-file/v91", api.BusinessUnitMiddleware(db)(v91BatchesMinimal))
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")
-	}	
+	}
 	/*-------------     exposures    ;)      --------------------*/
 	/*upload */
 
@@ -167,7 +167,6 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/exposures/reject-multiple-headers", api.BusinessUnitMiddleware(db)(exposures.RejectMultipleExposureHeaders(db)))
 	mux.Handle("/fx/exposures/approve-multiple-headers", api.BusinessUnitMiddleware(db)(exposures.ApproveMultipleExposureHeaders(db)))
 	mux.Handle("/fx/exposures/batch-upload-staging", api.BusinessUnitMiddleware(db)(exposures.BatchUploadStagingData(db)))
-	
 
 	/*bucketing */
 	mux.Handle("/fx/exposures/update-bucketing", api.BusinessUnitMiddleware(db)(exposures.UpdateExposureHeadersLineItemsBucketing(db)))
@@ -220,6 +219,3 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
-
-
-
