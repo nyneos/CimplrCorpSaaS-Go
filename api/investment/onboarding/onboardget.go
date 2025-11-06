@@ -101,7 +101,8 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT 
 				s.amc_name,
 				s.scheme_name,
-				s.internal_scheme_code,
+				-- some AMFI staging sources may not have an internal_scheme_code column; return empty string as a fallback
+				'' AS internal_scheme_code,
 				s.isin_div_payout_growth AS isin,
 				COALESCE(s.isin_div_reinvestment, '') AS isin_reinvest,
 				CASE 
@@ -128,9 +129,9 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var amcName, schemeName, isin, isinReinvest, internal_scheme_code string
+			var amcName, schemeName, internal_scheme_code, isin, isinReinvest string
 			var enriched bool
-			_ = rows.Scan(&amcName, &schemeName, &isin, &isinReinvest, &enriched, &internal_scheme_code)
+			_ = rows.Scan(&amcName, &schemeName, &internal_scheme_code, &isin, &isinReinvest, &enriched)
 			out = append(out, map[string]interface{}{
 				"amc_name":             amcName,
 				"scheme_name":          schemeName,
@@ -144,7 +145,6 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", out)
 	}
 }
-
 func GetFoliosBySchemeListSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
