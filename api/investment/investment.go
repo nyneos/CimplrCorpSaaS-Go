@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"database/sql"
 
-	// amfisync "CimplrCorpSaas/api/investment/amfi-sync"
+	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	"CimplrCorpSaas/api"
 
@@ -31,9 +31,17 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/onboard/dps-enriched", api.BusinessUnitMiddleware(db)(http.HandlerFunc(onboard.GetAllDPs(pool))))
 
 	// AMFI sync endpoints
-	// mux.HandleFunc("/investment/amfi/sync-schemes", amfisync.SyncSchemesHandler(pool))
-	// mux.HandleFunc("/investment/amfi/update-nav", amfisync.UpdateNAVHandler(pool))
+	mux.HandleFunc("/investment/amfi/sync-schemes", amfisync.SyncSchemesHandler(pool))
+	mux.HandleFunc("/investment/amfi/update-nav", amfisync.UpdateNAVHandler(pool))
 
+	// AMFI data retrieval endpoints
+	mux.HandleFunc("/investment/amfi/get-schemes", amfisync.GetSchemeDataHandler(pool))
+
+	// TODO: Add more investment-related endpoints here
+	// Example routes for future implementation:
+	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
+	// mux.HandleFunc("/investment/schemes", schemesHandler)
+	
 	log.Println("Investment Service started on :7143")
 	err := http.ListenAndServe(":7143", mux)
 	if err != nil {
