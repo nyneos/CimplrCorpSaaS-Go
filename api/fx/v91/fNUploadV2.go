@@ -2516,8 +2516,8 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 					signPtr = &sd
 				}
 				item := reqAllocItem{
-					BaseDoc: a.BaseDoc,
-					Knock:   a.KnockDoc,
+					BaseDoc: strings.TrimSpace(a.BaseDoc),
+					Knock:   strings.TrimSpace(a.KnockDoc),
 					AbsAmt:  abs,
 					SignAmt: signPtr,
 				}
@@ -2554,7 +2554,7 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		// Query DB to fetch availability/currency for every base doc
 		baseDocsArr := make([]string, 0, len(reqSum))
 		for k := range reqSum {
-			baseDocsArr = append(baseDocsArr, k)
+			baseDocsArr = append(baseDocsArr, strings.TrimSpace(k))
 		}
 
 		// robust fetch: prefer exposure_unallocated.amount when present else compute from headers - allocations
