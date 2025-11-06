@@ -1,6 +1,8 @@
 package exposures
 
 import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
@@ -20,7 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	
+
 	"strconv"
 	"strings"
 	"sync"
@@ -873,7 +875,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-
 			log.Printf("[FBUP] about to COPY %d exposure_line_items for batch %s", len(liRows), batchID.String())
 			if len(liRows) > 0 {
 				if _, err := tx.CopyFrom(ctx,
@@ -947,7 +948,6 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					log.Printf("[ERROR] copy allocations: %v", err)
 				}
 			}
-
 
 			// ------------------ Build and COPY exposure_unallocated ------------------
 			unallocCols := []string{
@@ -1568,42 +1568,40 @@ func ubParseUploadFile(file multipart.File, ext string) ([][]string, error) {
 
 // --- Request payload ---
 type EditAllocationRequest struct {
-    UserID  string `json:"user_id"`
-    BatchID string `json:"batch_id"`
-    Groups  []struct {
-        Source      string `json:"source"`
-        CompanyCode string `json:"company_code"`
-        Party       string `json:"party"`
-        Currency    string `json:"currency"`
-        Allocations []struct {
-            BaseDoc                string   `json:"base_document_id"`
-            KnockDoc               string   `json:"knockoff_document_id"`
-            AllocationAmountAbs    float64  `json:"allocation_amount_abs"`
-            AllocationAmountSigned *float64 `json:"allocation_amount_signed"`
-            Note                   string   `json:"note,omitempty"`
-        } `json:"allocations"`
-    } `json:"groups"`
+	UserID  string `json:"user_id"`
+	BatchID string `json:"batch_id"`
+	Groups  []struct {
+		Source      string `json:"source"`
+		CompanyCode string `json:"company_code"`
+		Party       string `json:"party"`
+		Currency    string `json:"currency"`
+		Allocations []struct {
+			BaseDoc                string   `json:"base_document_id"`
+			KnockDoc               string   `json:"knockoff_document_id"`
+			AllocationAmountAbs    float64  `json:"allocation_amount_abs"`
+			AllocationAmountSigned *float64 `json:"allocation_amount_signed"`
+			Note                   string   `json:"note,omitempty"`
+		} `json:"allocations"`
+	} `json:"groups"`
 }
-
 
 func EditAllocationHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ctx := context.Background()
 
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == UserID {
-				userName = s.Name
-				break
-			}
-		}
 		var req EditAllocationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeEditResponse(w, uuid.Nil, nil, []string{"invalid JSON payload: " + err.Error()}, nil, 0, 0, start)
 			return
 		}
-
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userName = s.Name
+				break
+			}
+		}
 		if len(req.Groups) == 0 {
 			writeEditResponse(w, uuid.Nil, nil, []string{"no groups provided in request"}, nil, 0, 0, start)
 			return
@@ -1699,7 +1697,7 @@ func EditAllocationHandler(pool *pgxpool.Pool) http.HandlerFunc {
 					FROM public.exposure_unallocated u
 					WHERE u.batch_id=$2 AND u.document_number=$3
 					LIMIT 1
-				`, allocID, batchID, a.BaseDoc, a.KnockDoc, a.AllocationAmountAbs, grp.Currency, a.AllocationAmountSigned, req.userName, note)
+				`, allocID, batchID, a.BaseDoc, a.KnockDoc, a.AllocationAmountAbs, grp.Currency, a.AllocationAmountSigned, userName, note)
 				if err != nil {
 					errorsList = append(errorsList, fmt.Sprintf("Group %s: insert %s→%s failed: %v", groupKey, a.BaseDoc, a.KnockDoc, err))
 				} else {
@@ -1719,7 +1717,7 @@ func EditAllocationHandler(pool *pgxpool.Pool) http.HandlerFunc {
 						(batch_id, file_hash, reference_document_number, adjustment_type,
 						adjustment_json, adjustment_amount, created_by, remarks)
 						VALUES ($1,$2,$3,'manual_allocation',$4,$5,$6,$7)
-					`, batchID, fileHash, a.BaseDoc, adjustmentJSON, a.AllocationAmountAbs, req.userName, note)
+					`, batchID, fileHash, a.BaseDoc, adjustmentJSON, a.AllocationAmountAbs, userName, note)
 				}
 			}
 			totalInserted += groupInserted
@@ -2481,6 +2479,18 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			httpError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			return
+		}
+		userName := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userName = s.Name
+				break
+			}
+		}
 		if req.BatchID == "" {
 			httpError(w, http.StatusBadRequest, "batch_id required")
 			return
@@ -2675,7 +2685,7 @@ GROUP BY
   h.currency, u.currency, sb.ingestion_source,
   h.document_date, u.document_date, h.posting_date, u.posting_date,
   u.net_due_date, u.amount_signed, h.total_open_amount, h.total_original_amount,
-  u.allocation_status, h.additional_header_details, u.source;
+  u.allocation_status, h.additional_header_details, u.source
 
 `, batchUUID)
 
@@ -2690,15 +2700,37 @@ GROUP BY
 			Currency                string
 		}{}
 
+		// for rows.Next() {
+		// 	var doc, cur string
+		// 	var amt, rem decimal.Decimal
+		// 	if err := rows.Scan(&doc, &amt, &rem, &cur); err == nil {
+		// 		dbBase[doc] = struct {
+		// 			Amount, RemainingSigned decimal.Decimal
+		// 			Currency                string
+		// 		}{amt, rem, strings.ToUpper(cur)}
+		// 	}
+		// }
 		for rows.Next() {
-			var doc, cur string
-			var amt, rem decimal.Decimal
-			if err := rows.Scan(&doc, &amt, &rem, &cur); err == nil {
-				dbBase[doc] = struct {
-					Amount, RemainingSigned decimal.Decimal
-					Currency                string
-				}{amt, rem, strings.ToUpper(cur)}
+			var (
+				docNum, company, party, currency, source string
+				docDate, postDate, netDueDate            *time.Time
+				amtSignedStr, totalOrigStr, allocStatus  string
+			)
+
+			if err := rows.Scan(&docNum, &company, &party, &currency, &source,
+				&docDate, &postDate, &netDueDate,
+				&amtSignedStr, &totalOrigStr, &allocStatus); err != nil {
+				errorsList = append(errorsList, fmt.Sprintf("scan base row failed: %v", err))
+				continue
 			}
+
+			amt := parseDecimalFromString(amtSignedStr)
+			rem := parseDecimalFromString(totalOrigStr)
+
+			dbBase[docNum] = struct {
+				Amount, RemainingSigned decimal.Decimal
+				Currency                string
+			}{amt, rem, strings.ToUpper(currency)}
 		}
 
 		for base, reqTotal := range reqSum {
@@ -2753,7 +2785,7 @@ GROUP BY
 				uuid.New(), batchUUID, fileHash.String,
 				a.BaseDoc, a.Knock,
 				a.AbsAmt.StringFixed(4), a.Group.Currency,
-				allocSigned.StringFixed(4), req.userName)
+				allocSigned.StringFixed(4), userName)
 			if err != nil {
 				_ = tx.Rollback(ctx)
 				httpError(w, 500, "insert alloc: "+err.Error())
@@ -2801,7 +2833,7 @@ GROUP BY
 		}
 		previewRes.Info = append(previewRes.Info,
 			fmt.Sprintf("Edit applied: %d allocations inserted (replaced previous allocations) for batch %s by user %s",
-				insertedCount, batchUUID.String(), req.userName))
+				insertedCount, batchUUID.String(), userName))
 		writeJSON(w, map[string]interface{}{"success": true, "results": []UploadResult{previewRes}})
 	}
 }
@@ -3010,13 +3042,7 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 			pr.Knockoffs = append(pr.Knockoffs, rin...)
 		}
 
-		// Currency priority:
-		// 1) header currency (already set if header existed)
-		// 2) allocation currency where doc is base (prefer first non-empty)
-		// 3) allocation currency where doc is knock (prefer first non-empty)
-		// 4) if still empty -> leave as empty but we will add an error to Errors (currency is required)
 		if strings.TrimSpace(pr.Currency) == "" {
-			// try outgoing allocations
 			if kos, ok := allocMap[doc]; ok {
 				for _, k := range kos {
 					if strings.TrimSpace(k.Currency) != "" {
@@ -3027,7 +3053,6 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 			}
 		}
 		if strings.TrimSpace(pr.Currency) == "" {
-			// try incoming allocations
 			if rin, ok := reverseAllocMap[doc]; ok {
 				for _, k := range rin {
 					if strings.TrimSpace(k.Currency) != "" {
@@ -3037,12 +3062,10 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 				}
 			}
 		}
-		// If currency still empty, mark an error in errorsList (currency is required per your note)
 		if strings.TrimSpace(pr.Currency) == "" {
 			errorsList = append(errorsList, fmt.Sprintf("currency missing for document %s", doc))
 		}
 
-		// Apply override source if provided
 		if overrideSource != nil {
 			if s, ok := overrideSource[doc]; ok && s != "" {
 				pr.Source = s
