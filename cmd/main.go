@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv" // Add this import
 	_ "github.com/lib/pq"
 
@@ -34,18 +36,18 @@ func main() {
 	// Load .env for local dev (ignored on Render)
 	_ = godotenv.Load("/.env")
 	// Debug: Print important env vars (avoid printing password directly!)
-fmt.Println("ENV CHECK:")
-fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
-fmt.Println("  DB_HOST:", os.Getenv("DB_HOST"))
-fmt.Println("  DB_PORT:", os.Getenv("DB_PORT"))
-fmt.Println("  DB_NAME:", os.Getenv("DB_NAME"))
+	fmt.Println("ENV CHECK:")
+	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
+	fmt.Println("  DB_HOST:", os.Getenv("DB_HOST"))
+	fmt.Println("  DB_PORT:", os.Getenv("DB_PORT"))
+	fmt.Println("  DB_NAME:", os.Getenv("DB_NAME"))
 
-// Optional: show if DB_PASSWORD is set (without leaking it)
-if os.Getenv("DB_PASSWORD") != "" {
-    fmt.Println("  DB_PASSWORD: [SET]")
-} else {
-    fmt.Println("  DB_PASSWORD: [NOT SET!]")
-}
+	// Optional: show if DB_PASSWORD is set (without leaking it)
+	if os.Getenv("DB_PASSWORD") != "" {
+		fmt.Println("  DB_PASSWORD: [SET]")
+	} else {
+		fmt.Println("  DB_PASSWORD: [NOT SET!]")
+	}
 
 	// Initialize DB for Auth
 	db, err := InitDB()
@@ -53,6 +55,14 @@ if os.Getenv("DB_PASSWORD") != "" {
 		log.Fatal("failed to connect to DB:", err)
 	}
 	appmanager.SetDB(db)
+	
+	pgxConnStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", os.Getenv("DB_USER"), os.Getenv("DB_PASSWORD"), os.Getenv("DB_HOST"), os.Getenv("DB_PORT"), os.Getenv("DB_NAME"))
+	pgxPool, err := pgxpool.New(context.Background(), pgxConnStr)
+	if err != nil {
+		log.Fatal("failed to create pgx pool:", err)
+	}
+	// make pgxPool available to services
+	appmanager.SetPgxPool(pgxPool)
 
 	manager := appmanager.NewAppManager()
 
@@ -90,7 +100,9 @@ if os.Getenv("DB_PASSWORD") != "" {
 	if err := manager.StopAll(); err != nil {
 		log.Fatal("failed to stop:", err)
 	}
+
+	// Close pgx pool if initialized
+	if appmanager.GetPgxPool() != nil {
+		appmanager.GetPgxPool().Close()
+	}
 }
-
-
-
