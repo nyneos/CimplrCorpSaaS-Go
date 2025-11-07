@@ -114,6 +114,22 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		results["folio"] = folioResults
 
+		// Update the batch approval status
+		batchApprovalStatus := "APPROVED"
+		if req.Action == "REJECT" {
+			batchApprovalStatus = "REJECTED"
+		}
+		
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.onboard_batch 
+			SET approval_status = $1, completed_at = now() 
+			WHERE batch_id::text = $2::text
+		`, batchApprovalStatus, req.BatchID)
+		if err != nil {
+			api.RespondWithError(w, 500, "Failed to update batch approval status: "+err.Error())
+			return
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, 500, "Failed to commit transaction: "+err.Error())
 			return
