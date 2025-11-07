@@ -1,4 +1,4 @@
-package  investment
+package investment
 
 import (
 	"database/sql"
@@ -18,6 +18,7 @@ type BatchInfo struct {
 	Source        string                 `json:"source"`
 	TotalRecords  int                    `json:"total_records"`
 	Status        string                 `json:"status"`
+	ApprovalStatus string                `json:"approval_status"`
 	CreatedAt     time.Time              `json:"created_at"`
 	CompletedAt   *time.Time             `json:"completed_at,omitempty"`
 	Remarks       string                 `json:"remarks,omitempty"`
@@ -170,14 +171,14 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var completedAt sql.NullTime
 		var remarks sql.NullString
 		
-		err := pgxPool.QueryRow(ctx, `
-			SELECT batch_id, user_id, user_email, source, total_records, status, 
-			       created_at, completed_at, remarks
-			FROM investment.onboard_batch 
-			WHERE batch_id::text = $1::text`, batchID).Scan(
-			&batchInfo.BatchID, &batchInfo.UserID, &batchInfo.UserEmail,
-			&batchInfo.Source, &batchInfo.TotalRecords, &batchInfo.Status,
-			&batchInfo.CreatedAt, &completedAt, &remarks)
+	 err := pgxPool.QueryRow(ctx, `
+	     SELECT batch_id, user_id, user_email, source, total_records, status, approval_status,
+		     created_at, completed_at, remarks
+	     FROM investment.onboard_batch 
+	     WHERE batch_id::text = $1::text`, batchID).Scan(
+	     &batchInfo.BatchID, &batchInfo.UserID, &batchInfo.UserEmail,
+	     &batchInfo.Source, &batchInfo.TotalRecords, &batchInfo.Status, &batchInfo.ApprovalStatus,
+	     &batchInfo.CreatedAt, &completedAt, &remarks)
 		
 		if err != nil {
 			if err == sql.ErrNoRows {
@@ -383,6 +384,7 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Source       string     `json:"source"`
 			TotalRecords int        `json:"total_records"`
 			Status       string     `json:"status"`
+			ApprovalStatus string   `json:"approval_status"`
 			CreatedAt    time.Time  `json:"created_at"`
 			CompletedAt  *time.Time `json:"completed_at,omitempty"`
 			EntityCounts map[string]int `json:"entity_counts"`
@@ -390,7 +392,7 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, `
 			SELECT ob.batch_id, ob.user_id, ob.user_email, ob.source, ob.total_records, 
-			       ob.status, ob.created_at, ob.completed_at,
+			       ob.status, ob.approval_status, ob.created_at, ob.completed_at,
 			       (SELECT COUNT(*) FROM investment.masteramc WHERE batch_id::text = ob.batch_id::text) as amc_count,
 			       (SELECT COUNT(*) FROM investment.masterscheme WHERE batch_id::text = ob.batch_id::text) as scheme_count,
 			       (SELECT COUNT(*) FROM investment.masterdepositoryparticipant WHERE batch_id::text = ob.batch_id::text) as dp_count,
@@ -411,9 +413,9 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var batch BatchSummary
 			var completedAt sql.NullTime
 			var amcCount, schemeCount, dpCount, dematCount, folioCount int
-			
+
 			err = rows.Scan(&batch.BatchID, &batch.UserID, &batch.UserEmail, &batch.Source,
-				&batch.TotalRecords, &batch.Status, &batch.CreatedAt, &completedAt,
+				&batch.TotalRecords, &batch.Status, &batch.ApprovalStatus, &batch.CreatedAt, &completedAt,
 				&amcCount, &schemeCount, &dpCount, &dematCount, &folioCount)
 			if err != nil {
 				continue
