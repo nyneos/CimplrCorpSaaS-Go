@@ -145,6 +145,7 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", out)
 	}
 }
+
 func GetFoliosBySchemeListSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -375,7 +376,7 @@ func GetDematWithDPInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				dematID, entityName, dpID, depository, dematAccNum, defaultAcc, dematStatus, dematSource string
 				depositoryParticipant, clientID                                                          *string
 				dpName, dpCode, dpDepository, dpStatus, dpSource                                         *string
-				dematDeleted, dpDeleted                                                                  bool
+				dematDeleted, dpDeleted                                                                  *bool
 			)
 
 			if err := rows.Scan(
@@ -399,7 +400,7 @@ func GetDematWithDPInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"default_settlement_account": defaultAcc,
 				"demat_status":               dematStatus,
 				"demat_source":               dematSource,
-				"demat_deleted":              dematDeleted,
+				"demat_deleted":              ifNotBool(dematDeleted),
 
 				// 🔹 DP Info
 				"dp_name":       ifNotNil(dpName),
@@ -407,7 +408,7 @@ func GetDematWithDPInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"dp_depository": ifNotNil(dpDepository),
 				"dp_status":     ifNotNil(dpStatus),
 				"dp_source":     ifNotNil(dpSource),
-				"dp_deleted":    dpDeleted,
+				"dp_deleted":    ifNotBool(dpDeleted),
 			})
 		}
 
@@ -426,6 +427,14 @@ func ifNotNil(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// helper for nil-safe bool conversion
+func ifNotBool(b *bool) bool {
+	if b == nil {
+		return false
+	}
+	return *b
 }
 
 // GetAllDPs returns all Depository Participants where is_deleted = false (no approval/active filters)
@@ -456,7 +465,8 @@ func GetAllDPs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var dpID, dpName, dpCode, depository, status, source string
+			var dpID, dpName, dpCode, depository, status string
+			var source *string
 			var isDeleted bool
 
 			if err := rows.Scan(&dpID, &dpName, &dpCode, &depository, &status, &source, &isDeleted); err != nil {
@@ -470,7 +480,7 @@ func GetAllDPs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"dp_code":    dpCode,
 				"depository": depository,
 				"status":     status,
-				"source":     source,
+				"source":     ifNotNil(source),
 				"is_deleted": isDeleted,
 			})
 		}
