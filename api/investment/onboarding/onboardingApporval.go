@@ -1,4 +1,5 @@
 package  investment
+package k
 
 import (
 	"context"
@@ -18,18 +19,20 @@ import (
 // -------------------------
 
 type BatchApprovalRequest struct {
-	UserID  string `json:"user_id"`
-	BatchID string `json:"batch_id"`
-	Action  string `json:"action"` // "APPROVE" or "REJECT"
-	Comment string `json:"comment,omitempty"`
+	UserID   string   `json:"user_id"`
+	BatchIDs []string `json:"batch_ids"` // Array of batch IDs for bulk operations
+	BatchID  string   `json:"batch_id,omitempty"` // Single batch ID for backward compatibility
+	Action   string   `json:"action"` // "APPROVE" or "REJECT"
+	Comment  string   `json:"comment,omitempty"`
 }
 
 type BatchApprovalResponse struct {
-	Success     bool                   `json:"success"`
-	BatchID     string                 `json:"batch_id"`
-	Action      string                 `json:"action"`
-	Results     map[string]interface{} `json:"results"`
-	Message     string                 `json:"message"`
+	Success     bool                     `json:"success"`
+	BatchIDs    []string                 `json:"batch_ids"`
+	Action      string                   `json:"action"`
+	BatchResults map[string]interface{}  `json:"batch_results"` // Results per batch ID
+	TotalProcessed int                   `json:"total_processed"`
+	Message     string                   `json:"message"`
 }
 
 // BulkApproveBatch - Approves all pending audit actions for records created in a specific batch
@@ -42,8 +45,15 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if req.BatchID == "" {
-			api.RespondWithError(w, 400, "batch_id required")
+		// Handle both single batch_id and bulk batch_ids
+		batchIDs := req.BatchIDs
+		if len(batchIDs) == 0 && req.BatchID != "" {
+			// Backward compatibility: single batch_id
+			batchIDs = []string{req.BatchID}
+		}
+		
+		if len(batchIDs) == 0 {
+			api.RespondWithError(w, 400, "batch_ids or batch_id required")
 			return
 		}
 
@@ -72,49 +82,74 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		results := make(map[string]interface{})
+		batchResults := make(map[string]interface{})
+		totalProcessed := 0
 		
-		// Process AMCs
-		amcResults, err := processBatchAuditAMC(ctx, tx, req.BatchID, req.Action, userEmail, req.Comment)
-		if err != nil {
-			api.RespondWithError(w, 500, "AMC processing failed: "+err.Error())
-			return
-		}
-		results["amc"] = amcResults
+		// Process each batch
+		for _, batchID := range batchIDs {
+			batchResult := make(map[string]interface{})
+			
+			// Process AMCs
+			amcResults, err := processBatchAuditAMC(ctx, tx, batchID, req.Action, userEmail, req.Comment)
+			if err != nil {
+				api.RespondWithError(w, 500, fmt.Sprintf("Batch %s AMC processing failed: %s", batchID, err.Error()))
+				return
+			}
+			batchResult["amc"] = amcResults
 
-		// Process Schemes
-		schemeResults, err := processBatchAuditScheme(ctx, tx, req.BatchID, req.Action, userEmail, req.Comment)
-		if err != nil {
-			api.RespondWithError(w, 500, "Scheme processing failed: "+err.Error())
-			return
-		}
-		results["scheme"] = schemeResults
+			// Process Schemes
+			schemeResults, err := processBatchAuditScheme(ctx, tx, batchID, req.Action, userEmail, req.Comment)
+			if err != nil {
+				api.RespondWithError(w, 500, fmt.Sprintf("Batch %s Scheme processing failed: %s", batchID, err.Error()))
+				return
+			}
+			batchResult["scheme"] = schemeResults
 
-		// Process DPs
-		dpResults, err := processBatchAuditDP(ctx, tx, req.BatchID, req.Action, userEmail, req.Comment)
-		if err != nil {
-			api.RespondWithError(w, 500, "DP processing failed: "+err.Error())
-			return
-		}
-		results["dp"] = dpResults
+			// Process DPs
+			dpResults, err := processBatchAuditDP(ctx, tx, batchID, req.Action, userEmail, req.Comment)
+			if err != nil {
+				api.RespondWithError(w, 500, fmt.Sprintf("Batch %s DP processing failed: %s", batchID, err.Error()))
+				return
+			}
+			batchResult["dp"] = dpResults
 
-		// Process Demats
-		dematResults, err := processBatchAuditDemat(ctx, tx, req.BatchID, req.Action, userEmail, req.Comment)
-		if err != nil {
-			api.RespondWithError(w, 500, "Demat processing failed: "+err.Error())
-			return
-		}
-		results["demat"] = dematResults
+			// Process Demats
+			dematResults, err := processBatchAuditDemat(ctx, tx, batchID, req.Action, userEmail, req.Comment)
+			if err != nil {
+				api.RespondWithError(w, 500, fmt.Sprintf("Batch %s Demat processing failed: %s", batchID, err.Error()))
+				return
+			}
+			batchResult["demat"] = dematResults
 
-		// Process Folios
-		folioResults, err := processBatchAuditFolio(ctx, tx, req.BatchID, req.Action, userEmail, req.Comment)
-		if err != nil {
-			api.RespondWithError(w, 500, "Folio processing failed: "+err.Error())
-			return
+			// Process Folios
+			folioResults, err := processBatchAuditFolio(ctx, tx, batchID, req.Action, userEmail, req.Comment)
+			if err != nil {
+				api.RespondWithError(w, 500, fmt.Sprintf("Batch %s Folio processing failed: %s", batchID, err.Error()))
+				return
+			}
+			batchResult["folio"] = folioResults
+			
+			// Count total processed for this batch
+			if processed, ok := amcResults["processed"].(int); ok {
+				totalProcessed += processed
+			}
+			if processed, ok := schemeResults["processed"].(int); ok {
+				totalProcessed += processed
+			}
+			if processed, ok := dpResults["processed"].(int); ok {
+				totalProcessed += processed
+			}
+			if processed, ok := dematResults["processed"].(int); ok {
+				totalProcessed += processed
+			}
+			if processed, ok := folioResults["processed"].(int); ok {
+				totalProcessed += processed
+			}
+			
+			batchResults[batchID] = batchResult
 		}
-		results["folio"] = folioResults
 
-		// Update the batch approval status
+		// Update all batch approval statuses in bulk
 		batchApprovalStatus := "APPROVED"
 		if req.Action == "REJECT" {
 			batchApprovalStatus = "REJECTED"
@@ -123,10 +158,10 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.onboard_batch 
 			SET approval_status = $1, completed_at = now() 
-			WHERE batch_id::text = $2::text
-		`, batchApprovalStatus, req.BatchID)
+			WHERE batch_id::text = ANY($2)
+		`, batchApprovalStatus, batchIDs)
 		if err != nil {
-			api.RespondWithError(w, 500, "Failed to update batch approval status: "+err.Error())
+			api.RespondWithError(w, 500, "Failed to update batch approval statuses: "+err.Error())
 			return
 		}
 
@@ -135,12 +170,18 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		message := fmt.Sprintf("%d batches %sd successfully", len(batchIDs), strings.ToLower(req.Action))
+		if len(batchIDs) == 1 {
+			message = fmt.Sprintf("Batch %s %sd successfully", batchIDs[0], strings.ToLower(req.Action))
+		}
+		
 		response := BatchApprovalResponse{
-			Success: true,
-			BatchID: req.BatchID,
-			Action:  req.Action,
-			Results: results,
-			Message: fmt.Sprintf("Batch %s %sd successfully", req.BatchID, strings.ToLower(req.Action)),
+			Success:        true,
+			BatchIDs:       batchIDs,
+			Action:         req.Action,
+			BatchResults:   batchResults,
+			TotalProcessed: totalProcessed,
+			Message:        message,
 		}
 
 		api.RespondWithPayload(w, true, "", response)
