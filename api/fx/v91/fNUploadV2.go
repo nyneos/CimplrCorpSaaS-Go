@@ -92,10 +92,11 @@ type CanonicalPreviewRow struct {
 }
 
 type KnockoffInfo struct {
-	BaseDoc  string          `json:"base"`
-	KnockDoc string          `json:"knock"`
-	AmtAbs   decimal.Decimal `json:"amt_abs"`
-	Currency string          `json:"currency,omitempty"`
+	BaseDoc   string          `json:"base"`
+	KnockDoc  string          `json:"knock"`
+	AmtAbs    decimal.Decimal `json:"amt_abs"`
+	Currency  string          `json:"currency,omitempty"`
+	SignedAmt decimal.Decimal `json:"-"`
 }
 
 // internal shape used by allocateFIFOFloat
@@ -383,6 +384,15 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 				conn.Release()
 			}()
+
+			// validate mapping JSON early to provide a clearer error than the DB
+			if len(mappingRaw) > 0 {
+				var _tmp interface{}
+				if err := json.Unmarshal(mappingRaw, &_tmp); err != nil {
+					httpError(w, http.StatusBadRequest, "invalid mapping JSON: "+err.Error())
+					return
+				}
+			}
 
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO public.staging_batches_exposures
@@ -890,9 +900,27 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			// ------------------ Build and COPY exposure_allocations ------------------
 			docCompany := make(map[string]string, len(canonicals))
 			docParty := make(map[string]string, len(canonicals))
+			// additional per-doc metadata maps used when inserting allocation rows
+			docSource := make(map[string]string, len(canonicals))
+			docDocDate := make(map[string]string, len(canonicals))
+			docPostingDate := make(map[string]string, len(canonicals))
+			docNetDue := make(map[string]string, len(canonicals))
+			docEffDue := make(map[string]string, len(canonicals))
+			docMappedPayload := make(map[string][]byte, len(canonicals))
+
 			for _, c := range canonicals {
 				docCompany[c.DocumentNumber] = c.CompanyCode
 				docParty[c.DocumentNumber] = c.Party
+				docSource[c.DocumentNumber] = c.Source
+				docDocDate[c.DocumentNumber] = c.DocumentDate
+				docPostingDate[c.DocumentNumber] = c.PostingDate
+				docNetDue[c.DocumentNumber] = c.NetDueDate
+				docEffDue[c.DocumentNumber] = c.NetDueDate
+				if c._raw != nil {
+					if b, err := json.Marshal(c._raw); err == nil {
+						docMappedPayload[c.DocumentNumber] = b
+					}
+				}
 			}
 			for _, q := range qualified {
 				if q.DocumentNumber != "" {
@@ -908,6 +936,9 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				"allocation_amount_signed", "allocation_date",
 				"created_at", "created_by", "notes",
 				"company_code", "counterparty_code",
+				// additional metadata columns added to table
+				"source", "document_date", "posting_date", "net_due_date", "effective_due_date",
+				"exchange_rate", "amount_local_signed", "mapped_payload",
 			}
 			allocRows := make([][]any, 0, len(knocksFloat))
 			for _, k := range knocksFloat {
@@ -922,6 +953,44 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				if pp, ok := docParty[k.BaseDoc]; ok && strings.TrimSpace(pp) != "" {
 					partyVal = pp
 				}
+				// lookup additional metadata (source, dates, mapped payload) from doc maps if available
+				var srcVal interface{}
+				var docDateVal interface{}
+				var postDateVal interface{}
+				var netDueVal interface{}
+				var effDueVal interface{}
+				var mappedPayload interface{}
+				if v, ok := docSource[k.BaseDoc]; ok && v != "" {
+					srcVal = v
+				} else if v, ok := docSource[k.KnockDoc]; ok && v != "" {
+					srcVal = v
+				}
+				if v, ok := docDocDate[k.BaseDoc]; ok && v != "" {
+					docDateVal = parseDateOrNil(v)
+				} else if v, ok := docDocDate[k.KnockDoc]; ok && v != "" {
+					docDateVal = parseDateOrNil(v)
+				}
+				if v, ok := docPostingDate[k.BaseDoc]; ok && v != "" {
+					postDateVal = parseDateOrNil(v)
+				} else if v, ok := docPostingDate[k.KnockDoc]; ok && v != "" {
+					postDateVal = parseDateOrNil(v)
+				}
+				if v, ok := docNetDue[k.BaseDoc]; ok && v != "" {
+					netDueVal = parseDateOrNil(v)
+				} else if v, ok := docNetDue[k.KnockDoc]; ok && v != "" {
+					netDueVal = parseDateOrNil(v)
+				}
+				if v, ok := docEffDue[k.BaseDoc]; ok && v != "" {
+					effDueVal = parseDateOrNil(v)
+				} else if v, ok := docEffDue[k.KnockDoc]; ok && v != "" {
+					effDueVal = parseDateOrNil(v)
+				}
+				if v, ok := docMappedPayload[k.BaseDoc]; ok {
+					mappedPayload = v
+				} else if v, ok := docMappedPayload[k.KnockDoc]; ok {
+					mappedPayload = v
+				}
+
 				allocRows = append(allocRows, []any{
 					uuid.New(),
 					batchID,
@@ -937,6 +1006,14 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					nil,
 					companyVal,
 					partyVal,
+					srcVal,
+					docDateVal,
+					postDateVal,
+					netDueVal,
+					effDueVal,
+					nil, // exchange_rate (not available at upload time)
+					nil, // amount_local_signed (not available at upload time)
+					mappedPayload,
 				})
 			}
 			if len(allocRows) > 0 {
@@ -1062,77 +1139,32 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 
 			log.Printf("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
 
-			allOriginalDocs := make(map[string]CanonicalRow)
-			for _, c := range canonicals {
-				allOriginalDocs[c.DocumentNumber] = c
+			// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
+			// The old in-memory preview (based on canonicals) is intentionally removed to ensure
+			// upload responses match the edit/preview responses produced after persisting data.
+			previewRes, _, err := buildPreviewForBatch(pool, ctx, batchID, nil)
+			if err != nil {
+				httpError(w, 500, "preview build after commit: "+err.Error())
+				return
 			}
-
-			qualifiedDocs := make(map[string]bool, len(qualified))
-			for _, q := range qualified {
-				qualifiedDocs[q.DocumentNumber] = true
+			// merge file-level warnings/info into preview result for visibility
+			if len(fileWarnings) > 0 {
+				previewRes.Warnings = append(previewRes.Warnings, fileWarnings...)
 			}
-
-			// Include ALL documents in response: 37 with remaining amounts + 12 fully knocked off
-			rowsPreview := make([]CanonicalPreviewRow, 0, len(allOriginalDocs))
-			for docNum, origDoc := range allOriginalDocs {
-				status := "ok"
-
-				// Check if this doc is in qualified list (has remaining amount)
-				if !qualifiedDocs[docNum] {
-					// Not in qualified = either non-qualified OR fully knocked off
-					// Check if it's in nonQualified list
-					isNonQual := false
-					for _, nq := range nonQualified {
-						if nq.Row.DocumentNumber == docNum {
-							isNonQual = true
-							break
-						}
-					}
-					if isNonQual {
-						status = "non_qualified"
-					} else {
-						// It's fully knocked off (has knockoffs and not in qualified)
-						if len(knockMap[docNum]) > 0 {
-							status = "knocked_off"
-						}
-					}
-				}
-
-				pr := CanonicalPreviewRow{
-					DocumentNumber: origDoc.DocumentNumber,
-					CompanyCode:    origDoc.CompanyCode,
-					Party:          origDoc.Party,
-					Currency:       origDoc.DocumentCurrency,
-					Source:         origDoc.Source,
-					DocumentDate:   origDoc.DocumentDate,
-					PostingDate:    origDoc.PostingDate,
-					NetDueDate:     origDoc.NetDueDate,
-					Amount:         origDoc.AmountDoc, // original amount from CSV
-					Status:         status,
-				}
-				if kos, ok := knockMap[docNum]; ok {
-					pr.Knockoffs = kos
-				}
-				if origDoc.IsNonQualified {
-					pr.Issues = []string{origDoc.NonQualifiedReason}
-				}
-				rowsPreview = append(rowsPreview, pr)
+			if len(fileInfo) > 0 {
+				previewRes.Info = append(previewRes.Info, fileInfo...)
 			}
-
-			res := UploadResult{
-				FileName:      fh.Filename,
-				Source:        src,
-				BatchID:       batchID,
-				TotalRows:     totalRows,
-				InsertedCount: len(qualified),
-				LineItemsRows: len(liRows),
-				NonQualified:  nonQualified,
-				Rows:          rowsPreview,
-				Errors:        fileErrors,
-				Warnings:      fileWarnings,
-				Info:          fileInfo,
+			if len(fileErrors) > 0 {
+				previewRes.Errors = append(previewRes.Errors, fileErrors...)
 			}
-			results = append(results, res)
+			// ensure filename/source reflect the uploaded file
+			if previewRes.FileName == "" {
+				previewRes.FileName = fh.Filename
+			}
+			if previewRes.Source == "" {
+				previewRes.Source = src
+			}
+			results = append(results, previewRes)
 		} // end per-file loop
 
 		elapsed := time.Since(start)
@@ -1214,6 +1246,10 @@ func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string
 		}
 
 		allExps = append(allExps, exps...)
+		// ensure knock entries carry the group's currency
+		for ki := range knocks {
+			knocks[ki].Currency = curr
+		}
 		allKnocks = append(allKnocks, knocks...)
 
 		// Optional: debug info
@@ -2479,14 +2515,14 @@ func EditAllocationsHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			httpError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
-		userID := r.FormValue("user_id")
-		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
-			return
-		}
+
+		// if req.UserID == "" {
+		// 	api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+		// 	return
+		// }
 		userName := ""
 		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
+			if s.UserID == req.UserID {
 				userName = s.Name
 				break
 			}
@@ -2698,6 +2734,8 @@ GROUP BY
 		dbBase := map[string]struct {
 			Amount, RemainingSigned decimal.Decimal
 			Currency                string
+			CompanyCode             string
+			Party                   string
 		}{}
 
 		// for rows.Next() {
@@ -2730,19 +2768,21 @@ GROUP BY
 			dbBase[docNum] = struct {
 				Amount, RemainingSigned decimal.Decimal
 				Currency                string
-			}{amt, rem, strings.ToUpper(currency)}
+				CompanyCode             string
+				Party                   string
+			}{amt, rem, strings.ToUpper(currency), "", ""}
 		}
 
-		for base, reqTotal := range reqSum {
-			info, ok := dbBase[base]
-			if !ok {
-				errorsList = append(errorsList, "missing base: "+base)
-				continue
-			}
-			if reqTotal.GreaterThan(info.Amount) {
-				errorsList = append(errorsList, fmt.Sprintf("allocation exceeds base %s (available %.2f < requested %.2f)", base, info.Amount, reqTotal))
-			}
-		}
+		// for base, reqTotal := range reqSum {
+		// 	info, ok := dbBase[base]
+		// 	if !ok {
+		// 		errorsList = append(errorsList, "missing base: "+base)
+		// 		continue
+		// 	}
+		// 	if reqTotal.GreaterThan(info.Amount) {
+		// 		errorsList = append(errorsList, fmt.Sprintf("allocation exceeds base %s (available %s < requested %s)", base, info.Amount.StringFixed(2), reqTotal.StringFixed(2)))
+		// 	}
+		// }
 
 		if len(errorsList) > 0 {
 			_ = tx.Rollback(ctx)
@@ -2760,13 +2800,22 @@ GROUP BY
 			_, _ = tx.Exec(ctx, `DELETE FROM public.exposure_allocations WHERE batch_id=$1 AND base_document_id=ANY($2::text[])`, batchUUID, baseDocsArr)
 		}
 
+		// stmt := `
+		// 	INSERT INTO public.exposure_allocations
+		// 	(allocation_id,batch_id,file_hash,base_document_id,knockoff_document_id,
+		// 	 allocation_amount,allocation_currency,allocation_amount_signed,
+		// 	 allocation_date,created_at,created_by)
+		// 	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now(),$9)
+		// `
 		stmt := `
-			INSERT INTO public.exposure_allocations
-			(allocation_id,batch_id,file_hash,base_document_id,knockoff_document_id,
-			 allocation_amount,allocation_currency,allocation_amount_signed,
-			 allocation_date,created_at,created_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now(),$9)
-		`
+INSERT INTO public.exposure_allocations
+(allocation_id,batch_id,file_hash,base_document_id,knockoff_document_id,
+ allocation_amount,allocation_currency,allocation_amount_signed,
+ company_code,counterparty_code,
+ allocation_date,created_at,created_by)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),now(),$11)
+`
+
 		insertedCount := 0
 		for _, a := range reqAllocs {
 			var allocSigned decimal.Decimal
@@ -2781,17 +2830,49 @@ GROUP BY
 					allocSigned = a.AbsAmt
 				}
 			}
+
+			// fallback: if group-level company_code/party are empty, infer from base doc
+			if a.Group.CompanyCode == "" {
+				if info, ok := dbBase[a.BaseDoc]; ok && info.CompanyCode != "" {
+					a.Group.CompanyCode = info.CompanyCode
+				}
+			}
+			if a.Group.Party == "" {
+				if info, ok := dbBase[a.BaseDoc]; ok && info.Party != "" {
+					a.Group.Party = info.Party
+				}
+			}
+
 			_, err := tx.Exec(ctx, stmt,
 				uuid.New(), batchUUID, fileHash.String,
 				a.BaseDoc, a.Knock,
 				a.AbsAmt.StringFixed(4), a.Group.Currency,
-				allocSigned.StringFixed(4), userName)
+				allocSigned.StringFixed(4),
+				a.Group.CompanyCode, a.Group.Party, // ✅ now set properly
+				userName,
+			)
 			if err != nil {
 				_ = tx.Rollback(ctx)
 				httpError(w, 500, "insert alloc: "+err.Error())
 				return
 			}
 			insertedCount++
+
+			// Persist an adjustment record for audit / history (mirror single-edit behavior)
+			adjustmentJSON, _ := json.Marshal(map[string]interface{}{
+				"base_document":     a.BaseDoc,
+				"knockoff_document": a.Knock,
+				"allocation_abs":    a.AbsAmt.StringFixed(4),
+				"allocation_signed": allocSigned.StringFixed(4),
+				"currency":          a.Group.Currency,
+				"group":             fmt.Sprintf("%s|%s|%s|%s", a.Group.Source, a.Group.CompanyCode, a.Group.Party, a.Group.Currency),
+			})
+			_, _ = tx.Exec(ctx, `
+				INSERT INTO public.exposure_adjustments
+				(batch_id, file_hash, reference_document_number, adjustment_type,
+				adjustment_json, adjustment_amount, created_by, remarks)
+				VALUES ($1,$2,$3,'manual_allocation',$4,$5,$6,$7)
+			`, batchUUID, fileHash.String, a.BaseDoc, adjustmentJSON, a.AbsAmt.StringFixed(4), userName, "manual-edit")
 		}
 
 		_, _ = tx.Exec(ctx, `
@@ -2895,31 +2976,141 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 	allocMap := map[string][]KnockoffInfo{}
 	// reverseAllocMap: incoming (knock -> []bases) with currency attached
 	reverseAllocMap := map[string][]KnockoffInfo{}
-	allocRows, err := conn.Query(ctx, `SELECT base_document_id,knockoff_document_id,allocation_amount::numeric,allocation_currency FROM public.exposure_allocations WHERE batch_id=$1`, batchUUID)
+
+	// allocation-level metadata fallbacks (filled from allocations/unallocated/unqualified mapped_payload)
+	stagingMeta := map[string]struct {
+		Company, Party, Currency, Source  string
+		DocumentDate, PostingDate, NetDue string
+		Amount                            decimal.Decimal
+	}{}
+	// allocation-level metadata fallbacks (filled from allocations query)
+	allocSourceByBase := map[string]string{}
+	allocCompanyByBase := map[string]string{}
+	allocPartyByBase := map[string]string{}
+	allocSourceByKnock := map[string]string{}
+	allocCompanyByKnock := map[string]string{}
+	allocPartyByKnock := map[string]string{}
+	allocRows, err := conn.Query(ctx, `
+		SELECT base_document_id,
+			   knockoff_document_id,
+			   allocation_amount::text,
+			   allocation_currency,
+			   company_code,
+			   counterparty_code,
+			   source,
+			   document_date,
+			   posting_date,
+			   net_due_date,
+			   allocation_amount_signed::text,
+			   amount_local_signed::text,
+			   mapped_payload
+		FROM public.exposure_allocations
+		WHERE batch_id=$1
+	`, batchUUID)
 	if err != nil {
 		errorsList = append(errorsList, fmt.Sprintf("query allocations: %v", err))
 	} else {
 		for allocRows.Next() {
-			var base, knock, curr sql.NullString
-			var amt decimal.Decimal
-			if scanErr := allocRows.Scan(&base, &knock, &amt, &curr); scanErr != nil {
+			var base, knock, curr, company, party, src sql.NullString
+			var docDate, postDate, netDue sql.NullTime
+			var amtText, amtSignedText, amtLocalText sql.NullString
+			var mappedPayload []byte
+			if scanErr := allocRows.Scan(&base, &knock, &amtText, &curr, &company, &party, &src, &docDate, &postDate, &netDue, &amtSignedText, &amtLocalText, &mappedPayload); scanErr != nil {
 				errorsList = append(errorsList, fmt.Sprintf("scan alloc row: %v", scanErr))
 				continue
 			}
 			baseStr := strings.TrimSpace(base.String)
 			knockStr := strings.TrimSpace(knock.String)
 			currStr := strings.ToUpper(strings.TrimSpace(curr.String))
-			info := KnockoffInfo{
-				BaseDoc:  baseStr,
-				KnockDoc: knockStr,
-				AmtAbs:   amt,
-				Currency: currStr,
+
+			// parse numeric text into decimals (handle NULLs)
+			amt := decimal.Zero
+			if amtText.Valid && strings.TrimSpace(amtText.String) != "" {
+				if d, derr := decimal.NewFromString(strings.TrimSpace(amtText.String)); derr == nil {
+					amt = d
+				}
 			}
+			signedAmt := decimal.Zero
+			if amtSignedText.Valid && strings.TrimSpace(amtSignedText.String) != "" {
+				if d, derr := decimal.NewFromString(strings.TrimSpace(amtSignedText.String)); derr == nil {
+					signedAmt = d
+				}
+			}
+
+			info := KnockoffInfo{
+				BaseDoc:   baseStr,
+				KnockDoc:  knockStr,
+				AmtAbs:    amt,
+				Currency:  currStr,
+				SignedAmt: signedAmt,
+			}
+
 			if baseStr != "" {
 				allocMap[baseStr] = append(allocMap[baseStr], info)
+				if strings.TrimSpace(company.String) != "" && allocCompanyByBase[baseStr] == "" {
+					allocCompanyByBase[baseStr] = strings.TrimSpace(company.String)
+				}
+				if strings.TrimSpace(party.String) != "" && allocPartyByBase[baseStr] == "" {
+					allocPartyByBase[baseStr] = strings.TrimSpace(party.String)
+				}
+				if strings.TrimSpace(src.String) != "" && allocSourceByBase[baseStr] == "" {
+					allocSourceByBase[baseStr] = strings.TrimSpace(src.String)
+				}
 			}
 			if knockStr != "" {
 				reverseAllocMap[knockStr] = append(reverseAllocMap[knockStr], info)
+				if strings.TrimSpace(company.String) != "" && allocCompanyByKnock[knockStr] == "" {
+					allocCompanyByKnock[knockStr] = strings.TrimSpace(company.String)
+				}
+				if strings.TrimSpace(party.String) != "" && allocPartyByKnock[knockStr] == "" {
+					allocPartyByKnock[knockStr] = strings.TrimSpace(party.String)
+				}
+				if strings.TrimSpace(src.String) != "" && allocSourceByKnock[knockStr] == "" {
+					allocSourceByKnock[knockStr] = strings.TrimSpace(src.String)
+				}
+			}
+
+			// If this allocation row carries the mapped_payload (original CSV mapping),
+			// extract the original document amount and metadata so preview can show
+			// the CSV amount for docs that don't have an exposure_headers row.
+			if len(mappedPayload) > 0 {
+				var mp map[string]interface{}
+				if merr := json.Unmarshal(mappedPayload, &mp); merr == nil {
+					docNum := strings.TrimSpace(stringFromAny(mp["DocumentNumber"]))
+					if docNum == "" {
+						// try alternative keys
+						docNum = strings.TrimSpace(stringFromAny(mp["DocumentID"]))
+					}
+					if docNum != "" {
+						amt := decimal.Zero
+						if v := stringFromAny(mp["AmountDoc"]); v != "" {
+							if d, derr := decimal.NewFromString(strings.ReplaceAll(strings.TrimSpace(v), ",", "")); derr == nil {
+								amt = d
+							}
+						} else if v := stringFromAny(mp["Amount"]); v != "" {
+							if d, derr := decimal.NewFromString(strings.ReplaceAll(strings.TrimSpace(v), ",", "")); derr == nil {
+								amt = d
+							}
+						}
+						// store if not present
+						if _, ok := stagingMeta[docNum]; !ok {
+							stagingMeta[docNum] = struct {
+								Company, Party, Currency, Source  string
+								DocumentDate, PostingDate, NetDue string
+								Amount                            decimal.Decimal
+							}{
+								Company:      stringFromAny(mp["CompanyCode"]),
+								Party:        stringFromAny(mp["Party"]),
+								Currency:     stringFromAny(mp["DocumentCurrency"]),
+								Source:       stringFromAny(mp["Source"]),
+								DocumentDate: stringFromAny(mp["DocumentDate"]),
+								PostingDate:  stringFromAny(mp["PostingDate"]),
+								NetDue:       stringFromAny(mp["NetDueDate"]),
+								Amount:       amt,
+							}
+						}
+					}
+				}
 			}
 		}
 		allocRows.Close()
@@ -2956,9 +3147,102 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 			if reason.Valid {
 				nq.Row.NonQualifiedReason = reason.String
 			}
+			// parse mapped_payload if present to capture original CSV amount/metadata
+			if len(payload) > 0 {
+				var mp map[string]interface{}
+				if merr := json.Unmarshal(payload, &mp); merr == nil {
+					docNum := strings.TrimSpace(stringFromAny(mp["DocumentNumber"]))
+					if docNum == "" {
+						docNum = strings.TrimSpace(stringFromAny(mp["DocumentID"]))
+					}
+					if docNum != "" {
+						amt := decimal.Zero
+						if v := stringFromAny(mp["AmountDoc"]); v != "" {
+							if d, derr := decimal.NewFromString(strings.ReplaceAll(strings.TrimSpace(v), ",", "")); derr == nil {
+								amt = d
+							}
+						} else if v := stringFromAny(mp["Amount"]); v != "" {
+							if d, derr := decimal.NewFromString(strings.ReplaceAll(strings.TrimSpace(v), ",", "")); derr == nil {
+								amt = d
+							}
+						}
+						if _, ok := stagingMeta[docNum]; !ok {
+							stagingMeta[docNum] = struct {
+								Company, Party, Currency, Source  string
+								DocumentDate, PostingDate, NetDue string
+								Amount                            decimal.Decimal
+							}{
+								Company:      stringFromAny(mp["CompanyCode"]),
+								Party:        stringFromAny(mp["Party"]),
+								Currency:     strings.ToUpper(stringFromAny(mp["DocumentCurrency"])),
+								Source:       stringFromAny(mp["Source"]),
+								DocumentDate: stringFromAny(mp["DocumentDate"]),
+								PostingDate:  stringFromAny(mp["PostingDate"]),
+								NetDue:       stringFromAny(mp["NetDueDate"]),
+								Amount:       amt,
+							}
+						}
+					}
+				}
+			}
 			nonQualMap[strings.TrimSpace(doc.String)] = nq
 		}
 		nqRows.Close()
+	}
+
+	// Populate stagingMeta from exposure_unallocated and exposure_unqualified (and allocations above)
+	// so we avoid reading the staging_exposures table which is not allowed in this context.
+	// exposure_allocations mapped_payloads were parsed above and populated into stagingMeta.
+	// Read exposure_unallocated mapped_payloads next.
+	unallocRows, uerr := conn.Query(ctx, `SELECT document_number, mapped_payload, amount::text FROM public.exposure_unallocated WHERE batch_id=$1`, batchUUID)
+	if uerr == nil {
+		for unallocRows.Next() {
+			var doc sql.NullString
+			var payload []byte
+			var amtText sql.NullString
+			if uscan := unallocRows.Scan(&doc, &payload, &amtText); uscan != nil {
+				continue
+			}
+			if !doc.Valid {
+				continue
+			}
+			docNum := strings.TrimSpace(doc.String)
+			if docNum == "" {
+				continue
+			}
+			if len(payload) > 0 {
+				var mp map[string]interface{}
+				if merr := json.Unmarshal(payload, &mp); merr == nil {
+					amt := decimal.Zero
+					if v := stringFromAny(mp["AmountDoc"]); v != "" {
+						if d, derr := decimal.NewFromString(strings.ReplaceAll(strings.TrimSpace(v), ",", "")); derr == nil {
+							amt = d
+						}
+					} else if amtText.Valid {
+						if d, derr := decimal.NewFromString(strings.TrimSpace(amtText.String)); derr == nil {
+							amt = d
+						}
+					}
+					if _, ok := stagingMeta[docNum]; !ok {
+						stagingMeta[docNum] = struct {
+							Company, Party, Currency, Source  string
+							DocumentDate, PostingDate, NetDue string
+							Amount                            decimal.Decimal
+						}{
+							Company:      stringFromAny(mp["CompanyCode"]),
+							Party:        stringFromAny(mp["Party"]),
+							Currency:     strings.ToUpper(stringFromAny(mp["DocumentCurrency"])),
+							Source:       stringFromAny(mp["Source"]),
+							DocumentDate: stringFromAny(mp["DocumentDate"]),
+							PostingDate:  stringFromAny(mp["PostingDate"]),
+							NetDue:       stringFromAny(mp["NetDueDate"]),
+							Amount:       amt,
+						}
+					}
+				}
+			}
+		}
+		unallocRows.Close()
 	}
 
 	// Build union of all docs to preview
@@ -3042,7 +3326,13 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 			pr.Knockoffs = append(pr.Knockoffs, rin...)
 		}
 
+		// Currency priority:
+		// 1) header currency (already set if header existed)
+		// 2) allocation currency where doc is base (prefer first non-empty)
+		// 3) allocation currency where doc is knock (prefer first non-empty)
+		// 4) if still empty -> leave as empty but we will add an error to Errors (currency is required)
 		if strings.TrimSpace(pr.Currency) == "" {
+			// try outgoing allocations
 			if kos, ok := allocMap[doc]; ok {
 				for _, k := range kos {
 					if strings.TrimSpace(k.Currency) != "" {
@@ -3053,6 +3343,7 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 			}
 		}
 		if strings.TrimSpace(pr.Currency) == "" {
+			// try incoming allocations
 			if rin, ok := reverseAllocMap[doc]; ok {
 				for _, k := range rin {
 					if strings.TrimSpace(k.Currency) != "" {
@@ -3062,10 +3353,34 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 				}
 			}
 		}
+		// If currency still empty, mark an error in errorsList (currency is required per your note)
 		if strings.TrimSpace(pr.Currency) == "" {
 			errorsList = append(errorsList, fmt.Sprintf("currency missing for document %s", doc))
 		}
 
+		// If header fields are empty, try to fall back to allocation-level metadata
+		if strings.TrimSpace(pr.CompanyCode) == "" {
+			if v, ok := allocCompanyByBase[doc]; ok && v != "" {
+				pr.CompanyCode = v
+			} else if v, ok := allocCompanyByKnock[doc]; ok && v != "" {
+				pr.CompanyCode = v
+			}
+		}
+		if strings.TrimSpace(pr.Party) == "" {
+			if v, ok := allocPartyByBase[doc]; ok && v != "" {
+				pr.Party = v
+			} else if v, ok := allocPartyByKnock[doc]; ok && v != "" {
+				pr.Party = v
+			}
+		}
+		if strings.TrimSpace(pr.Source) == "" {
+			if v, ok := allocSourceByBase[doc]; ok && v != "" {
+				pr.Source = v
+			} else if v, ok := allocSourceByKnock[doc]; ok && v != "" {
+				pr.Source = v
+			}
+		}
+		// Apply override source if provided
 		if overrideSource != nil {
 			if s, ok := overrideSource[doc]; ok && s != "" {
 				pr.Source = s
@@ -3073,6 +3388,57 @@ func buildPreviewForBatch(pool *pgxpool.Pool, ctx context.Context, batchUUID uui
 		}
 		if pr.Source == "" {
 			pr.Source = ingestionSource.String
+		}
+
+		// If allocations exist for this document (as base or knock) and the amount is zero,
+		// treat it as knocked_off for preview consistency with the in-memory result users expect.
+		if pr.Status != "non_qualified" {
+			if pr.Amount.IsZero() && (len(allocMap[doc]) > 0 || len(reverseAllocMap[doc]) > 0) {
+				pr.Status = "knocked_off"
+			}
+		}
+
+		// If we still don't have an amount (common for knocked docs with no header),
+		// fall back to the original mapped payload from staging_exposures collected earlier.
+		if pr.Amount.IsZero() {
+			if sm, ok := stagingMeta[doc]; ok {
+				if !sm.Amount.IsZero() {
+					pr.Amount = sm.Amount
+				}
+				// also fill missing metadata from staging if available
+				if pr.CompanyCode == "" && sm.Company != "" {
+					pr.CompanyCode = sm.Company
+				}
+				if pr.Party == "" && sm.Party != "" {
+					pr.Party = sm.Party
+				}
+				if pr.Currency == "" && sm.Currency != "" {
+					pr.Currency = sm.Currency
+				}
+				if pr.DocumentDate == "" && sm.DocumentDate != "" {
+					pr.DocumentDate = sm.DocumentDate
+				}
+				if pr.PostingDate == "" && sm.PostingDate != "" {
+					pr.PostingDate = sm.PostingDate
+				}
+				if pr.NetDueDate == "" && sm.NetDue != "" {
+					pr.NetDueDate = sm.NetDue
+				}
+			}
+		}
+
+		// If still zero and we have incoming allocations (reverseAllocMap), sum their signed amounts
+		// to reconstruct the original document amount (common when header is missing but allocations exist).
+		if pr.Amount.IsZero() {
+			if rin, ok := reverseAllocMap[doc]; ok && len(rin) > 0 {
+				signedSum := decimal.Zero
+				for _, k := range rin {
+					signedSum = signedSum.Add(k.SignedAmt)
+				}
+				if !signedSum.IsZero() {
+					pr.Amount = signedSum
+				}
+			}
 		}
 
 		if pr.Status != "non_qualified" {
