@@ -160,16 +160,16 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.status,
 				m.old_decimal_places,
 				m.old_status,
-				a.requested_at AS latest_requested_at
+				a.requested_at AS laterequested_at
 			FROM mastercurrency m
 			LEFT JOIN LATERAL (
-				SELECT requested_at
+				SELECT requested_at , checker_at
 				FROM auditactioncurrency
 				WHERE currency_id = m.currency_id
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
-			ORDER BY a.requested_at DESC NULLS LAST
+			ORDER BY a.checker_at DESC NULLS LAST, a.requested_at DESC NULLS LAST
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
