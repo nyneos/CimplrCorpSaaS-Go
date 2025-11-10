@@ -190,7 +190,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					   default_subscription_account, default_redemption_account,
 					   COALESCE(status,'Active'), COALESCE(source,'Upload')
 				FROM tmp_folio
-				ON CONFLICT (entity_name, amc_name, folio_number)
+				ON CONFLICT (folio_number)
 				DO UPDATE SET
 					entity_name = EXCLUDED.entity_name,
 					amc_name = EXCLUDED.amc_name,
