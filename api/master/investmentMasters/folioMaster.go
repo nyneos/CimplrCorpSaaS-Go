@@ -180,30 +180,50 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			upsertSQL := `
-				INSERT INTO investment.masterfolio (
-					entity_name, amc_name, folio_number, first_holder_name,
-					default_subscription_account, default_redemption_account,
-					status, source
-				)
-				SELECT entity_name, amc_name, folio_number, first_holder_name,
-					   default_subscription_account, default_redemption_account,
-					   COALESCE(status,'Active'), COALESCE(source,'Upload')
-				FROM tmp_folio
-				ON CONFLICT (folio_number)
-				DO UPDATE SET
-					entity_name = EXCLUDED.entity_name,
-					amc_name = EXCLUDED.amc_name,
-					first_holder_name = EXCLUDED.first_holder_name,
-					default_subscription_account = EXCLUDED.default_subscription_account,
-					default_redemption_account = EXCLUDED.default_redemption_account,
-					status = EXCLUDED.status,
-					source = EXCLUDED.source;
-			`
-			if _, err := tx.Exec(ctx, upsertSQL); err != nil {
-				api.RespondWithError(w, 500, "upsert masterfolio: "+err.Error())
-				return
-			}
+		
+updateSQL := `
+	UPDATE investment.masterfolio m
+	SET 
+		first_holder_name = COALESCE(t.first_holder_name, m.first_holder_name),
+		default_subscription_account = COALESCE(t.default_subscription_account, m.default_subscription_account),
+		default_redemption_account = COALESCE(t.default_redemption_account, m.default_redemption_account),
+		status = COALESCE(t.status, m.status),
+		source = COALESCE(t.source, m.source)
+	FROM tmp_folio t
+	WHERE m.entity_name = t.entity_name
+	  AND m.amc_name = t.amc_name
+	  AND m.folio_number = t.folio_number
+	  AND m.is_deleted = false;
+`
+if _, err := tx.Exec(ctx, updateSQL); err != nil {
+	api.RespondWithError(w, 500, "update masterfolio: "+err.Error())
+	return
+}
+
+insertSQL := `
+	INSERT INTO investment.masterfolio (
+		entity_name, amc_name, folio_number, first_holder_name,
+		default_subscription_account, default_redemption_account,
+		status, source
+	)
+	SELECT t.entity_name, t.amc_name, t.folio_number, t.first_holder_name,
+		   t.default_subscription_account, t.default_redemption_account,
+		   COALESCE(t.status,'Active'), COALESCE(t.source,'Upload')
+	FROM tmp_folio t
+	WHERE NOT EXISTS (
+		SELECT 1 FROM investment.masterfolio m
+		WHERE m.entity_name = t.entity_name
+		  AND m.amc_name = t.amc_name
+		  AND m.folio_number = t.folio_number
+		  AND m.is_deleted = false
+	);
+`
+if _, err := tx.Exec(ctx, insertSQL); err != nil {
+	api.RespondWithError(w, 500, "insert masterfolio: "+err.Error())
+	return
+}
+
+
 
 			auditSQL := `
 				INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
