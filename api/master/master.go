@@ -222,6 +222,7 @@ func StartMasterService(db *sql.DB) {
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
 	mux.Handle("/master/amfi/nav", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFINavStagingSimple(pgxPool)))
+	mux.Handle("/master/amfi/approved-amc", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
 	
 	// Holiday calendar exports (ICS/feed/share links)
 	mux.Handle("/master/calendar/export/ics/", api.BusinessUnitMiddleware(db)(investmentMasters.ExportCalendarICS(pgxPool)))
@@ -252,6 +253,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
