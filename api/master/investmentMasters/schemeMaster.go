@@ -837,6 +837,72 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// Read amc_name from JSON body
+		var body struct {
+			AMCName string `json:"amc_name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		amcName := strings.TrimSpace(body.AMCName)
+
+		// Base query
+		q := `
+			WITH latest AS (
+				SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
+				FROM investment.auditactionscheme
+				ORDER BY scheme_id, requested_at DESC
+			)
+			SELECT 
+				m.scheme_id,
+				COALESCE(m.scheme_name, '') AS scheme_name,
+				COALESCE(m.isin, '') AS isin,
+				COALESCE(m.internal_scheme_code, '') AS internal_scheme_code,
+				COALESCE(m.amc_name, '') AS amc_name
+			FROM investment.masterscheme m
+			JOIN latest l ON l.scheme_id = m.scheme_id
+			WHERE UPPER(l.processing_status) = 'APPROVED'
+			  AND UPPER(m.status) = 'ACTIVE'
+			  AND COALESCE(m.is_deleted,false) = false
+		`
+
+		args := []interface{}{}
+		if amcName != "" {
+			q += ` AND UPPER(m.amc_name) = UPPER($1)`
+			args = append(args, amcName)
+		}
+
+		q += ` ORDER BY m.scheme_name;`
+
+		rows, err := pgxPool.Query(ctx, q, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := []map[string]interface{}{}
+		for rows.Next() {
+			var id, name, isin, code, amc string
+			if err := rows.Scan(&id, &name, &isin, &code, &amc); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
+				return
+			}
+			out = append(out, map[string]interface{}{
+				"scheme_id":            id,
+				"scheme_name":          name,
+				"isin":                 isin,
+				"internal_scheme_code": code,
+				"amc_name":             amc,
+			})
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
 func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
