@@ -181,6 +181,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/scheme/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectSchemeActions(pgxPool)))
 	mux.Handle("/master/scheme/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveSchemes(pgxPool)))
 	mux.Handle("/master/scheme/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetSchemesWithAudit(pgxPool)))
+	mux.Handle("/master/scheme/by-amc", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveSchemesByAMC(pgxPool)))
 	
 	// DP Master routes
 	mux.Handle("/master/dp/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadDPSimple(pgxPool)))
@@ -253,6 +254,7 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
 
 
 
