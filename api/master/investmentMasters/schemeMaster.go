@@ -802,7 +802,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetApprovedActiveSchemesAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
+func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		q := `
@@ -837,7 +837,7 @@ func GetApprovedActiveSchemesAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
+func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
