@@ -1001,7 +1001,6 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetEntitySchemeHoldings exposes holdings aggregated per scheme for a given entity
 func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1023,44 +1022,40 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		const holdingsSQL = `
-	WITH base AS (
-		SELECT DISTINCT entity_name, scheme_id, COALESCE(scheme_name,'') AS scheme_name
-		FROM investment.portfolio_onboarding_map
-		WHERE entity_name = $1
-		UNION
-		SELECT DISTINCT entity_name, scheme_id, COALESCE(scheme_name,'') AS scheme_name
-		FROM investment.portfolio_snapshot
-		WHERE entity_name = $1
-	),
-	agg AS (
-		SELECT entity_name,
-		       scheme_id,
-		       COALESCE(scheme_name,'') AS scheme_name,
-		       SUM(total_units) AS total_units,
-		       SUM(current_value) AS current_value,
-		       MAX(created_at) AS last_snapshot_at
-		FROM investment.portfolio_snapshot
-		WHERE entity_name = $1
-		GROUP BY entity_name, scheme_id, scheme_name
-	)
-	SELECT
-		COALESCE(b.scheme_id::text, a.scheme_id::text, '') AS scheme_id,
-		COALESCE(NULLIF(b.scheme_name,''), NULLIF(a.scheme_name,''), COALESCE(ms.scheme_name,'')) AS scheme_name,
-		COALESCE(ms.internal_scheme_code,'') AS scheme_internal_code,
-		COALESCE(a.current_value,0) AS current_holding,
-		COALESCE(a.total_units,0) AS total_units,
-		COALESCE(TO_CHAR(a.last_snapshot_at,'YYYY-MM-DD HH24:MI:SS'),'') AS last_snapshot_at
-	FROM base b
-	LEFT JOIN agg a
-		ON a.entity_name = b.entity_name
-		AND (
-			(a.scheme_id IS NOT DISTINCT FROM b.scheme_id)
-			OR (a.scheme_id IS NULL AND a.scheme_name = b.scheme_name)
+WITH snapshot_agg AS (
+	SELECT 
+		scheme_id,
+		scheme_name,
+		SUM(current_value) AS current_holding
+	FROM investment.portfolio_snapshot
+	WHERE entity_name = $1
+	GROUP BY scheme_id, scheme_name
+),
+all_schemes AS (
+	SELECT DISTINCT
+		COALESCE(s.scheme_id, ms.scheme_id::text) AS scheme_id,
+		COALESCE(NULLIF(s.scheme_name,''), ms.scheme_name) AS scheme_name,
+		COALESCE(s.current_holding, 0) AS current_holding
+	FROM snapshot_agg s
+	FULL OUTER JOIN investment.masterscheme ms
+		ON ms.scheme_id::text = s.scheme_id OR ms.scheme_name = s.scheme_name
+	WHERE ms.status = 'Active'
+		AND EXISTS (
+			SELECT 1 FROM investment.auditactionscheme a
+			WHERE a.scheme_id = ms.scheme_id::text
+				AND a.processing_status = 'APPROVED'
+			ORDER BY a.requested_at DESC
+			LIMIT 1
 		)
-	LEFT JOIN investment.masterscheme ms
-		ON ms.scheme_id::text = COALESCE(b.scheme_id::text, a.scheme_id::text)
-	WHERE b.entity_name = $1
-	ORDER BY scheme_name`
+)
+SELECT 
+	COALESCE(scheme_id, '') AS scheme_id,
+	COALESCE(scheme_name, '') AS scheme_name,
+	COALESCE(current_holding, 0) AS current_holding
+FROM all_schemes
+WHERE scheme_name IS NOT NULL AND scheme_name != ''
+ORDER BY scheme_name
+`
 
 		rows, err := pool.Query(ctx, holdingsSQL, entityName)
 		if err != nil {
@@ -1072,18 +1067,10 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 		holdings := make([]EntitySchemeHolding, 0, 16)
 		for rows.Next() {
 			var rec EntitySchemeHolding
-			var schemeID sql.NullString
-			var schemeName sql.NullString
-			var internalCode sql.NullString
-			var lastSnapshot sql.NullString
-			if err := rows.Scan(&schemeID, &schemeName, &internalCode, &rec.CurrentHolding, &rec.TotalUnits, &lastSnapshot); err != nil {
+			if err := rows.Scan(&rec.SchemeID, &rec.SchemeName, &rec.CurrentHolding); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read holdings rows")
 				return
 			}
-			rec.SchemeID = schemeID.String
-			rec.SchemeName = schemeName.String
-			rec.SchemeInternalCode = internalCode.String
-			rec.LastSnapshotAt = lastSnapshot.String
 			holdings = append(holdings, rec)
 		}
 		if err := rows.Err(); err != nil {
@@ -1091,12 +1078,7 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		payload := map[string]interface{}{
-			"entity_name":   entityName,
-			"total_schemes": len(holdings),
-			"holdings":      holdings,
-		}
-		api.RespondWithPayload(w, true, "", payload)
+		api.RespondWithPayload(w, true, "", holdings)
 	}
 }
 func normalizeProposalRequest(req *CreateProposalRequest) {
