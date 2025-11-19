@@ -272,7 +272,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// fallback: old style form fields
 			mf := r.MultipartForm
 			log.Printf("[bulk] multipart form values: %+v", mf.Value)
-			
+
 			// Debug: Print raw form values for each field
 			if amcRaw, exists := mf.Value["amc"]; exists && len(amcRaw) > 0 {
 				log.Printf("[bulk] raw amc data: %s", amcRaw[0])
@@ -280,7 +280,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if schemeRaw, exists := mf.Value["scheme"]; exists && len(schemeRaw) > 0 {
 				log.Printf("[bulk] raw scheme data: %s", schemeRaw[0])
 			}
-			
+
 			var err error
 			amcs, err = parseJSONField[AMCInput](mf, "amc")
 			if err != nil {
@@ -342,20 +342,20 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// insert
 			var amcID string
 			q := `INSERT INTO investment.masteramc (amc_name, internal_amc_code, status, primary_contact_name, primary_contact_email, sebi_registration_no, amc_beneficiary_name, amc_bank_account_no, amc_bank_name, amc_bank_ifsc, mfu_amc_code, cams_amc_code, erp_vendor_code, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'Manual',$14) RETURNING amc_id`
-			if err := tx.QueryRow(ctx, q, 
-				a.AmcName, 
-				a.InternalAmcCode, 
-				defaultIfEmpty(a.Status, "Active"), 
-				nullableString(a.PrimaryContactName), 
-				nullableString(a.PrimaryContactEmail), 
-				nullableString(a.SebiRegistrationNo), 
-				defaultIfEmpty(a.AmcBeneficiaryName, "Default Beneficiary"), 
-				defaultIfEmpty(a.AmcBankAccountNo, "000000000000"), 
-				defaultIfEmpty(a.AmcBankName, "Default Bank"), 
-				defaultIfEmpty(a.AmcBankIfsc, "DEFAULT0000"), 
-				defaultIfEmpty(a.MfuAmcCode, "MFU000"), 
-				defaultIfEmpty(a.CamsAmcCode, "CAM000"), 
-				defaultIfEmpty(a.ErpVendorCode, "ERP000"), 
+			if err := tx.QueryRow(ctx, q,
+				a.AmcName,
+				a.InternalAmcCode,
+				defaultIfEmpty(a.Status, "Active"),
+				nullableString(a.PrimaryContactName),
+				nullableString(a.PrimaryContactEmail),
+				nullableString(a.SebiRegistrationNo),
+				defaultIfEmpty(a.AmcBeneficiaryName, "Default Beneficiary"),
+				defaultIfEmpty(a.AmcBankAccountNo, "000000000000"),
+				defaultIfEmpty(a.AmcBankName, "Default Bank"),
+				defaultIfEmpty(a.AmcBankIfsc, "DEFAULT0000"),
+				defaultIfEmpty(a.MfuAmcCode, "MFU000"),
+				defaultIfEmpty(a.CamsAmcCode, "CAM000"),
+				defaultIfEmpty(a.ErpVendorCode, "ERP000"),
 				batchID).Scan(&amcID); err != nil {
 				log.Printf("[bulk] insert amc failed: %v", err)
 				api.RespondWithError(w, 500, "insert amc failed: "+err.Error())
@@ -499,14 +499,14 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			var schemeID string
-			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterscheme (scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING scheme_id`, 
-				s.SchemeName, 
-				s.ISIN, 
-				s.AmcName, 
-				s.InternalSchemeCode, 
-				defaultIfEmpty(s.InternalRiskRating, "Medium"), 
-				defaultIfEmpty(s.ErpGlAccount, "GL000"), 
-				defaultIfEmpty(s.Status, "Active"), 
+			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterscheme (scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING scheme_id`,
+				s.SchemeName,
+				s.ISIN,
+				s.AmcName,
+				s.InternalSchemeCode,
+				defaultIfEmpty(s.InternalRiskRating, "Medium"),
+				defaultIfEmpty(s.ErpGlAccount, "GL000"),
+				defaultIfEmpty(s.Status, "Active"),
 				batchID).Scan(&schemeID); err != nil {
 				log.Printf("[bulk] insert scheme failed: %v", err)
 				api.RespondWithError(w, 500, "insert scheme failed: "+err.Error())
@@ -561,7 +561,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Insert portfolio_onboarding_map rows for all entities
 		log.Printf("[bulk] populating portfolio_onboarding_map for all entities")
-		
+
 		// Insert for AMCs
 		for amcKey, amcID := range amcMap {
 			var entityName, amcName sql.NullString
@@ -573,7 +573,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		
+
 		// Insert for DPs
 		for dpKey, dpID := range dpMap {
 			var entityName, dpName sql.NullString
@@ -585,7 +585,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		
+
 		// Insert for Demats
 		for dematKey, dematID := range dematMap {
 			var entityName, dematAccNum sql.NullString
@@ -597,8 +597,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		
-		// Insert for Schemes  
+
+		// Insert for Schemes
 		for schemeKey, schemeID := range schemeMap {
 			var entityName, schemeName sql.NullString
 			if err := tx.QueryRow(ctx, `SELECT amc_name, scheme_name FROM investment.masterscheme WHERE scheme_id=$1`, schemeID).Scan(&entityName, &schemeName); err == nil {
@@ -609,7 +609,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		
+
 		// Insert for Folios (enhanced with related data)
 		for folioKey, folioID := range folioMap {
 			var entityName, folioNumber, amcNameVal sql.NullString
@@ -619,7 +619,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if amcNameVal.Valid {
 					_ = tx.QueryRow(ctx, `SELECT amc_id FROM investment.masteramc WHERE amc_name=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, amcNameVal.String).Scan(&relatedAmcID)
 				}
-				
+
 				// Get related schemes for this folio
 				schemeRows, _ := tx.Query(ctx, `SELECT s.scheme_id, s.scheme_name FROM investment.folioschememapping fsm JOIN investment.masterscheme s ON s.scheme_id = fsm.scheme_id WHERE fsm.folio_id=$1`, folioID)
 				schemeFound := false
@@ -627,8 +627,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					var sid, sname string
 					_ = schemeRows.Scan(&sid, &sname)
 					// Insert with scheme details
-					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number, amc_id, scheme_id, scheme_name, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, 
-						batchID, entityName.String, folioID, folioNumber.String, 
+					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number, amc_id, scheme_id, scheme_name, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now())`,
+						batchID, entityName.String, folioID, folioNumber.String,
 						nullableString(relatedAmcID.String), sid, sname); err != nil {
 						log.Printf("[bulk] portfolio_onboarding_map Folio+Scheme insert failed: %v", err)
 					} else {
@@ -637,10 +637,10 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				schemeRows.Close()
-				
+
 				// If no schemes found, insert folio-only record
 				if !schemeFound {
-					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number, amc_id, created_at) VALUES ($1,$2,$3,$4,$5,now())`, 
+					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number, amc_id, created_at) VALUES ($1,$2,$3,$4,$5,now())`,
 						batchID, entityName.String, folioID, folioNumber.String, nullableString(relatedAmcID.String)); err != nil {
 						log.Printf("[bulk] portfolio_onboarding_map Folio insert failed: %v", err)
 					} else {
@@ -693,69 +693,27 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			log.Printf("[bulk] inserted %d transactions", counts["transactions"])
 		}
-		_, err = tx.Exec(ctx, `
-INSERT INTO investment.portfolio_snapshot (
-  batch_id,
-  entity_name,
-  folio_number,
-  scheme_id,
-  scheme_name,
-  isin,
-  total_units,
-  avg_nav,
-  current_nav,
-  current_value,
-  gain_loss,
-  created_at
-)
-SELECT
-  $1 AS batch_id,
-  mf.entity_name,
-  mf.folio_number,
-  fsm.scheme_id,
-  ms.scheme_name,
-  ms.isin,
-  SUM(ot.units) AS total_units,
-  CASE 
-    WHEN SUM(ot.units) = 0 THEN 0 
-    ELSE SUM(ot.nav * ot.units) / NULLIF(SUM(ot.units), 0) 
-  END AS avg_nav,
-  COALESCE(
-    (SELECT nav_value FROM investment.amfi_nav_staging an 
-     WHERE an.scheme_name = ms.scheme_name 
-     ORDER BY an.nav_date DESC LIMIT 1),
-    0
-  ) AS current_nav,
-  COALESCE(SUM(ot.units), 0) *
-  COALESCE(
-    (SELECT nav_value FROM investment.amfi_nav_staging an 
-     WHERE an.scheme_name = ms.scheme_name 
-     ORDER BY an.nav_date DESC LIMIT 1),
-    0
-  ) AS current_value,
-  0 AS gain_loss,
-  NOW()
-FROM investment.onboard_transaction ot
-JOIN investment.masterfolio mf 
-  ON mf.folio_number = ot.folio_number
-LEFT JOIN investment.folioschememapping fsm 
-  ON fsm.folio_id = mf.folio_id
-LEFT JOIN investment.masterscheme ms 
-  ON ms.scheme_id = fsm.scheme_id 
-  OR ms.internal_scheme_code = ot.scheme_internal_code
-WHERE ot.batch_id = $1
-GROUP BY mf.entity_name, mf.folio_number, fsm.scheme_id, ms.scheme_name, ms.isin;
-`, batchID)
-
-		if err != nil {
-			log.Printf("[bulk] create tmp_snapshot failed: %v", err)
-			api.RespondWithError(w, 500, "snapshot prep failed: "+err.Error())
-			return
-		}
-
-		
 
 		aggQ := `
+WITH scheme_resolved AS (
+    SELECT
+        ot.*,
+        mf.entity_name,
+        mf.folio_number,
+        COALESCE(fsm.scheme_id, ms2.scheme_id) AS scheme_id,
+        COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
+        COALESCE(ms.isin, ms2.isin) AS isin
+    FROM investment.onboard_transaction ot
+    JOIN investment.masterfolio mf 
+        ON mf.folio_number = ot.folio_number
+    LEFT JOIN investment.folioschememapping fsm 
+        ON fsm.folio_id = mf.folio_id
+    LEFT JOIN investment.masterscheme ms 
+        ON ms.scheme_id = fsm.scheme_id
+    LEFT JOIN investment.masterscheme ms2
+        ON ms2.internal_scheme_code = ot.scheme_internal_code
+    WHERE ot.batch_id = $1
+)
 INSERT INTO investment.portfolio_snapshot (
   batch_id,
   entity_name,
@@ -772,41 +730,31 @@ INSERT INTO investment.portfolio_snapshot (
 )
 SELECT
   $1 AS batch_id,
-  mf.entity_name,
-  mf.folio_number,
-  fsm.scheme_id,
-  ms.scheme_name,
-  ms.isin,
-  SUM(ot.units) AS total_units,
-  CASE 
-    WHEN SUM(ot.units) = 0 THEN 0 
-    ELSE SUM(ot.nav * ot.units) / NULLIF(SUM(ot.units), 0) 
-  END AS avg_nav,
+  entity_name,
+  folio_number,
+  scheme_id,
+  scheme_name,
+  isin,
+  SUM(units) AS total_units,
+  CASE WHEN SUM(units)=0 THEN 0 ELSE SUM(nav * units)/SUM(units) END AS avg_nav,
   COALESCE(
-    (SELECT nav_value FROM investment.amfi_nav_staging an 
-     WHERE an.scheme_name = ms.scheme_name 
-     ORDER BY an.nav_date DESC LIMIT 1),
-    0
+     (SELECT nav_value 
+      FROM investment.amfi_nav_staging an 
+      WHERE an.scheme_name = scheme_name 
+      ORDER BY an.nav_date DESC 
+      LIMIT 1), 0
   ) AS current_nav,
-  COALESCE(SUM(ot.units), 0) *
+  SUM(units) *
   COALESCE(
-    (SELECT nav_value FROM investment.amfi_nav_staging an 
-     WHERE an.scheme_name = ms.scheme_name 
-     ORDER BY an.nav_date DESC LIMIT 1),
-    0
+     (SELECT nav_value 
+      FROM investment.amfi_nav_staging an 
+      WHERE an.scheme_name = scheme_name 
+      ORDER BY an.nav_date DESC LIMIT 1), 0
   ) AS current_value,
   0 AS gain_loss,
   NOW()
-FROM investment.onboard_transaction ot
-JOIN investment.masterfolio mf 
-  ON mf.folio_number = ot.folio_number
-LEFT JOIN investment.folioschememapping fsm 
-  ON fsm.folio_id = mf.folio_id
-LEFT JOIN investment.masterscheme ms 
-  ON ms.scheme_id = fsm.scheme_id 
-  OR ms.internal_scheme_code = ot.scheme_internal_code
-WHERE ot.batch_id = $1
-GROUP BY mf.entity_name, mf.folio_number, fsm.scheme_id, ms.scheme_name, ms.isin;
+FROM scheme_resolved
+GROUP BY entity_name, folio_number, scheme_id, scheme_name, isin;
 `
 
 		// Note: pf alias used above should refer to masterfolio; fix with correct aliasing
@@ -849,7 +797,6 @@ GROUP BY mf.entity_name, mf.folio_number, fsm.scheme_id, ms.scheme_name, ms.isin
 		api.RespondWithPayload(w, true, "", res)
 	}
 }
-
 // helper to return nil for empty strings for Exec params
 func nullableString(s string) interface{} {
 	if strings.TrimSpace(s) == "" {
