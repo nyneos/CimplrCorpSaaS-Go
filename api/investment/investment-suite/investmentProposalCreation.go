@@ -1,0 +1,1581 @@
+package investmentsuite
+
+import (
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const amountTolerance = 0.01
+
+// CreateProposalRequest models the payload for manual proposal creation
+type CreateProposalRequest struct {
+	UserID       string                    `json:"user_id"`
+	ProposalName string                    `json:"proposal_name"`
+	EntityName   string                    `json:"entity_name"`
+	TotalAmount  float64                   `json:"total_amount"`
+	HorizonDays  *int                      `json:"horizon_days"`
+	Source       string                    `json:"source"`
+	Status       string                    `json:"status"`
+	BatchID      string                    `json:"batch_id"`
+	Reason       string                    `json:"reason"`
+	Allocations  []ProposalAllocationInput `json:"allocations"`
+}
+
+// UpdateProposalRequest models the payload for editing proposals and allocations
+type UpdateProposalRequest struct {
+	UserID       string                          `json:"user_id"`
+	ProposalID   string                          `json:"proposal_id"`
+	ProposalName string                          `json:"proposal_name"`
+	EntityName   string                          `json:"entity_name"`
+	TotalAmount  float64                         `json:"total_amount"`
+	HorizonDays  *int                            `json:"horizon_days"`
+	Source       string                          `json:"source"`
+	Status       string                          `json:"status"`
+	BatchID      string                          `json:"batch_id"`
+	Reason       string                          `json:"reason"`
+	Allocations  []ProposalAllocationUpsertInput `json:"allocations"`
+}
+
+// ProposalAllocationInput represents a single allocation row
+type ProposalAllocationInput struct {
+	SchemeID            string   `json:"scheme_id"`
+	SchemeInternalCode  string   `json:"scheme_internal_code"`
+	Amount              float64  `json:"amount"`
+	Percent             *float64 `json:"percent"`
+	PolicyStatus        *bool    `json:"policy_status"`
+	PostTradeHolding    *float64 `json:"post_trade_holding"`
+	OldPostTradeHolding *float64 `json:"old_post_trade_holding"`
+	CurrentHolding      *float64 `json:"current_holding"`
+	OldCurrentHolding   *float64 `json:"old_current_holding"`
+}
+
+// ProposalAllocationUpsertInput represents allocation operations for updates
+type ProposalAllocationUpsertInput struct {
+	AllocationID        *int64   `json:"allocation_id"`
+	SchemeID            string   `json:"scheme_id"`
+	SchemeInternalCode  string   `json:"scheme_internal_code"`
+	Amount              float64  `json:"amount"`
+	Percent             *float64 `json:"percent"`
+	PolicyStatus        *bool    `json:"policy_status"`
+	PostTradeHolding    *float64 `json:"post_trade_holding"`
+	OldPostTradeHolding *float64 `json:"old_post_trade_holding"`
+	CurrentHolding      *float64 `json:"current_holding"`
+	OldCurrentHolding   *float64 `json:"old_current_holding"`
+}
+
+// CreateProposalResponse captures the API response payload
+type CreateProposalResponse struct {
+	Success         bool    `json:"success"`
+	ProposalID      string  `json:"proposal_id"`
+	TotalAmount     float64 `json:"total_amount"`
+	AllocationCount int     `json:"allocation_count"`
+}
+
+// UpdateProposalResponse captures the response payload for updates
+type UpdateProposalResponse struct {
+	Success         bool    `json:"success"`
+	ProposalID      string  `json:"proposal_id"`
+	TotalAmount     float64 `json:"total_amount"`
+	AllocationCount int     `json:"allocation_count"`
+}
+
+// ProposalBulkActionRequest models checker actions on proposals
+type ProposalBulkActionRequest struct {
+	UserID      string   `json:"user_id"`
+	ProposalIDs []string `json:"proposal_ids"`
+	Comment     string   `json:"comment"`
+}
+
+// ProposalBulkActionResponse summarizes checker outcomes
+type ProposalBulkActionResponse struct {
+	Success        bool     `json:"success"`
+	Action         string   `json:"action"`
+	ApprovedIDs    []string `json:"approved_ids"`
+	RejectedIDs    []string `json:"rejected_ids"`
+	DeletedIDs     []string `json:"deleted_ids"`
+	SkippedIDs     []string `json:"skipped_ids"`
+	ProcessedCount int      `json:"processed_count"`
+}
+
+// ProposalBulkDeleteRequest lets makers request delete approvals in bulk
+type ProposalBulkDeleteRequest struct {
+	UserID      string   `json:"user_id"`
+	ProposalIDs []string `json:"proposal_ids"`
+	Reason      string   `json:"reason"`
+}
+
+// ProposalBulkDeleteResponse reports delete submission stats
+type ProposalBulkDeleteResponse struct {
+	Success        bool     `json:"success"`
+	RequestedIDs   []string `json:"requested_ids"`
+	SkippedIDs     []string `json:"skipped_ids"`
+	SubmittedCount int      `json:"submitted_count"`
+}
+
+// ProposalDetailRequest models the payload for detail retrieval
+type ProposalDetailRequest struct {
+	ProposalID string `json:"proposal_id"`
+}
+
+// EntityHoldingsRequest models the payload to fetch holdings for an entity
+type EntityHoldingsRequest struct {
+	EntityName string `json:"entity_name"`
+}
+
+// EntitySchemeHolding captures per-scheme holding details for an entity
+type EntitySchemeHolding struct {
+	SchemeID           string  `json:"scheme_id"`
+	SchemeName         string  `json:"scheme_name"`
+	SchemeInternalCode string  `json:"scheme_internal_code"`
+	CurrentHolding     float64 `json:"current_holding"`
+	TotalUnits         float64 `json:"total_units"`
+	LastSnapshotAt     string  `json:"last_snapshot_at"`
+}
+
+// CreateInvestmentProposal exposes POST /investment/proposals
+func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		var req CreateProposalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		normalizeProposalRequest(&req)
+		if err := validateProposalRequest(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		userEmail, ok := resolveUserEmail(req.UserID)
+		if !ok {
+			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			return
+		}
+
+		batchUUID, err := parseBatchID(req.BatchID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		proposalID, err := insertProposal(ctx, tx, &req, batchUUID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create proposal: %v", err))
+			return
+		}
+
+		allocIDs, err := insertAllocations(ctx, tx, proposalID, req.Allocations)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert allocations: %v", err))
+			return
+		}
+
+		if err := insertProposalAudit(ctx, tx, proposalID, userEmail, req.Reason, "CREATE", "PENDING_APPROVAL"); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit proposal transaction")
+			return
+		}
+
+		resp := CreateProposalResponse{Success: true, ProposalID: proposalID, TotalAmount: req.TotalAmount, AllocationCount: len(allocIDs)}
+		api.RespondWithPayload(w, true, "", resp)
+
+	}
+}
+
+// UpdateInvestmentProposal exposes PUT /investment/proposals
+func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		var req UpdateProposalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		normalizeUpdateProposalRequest(&req)
+		if err := validateUpdateProposalRequest(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		userEmail, ok := resolveUserEmail(req.UserID)
+		if !ok {
+			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			return
+		}
+
+		batchUUID, err := parseBatchID(req.BatchID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		if err := applyProposalUpdate(ctx, tx, &req, batchUUID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update proposal: %v", err))
+			return
+		}
+
+		if err := syncProposalAllocations(ctx, tx, req.ProposalID, req.Allocations); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to upsert allocations: %v", err))
+			return
+		}
+
+		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_APPROVAL"); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit proposal transaction")
+			return
+		}
+
+		resp := UpdateProposalResponse{Success: true, ProposalID: req.ProposalID, TotalAmount: req.TotalAmount, AllocationCount: len(req.Allocations)}
+		api.RespondWithPayload(w, true, "", resp)
+	}
+}
+
+// BulkApproveProposals allows checkers to approve multiple proposals
+func BulkApproveProposals(pool *pgxpool.Pool) http.HandlerFunc {
+	return bulkProposalDecision(pool, "APPROVE")
+}
+
+// BulkRejectProposals allows checkers to reject multiple proposals
+func BulkRejectProposals(pool *pgxpool.Pool) http.HandlerFunc {
+	return bulkProposalDecision(pool, "REJECT")
+}
+
+func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		var req ProposalBulkActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		normalizeBulkActionRequest(&req)
+		if err := validateBulkActionRequest(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		userEmail, ok := resolveUserEmail(req.UserID)
+		if !ok {
+			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			return
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		validIDs, invalidIDs, err := gatherProposalIDs(ctx, tx, req.ProposalIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		skipped := append([]string{}, invalidIDs...)
+		const latestAuditSQL = `
+			WITH ranked AS (
+				SELECT action_id, proposal_id, actiontype, processing_status,
+					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY requested_at DESC) AS rn
+				FROM investment.auditactionproposal
+				WHERE proposal_id = ANY($1)
+			)
+			SELECT action_id, proposal_id, actiontype, processing_status
+			FROM ranked
+			WHERE rn = 1
+		`
+
+		rows, err := tx.Query(ctx, latestAuditSQL, validIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal audits")
+			return
+		}
+		defer rows.Close()
+
+		type auditSnapshot struct {
+			actionID   string
+			proposalID string
+			actionType string
+			status     string
+		}
+
+		latest := make(map[string]auditSnapshot)
+		for rows.Next() {
+			var snap auditSnapshot
+			if err := rows.Scan(&snap.actionID, &snap.proposalID, &snap.actionType, &snap.status); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit rows")
+				return
+			}
+			latest[snap.proposalID] = snap
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate audit rows")
+			return
+		}
+
+		approvedActions := make([]string, 0)
+		deletedActions := make([]string, 0)
+		rejectedActions := make([]string, 0)
+		approvedProposals := make([]string, 0)
+		deletedProposals := make([]string, 0)
+		rejectedProposals := make([]string, 0)
+
+		for _, proposalID := range validIDs {
+			snap, ok := latest[proposalID]
+			if !ok {
+				skipped = append(skipped, proposalID)
+				continue
+			}
+			if !strings.HasPrefix(snap.status, "PENDING") {
+				skipped = append(skipped, proposalID)
+				continue
+			}
+
+			if action == "APPROVE" {
+				if snap.status == "PENDING_DELETE_APPROVAL" || strings.EqualFold(snap.actionType, "DELETE") {
+					deletedActions = append(deletedActions, snap.actionID)
+					deletedProposals = append(deletedProposals, proposalID)
+				} else {
+					approvedActions = append(approvedActions, snap.actionID)
+					approvedProposals = append(approvedProposals, proposalID)
+				}
+			} else {
+				rejectedActions = append(rejectedActions, snap.actionID)
+				rejectedProposals = append(rejectedProposals, proposalID)
+			}
+		}
+
+		if len(approvedActions) > 0 {
+			if err := updateAuditStatuses(ctx, tx, approvedActions, "APPROVED", userEmail, req.Comment); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if len(deletedActions) > 0 {
+			if err := updateAuditStatuses(ctx, tx, deletedActions, "DELETED", userEmail, req.Comment); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if len(rejectedActions) > 0 {
+			if err := updateAuditStatuses(ctx, tx, rejectedActions, "REJECTED", userEmail, req.Comment); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+
+		if len(approvedProposals) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_proposal
+				SET status='Active', is_deleted=false, updated_at=now()
+				WHERE proposal_id = ANY($1)
+			`, approvedProposals); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to update approved proposals")
+				return
+			}
+		}
+		if len(deletedProposals) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_proposal
+				SET status='Deleted', is_deleted=true, updated_at=now()
+				WHERE proposal_id = ANY($1)
+			`, deletedProposals); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to delete proposals")
+				return
+			}
+		}
+		if len(rejectedProposals) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_proposal
+				SET status='Rejected', updated_at=now()
+				WHERE proposal_id = ANY($1)
+			`, rejectedProposals); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject proposals")
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit bulk action")
+			return
+		}
+
+		processedCount := len(approvedProposals) + len(deletedProposals) + len(rejectedProposals)
+		response := ProposalBulkActionResponse{
+			Success:        true,
+			Action:         action,
+			ApprovedIDs:    approvedProposals,
+			RejectedIDs:    rejectedProposals,
+			DeletedIDs:     deletedProposals,
+			SkippedIDs:     uniqueStrings(skipped),
+			ProcessedCount: processedCount,
+		}
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// BulkDeleteProposals lets makers raise delete requests for multiple proposals
+func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		var req ProposalBulkDeleteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		normalizeBulkDeleteRequest(&req)
+		if err := validateBulkDeleteRequest(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		userEmail, ok := resolveUserEmail(req.UserID)
+		if !ok {
+			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			return
+		}
+
+		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		validIDs, invalidIDs, err := gatherProposalIDs(ctx, tx, req.ProposalIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		skipped := append([]string{}, invalidIDs...)
+		const pendingDeleteSQL = `
+			WITH ranked AS (
+				SELECT proposal_id,
+					ROW_NUMBER() OVER (PARTITION BY proposal_id ORDER BY requested_at DESC) AS rn,
+					processing_status
+				FROM investment.auditactionproposal
+				WHERE proposal_id = ANY($1)
+			)
+			SELECT proposal_id
+			FROM ranked
+			WHERE rn = 1 AND processing_status = 'PENDING_DELETE_APPROVAL'
+		`
+
+		rows, err := tx.Query(ctx, pendingDeleteSQL, validIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to inspect proposal delete state")
+			return
+		}
+		defer rows.Close()
+
+		pendingDelete := make(map[string]struct{})
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read delete state")
+				return
+			}
+			pendingDelete[id] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate delete state")
+			return
+		}
+
+		readyForDelete := make([]string, 0, len(validIDs))
+		for _, id := range validIDs {
+			if _, exists := pendingDelete[id]; exists {
+				skipped = append(skipped, id)
+				continue
+			}
+			readyForDelete = append(readyForDelete, id)
+		}
+
+		if len(readyForDelete) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "no proposals eligible for delete submission")
+			return
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE investment.investment_proposal
+			SET status='PENDING_DELETE_APPROVAL', updated_at=now()
+			WHERE proposal_id = ANY($1)
+		`, readyForDelete); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to tag proposals for delete")
+			return
+		}
+
+		for _, id := range readyForDelete {
+			if err := insertProposalAudit(ctx, tx, id, userEmail, req.Reason, "DELETE", "PENDING_DELETE_APPROVAL"); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert delete audit for %s", id))
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit delete submissions")
+			return
+		}
+
+		response := ProposalBulkDeleteResponse{
+			Success:        true,
+			RequestedIDs:   readyForDelete,
+			SkippedIDs:     uniqueStrings(skipped),
+			SubmittedCount: len(readyForDelete),
+		}
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// GetProposalMeta mirrors other master GETs: proposal fields + latest audit + history summary ordered by updated_at.
+func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		const metaSQL = `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (proposal_id)
+					proposal_id,
+					actiontype,
+					processing_status,
+					action_id,
+					requested_by,
+					requested_at,
+					checker_by,
+					checker_at,
+					checker_comment,
+					reason
+				FROM investment.auditactionproposal
+				ORDER BY proposal_id, requested_at DESC
+			),
+			history AS (
+				SELECT
+					proposal_id,
+					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				FROM investment.auditactionproposal
+				GROUP BY proposal_id
+			)
+			SELECT
+				p.proposal_id,
+				p.proposal_name,
+				p.old_proposal_name,
+				p.entity_name,
+				p.old_entity_name,
+				p.total_amount,
+				p.old_total_amount,
+				p.horizon_days,
+				p.old_horizon_days,
+				p.source,
+				p.old_source,
+				p.status,
+				p.old_status,
+				COALESCE(p.batch_id::text,'') AS batch_id,
+				COALESCE(p.is_deleted,false) AS is_deleted,
+				COALESCE(TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
+				COALESCE(TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at,
+				COALESCE(l.actiontype,'') AS action_type,
+				COALESCE(l.processing_status,'') AS processing_status,
+				COALESCE(l.action_id::text,'') AS action_id,
+				COALESCE(l.requested_by,'') AS requested_by,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(l.checker_by,'') AS checker_by,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(l.checker_comment,'') AS checker_comment,
+				COALESCE(l.reason,'') AS reason,
+				COALESCE(h.created_by,'') AS created_by,
+				COALESCE(h.created_at,'') AS created_at_history,
+				COALESCE(h.edited_by,'') AS edited_by,
+				COALESCE(h.edited_at,'') AS edited_at_history,
+				COALESCE(h.deleted_by,'') AS deleted_by,
+				COALESCE(h.deleted_at,'') AS deleted_at
+			FROM investment.investment_proposal p
+			LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
+			LEFT JOIN history h ON h.proposal_id = p.proposal_id
+			ORDER BY p.updated_at DESC NULLS LAST, p.created_at DESC NULLS LAST
+		`
+
+		rows, err := pool.Query(ctx, metaSQL)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal meta: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		fields := rows.FieldDescriptions()
+		result := make([]map[string]interface{}, 0, 64)
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read proposal meta")
+				return
+			}
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				key := string(f.Name)
+				switch v := vals[i].(type) {
+				case nil:
+					rec[key] = ""
+				case time.Time:
+					rec[key] = v.Format("2006-01-02 15:04:05")
+				default:
+					rec[key] = v
+				}
+			}
+			result = append(result, rec)
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate proposal meta: "+rows.Err().Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", result)
+	}
+}
+
+// GetApprovedProposalMeta returns only active proposals whose latest audit is approved.
+func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		const metaSQL = `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (proposal_id)
+					proposal_id,
+					actiontype,
+					processing_status,
+					action_id,
+					requested_by,
+					requested_at,
+					checker_by,
+					checker_at,
+					checker_comment,
+					reason
+				FROM investment.auditactionproposal
+				ORDER BY proposal_id, requested_at DESC
+			),
+			history AS (
+				SELECT
+					proposal_id,
+					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				FROM investment.auditactionproposal
+				GROUP BY proposal_id
+			)
+			SELECT
+				p.proposal_id,
+				p.proposal_name,
+				p.old_proposal_name,
+				p.entity_name,
+				p.old_entity_name,
+				p.total_amount,
+				p.old_total_amount,
+				p.horizon_days,
+				p.old_horizon_days,
+				p.source,
+				p.old_source,
+				p.status,
+				p.old_status,
+				COALESCE(p.batch_id::text,'') AS batch_id,
+				COALESCE(p.is_deleted,false) AS is_deleted,
+				COALESCE(TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
+				COALESCE(TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at,
+				COALESCE(l.actiontype,'') AS action_type,
+				COALESCE(l.processing_status,'') AS processing_status,
+				COALESCE(l.action_id::text,'') AS action_id,
+				COALESCE(l.requested_by,'') AS requested_by,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(l.checker_by,'') AS checker_by,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(l.checker_comment,'') AS checker_comment,
+				COALESCE(l.reason,'') AS reason,
+				COALESCE(h.created_by,'') AS created_by,
+				COALESCE(h.created_at,'') AS created_at_history,
+				COALESCE(h.edited_by,'') AS edited_by,
+				COALESCE(h.edited_at,'') AS edited_at_history,
+				COALESCE(h.deleted_by,'') AS deleted_by,
+				COALESCE(h.deleted_at,'') AS deleted_at
+			FROM investment.investment_proposal p
+			JOIN latest_audit l ON l.proposal_id = p.proposal_id
+			LEFT JOIN history h ON h.proposal_id = p.proposal_id
+			WHERE COALESCE(p.is_deleted,false)=false
+				AND UPPER(p.status)='ACTIVE'
+				AND UPPER(l.processing_status)='APPROVED'
+			ORDER BY l.requested_at DESC NULLS LAST
+		`
+
+		rows, err := pool.Query(ctx, metaSQL)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal meta: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		fields := rows.FieldDescriptions()
+		result := make([]map[string]interface{}, 0, 64)
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read proposal meta")
+				return
+			}
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				key := string(f.Name)
+				switch v := vals[i].(type) {
+				case nil:
+					rec[key] = ""
+				case time.Time:
+					rec[key] = v.Format("2006-01-02 15:04:05")
+				default:
+					rec[key] = v
+				}
+			}
+			result = append(result, rec)
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate proposal meta: "+rows.Err().Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", result)
+	}
+}
+
+// GetProposalDetail returns master-style proposal data plus allocations array.
+func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req ProposalDetailRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		req.ProposalID = strings.TrimSpace(req.ProposalID)
+		if req.ProposalID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "proposal_id is required")
+			return
+		}
+
+		ctx := r.Context()
+		const proposalSQL = `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (proposal_id)
+					proposal_id,
+					actiontype,
+					processing_status,
+					action_id,
+					requested_by,
+					requested_at,
+					checker_by,
+					checker_at,
+					checker_comment,
+					reason
+				FROM investment.auditactionproposal
+				ORDER BY proposal_id, requested_at DESC
+			),
+			history AS (
+				SELECT
+					proposal_id,
+					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				FROM investment.auditactionproposal
+				GROUP BY proposal_id
+			)
+			SELECT
+				p.proposal_id,
+				p.proposal_name,
+				p.old_proposal_name,
+				p.entity_name,
+				p.old_entity_name,
+				p.total_amount,
+				p.old_total_amount,
+				p.horizon_days,
+				p.old_horizon_days,
+				p.source,
+				p.old_source,
+				p.status,
+				p.old_status,
+				COALESCE(p.is_deleted,false) AS is_deleted,
+				COALESCE(p.batch_id::text,'') AS batch_id,
+				COALESCE(TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
+				COALESCE(TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at,
+				COALESCE(l.actiontype,'') AS action_type,
+				COALESCE(l.processing_status,'') AS processing_status,
+				COALESCE(l.action_id::text,'') AS action_id,
+				COALESCE(l.requested_by,'') AS requested_by,
+				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(l.checker_by,'') AS checker_by,
+				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(l.checker_comment,'') AS checker_comment,
+				COALESCE(l.reason,'') AS reason,
+				COALESCE(h.created_by,'') AS created_by,
+				COALESCE(h.created_at,'') AS created_at_history,
+				COALESCE(h.edited_by,'') AS edited_by,
+				COALESCE(h.edited_at,'') AS edited_at_history,
+				COALESCE(h.deleted_by,'') AS deleted_by,
+				COALESCE(h.deleted_at,'') AS deleted_at
+			FROM investment.investment_proposal p
+			LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
+			LEFT JOIN history h ON h.proposal_id = p.proposal_id
+			WHERE p.proposal_id = $1
+		`
+
+		rows, err := pool.Query(ctx, proposalSQL, req.ProposalID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal detail: "+err.Error())
+			return
+		}
+		fields := rows.FieldDescriptions()
+		if !rows.Next() {
+			rows.Close()
+			api.RespondWithError(w, http.StatusNotFound, "proposal not found")
+			return
+		}
+		vals, err := rows.Values()
+		if err != nil {
+			rows.Close()
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read proposal detail")
+			return
+		}
+		proposal := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			key := string(f.Name)
+			switch v := vals[i].(type) {
+			case nil:
+				proposal[key] = ""
+			case time.Time:
+				proposal[key] = v.Format("2006-01-02 15:04:05")
+			default:
+				proposal[key] = v
+			}
+		}
+		rows.Close()
+
+		const allocSQL = `
+			SELECT
+				id,
+				scheme_id,
+				scheme_internal_code,
+				amount,
+				old_amount,
+				percent,
+				old_percent,
+				policy_status,
+				post_trade_holding,
+				old_post_trade_holding,
+				current_holding,
+				old_current_holding
+			FROM investment.investment_proposal_allocation
+			WHERE proposal_id = $1
+			ORDER BY id
+		`
+		allocRows, err := pool.Query(ctx, allocSQL, req.ProposalID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch allocations: "+err.Error())
+			return
+		}
+		allocFields := allocRows.FieldDescriptions()
+		allocations := make([]map[string]interface{}, 0, 8)
+		for allocRows.Next() {
+			vals, err := allocRows.Values()
+			if err != nil {
+				allocRows.Close()
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read allocations")
+				return
+			}
+			rec := make(map[string]interface{}, len(allocFields))
+			for i, f := range allocFields {
+				key := string(f.Name)
+				switch v := vals[i].(type) {
+				case nil:
+					rec[key] = ""
+				case time.Time:
+					rec[key] = v.Format("2006-01-02 15:04:05")
+				default:
+					rec[key] = v
+				}
+			}
+			allocations = append(allocations, rec)
+		}
+		if allocRows.Err() != nil {
+			allocRows.Close()
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate allocations: "+allocRows.Err().Error())
+			return
+		}
+		allocRows.Close()
+
+		payload := map[string]interface{}{
+			"proposal":    proposal,
+			"allocations": allocations,
+		}
+		api.RespondWithPayload(w, true, "", payload)
+	}
+}
+
+// GetEntitySchemeHoldings exposes holdings aggregated per scheme for a given entity
+func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req EntityHoldingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		entityName := strings.TrimSpace(req.EntityName)
+		if entityName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+
+		ctx := r.Context()
+		const holdingsSQL = `
+	WITH base AS (
+		SELECT DISTINCT entity_name, scheme_id, COALESCE(scheme_name,'') AS scheme_name
+		FROM investment.portfolio_onboarding_map
+		WHERE entity_name = $1
+		UNION
+		SELECT DISTINCT entity_name, scheme_id, COALESCE(scheme_name,'') AS scheme_name
+		FROM investment.portfolio_snapshot
+		WHERE entity_name = $1
+	),
+	agg AS (
+		SELECT entity_name,
+		       scheme_id,
+		       COALESCE(scheme_name,'') AS scheme_name,
+		       SUM(total_units) AS total_units,
+		       SUM(current_value) AS current_value,
+		       MAX(created_at) AS last_snapshot_at
+		FROM investment.portfolio_snapshot
+		WHERE entity_name = $1
+		GROUP BY entity_name, scheme_id, scheme_name
+	)
+	SELECT
+		COALESCE(b.scheme_id::text, a.scheme_id::text, '') AS scheme_id,
+		COALESCE(NULLIF(b.scheme_name,''), NULLIF(a.scheme_name,''), COALESCE(ms.scheme_name,'')) AS scheme_name,
+		COALESCE(ms.internal_scheme_code,'') AS scheme_internal_code,
+		COALESCE(a.current_value,0) AS current_holding,
+		COALESCE(a.total_units,0) AS total_units,
+		COALESCE(TO_CHAR(a.last_snapshot_at,'YYYY-MM-DD HH24:MI:SS'),'') AS last_snapshot_at
+	FROM base b
+	LEFT JOIN agg a
+		ON a.entity_name = b.entity_name
+		AND (
+			(a.scheme_id IS NOT DISTINCT FROM b.scheme_id)
+			OR (a.scheme_id IS NULL AND a.scheme_name = b.scheme_name)
+		)
+	LEFT JOIN investment.masterscheme ms
+		ON ms.scheme_id::text = COALESCE(b.scheme_id::text, a.scheme_id::text)
+	WHERE b.entity_name = $1
+	ORDER BY scheme_name`
+
+		rows, err := pool.Query(ctx, holdingsSQL, entityName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch holdings: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		holdings := make([]EntitySchemeHolding, 0, 16)
+		for rows.Next() {
+			var rec EntitySchemeHolding
+			var schemeID sql.NullString
+			var schemeName sql.NullString
+			var internalCode sql.NullString
+			var lastSnapshot sql.NullString
+			if err := rows.Scan(&schemeID, &schemeName, &internalCode, &rec.CurrentHolding, &rec.TotalUnits, &lastSnapshot); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read holdings rows")
+				return
+			}
+			rec.SchemeID = schemeID.String
+			rec.SchemeName = schemeName.String
+			rec.SchemeInternalCode = internalCode.String
+			rec.LastSnapshotAt = lastSnapshot.String
+			holdings = append(holdings, rec)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate holdings rows: "+err.Error())
+			return
+		}
+
+		payload := map[string]interface{}{
+			"entity_name":   entityName,
+			"total_schemes": len(holdings),
+			"holdings":      holdings,
+		}
+		api.RespondWithPayload(w, true, "", payload)
+	}
+}
+func normalizeProposalRequest(req *CreateProposalRequest) {
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.ProposalName = strings.TrimSpace(req.ProposalName)
+	req.EntityName = strings.TrimSpace(req.EntityName)
+	req.Source = defaultString(strings.TrimSpace(req.Source), "Manual")
+	req.Status = defaultString(strings.TrimSpace(req.Status), "Active")
+	req.BatchID = strings.TrimSpace(req.BatchID)
+	req.Reason = strings.TrimSpace(req.Reason)
+	for i := range req.Allocations {
+		req.Allocations[i].SchemeID = strings.TrimSpace(req.Allocations[i].SchemeID)
+		req.Allocations[i].SchemeInternalCode = strings.TrimSpace(req.Allocations[i].SchemeInternalCode)
+	}
+}
+
+func normalizeUpdateProposalRequest(req *UpdateProposalRequest) {
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.ProposalID = strings.TrimSpace(req.ProposalID)
+	req.ProposalName = strings.TrimSpace(req.ProposalName)
+	req.EntityName = strings.TrimSpace(req.EntityName)
+	req.Source = defaultString(strings.TrimSpace(req.Source), "Manual")
+	req.Status = defaultString(strings.TrimSpace(req.Status), "Active")
+	req.BatchID = strings.TrimSpace(req.BatchID)
+	req.Reason = strings.TrimSpace(req.Reason)
+	for i := range req.Allocations {
+		req.Allocations[i].SchemeID = strings.TrimSpace(req.Allocations[i].SchemeID)
+		req.Allocations[i].SchemeInternalCode = strings.TrimSpace(req.Allocations[i].SchemeInternalCode)
+	}
+}
+
+func validateProposalRequest(req *CreateProposalRequest) error {
+	if req.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	if req.ProposalName == "" {
+		return fmt.Errorf("proposal_name is required")
+	}
+	if req.EntityName == "" {
+		return fmt.Errorf("entity_name is required")
+	}
+	if req.TotalAmount <= 0 {
+		return fmt.Errorf("total_amount must be greater than zero")
+	}
+	if len(req.Allocations) == 0 {
+		return fmt.Errorf("at least one allocation is required")
+	}
+	sum := 0.0
+	for idx, alloc := range req.Allocations {
+		if alloc.Amount <= 0 {
+			return fmt.Errorf("allocation at position %d must have amount greater than zero", idx+1)
+		}
+		if alloc.SchemeID == "" && alloc.SchemeInternalCode == "" {
+			return fmt.Errorf("allocation at position %d must provide scheme_id or scheme_internal_code", idx+1)
+		}
+		sum += alloc.Amount
+	}
+	if math.Abs(sum-req.TotalAmount) > amountTolerance {
+		return fmt.Errorf("allocation total %.2f must equal total_amount %.2f", sum, req.TotalAmount)
+	}
+	return nil
+}
+
+func validateUpdateProposalRequest(req *UpdateProposalRequest) error {
+	if req.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	if req.ProposalID == "" {
+		return fmt.Errorf("proposal_id is required")
+	}
+	if req.ProposalName == "" {
+		return fmt.Errorf("proposal_name is required")
+	}
+	if req.EntityName == "" {
+		return fmt.Errorf("entity_name is required")
+	}
+	if req.TotalAmount <= 0 {
+		return fmt.Errorf("total_amount must be greater than zero")
+	}
+	if len(req.Allocations) == 0 {
+		return fmt.Errorf("at least one allocation is required")
+	}
+	sum := 0.0
+	for idx, alloc := range req.Allocations {
+		if alloc.Amount <= 0 {
+			return fmt.Errorf("allocation at position %d must have amount greater than zero", idx+1)
+		}
+		if alloc.SchemeID == "" && alloc.SchemeInternalCode == "" {
+			return fmt.Errorf("allocation at position %d must provide scheme_id or scheme_internal_code", idx+1)
+		}
+		if alloc.AllocationID != nil && *alloc.AllocationID <= 0 {
+			return fmt.Errorf("allocation at position %d has invalid allocation_id", idx+1)
+		}
+		sum += alloc.Amount
+	}
+	if math.Abs(sum-req.TotalAmount) > amountTolerance {
+		return fmt.Errorf("allocation total %.2f must equal total_amount %.2f", sum, req.TotalAmount)
+	}
+	return nil
+}
+
+func resolveUserEmail(userID string) (string, bool) {
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			return s.Email, true
+		}
+	}
+	return "", false
+}
+
+func parseBatchID(batch string) (*uuid.UUID, error) {
+	if batch == "" {
+		return nil, nil
+	}
+	u, err := uuid.Parse(batch)
+	if err != nil {
+		return nil, fmt.Errorf("invalid batch_id format")
+	}
+	return &u, nil
+}
+
+func insertProposal(ctx context.Context, tx pgx.Tx, req *CreateProposalRequest, batchUUID *uuid.UUID) (string, error) {
+	const insertSQL = `
+		INSERT INTO investment.investment_proposal
+			(proposal_name, entity_name, total_amount, horizon_days, source, status, batch_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		RETURNING proposal_id
+	`
+	var horizon interface{}
+	if req.HorizonDays != nil {
+		horizon = *req.HorizonDays
+	}
+	var batch interface{}
+	if batchUUID != nil {
+		batch = *batchUUID
+	}
+	var proposalID string
+	err := tx.QueryRow(ctx, insertSQL,
+		req.ProposalName,
+		req.EntityName,
+		req.TotalAmount,
+		horizon,
+		req.Source,
+		req.Status,
+		batch,
+	).Scan(&proposalID)
+	return proposalID, err
+}
+
+func applyProposalUpdate(ctx context.Context, tx pgx.Tx, req *UpdateProposalRequest, batchUUID *uuid.UUID) error {
+	const updateSQL = `
+		UPDATE investment.investment_proposal
+			SET old_proposal_name=proposal_name,
+				proposal_name=$1,
+				old_entity_name=entity_name,
+				entity_name=$2,
+				old_total_amount=total_amount,
+				total_amount=$3,
+				old_horizon_days=horizon_days,
+				horizon_days=$4,
+				old_source=source,
+				source=$5,
+				old_status=status,
+				status=$6,
+			batch_id=$7,
+			updated_at=now()
+		WHERE proposal_id=$8
+	`
+	var horizon interface{}
+	if req.HorizonDays != nil {
+		horizon = *req.HorizonDays
+	}
+	var batch interface{}
+	if batchUUID != nil {
+		batch = *batchUUID
+	}
+	tag, err := tx.Exec(ctx, updateSQL,
+		req.ProposalName,
+		req.EntityName,
+		req.TotalAmount,
+		horizon,
+		req.Source,
+		req.Status,
+		batch,
+		req.ProposalID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("proposal %s not found", req.ProposalID)
+	}
+	return nil
+}
+
+func insertAllocations(ctx context.Context, tx pgx.Tx, proposalID string, allocations []ProposalAllocationInput) ([]int64, error) {
+	const allocSQL = `
+		INSERT INTO investment.investment_proposal_allocation
+		(proposal_id, scheme_id, scheme_internal_code, amount, percent, policy_status, post_trade_holding, old_post_trade_holding, current_holding, old_current_holding)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		RETURNING id
+	`
+	ids := make([]int64, 0, len(allocations))
+	for _, alloc := range allocations {
+		var schemeID interface{}
+		if alloc.SchemeID != "" {
+			schemeID = alloc.SchemeID
+		}
+		var schemeCode interface{}
+		if alloc.SchemeInternalCode != "" {
+			schemeCode = alloc.SchemeInternalCode
+		}
+		var percent interface{}
+		if alloc.Percent != nil {
+			percent = *alloc.Percent
+		}
+		policyStatus := boolOrDefault(alloc.PolicyStatus, true)
+		postTradeHolding := floatOrZero(alloc.PostTradeHolding)
+		oldPostTradeHolding := floatOrZero(alloc.OldPostTradeHolding)
+		currentHolding := floatOrZero(alloc.CurrentHolding)
+		oldCurrentHolding := floatOrZero(alloc.OldCurrentHolding)
+		var allocationID int64
+		if err := tx.QueryRow(ctx, allocSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, oldPostTradeHolding, currentHolding, oldCurrentHolding).Scan(&allocationID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, allocationID)
+	}
+	return ids, nil
+}
+
+func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, allocations []ProposalAllocationUpsertInput) error {
+	const (
+		fetchSQL  = `SELECT id FROM investment.investment_proposal_allocation WHERE proposal_id=$1`
+		updateSQL = `
+			UPDATE investment.investment_proposal_allocation
+			SET scheme_id=$1,
+				scheme_internal_code=$2,
+				old_amount=amount,
+				amount=$3,
+				old_percent=percent,
+				percent=$4,
+				policy_status=$5,
+				old_post_trade_holding=post_trade_holding,
+				post_trade_holding=$6,
+				old_current_holding=current_holding,
+				current_holding=$7,
+				updated_at=now()
+			WHERE id=$8 AND proposal_id=$9
+		`
+		insertSQL = `
+			INSERT INTO investment.investment_proposal_allocation
+				(proposal_id, scheme_id, scheme_internal_code, amount, percent, policy_status, post_trade_holding, old_post_trade_holding, current_holding, old_current_holding)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			RETURNING id
+		`
+		deleteSQL = `DELETE FROM investment.investment_proposal_allocation WHERE proposal_id=$1 AND id = ANY($2)`
+	)
+
+	rows, err := tx.Query(ctx, fetchSQL, proposalID)
+	if err != nil {
+		return err
+	}
+	existing := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[id] = struct{}{}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, alloc := range allocations {
+		schemeID := nullIfEmpty(alloc.SchemeID)
+		schemeCode := nullIfEmpty(alloc.SchemeInternalCode)
+		var percent interface{}
+		if alloc.Percent != nil {
+			percent = *alloc.Percent
+		}
+		policyStatus := boolOrDefault(alloc.PolicyStatus, true)
+		postTradeHolding := floatOrZero(alloc.PostTradeHolding)
+		currentHolding := floatOrZero(alloc.CurrentHolding)
+
+		if alloc.AllocationID != nil {
+			if _, ok := existing[*alloc.AllocationID]; !ok {
+				return fmt.Errorf("allocation_id %d does not belong to proposal %s", *alloc.AllocationID, proposalID)
+			}
+			tag, err := tx.Exec(ctx, updateSQL, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, currentHolding, *alloc.AllocationID, proposalID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				return fmt.Errorf("failed to update allocation_id %d", *alloc.AllocationID)
+			}
+			delete(existing, *alloc.AllocationID)
+			continue
+		}
+
+		var newID int64
+		if err := tx.QueryRow(ctx, insertSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, floatOrZero(alloc.OldPostTradeHolding), currentHolding, floatOrZero(alloc.OldCurrentHolding)).Scan(&newID); err != nil {
+			return err
+		}
+	}
+
+	if len(existing) > 0 {
+		ids := make([]int64, 0, len(existing))
+		for id := range existing {
+			ids = append(ids, id)
+		}
+		if _, err := tx.Exec(ctx, deleteSQL, proposalID, ids); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func insertProposalAudit(ctx context.Context, tx pgx.Tx, proposalID, requestedBy, reason, actionType, processingStatus string) error {
+	const auditSQL = `
+		INSERT INTO investment.auditactionproposal
+			(proposal_id, actiontype, processing_status, requested_by, requested_at, reason)
+		VALUES ($1,$2,$3,$4,now(),$5)
+	`
+	_, err := tx.Exec(ctx, auditSQL, proposalID, actionType, processingStatus, requestedBy, nullIfEmpty(reason))
+	return err
+}
+
+func defaultString(val, fallback string) string {
+	if val == "" {
+		return fallback
+	}
+	return val
+}
+
+func nullIfEmpty(val string) interface{} {
+	if strings.TrimSpace(val) == "" {
+		return nil
+	}
+	return val
+}
+
+func boolOrDefault(val *bool, fallback bool) bool {
+	if val == nil {
+		return fallback
+	}
+	return *val
+}
+
+func floatOrZero(val *float64) float64 {
+	if val == nil {
+		return 0
+	}
+	return *val
+}
+
+func normalizeBulkActionRequest(req *ProposalBulkActionRequest) {
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.Comment = strings.TrimSpace(req.Comment)
+	req.ProposalIDs = normalizeStringSlice(req.ProposalIDs)
+}
+
+func validateBulkActionRequest(req *ProposalBulkActionRequest) error {
+	if req.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	if len(req.ProposalIDs) == 0 {
+		return fmt.Errorf("proposal_ids are required")
+	}
+	return nil
+}
+
+func normalizeBulkDeleteRequest(req *ProposalBulkDeleteRequest) {
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.Reason = strings.TrimSpace(req.Reason)
+	req.ProposalIDs = normalizeStringSlice(req.ProposalIDs)
+}
+
+func validateBulkDeleteRequest(req *ProposalBulkDeleteRequest) error {
+	if req.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	if len(req.ProposalIDs) == 0 {
+		return fmt.Errorf("proposal_ids are required")
+	}
+	return nil
+}
+
+func gatherProposalIDs(ctx context.Context, tx pgx.Tx, proposalIDs []string) ([]string, []string, error) {
+	ordered := normalizeStringSlice(proposalIDs)
+	if len(ordered) == 0 {
+		return nil, nil, fmt.Errorf("proposal_ids are required")
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT proposal_id
+		FROM investment.investment_proposal
+		WHERE proposal_id = ANY($1)
+	`, ordered)
+	if err != nil {
+		return nil, nil, err
+	}
+	validSet := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		validSet[id] = struct{}{}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	valid := make([]string, 0, len(validSet))
+	invalid := make([]string, 0)
+	for _, id := range ordered {
+		if _, ok := validSet[id]; ok {
+			valid = append(valid, id)
+		} else {
+			invalid = append(invalid, id)
+		}
+	}
+	if len(valid) == 0 {
+		return nil, invalid, fmt.Errorf("no proposals found for provided identifiers")
+	}
+	sort.Strings(invalid)
+	return valid, invalid, nil
+}
+
+func updateAuditStatuses(ctx context.Context, tx pgx.Tx, actionIDs []string, status, checkerBy, comment string) error {
+	if len(actionIDs) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE investment.auditactionproposal
+		SET processing_status=$1,
+			checker_by=$2,
+			checker_at=now(),
+			checker_comment=$3
+		WHERE action_id = ANY($4)
+	`, status, checkerBy, nullIfEmpty(comment), actionIDs)
+	return err
+}
+
+func normalizeStringSlice(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{})
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, exists := seen[v]; exists {
+			continue
+		}
+		seen[v] = struct{}{}
+		result = append(result, v)
+	}
+	return result
+}
+
+func uniqueStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{})
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if _, exists := seen[v]; exists {
+			continue
+		}
+		seen[v] = struct{}{}
+		result = append(result, v)
+	}
+	return result
+}
