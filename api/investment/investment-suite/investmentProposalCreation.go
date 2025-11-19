@@ -4,7 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
-	"database/sql"
+	// "database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
