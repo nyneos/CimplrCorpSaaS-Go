@@ -130,7 +130,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Query to get portfolio snapshots for the entity
 		snapshotQuery := `
-			SELECT 
+			SELECT DISTINCT ON (scheme_id, COALESCE(folio_number, ''), COALESCE(demat_acc_number, ''))
 				id, 
 				batch_id, 
 				entity_name, 
@@ -150,7 +150,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.portfolio_snapshot
 			WHERE entity_name = $1
 				AND COALESCE(total_units, 0) > 0
-			ORDER BY scheme_name, folio_number, demat_acc_number
+			ORDER BY scheme_id, COALESCE(folio_number, ''), COALESCE(demat_acc_number, ''), created_at DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, snapshotQuery, req.EntityName)
