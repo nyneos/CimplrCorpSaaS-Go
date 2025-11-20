@@ -60,7 +60,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				userEmail = s.Email
+				userEmail = s.Name
 				break
 			}
 		}
@@ -158,7 +158,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				userEmail = s.Email
+				userEmail = s.Name
 				break
 			}
 		}
@@ -253,7 +253,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				userEmail = s.Email
+				userEmail = s.Name
 				break
 			}
 		}
@@ -367,7 +367,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				userEmail = s.Email
+				userEmail = s.Name
 				break
 			}
 		}
@@ -486,7 +486,7 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		requestedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				requestedBy = s.Email
+				requestedBy = s.Name
 				break
 			}
 		}
@@ -539,7 +539,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -692,7 +692,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 		checkerBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				checkerBy = s.Email
+				checkerBy = s.Name
 				break
 			}
 		}
@@ -1232,7 +1232,7 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		confirmedBy := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
-				confirmedBy = s.Email
+				confirmedBy = s.Name
 				break
 			}
 		}
