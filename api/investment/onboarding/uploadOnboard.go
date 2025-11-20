@@ -694,12 +694,18 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			log.Printf("[bulk] inserted %d transactions", counts["transactions"])
 		}
 
+	
 		aggQ := `
 WITH scheme_resolved AS (
     SELECT
-        ot.*,
+        ot.batch_id,
+        ot.transaction_date,
+        ot.transaction_type,
+        ot.amount,
+        ot.units,
+        ot.nav,
         mf.entity_name,
-        mf.folio_number,
+        ot.folio_number,
         COALESCE(fsm.scheme_id, ms2.scheme_id) AS scheme_id,
         COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
         COALESCE(ms.isin, ms2.isin) AS isin
@@ -730,36 +736,33 @@ INSERT INTO investment.portfolio_snapshot (
 )
 SELECT
   $1 AS batch_id,
-  entity_name,
-  folio_number,
-  scheme_id,
-  scheme_name,
-  isin,
-  SUM(units) AS total_units,
-  CASE WHEN SUM(units)=0 THEN 0 ELSE SUM(nav * units)/SUM(units) END AS avg_nav,
+  sr.entity_name,
+  sr.folio_number,
+  sr.scheme_id,
+  sr.scheme_name,
+  sr.isin,
+  SUM(sr.units) AS total_units,
+  CASE WHEN SUM(sr.units)=0 THEN 0 ELSE SUM(sr.nav * sr.units)/SUM(sr.units) END AS avg_nav,
   COALESCE(
      (SELECT nav_value 
       FROM investment.amfi_nav_staging an 
-      WHERE an.scheme_name = scheme_name 
+      WHERE an.scheme_name = sr.scheme_name 
       ORDER BY an.nav_date DESC 
       LIMIT 1), 0
   ) AS current_nav,
-  SUM(units) *
+  SUM(sr.units) *
   COALESCE(
      (SELECT nav_value 
       FROM investment.amfi_nav_staging an 
-      WHERE an.scheme_name = scheme_name 
+      WHERE an.scheme_name = sr.scheme_name 
       ORDER BY an.nav_date DESC LIMIT 1), 0
   ) AS current_value,
   0 AS gain_loss,
   NOW()
-FROM scheme_resolved
-GROUP BY entity_name, folio_number, scheme_id, scheme_name, isin;
+FROM scheme_resolved sr
+GROUP BY sr.entity_name, sr.folio_number, sr.scheme_id, sr.scheme_name, sr.isin;
 `
 
-		// Note: pf alias used above should refer to masterfolio; fix with correct aliasing
-		// We'll instead use masterfolio alias directly
-		aggQ = strings.ReplaceAll(aggQ, "pf.", "mf.")
 		if _, err := tx.Exec(ctx, aggQ, batchID); err != nil {
 			log.Printf("[bulk] insert snapshot failed: %v", err)
 			api.RespondWithError(w, 500, "snapshot insert failed: "+err.Error())
