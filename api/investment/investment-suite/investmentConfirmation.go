@@ -650,6 +650,16 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "approve failed: "+err.Error())
 				return
 			}
+
+			// Update investment_confirmation status to CONFIRMED
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_confirmation
+				SET status='CONFIRMED'
+				WHERE confirmation_id = ANY($1)
+			`, toApproveConfirmations); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "update confirmation status failed: "+err.Error())
+				return
+			}
 		}
 
 		if len(toDeleteActionIDs) > 0 {
@@ -676,6 +686,21 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Automatically process confirmed investments (create BUY transactions and refresh snapshots)
+		var confirmResult map[string]any
+		if len(toApproveConfirmations) > 0 {
+			confirmResult, err = processInvestmentConfirmations(pgxPool, ctx, req.UserID, checkerBy, toApproveConfirmations)
+			if err != nil {
+				// Log the error but don't fail the approval - confirmations can be reprocessed manually
+				api.RespondWithPayload(w, true, "Approved but confirmation processing failed: "+err.Error(), map[string]any{
+					"approved_confirmation_ids": toApproveConfirmations,
+					"deleted_confirmations":     deleteMasterIDs,
+					"confirmation_error":        err.Error(),
+				})
+				return
+			}
+		}
+
 		// ensure non-nil slices so JSON marshals [] instead of null
 		if toApproveConfirmations == nil {
 			toApproveConfirmations = []string{}
@@ -684,10 +709,15 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			deleteMasterIDs = []string{}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]any{
+		response := map[string]any{
 			"approved_confirmation_ids": toApproveConfirmations,
 			"deleted_confirmations":     deleteMasterIDs,
-		})
+		}
+		if confirmResult != nil {
+			response["confirmation_processing"] = confirmResult
+		}
+
+		api.RespondWithPayload(w, true, "", response)
 	}
 }
 
@@ -1190,230 +1220,184 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ---------------------------
-// ConfirmInvestment - Process approved confirmations
+// processInvestmentConfirmations - Internal helper to process confirmations
 // ---------------------------
 
-func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID          string   `json:"user_id"`
-			ConfirmationIDs []string `json:"confirmation_ids"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
-			return
-		}
-		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids required")
-			return
-		}
+func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, userID string, confirmedBy string, confirmationIDs []string) (map[string]any, error) {
+	tx, err := pgxPool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tx begin failed: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
-		confirmedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				confirmedBy = s.Name
-				break
-			}
-		}
-		if confirmedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
-			return
-		}
+	// Create batch
+	var batchID string
+	batchInsert := `
+		INSERT INTO investment.onboard_batch (user_id, user_email, source, total_records, status)
+		VALUES ($1, $2, $3, 0, $4)
+		RETURNING batch_id
+	`
+	if err := tx.QueryRow(ctx, batchInsert, userID, confirmedBy, "Investment Confirmation Batch", "IN_PROGRESS").Scan(&batchID); err != nil {
+		return nil, fmt.Errorf("batch creation failed: %w", err)
+	}
 
-		ctx := context.Background()
-		tx, err := pgxPool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
-			return
-		}
-		defer tx.Rollback(ctx)
+	// Fetch confirmation details with related initiation and scheme info
+	query := `
+		SELECT 
+			c.confirmation_id,
+			c.initiation_id,
+			c.nav_date,
+			c.nav,
+			c.allotted_units,
+			c.stamp_duty,
+			c.net_amount,
+			c.status,
+			i.transaction_date,
+			i.entity_name,
+			i.scheme_id,
+			i.folio_id,
+			i.demat_id,
+			i.amount AS initiation_amount,
+			s.scheme_name,
+			s.isin,
+			s.internal_scheme_code,
+			f.folio_number,
+			d.demat_account_number
+		FROM investment.investment_confirmation c
+		JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
+		LEFT JOIN investment.masterscheme s ON s.scheme_id = i.scheme_id
+		LEFT JOIN investment.masterfolio f ON f.folio_id = i.folio_id
+		LEFT JOIN investment.masterdemataccount d ON d.demat_id = i.demat_id
+		WHERE c.confirmation_id = ANY($1)
+			AND c.status = 'CONFIRMED'
+			AND COALESCE(c.is_deleted, false) = false
+	`
 
-		// Get or create a batch_id for these confirmations
-		var batchID string
-		// Use the same onboard_batch columns as uploadOnboard.go: user_id, user_email, source, total_records, status
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO investment.onboard_batch (user_id, user_email, source, total_records, status)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING batch_id
-		`, req.UserID, confirmedBy, "Investment Confirmation Batch", 0, "IN_PROGRESS").Scan(&batchID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Batch creation failed: "+err.Error())
-			return
-		}
+	rows, err := tx.Query(ctx, query, confirmationIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch confirmations failed: %w", err)
+	}
+	defer rows.Close()
 
-		// Fetch confirmation details with related initiation and scheme info
-		query := `
-			SELECT 
-				c.confirmation_id,
-				c.initiation_id,
-				c.nav_date,
-				c.nav,
-				c.allotted_units,
-				c.stamp_duty,
-				c.net_amount,
-				c.status,
-				i.transaction_date,
-				i.entity_name,
-				i.scheme_id,
-				i.folio_id,
-				i.demat_id,
-				i.amount AS initiation_amount,
-				s.scheme_name,
-				s.isin,
-				s.internal_scheme_code,
-				f.folio_number,
-				d.demat_account_number
-			FROM investment.investment_confirmation c
-			JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
-			LEFT JOIN investment.masterscheme s ON s.scheme_id = i.scheme_id
-			LEFT JOIN investment.masterfolio f ON f.folio_id = i.folio_id
-			LEFT JOIN investment.masterdemataccount d ON d.demat_id = i.demat_id
-			WHERE c.confirmation_id = ANY($1)
-				AND c.status IN ('APPROVED', 'PENDING_CONFIRMATION')
-				AND COALESCE(c.is_deleted, false) = false
+	type ConfirmationData struct {
+		ConfirmationID     string
+		InitiationID       string
+		NAVDate            time.Time
+		NAV                float64
+		AllottedUnits      float64
+		StampDuty          float64
+		NetAmount          float64
+		Status             string
+		TransactionDate    time.Time
+		EntityName         string
+		SchemeID           string
+		FolioID            *string
+		DematID            *string
+		InitiationAmount   float64
+		SchemeName         *string
+		ISIN               *string
+		InternalSchemeCode *string
+		FolioNumber        *string
+		DematAccountNumber *string
+	}
+
+	confirmations := []ConfirmationData{}
+	for rows.Next() {
+		var cd ConfirmationData
+		if err := rows.Scan(
+			&cd.ConfirmationID, &cd.InitiationID, &cd.NAVDate, &cd.NAV, &cd.AllottedUnits,
+			&cd.StampDuty, &cd.NetAmount, &cd.Status, &cd.TransactionDate, &cd.EntityName,
+			&cd.SchemeID, &cd.FolioID, &cd.DematID, &cd.InitiationAmount, &cd.SchemeName,
+			&cd.ISIN, &cd.InternalSchemeCode, &cd.FolioNumber, &cd.DematAccountNumber,
+		); err != nil {
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+		confirmations = append(confirmations, cd)
+	}
+
+	if len(confirmations) == 0 {
+		return nil, fmt.Errorf("no confirmed investments found")
+	}
+
+	processedIDs := []string{}
+
+	for _, cd := range confirmations {
+		// Insert transaction into onboard_transaction
+		txInsert := `
+			INSERT INTO investment.onboard_transaction (
+				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
+				amount, units, nav, scheme_id, scheme_name, isin, folio_id, demat_id,
+				scheme_internal_code, entity_name
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		`
 
-		rows, err := tx.Query(ctx, query, req.ConfirmationIDs)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
-			return
-		}
-		defer rows.Close()
-
-		type ConfirmationData struct {
-			ConfirmationID     string
-			InitiationID       string
-			NAVDate            time.Time
-			NAV                float64
-			AllottedUnits      float64
-			StampDuty          float64
-			NetAmount          float64
-			Status             string
-			TransactionDate    time.Time
-			EntityName         string
-			SchemeID           string
-			FolioID            *string
-			DematID            *string
-			InitiationAmount   float64
-			SchemeName         *string
-			ISIN               *string
-			InternalSchemeCode *string
-			FolioNumber        *string
-			DematAccountNumber *string
-		}
-
-		confirmations := []ConfirmationData{}
-		for rows.Next() {
-			var cd ConfirmationData
-			if err := rows.Scan(
-				&cd.ConfirmationID,
-				&cd.InitiationID,
-				&cd.NAVDate,
-				&cd.NAV,
-				&cd.AllottedUnits,
-				&cd.StampDuty,
-				&cd.NetAmount,
-				&cd.Status,
-				&cd.TransactionDate,
-				&cd.EntityName,
-				&cd.SchemeID,
-				&cd.FolioID,
-				&cd.DematID,
-				&cd.InitiationAmount,
-				&cd.SchemeName,
-				&cd.ISIN,
-				&cd.InternalSchemeCode,
-				&cd.FolioNumber,
-				&cd.DematAccountNumber,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
-				return
+		// Resolve folio_number or demat_account_number from IDs
+		var folioNumber, dematAccNumber *string
+		if cd.FolioNumber != nil {
+			folioNumber = cd.FolioNumber
+		} else if cd.FolioID != nil {
+			var fn string
+			_ = tx.QueryRow(ctx, `SELECT folio_number FROM investment.masterfolio WHERE folio_id=$1`, *cd.FolioID).Scan(&fn)
+			if fn != "" {
+				folioNumber = &fn
 			}
-			confirmations = append(confirmations, cd)
 		}
 
-		if len(confirmations) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No confirmable confirmations found")
-			return
+		if cd.DematAccountNumber != nil {
+			dematAccNumber = cd.DematAccountNumber
+		} else if cd.DematID != nil {
+			var da string
+			_ = tx.QueryRow(ctx, `SELECT demat_account_number FROM investment.masterdemataccount WHERE demat_id=$1`, *cd.DematID).Scan(&da)
+			if da != "" {
+				dematAccNumber = &da
+			}
 		}
 
-		processedIDs := []string{}
-
-		for _, cd := range confirmations {
-			// Insert transaction into onboard_transaction
-			insertTxQ := `
-				INSERT INTO investment.onboard_transaction (
-					batch_id,
-					transaction_date,
-					transaction_type,
-					scheme_internal_code,
-					folio_number,
-					demat_acc_number,
-					amount,
-					units,
-					nav,
-					scheme_id,
-					folio_id,
-					demat_id,
-					created_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
-			`
-
-			// Resolve folio_number or demat_account_number from IDs
-			var folioNumber, dematAccNumber *string
-			if cd.FolioID != nil {
-				if cd.FolioNumber != nil {
-					folioNumber = cd.FolioNumber
-				}
-			}
-			if cd.DematID != nil {
-				if cd.DematAccountNumber != nil {
-					dematAccNumber = cd.DematAccountNumber
-				}
-			}
-
-			if _, err := tx.Exec(ctx, insertTxQ,
-				batchID,
-				cd.NAVDate,
-				"BUY", // Confirmation is always a purchase/subscription
-				stringOrNull(cd.InternalSchemeCode),
-				folioNumber,
-				dematAccNumber,
-				cd.NetAmount,
-				cd.AllottedUnits,
-				cd.NAV,
-				cd.SchemeID,
-				cd.FolioID,
-				cd.DematID,
-			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Transaction insert failed: "+err.Error())
-				return
-			}
-
-			// Update confirmation status - no separate audit action needed
-			updateConfQ := `
-				UPDATE investment.investment_confirmation
-				SET status = 'CONFIRMED',
-					confirmed_by = $1,
-					confirmed_at = now(),
-					updated_at = now()
-				WHERE confirmation_id = $2
-			`
-			if _, err := tx.Exec(ctx, updateConfQ, confirmedBy, cd.ConfirmationID); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Confirmation update failed: "+err.Error())
-				return
-			}
-
-			processedIDs = append(processedIDs, cd.ConfirmationID)
+		if _, err := tx.Exec(ctx, txInsert,
+			batchID,
+			cd.NAVDate,
+			"BUY",
+			folioNumber,
+			dematAccNumber,
+			cd.NetAmount,
+			cd.AllottedUnits,
+			cd.NAV,
+			cd.SchemeID,
+			cd.SchemeName,
+			cd.ISIN,
+			cd.FolioID,
+			cd.DematID,
+			cd.InternalSchemeCode,
+			cd.EntityName,
+		); err != nil {
+			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
 
-		// Refresh portfolio snapshot based on the batch transactions
-		// First delete any existing snapshots for this batch
-		if _, err := tx.Exec(ctx, `DELETE FROM investment.portfolio_snapshot WHERE batch_id = $1`, batchID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot cleanup failed: "+err.Error())
-			return
+		// Update confirmation
+		updateConfirm := `
+			UPDATE investment.investment_confirmation
+			SET confirmed_by=$1, confirmed_at=now()
+			WHERE confirmation_id=$2
+		`
+		if _, err := tx.Exec(ctx, updateConfirm, confirmedBy, cd.ConfirmationID); err != nil {
+			return nil, fmt.Errorf("update confirmation failed: %w", err)
 		}
 
-		snapshotQ := `
+		processedIDs = append(processedIDs, cd.ConfirmationID)
+	}
+
+	// Refresh portfolio snapshot
+	deleteSnap := `
+		DELETE FROM investment.portfolio_snapshot
+		WHERE batch_id IN (
+			SELECT DISTINCT batch_id FROM investment.onboard_transaction WHERE batch_id=$1
+		)
+	`
+	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
+		return nil, fmt.Errorf("delete snapshot failed: %w", err)
+	}
+
+	snapshotQ := `
 WITH scheme_resolved AS (
     SELECT
         ot.batch_id,
@@ -1527,43 +1511,79 @@ FROM transaction_summary ts
 LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
 WHERE ts.total_units > 0;
 `
+	if _, err := tx.Exec(ctx, snapshotQ, batchID); err != nil {
+		return nil, fmt.Errorf("rebuild snapshot failed: %w", err)
+	}
 
-		if _, err := tx.Exec(ctx, snapshotQ, batchID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot creation failed: "+err.Error())
+	// Count snapshots created
+	var snapshotCount int64
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCount); err != nil {
+		snapshotCount = 0
+	}
+
+	// Mark batch as completed
+	updateBatch := `
+		UPDATE investment.onboard_batch
+		SET total_records=$1, status='COMPLETED', completed_at=now()
+		WHERE batch_id=$2
+	`
+	if _, err := tx.Exec(ctx, updateBatch, len(processedIDs), batchID); err != nil {
+		return nil, fmt.Errorf("update batch failed: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit failed: %w", err)
+	}
+
+	return map[string]any{
+		"batch_id":           batchID,
+		"confirmed_ids":      processedIDs,
+		"transactions_count": len(processedIDs),
+		"snapshot_count":     snapshotCount,
+		"confirmed_by":       confirmedBy,
+	}, nil
+}
+
+// ---------------------------
+// ConfirmInvestment - Process approved confirmations (Manual endpoint for testing)
+// ---------------------------
+
+func ConfirmInvestment(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			ConfirmationIDs []string `json:"confirmation_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			return
+		}
+		if len(req.ConfirmationIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids required")
 			return
 		}
 
-		// Count snapshots created
-		var snapshotCount int64
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCount); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot count failed: "+err.Error())
+		confirmedBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				confirmedBy = s.Name
+				break
+			}
+		}
+		if confirmedBy == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
 			return
 		}
 
-		// Mark batch as completed and set total_records to number of transactions
-		if _, err := tx.Exec(ctx, `
-			UPDATE investment.onboard_batch
-			SET total_records = (SELECT COUNT(*) FROM investment.onboard_transaction WHERE batch_id=$1),
-				status = 'COMPLETED',
-				completed_at = now()
-			WHERE batch_id = $1
-		`, batchID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to update batch status: "+err.Error())
+		ctx := context.Background()
+
+		result, err := processInvestmentConfirmations(pgxPool, ctx, req.UserID, confirmedBy, req.ConfirmationIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
-			return
-		}
-
-		api.RespondWithPayload(w, true, "", map[string]any{
-			"batch_id":           batchID,
-			"confirmed_ids":      processedIDs,
-			"transactions_count": len(processedIDs),
-			"snapshot_count":     snapshotCount,
-			"confirmed_by":       confirmedBy,
-		})
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
 
