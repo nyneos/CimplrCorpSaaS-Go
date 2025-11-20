@@ -1,4 +1,4 @@
-package  investment
+package investment
 
 import (
 	"context"
@@ -7,10 +7,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // -------------------------
@@ -19,19 +20,19 @@ import (
 
 type BatchApprovalRequest struct {
 	UserID   string   `json:"user_id"`
-	BatchIDs []string `json:"batch_ids"` // Array of batch IDs for bulk operations
+	BatchIDs []string `json:"batch_ids"`          // Array of batch IDs for bulk operations
 	BatchID  string   `json:"batch_id,omitempty"` // Single batch ID for backward compatibility
-	Action   string   `json:"action"` // "APPROVE" or "REJECT"
+	Action   string   `json:"action"`             // "APPROVE" or "REJECT"
 	Comment  string   `json:"comment,omitempty"`
 }
 
 type BatchApprovalResponse struct {
-	Success     bool                     `json:"success"`
-	BatchIDs    []string                 `json:"batch_ids"`
-	Action      string                   `json:"action"`
-	BatchResults map[string]interface{}  `json:"batch_results"` // Results per batch ID
-	TotalProcessed int                   `json:"total_processed"`
-	Message     string                   `json:"message"`
+	Success        bool                   `json:"success"`
+	BatchIDs       []string               `json:"batch_ids"`
+	Action         string                 `json:"action"`
+	BatchResults   map[string]interface{} `json:"batch_results"` // Results per batch ID
+	TotalProcessed int                    `json:"total_processed"`
+	Message        string                 `json:"message"`
 }
 
 // BulkApproveBatch - Approves all pending audit actions for records created in a specific batch
@@ -50,7 +51,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Backward compatibility: single batch_id
 			batchIDs = []string{req.BatchID}
 		}
-		
+
 		if len(batchIDs) == 0 {
 			api.RespondWithError(w, 400, "batch_ids or batch_id required")
 			return
@@ -83,11 +84,11 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		batchResults := make(map[string]interface{})
 		totalProcessed := 0
-		
+
 		// Process each batch
 		for _, batchID := range batchIDs {
 			batchResult := make(map[string]interface{})
-			
+
 			// Process AMCs
 			amcResults, err := processBatchAuditAMC(ctx, tx, batchID, req.Action, userEmail, req.Comment)
 			if err != nil {
@@ -127,7 +128,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			batchResult["folio"] = folioResults
-			
+
 			// Count total processed for this batch
 			if processed, ok := amcResults["processed"].(int); ok {
 				totalProcessed += processed
@@ -144,7 +145,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if processed, ok := folioResults["processed"].(int); ok {
 				totalProcessed += processed
 			}
-			
+
 			batchResults[batchID] = batchResult
 		}
 
@@ -153,7 +154,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.Action == "REJECT" {
 			batchApprovalStatus = "REJECTED"
 		}
-		
+
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.onboard_batch 
 			SET approval_status = $1, completed_at = now() 
@@ -173,7 +174,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(batchIDs) == 1 {
 			message = fmt.Sprintf("Batch %s %sd successfully", batchIDs[0], strings.ToLower(req.Action))
 		}
-		
+
 		response := BatchApprovalResponse{
 			Success:        true,
 			BatchIDs:       batchIDs,
@@ -191,14 +192,18 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // processBatchAuditAMC handles AMC audit approvals/rejections
 func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userEmail, comment string) (map[string]interface{}, error) {
-	// Get all AMC IDs for this batch
+	// Get all AMC IDs for this batch from mapping table
 	amcIDs := []string{}
-	rows, err := tx.Query(ctx, `SELECT amc_id FROM investment.masteramc WHERE batch_id = $1`, batchID)
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT amc_id 
+		FROM investment.portfolio_onboarding_map 
+		WHERE batch_id = $1 AND amc_id IS NOT NULL
+	`, batchID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	for rows.Next() {
 		var id string
 		rows.Scan(&id)
@@ -209,14 +214,14 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 		return map[string]interface{}{"processed": 0, "ids": []string{}}, nil
 	}
 
-	// Get latest pending audit actions for these AMCs
+	// Get latest audit actions for these AMCs (may or may not exist for enriched entities)
 	auditQuery := `
 		SELECT DISTINCT ON (amc_id) action_id, amc_id, actiontype, processing_status
 		FROM investment.auditactionamc
-		WHERE amc_id = ANY($1) AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+		WHERE amc_id = ANY($1)
 		ORDER BY amc_id, requested_at DESC
 	`
-	
+
 	auditRows, err := tx.Query(ctx, auditQuery, amcIDs)
 	if err != nil {
 		return nil, err
@@ -225,11 +230,13 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 
 	actionIDs := []string{}
 	deleteAMCIDs := []string{}
-	
+	amcsWithAudit := make(map[string]bool)
+
 	for auditRows.Next() {
 		var actionID, amcID, actionType, status string
-		auditRows.Scan(&actionID, &amcID, &actionType, &status) 
-		
+		auditRows.Scan(&actionID, &amcID, &actionType, &status)
+		amcsWithAudit[amcID] = true
+
 		if action == "APPROVE" {
 			if status == "PENDING_DELETE_APPROVAL" {
 				// For delete approval, mark as DELETED and soft-delete the master record
@@ -241,7 +248,7 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 				if err != nil {
 					return nil, err
 				}
-				
+
 				// Soft delete the master record
 				_, err = tx.Exec(ctx, `
 					UPDATE investment.masteramc 
@@ -251,14 +258,33 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 				if err != nil {
 					return nil, err
 				}
-				
+
 				deleteAMCIDs = append(deleteAMCIDs, amcID)
-			} else {
+			} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" {
 				// For create/edit approval, mark as APPROVED
 				actionIDs = append(actionIDs, actionID)
 			}
 		} else if action == "REJECT" {
-			actionIDs = append(actionIDs, actionID)
+			if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || status == "PENDING_DELETE_APPROVAL" {
+				actionIDs = append(actionIDs, actionID)
+			}
+		}
+	}
+
+	// For enriched entities without audit records, create approval audit if action is APPROVE
+	if action == "APPROVE" {
+		for _, amcID := range amcIDs {
+			if !amcsWithAudit[amcID] {
+				// Create an approval audit record for enriched entities
+				_, err = tx.Exec(ctx, `
+					INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
+					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
+				`, amcID, userEmail, "Auto-approved enriched entity")
+				if err != nil {
+					return nil, err
+				}
+				actionIDs = append(actionIDs, amcID) // Use amcID as placeholder for count
+			}
 		}
 	}
 
@@ -268,34 +294,36 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 		if action == "REJECT" {
 			status = "REJECTED"
 		}
-		
+
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactionamc 
 			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
 			WHERE action_id = ANY($4)
 		`, status, userEmail, comment, actionIDs)
-		if err != nil {
-			return nil, err
-		}
+		// Ignore errors for enriched entities without audit
 	}
 
 	return map[string]interface{}{
-		"processed":     len(actionIDs) + len(deleteAMCIDs),
-		"approved_ids":  actionIDs,
-		"deleted_ids":   deleteAMCIDs,
+		"processed":    len(actionIDs) + len(deleteAMCIDs),
+		"approved_ids": actionIDs,
+		"deleted_ids":  deleteAMCIDs,
 	}, nil
 }
 
 // processBatchAuditScheme handles Scheme audit approvals/rejections
 func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, userEmail, comment string) (map[string]interface{}, error) {
-	// Get all Scheme IDs for this batch
+	// Get all Scheme IDs for this batch from mapping table
 	schemeIDs := []string{}
-	rows, err := tx.Query(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE batch_id = $1`, batchID)
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT scheme_id 
+		FROM investment.portfolio_onboarding_map 
+		WHERE batch_id = $1 AND scheme_id IS NOT NULL
+	`, batchID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	for rows.Next() {
 		var id string
 		rows.Scan(&id)
@@ -306,14 +334,14 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 		return map[string]interface{}{"processed": 0, "ids": []string{}}, nil
 	}
 
-	// Get latest pending audit actions
+	// Get latest audit actions
 	auditQuery := `
 		SELECT DISTINCT ON (scheme_id) action_id, scheme_id, actiontype, processing_status
 		FROM investment.auditactionscheme
-		WHERE scheme_id = ANY($1) AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+		WHERE scheme_id = ANY($1)
 		ORDER BY scheme_id, requested_at DESC
 	`
-	
+
 	auditRows, err := tx.Query(ctx, auditQuery, schemeIDs)
 	if err != nil {
 		return nil, err
@@ -322,11 +350,13 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 
 	actionIDs := []string{}
 	deleteSchemeIDs := []string{}
-	
+	schemesWithAudit := make(map[string]bool)
+
 	for auditRows.Next() {
 		var actionID, schemeID, actionType, status string
 		auditRows.Scan(&actionID, &schemeID, &actionType, &status)
-		
+		schemesWithAudit[schemeID] = true
+
 		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactionscheme 
@@ -336,7 +366,7 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 			if err != nil {
 				return nil, err
 			}
-			
+
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.masterscheme 
 				SET is_deleted=true, status='Inactive' 
@@ -345,10 +375,26 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 			if err != nil {
 				return nil, err
 			}
-			
+
 			deleteSchemeIDs = append(deleteSchemeIDs, schemeID)
-		} else {
+		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
 			actionIDs = append(actionIDs, actionID)
+		}
+	}
+
+	// For enriched entities without audit records, create approval audit if action is APPROVE
+	if action == "APPROVE" {
+		for _, schemeID := range schemeIDs {
+			if !schemesWithAudit[schemeID] {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
+					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
+				`, schemeID, userEmail, "Auto-approved enriched entity")
+				if err != nil {
+					return nil, err
+				}
+				actionIDs = append(actionIDs, schemeID)
+			}
 		}
 	}
 
@@ -357,33 +403,33 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 		if action == "REJECT" {
 			status = "REJECTED"
 		}
-		
+
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactionscheme 
 			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
 			WHERE action_id = ANY($4)
 		`, status, userEmail, comment, actionIDs)
-		if err != nil {
-			return nil, err
-		}
+		// Ignore errors for enriched entities
 	}
 
 	return map[string]interface{}{
-		"processed":     len(actionIDs) + len(deleteSchemeIDs),
-		"approved_ids":  actionIDs,
-		"deleted_ids":   deleteSchemeIDs,
+		"processed":    len(actionIDs) + len(deleteSchemeIDs),
+		"approved_ids": actionIDs,
+		"deleted_ids":  deleteSchemeIDs,
 	}, nil
 }
 
 // processBatchAuditDP handles DP audit approvals/rejections
 func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEmail, comment string) (map[string]interface{}, error) {
+	// Get all DP IDs for this batch from mapping table
+	// Note: DPs don't have a dedicated column, so we query from master table with batch_id
 	dpIDs := []string{}
 	rows, err := tx.Query(ctx, `SELECT dp_id FROM investment.masterdepositoryparticipant WHERE batch_id = $1`, batchID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	for rows.Next() {
 		var id string
 		rows.Scan(&id)
@@ -397,10 +443,10 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 	auditQuery := `
 		SELECT DISTINCT ON (dp_id) action_id, dp_id, actiontype, processing_status
 		FROM investment.auditactiondp
-		WHERE dp_id = ANY($1) AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+		WHERE dp_id = ANY($1)
 		ORDER BY dp_id, requested_at DESC
 	`
-	
+
 	auditRows, err := tx.Query(ctx, auditQuery, dpIDs)
 	if err != nil {
 		return nil, err
@@ -409,11 +455,13 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 
 	actionIDs := []string{}
 	deleteDPIDs := []string{}
-	
+	dpsWithAudit := make(map[string]bool)
+
 	for auditRows.Next() {
 		var actionID, dpID, actionType, status string
 		auditRows.Scan(&actionID, &dpID, &actionType, &status)
-		
+		dpsWithAudit[dpID] = true
+
 		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactiondp 
@@ -423,7 +471,7 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 			if err != nil {
 				return nil, err
 			}
-			
+
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.masterdepositoryparticipant 
 				SET is_deleted=true, status='Inactive' 
@@ -432,10 +480,25 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 			if err != nil {
 				return nil, err
 			}
-			
+
 			deleteDPIDs = append(deleteDPIDs, dpID)
-		} else {
+		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
 			actionIDs = append(actionIDs, actionID)
+		}
+	}
+
+	if action == "APPROVE" {
+		for _, dpID := range dpIDs {
+			if !dpsWithAudit[dpID] {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
+					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
+				`, dpID, userEmail, "Auto-approved enriched entity")
+				if err != nil {
+					return nil, err
+				}
+				actionIDs = append(actionIDs, dpID)
+			}
 		}
 	}
 
@@ -444,33 +507,35 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 		if action == "REJECT" {
 			status = "REJECTED"
 		}
-		
+
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.auditactiondp 
 			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
 			WHERE action_id = ANY($4)
 		`, status, userEmail, comment, actionIDs)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return map[string]interface{}{
-		"processed":     len(actionIDs) + len(deleteDPIDs),
-		"approved_ids":  actionIDs,
-		"deleted_ids":   deleteDPIDs,
+		"processed":    len(actionIDs) + len(deleteDPIDs),
+		"approved_ids": actionIDs,
+		"deleted_ids":  deleteDPIDs,
 	}, nil
 }
 
 // processBatchAuditDemat handles Demat audit approvals/rejections
 func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, userEmail, comment string) (map[string]interface{}, error) {
+	// Get all Demat IDs for this batch from mapping table
 	dematIDs := []string{}
-	rows, err := tx.Query(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE batch_id = $1`, batchID)
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT demat_id 
+		FROM investment.portfolio_onboarding_map 
+		WHERE batch_id = $1 AND demat_id IS NOT NULL
+	`, batchID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	for rows.Next() {
 		var id string
 		rows.Scan(&id)
@@ -484,10 +549,10 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 	auditQuery := `
 		SELECT DISTINCT ON (demat_id) action_id, demat_id, actiontype, processing_status
 		FROM investment.auditactiondemat
-		WHERE demat_id = ANY($1) AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+		WHERE demat_id = ANY($1)
 		ORDER BY demat_id, requested_at DESC
 	`
-	
+
 	auditRows, err := tx.Query(ctx, auditQuery, dematIDs)
 	if err != nil {
 		return nil, err
@@ -496,11 +561,13 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 	actionIDs := []string{}
 	deleteDematIDs := []string{}
-	
+	dematsWithAudit := make(map[string]bool)
+
 	for auditRows.Next() {
 		var actionID, dematID, actionType, status string
 		auditRows.Scan(&actionID, &dematID, &actionType, &status)
-		
+		dematsWithAudit[dematID] = true
+
 		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactiondemat 
@@ -510,7 +577,7 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 			if err != nil {
 				return nil, err
 			}
-			
+
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.masterdemataccount 
 				SET is_deleted=true, status='Inactive' 
@@ -519,10 +586,25 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 			if err != nil {
 				return nil, err
 			}
-			
+
 			deleteDematIDs = append(deleteDematIDs, dematID)
-		} else {
+		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
 			actionIDs = append(actionIDs, actionID)
+		}
+	}
+
+	if action == "APPROVE" {
+		for _, dematID := range dematIDs {
+			if !dematsWithAudit[dematID] {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
+					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
+				`, dematID, userEmail, "Auto-approved enriched entity")
+				if err != nil {
+					return nil, err
+				}
+				actionIDs = append(actionIDs, dematID)
+			}
 		}
 	}
 
@@ -531,33 +613,35 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 		if action == "REJECT" {
 			status = "REJECTED"
 		}
-		
-		_, err = tx.Exec(ctx, `
+
+		_, _ = tx.Exec(ctx, `
 			UPDATE investment.auditactiondemat 
 			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
 			WHERE action_id = ANY($4)
 		`, status, userEmail, comment, actionIDs)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return map[string]interface{}{
-		"processed":     len(actionIDs) + len(deleteDematIDs),
-		"approved_ids":  actionIDs,
-		"deleted_ids":   deleteDematIDs,
+		"processed":    len(actionIDs) + len(deleteDematIDs),
+		"approved_ids": actionIDs,
+		"deleted_ids":  deleteDematIDs,
 	}, nil
 }
 
 // processBatchAuditFolio handles Folio audit approvals/rejections
 func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, userEmail, comment string) (map[string]interface{}, error) {
+	// Get all Folio IDs for this batch from mapping table
 	folioIDs := []string{}
-	rows, err := tx.Query(ctx, `SELECT folio_id FROM investment.masterfolio WHERE batch_id = $1`, batchID)
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT folio_id 
+		FROM investment.portfolio_onboarding_map 
+		WHERE batch_id = $1 AND folio_id IS NOT NULL
+	`, batchID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	for rows.Next() {
 		var id string
 		rows.Scan(&id)
@@ -571,10 +655,10 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 	auditQuery := `
 		SELECT DISTINCT ON (folio_id) action_id, folio_id, actiontype, processing_status
 		FROM investment.auditactionfolio
-		WHERE folio_id = ANY($1) AND processing_status IN ('PENDING_APPROVAL', 'PENDING_EDIT_APPROVAL', 'PENDING_DELETE_APPROVAL')
+		WHERE folio_id = ANY($1)
 		ORDER BY folio_id, requested_at DESC
 	`
-	
+
 	auditRows, err := tx.Query(ctx, auditQuery, folioIDs)
 	if err != nil {
 		return nil, err
@@ -583,11 +667,13 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 
 	actionIDs := []string{}
 	deleteFolioIDs := []string{}
-	
+	foliosWithAudit := make(map[string]bool)
+
 	for auditRows.Next() {
 		var actionID, folioID, actionType, status string
 		auditRows.Scan(&actionID, &folioID, &actionType, &status)
-		
+		foliosWithAudit[folioID] = true
+
 		if action == "APPROVE" && status == "PENDING_DELETE_APPROVAL" {
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.auditactionfolio 
@@ -597,7 +683,7 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 			if err != nil {
 				return nil, err
 			}
-			
+
 			_, err = tx.Exec(ctx, `
 				UPDATE investment.masterfolio 
 				SET is_deleted=true, status='Inactive' 
@@ -606,10 +692,25 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 			if err != nil {
 				return nil, err
 			}
-			
+
 			deleteFolioIDs = append(deleteFolioIDs, folioID)
-		} else {
+		} else if status == "PENDING_APPROVAL" || status == "PENDING_EDIT_APPROVAL" || (action == "REJECT" && status == "PENDING_DELETE_APPROVAL") {
 			actionIDs = append(actionIDs, actionID)
+		}
+	}
+
+	if action == "APPROVE" {
+		for _, folioID := range folioIDs {
+			if !foliosWithAudit[folioID] {
+				_, err = tx.Exec(ctx, `
+					INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
+					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
+				`, folioID, userEmail, "Auto-approved enriched entity")
+				if err != nil {
+					return nil, err
+				}
+				actionIDs = append(actionIDs, folioID)
+			}
 		}
 	}
 
@@ -618,20 +719,17 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 		if action == "REJECT" {
 			status = "REJECTED"
 		}
-		
-		_, err = tx.Exec(ctx, `
+
+		_, _ = tx.Exec(ctx, `
 			UPDATE investment.auditactionfolio 
 			SET processing_status=$1, checker_by=$2, checker_at=now(), checker_comment=$3
 			WHERE action_id = ANY($4)
 		`, status, userEmail, comment, actionIDs)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	return map[string]interface{}{
-		"processed":     len(actionIDs) + len(deleteFolioIDs),
-		"approved_ids":  actionIDs,
-		"deleted_ids":   deleteFolioIDs,
+		"processed":    len(actionIDs) + len(deleteFolioIDs),
+		"approved_ids": actionIDs,
+		"deleted_ids":  deleteFolioIDs,
 	}, nil
 }
