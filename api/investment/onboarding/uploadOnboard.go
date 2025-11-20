@@ -3,7 +3,8 @@ package investment
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
-	"context"
+
+	// "context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -92,6 +94,7 @@ type TxCSVRow struct {
 	TransactionType    string
 	SchemeInternalCode string
 	FolioNumber        string
+	DematAccNumber     string
 	Amount             float64
 	Units              float64
 	Nav                float64
@@ -150,20 +153,32 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 		if len(rec) < 7 {
 			return nil, fmt.Errorf("csv: expected >=7 cols, got %d", len(rec))
 		}
-		// parse date flexible formats
-		var dt time.Time
+		// parse date using NormalizeDate
 		dtStr := strings.TrimSpace(rec[0])
-		dt, err = time.Parse("2006-01-02", dtStr)
+		normalizedDate, err := NormalizeDate(dtStr)
 		if err != nil {
-			dt, err = time.Parse("02/01/2006", dtStr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid date %s", dtStr)
-			}
+			return nil, fmt.Errorf("invalid date %s: %v", dtStr, err)
 		}
-		amount, _ := strconv.ParseFloat(strings.TrimSpace(rec[4]), 64)
-		units, _ := strconv.ParseFloat(strings.TrimSpace(rec[5]), 64)
-		nav, _ := strconv.ParseFloat(strings.TrimSpace(rec[6]), 64)
-		rows = append(rows, TxCSVRow{TransactionDate: dt, TransactionType: strings.TrimSpace(rec[1]), SchemeInternalCode: strings.TrimSpace(rec[2]), FolioNumber: strings.TrimSpace(rec[3]), Amount: amount, Units: units, Nav: nav})
+		dt, err := time.Parse("2006-01-02", normalizedDate)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse normalized date %s: %v", normalizedDate, err)
+		}
+		// Handle both folio and demat (8 cols) or just folio (7 cols)
+		folioNumber := strings.TrimSpace(rec[3])
+		dematAccNumber := ""
+		amountIdx := 4
+		if len(rec) >= 8 {
+			dematAccNumber = strings.TrimSpace(rec[4])
+			amountIdx = 5
+		}
+		// Validate: either folio or demat must be present
+		if folioNumber == "" && dematAccNumber == "" {
+			return nil, fmt.Errorf("either folio_number or demat_acc_number must be provided")
+		}
+		amount, _ := strconv.ParseFloat(strings.TrimSpace(rec[amountIdx]), 64)
+		units, _ := strconv.ParseFloat(strings.TrimSpace(rec[amountIdx+1]), 64)
+		nav, _ := strconv.ParseFloat(strings.TrimSpace(rec[amountIdx+2]), 64)
+		rows = append(rows, TxCSVRow{TransactionDate: dt, TransactionType: strings.TrimSpace(rec[1]), SchemeInternalCode: strings.TrimSpace(rec[2]), FolioNumber: folioNumber, DematAccNumber: dematAccNumber, Amount: amount, Units: units, Nav: nav})
 	}
 	return rows, nil
 }
@@ -319,24 +334,32 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		log.Printf("[bulk] starting AMC processing, found %d AMCs", len(amcs))
 		for i, a := range amcs {
 			log.Printf("[bulk] processing amc[%d]: %+v", i, a)
-			if a.Enriched && a.AmcID != "" {
-				log.Printf("[bulk] amc[%d] is enriched, skipping insert", i)
-				amcMap[defaultIfEmpty(a.InternalAmcCode, a.AmcName)] = a.AmcID
-				continue
-			}
 			// lookup by internal code or name
 			var existing string
 			if a.InternalAmcCode != "" {
 				log.Printf("[bulk] amc[%d] checking existing by internal_code: %s", i, a.InternalAmcCode)
 				_ = tx.QueryRow(ctx, `SELECT amc_id FROM investment.masteramc WHERE internal_amc_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, a.InternalAmcCode).Scan(&existing)
 			}
-			if existing == "" {
+			if existing == "" && a.AmcName != "" {
 				log.Printf("[bulk] amc[%d] checking existing by name: %s", i, a.AmcName)
 				_ = tx.QueryRow(ctx, `SELECT amc_id FROM investment.masteramc WHERE amc_name=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, a.AmcName).Scan(&existing)
 			}
 			if existing != "" {
 				log.Printf("[bulk] amc[%d] found existing: %s", i, existing)
 				amcMap[defaultIfEmpty(a.InternalAmcCode, a.AmcName)] = existing
+				// Create mapping entry instead of updating batch_id
+				_, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, amc_id) VALUES ($1, $2)`, batchID, existing)
+				if err != nil {
+					log.Printf("[bulk] amc[%d] mapping insert failed: %v", i, err)
+					api.RespondWithError(w, 500, "amc mapping failed: "+err.Error())
+					return
+				}
+				log.Printf("[bulk] amc[%d] created mapping for existing entity", i)
+				// If enriched, don't create audit record
+				if a.Enriched {
+					continue
+				}
+				// Otherwise, treat as duplicate
 				continue
 			}
 			// insert
@@ -362,6 +385,12 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			log.Printf("[bulk] inserted amc[%d] %s (%s) with batch_id %s", i, amcID, a.AmcName, batchID)
+			// Create mapping entry
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, amc_id) VALUES ($1, $2)`, batchID, amcID); err != nil {
+				log.Printf("[bulk] amc[%d] mapping insert failed: %v", i, err)
+				api.RespondWithError(w, 500, "amc mapping failed: "+err.Error())
+				return
+			}
 			// audit
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, amcID, userEmail); err != nil {
 				log.Printf("[bulk] audit amc[%d] insert failed: %v", i, err)
@@ -378,22 +407,33 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process DP
 		for _, d := range dps {
 			log.Printf("[bulk] processing dp: %+v", d)
-			if d.Enriched && d.DPID != "" {
-				dpMap[d.DPCode] = d.DPID
-				continue
-			}
 			var existing string
 			if d.DPCode != "" {
 				_ = tx.QueryRow(ctx, `SELECT dp_id FROM investment.masterdepositoryparticipant WHERE dp_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, d.DPCode).Scan(&existing)
 			}
 			if existing != "" {
 				dpMap[d.DPCode] = existing
+				// Create mapping entry
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name) VALUES ($1, $2)`, batchID, d.DPName); err != nil {
+					log.Printf("[bulk] dp mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "dp mapping failed: "+err.Error())
+					return
+				}
+				if d.Enriched {
+					continue
+				}
 				continue
 			}
 			var dpID string
 			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterdepositoryparticipant (dp_name, dp_code, depository, status, source, batch_id) VALUES ($1,$2,$3,$4,'Manual',$5) RETURNING dp_id`, d.DPName, d.DPCode, defaultIfEmpty(d.Depository, "NSDL"), defaultIfEmpty(d.Status, "Active"), batchID).Scan(&dpID); err != nil {
 				log.Printf("[bulk] insert dp failed: %v", err)
 				api.RespondWithError(w, 500, "insert dp failed: "+err.Error())
+				return
+			}
+			// Create mapping entry
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name) VALUES ($1, $2)`, batchID, d.DPName); err != nil {
+				log.Printf("[bulk] dp mapping insert failed: %v", err)
+				api.RespondWithError(w, 500, "dp mapping failed: "+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, dpID, userEmail); err != nil {
@@ -408,22 +448,33 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process Demat
 		for _, dm := range demats {
 			log.Printf("[bulk] processing demat: %+v", dm)
-			if dm.Enriched && dm.DematID != "" {
-				dematMap[dm.DematAccountNumber] = dm.DematID
-				continue
-			}
 			var existing string
 			if dm.DematAccountNumber != "" {
 				_ = tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, dm.DematAccountNumber).Scan(&existing)
 			}
 			if existing != "" {
 				dematMap[dm.DematAccountNumber] = existing
+				// Create mapping entry
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, demat_id) VALUES ($1, $2, $3)`, batchID, dm.EntityName, existing); err != nil {
+					log.Printf("[bulk] demat mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "demat mapping failed: "+err.Error())
+					return
+				}
+				if dm.Enriched {
+					continue
+				}
 				continue
 			}
 			var dematID string
 			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterdemataccount (entity_name, dp_id, depository, demat_account_number, depository_participant, client_id, default_settlement_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual',$9) RETURNING demat_id`, dm.EntityName, dm.DPID, defaultIfEmpty(dm.Depository, "NSDL"), dm.DematAccountNumber, dm.DepositoryParticipant, dm.ClientID, defaultIfEmpty(dm.DefaultSettlementAccount, "SYSTEM"), defaultIfEmpty(dm.Status, "Active"), batchID).Scan(&dematID); err != nil {
 				log.Printf("[bulk] insert demat failed: %v", err)
 				api.RespondWithError(w, 500, "insert demat failed: "+err.Error())
+				return
+			}
+			// Create mapping entry
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, demat_id) VALUES ($1, $2, $3)`, batchID, dm.EntityName, dematID); err != nil {
+				log.Printf("[bulk] demat mapping insert failed: %v", err)
+				api.RespondWithError(w, 500, "demat mapping failed: "+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, dematID, userEmail); err != nil {
@@ -439,21 +490,58 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, f := range folios {
 			log.Printf("[bulk] processing folio: %+v", f)
 			if f.Enriched && f.FolioID != "" {
+				log.Printf("[bulk] folio is enriched with ID, using: %s", f.FolioID)
 				folioMap[f.FolioNumber] = f.FolioID
+				// Create mapping entry
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, f.FolioID, f.FolioNumber); err != nil {
+					log.Printf("[bulk] folio mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+					return
+				}
 				continue
 			}
+			// Resolve amc_name if empty - try to lookup from entity_name or use a default
+			folioAmcName := f.AmcName
+			if folioAmcName == "" {
+				// Try to find an AMC for this entity or use first available
+				for amcKey, _ := range amcMap {
+					folioAmcName = amcKey
+					break
+				}
+				if folioAmcName == "" {
+					folioAmcName = "Unknown AMC"
+				}
+				log.Printf("[bulk] folio amc_name was empty, using: %s", folioAmcName)
+			}
 			var existing string
-			if f.FolioNumber != "" {
-				_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND amc_name=$3 AND COALESCE(is_deleted,false)=false LIMIT 1`, f.FolioNumber, f.EntityName, f.AmcName).Scan(&existing)
+			if f.FolioNumber != "" && f.EntityName != "" {
+				log.Printf("[bulk] folio checking existing: folio=%s, entity=%s, amc=%s", f.FolioNumber, f.EntityName, folioAmcName)
+				_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 AND COALESCE(is_deleted,false)=false LIMIT 1`, f.FolioNumber, f.EntityName).Scan(&existing)
 			}
 			if existing != "" {
+				log.Printf("[bulk] folio found existing: %s", existing)
 				folioMap[f.FolioNumber] = existing
+				// Create mapping entry
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, existing, f.FolioNumber); err != nil {
+					log.Printf("[bulk] folio mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+					return
+				}
+				if f.Enriched {
+					continue
+				}
 				continue
 			}
 			var folioID string
-			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterfolio (entity_name, amc_name, folio_number, first_holder_name, default_subscription_account, default_redemption_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING folio_id`, f.EntityName, f.AmcName, f.FolioNumber, f.FirstHolderName, defaultIfEmpty(f.DefaultSubscriptionAccount, "SYSTEM"), defaultIfEmpty(f.DefaultRedemptionAccount, "SYSTEM"), defaultIfEmpty(f.Status, "Active"), batchID).Scan(&folioID); err != nil {
+			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterfolio (entity_name, amc_name, folio_number, first_holder_name, default_subscription_account, default_redemption_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING folio_id`, f.EntityName, folioAmcName, f.FolioNumber, f.FirstHolderName, defaultIfEmpty(f.DefaultSubscriptionAccount, "SYSTEM"), defaultIfEmpty(f.DefaultRedemptionAccount, "SYSTEM"), defaultIfEmpty(f.Status, "Active"), batchID).Scan(&folioID); err != nil {
 				log.Printf("[bulk] insert folio failed: %v", err)
 				api.RespondWithError(w, 500, "insert folio failed: "+err.Error())
+				return
+			}
+			// Create mapping entry for new folio
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, folioID, f.FolioNumber); err != nil {
+				log.Printf("[bulk] folio mapping insert failed: %v", err)
+				api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, folioID, userEmail); err != nil {
@@ -483,19 +571,54 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process Schemes (after AMCs so amc exists)
 		for _, s := range schemes {
 			log.Printf("[bulk] processing scheme: %+v", s)
-			if s.Enriched && s.SchemeID != "" {
-				schemeMap[s.InternalSchemeCode] = s.SchemeID
-				continue
-			}
 			var existing string
+
+			// For enriched entities, look up by name and amc first
+			if s.Enriched && s.SchemeName != "" {
+				log.Printf("[bulk] scheme is enriched, looking up by name: %s (amc: %s)", s.SchemeName, s.AmcName)
+				if s.AmcName != "" {
+					_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE scheme_name=$1 AND amc_name=$2 AND COALESCE(is_deleted,false)=false LIMIT 1`, s.SchemeName, s.AmcName).Scan(&existing)
+				} else {
+					_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE scheme_name=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, s.SchemeName).Scan(&existing)
+				}
+				if existing != "" {
+					log.Printf("[bulk] scheme found enriched entity: %s", existing)
+					schemeMap[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = existing
+					// Create mapping entry for enriched scheme
+					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, existing, s.SchemeName); err != nil {
+						log.Printf("[bulk] scheme mapping insert failed: %v", err)
+						api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+						return
+					}
+					continue
+				}
+			}
+
+			// lookup by internal code, isin, or name
 			if s.InternalSchemeCode != "" {
+				log.Printf("[bulk] scheme checking existing by internal_code: %s", s.InternalSchemeCode)
 				_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, s.InternalSchemeCode).Scan(&existing)
 			}
-			if existing == "" {
+			if existing == "" && s.ISIN != "" {
+				log.Printf("[bulk] scheme checking existing by isin: %s", s.ISIN)
 				_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, s.ISIN).Scan(&existing)
 			}
+			if existing == "" && s.SchemeName != "" {
+				log.Printf("[bulk] scheme checking existing by name: %s", s.SchemeName)
+				_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE scheme_name=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, s.SchemeName).Scan(&existing)
+			}
 			if existing != "" {
-				schemeMap[s.InternalSchemeCode] = existing
+				log.Printf("[bulk] scheme found existing: %s", existing)
+				schemeMap[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = existing
+				// Create mapping entry for existing scheme
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, existing, s.SchemeName); err != nil {
+					log.Printf("[bulk] scheme mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+					return
+				}
+				if s.Enriched {
+					continue
+				}
 				continue
 			}
 			var schemeID string
@@ -510,6 +633,12 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				batchID).Scan(&schemeID); err != nil {
 				log.Printf("[bulk] insert scheme failed: %v", err)
 				api.RespondWithError(w, 500, "insert scheme failed: "+err.Error())
+				return
+			}
+			// Create mapping entry for new scheme
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, schemeID, s.SchemeName); err != nil {
+				log.Printf("[bulk] scheme mapping insert failed: %v", err)
+				api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, schemeID, userEmail); err != nil {
@@ -677,14 +806,25 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				} else {
 					_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.SchemeInternalCode).Scan(&schemeID)
 				}
-				// resolve folio_id
+				// resolve folio_id if folio_number provided
 				var folioID string
-				if v, ok := folioMap[tr.FolioNumber]; ok {
-					folioID = v
-				} else {
-					_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.FolioNumber).Scan(&folioID)
+				if tr.FolioNumber != "" {
+					if v, ok := folioMap[tr.FolioNumber]; ok {
+						folioID = v
+					} else {
+						_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.FolioNumber).Scan(&folioID)
+					}
 				}
-				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, amount, units, nav, scheme_id, folio_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, tr.FolioNumber, tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID)); err != nil {
+				// resolve demat_id if demat_acc_number provided
+				var dematID string
+				if tr.DematAccNumber != "" {
+					if v, ok := dematMap[tr.DematAccNumber]; ok {
+						dematID = v
+					} else {
+						_ = tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.DematAccNumber).Scan(&dematID)
+					}
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, demat_acc_number, amount, units, nav, scheme_id, folio_id, demat_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, nullableString(tr.FolioNumber), nullableString(tr.DematAccNumber), tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID), nullableString(dematID)); err != nil {
 					log.Printf("[bulk] insert onboard_transaction failed: %v", err)
 					api.RespondWithError(w, 500, "insert transaction failed: "+err.Error())
 					return
@@ -694,8 +834,9 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			log.Printf("[bulk] inserted %d transactions", counts["transactions"])
 		}
 
-	
-		aggQ := `
+		// Only create snapshots if there are transactions
+		if counts["transactions"] > 0 {
+			aggQ := `
 WITH scheme_resolved AS (
     SELECT
         ot.batch_id,
@@ -704,14 +845,17 @@ WITH scheme_resolved AS (
         ot.amount,
         ot.units,
         ot.nav,
-        mf.entity_name,
+        COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
+        ot.demat_acc_number,
         COALESCE(fsm.scheme_id, ms2.scheme_id) AS scheme_id,
         COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
         COALESCE(ms.isin, ms2.isin) AS isin
     FROM investment.onboard_transaction ot
-    JOIN investment.masterfolio mf 
+    LEFT JOIN investment.masterfolio mf 
         ON mf.folio_number = ot.folio_number
+    LEFT JOIN investment.masterdemataccount md
+        ON md.demat_account_number = ot.demat_acc_number
     LEFT JOIN investment.folioschememapping fsm 
         ON fsm.folio_id = mf.folio_id
     LEFT JOIN investment.masterscheme ms 
@@ -719,11 +863,58 @@ WITH scheme_resolved AS (
     LEFT JOIN investment.masterscheme ms2
         ON ms2.internal_scheme_code = ot.scheme_internal_code
     WHERE ot.batch_id = $1
+),
+transaction_summary AS (
+    SELECT
+        entity_name,
+        folio_number,
+        demat_acc_number,
+        scheme_id,
+        scheme_name,
+        isin,
+        SUM(CASE 
+            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+            ELSE units
+        END) AS total_units,
+        SUM(CASE 
+            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
+            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -amount
+            ELSE amount
+        END) AS total_invested_amount,
+        CASE 
+            WHEN SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+                ELSE units
+            END) = 0 THEN 0
+            ELSE SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
+                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -nav * units
+                ELSE nav * units
+            END) / SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+                ELSE units
+            END)
+        END AS avg_nav
+    FROM scheme_resolved
+    GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+),
+latest_nav AS (
+    SELECT DISTINCT ON (scheme_name)
+        scheme_name,
+        isin_div_payout_growth as isin,
+        nav_value,
+        nav_date
+    FROM investment.amfi_nav_staging
+    ORDER BY scheme_name, nav_date DESC
 )
 INSERT INTO investment.portfolio_snapshot (
   batch_id,
   entity_name,
   folio_number,
+  demat_acc_number,
   scheme_id,
   scheme_name,
   isin,
@@ -731,52 +922,52 @@ INSERT INTO investment.portfolio_snapshot (
   avg_nav,
   current_nav,
   current_value,
+  total_invested_amount,
   gain_loss,
+  gain_losss_percent,
   created_at
 )
 SELECT
   $1 AS batch_id,
-  sr.entity_name,
-  sr.folio_number,
-  sr.scheme_id,
-  sr.scheme_name,
-  sr.isin,
-  SUM(sr.units) AS total_units,
-  CASE WHEN SUM(sr.units)=0 THEN 0 ELSE SUM(sr.nav * sr.units)/SUM(sr.units) END AS avg_nav,
-  COALESCE(
-     (SELECT nav_value 
-      FROM investment.amfi_nav_staging an 
-      WHERE an.scheme_name = sr.scheme_name 
-      ORDER BY an.nav_date DESC 
-      LIMIT 1), 0
-  ) AS current_nav,
-  SUM(sr.units) *
-  COALESCE(
-     (SELECT nav_value 
-      FROM investment.amfi_nav_staging an 
-      WHERE an.scheme_name = sr.scheme_name 
-      ORDER BY an.nav_date DESC LIMIT 1), 0
-  ) AS current_value,
-  0 AS gain_loss,
+  ts.entity_name,
+  ts.folio_number,
+  ts.demat_acc_number,
+  ts.scheme_id,
+  ts.scheme_name,
+  ts.isin,
+  ts.total_units,
+  ts.avg_nav,
+  COALESCE(ln.nav_value, 0) AS current_nav,
+  ts.total_units * COALESCE(ln.nav_value, 0) AS current_value,
+  ts.total_invested_amount,
+  (ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount AS gain_loss,
+  CASE 
+    WHEN ts.total_invested_amount = 0 THEN 0
+    ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100
+  END AS gain_losss_percent,
   NOW()
-FROM scheme_resolved sr
-GROUP BY sr.entity_name, sr.folio_number, sr.scheme_id, sr.scheme_name, sr.isin;
+FROM transaction_summary ts
+LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
+WHERE ts.total_units > 0;
 `
 
-		if _, err := tx.Exec(ctx, aggQ, batchID); err != nil {
-			log.Printf("[bulk] insert snapshot failed: %v", err)
-			api.RespondWithError(w, 500, "snapshot insert failed: "+err.Error())
-			return
+			if _, err := tx.Exec(ctx, aggQ, batchID); err != nil {
+				log.Printf("[bulk] insert snapshot failed: %v", err)
+				api.RespondWithError(w, 500, "snapshot insert failed: "+err.Error())
+				return
+			}
+			// count snapshot rows
+			var snapshotCnt int64
+			if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCnt); err != nil {
+				log.Printf("[bulk] snapshot count failed: %v", err)
+				api.RespondWithError(w, 500, "snapshot count failed: "+err.Error())
+				return
+			}
+			counts["snapshot"] = snapshotCnt
+			log.Printf("[bulk] inserted %d snapshot rows", counts["snapshot"])
+		} else {
+			log.Printf("[bulk] no transactions found, skipping snapshot creation")
 		}
-		// count snapshot rows
-		var snapshotCnt int64
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCnt); err != nil {
-			log.Printf("[bulk] snapshot count failed: %v", err)
-			api.RespondWithError(w, 500, "snapshot count failed: "+err.Error())
-			return
-		}
-		counts["snapshot"] = snapshotCnt
-		log.Printf("[bulk] inserted %d snapshot rows", counts["snapshot"])
 
 		// finalize batch update totals & status
 		if _, err := tx.Exec(ctx, `UPDATE investment.onboard_batch SET total_records = (SELECT COUNT(*) FROM investment.onboard_transaction WHERE batch_id=$1), status='COMPLETED', completed_at=now() WHERE batch_id=$1`, batchID); err != nil {
@@ -800,6 +991,7 @@ GROUP BY sr.entity_name, sr.folio_number, sr.scheme_id, sr.scheme_name, sr.isin;
 		api.RespondWithPayload(w, true, "", res)
 	}
 }
+
 // helper to return nil for empty strings for Exec params
 func nullableString(s string) interface{} {
 	if strings.TrimSpace(s) == "" {
@@ -808,218 +1000,142 @@ func nullableString(s string) interface{} {
 	return s
 }
 
-func batchInsertAMCs(ctx context.Context, tx pgx.Tx, batchID string, rows []AMCInput, userEmail string) (map[string]string, error) {
-	res := map[string]string{}
-	if len(rows) == 0 {
-		return res, nil
+// NormalizeDate parses various date formats and returns YYYY-MM-DD format
+func NormalizeDate(dateStr string) (string, error) {
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return "", nil
 	}
-	// create temp table
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_amc_upload (amc_name text, internal_amc_code text, status text, primary_contact_name text, primary_contact_email text, sebi_registration_no text, amc_beneficiary_name text, amc_bank_account_no text, amc_bank_name text, amc_bank_ifsc text, mfu_amc_code text, cams_amc_code text, erp_vendor_code text) ON COMMIT DROP`); err != nil {
-		return nil, err
-	}
-	// prepare rows for copy
-	copyRows := make([][]interface{}, 0, len(rows))
-	for _, r := range rows {
-		if r.Enriched && r.AmcID != "" {
-			res[defaultIfEmpty(r.InternalAmcCode, r.AmcName)] = r.AmcID
-			continue
-		}
-		copyRows = append(copyRows, []interface{}{r.AmcName, r.InternalAmcCode, defaultIfEmpty(r.Status, "Active"), r.PrimaryContactName, r.PrimaryContactEmail, r.SebiRegistrationNo, r.AmcBeneficiaryName, r.AmcBankAccountNo, r.AmcBankName, r.AmcBankIfsc, r.MfuAmcCode, r.CamsAmcCode, r.ErpVendorCode})
-	}
-	if len(copyRows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_amc_upload"}, []string{"amc_name", "internal_amc_code", "status", "primary_contact_name", "primary_contact_email", "sebi_registration_no", "amc_beneficiary_name", "amc_bank_account_no", "amc_bank_name", "amc_bank_ifsc", "mfu_amc_code", "cams_amc_code", "erp_vendor_code"}, pgx.CopyFromRows(copyRows)); err != nil {
-		return nil, err
-	}
-	// Insert missing into masteramc
-	insertQ := `INSERT INTO investment.masteramc (amc_name, internal_amc_code, status, primary_contact_name, primary_contact_email, sebi_registration_no, amc_beneficiary_name, amc_bank_account_no, amc_bank_name, amc_bank_ifsc, mfu_amc_code, cams_amc_code, erp_vendor_code, source, batch_id) SELECT tam.amc_name, tam.internal_amc_code, tam.status, tam.primary_contact_name, tam.primary_contact_email, tam.sebi_registration_no, tam.amc_beneficiary_name, tam.amc_bank_account_no, tam.amc_bank_name, tam.amc_bank_ifsc, tam.mfu_amc_code, tam.cams_amc_code, tam.erp_vendor_code, 'Manual', $1 FROM tmp_amc_upload tam WHERE NOT EXISTS (SELECT 1 FROM investment.masteramc m WHERE m.internal_amc_code = tam.internal_amc_code AND COALESCE(m.is_deleted,false)=false)`
-	if _, err := tx.Exec(ctx, insertQ, batchID); err != nil {
-		return nil, err
-	}
-	// fetch ids for all internal codes present
-	rowsQ := `SELECT amc_id, internal_amc_code, amc_name FROM investment.masteramc WHERE internal_amc_code IN (SELECT internal_amc_code FROM tmp_amc_upload) OR amc_name IN (SELECT amc_name FROM tmp_amc_upload)`
-	rset, err := tx.Query(ctx, rowsQ)
-	if err != nil {
-		return nil, err
-	}
-	defer rset.Close()
-	for rset.Next() {
-		var id, code, name string
-		_ = rset.Scan(&id, &code, &name)
-		key := defaultIfEmpty(code, name)
-		res[key] = id
-		// insert mapping
-		if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'AMC',$3,false)`, batchID, id, key); err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
 
-func batchInsertDPs(ctx context.Context, tx pgx.Tx, batchID string, rows []DPInput, userEmail string) (map[string]string, error) {
-	res := map[string]string{}
-	if len(rows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_dp_upload (dp_name text, dp_code text, depository text, status text) ON COMMIT DROP`); err != nil {
-		return nil, err
-	}
-	copyRows := [][]interface{}{}
-	for _, r := range rows {
-		if r.Enriched && r.DPID != "" {
-			res[r.DPCode] = r.DPID
-			continue
-		}
-		copyRows = append(copyRows, []interface{}{r.DPName, r.DPCode, defaultIfEmpty(r.Depository, "NSDL"), defaultIfEmpty(r.Status, "Active")})
-	}
-	if len(copyRows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_dp_upload"}, []string{"dp_name", "dp_code", "depository", "status"}, pgx.CopyFromRows(copyRows)); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO investment.masterdepositoryparticipant (dp_name, dp_code, depository, status, source, batch_id) SELECT t.dp_name, t.dp_code, t.depository, t.status, 'Manual', $1 FROM tmp_dp_upload t WHERE NOT EXISTS (SELECT 1 FROM investment.masterdepositoryparticipant m WHERE m.dp_code = t.dp_code AND COALESCE(m.is_deleted,false)=false)`, batchID); err != nil {
-		return nil, err
-	}
-	rset, err := tx.Query(ctx, `SELECT dp_id, dp_code FROM investment.masterdepositoryparticipant WHERE dp_code IN (SELECT dp_code FROM tmp_dp_upload)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rset.Close()
-	for rset.Next() {
-		var id, code string
-		_ = rset.Scan(&id, &code)
-		res[code] = id
-		if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DP',$3,false)`, batchID, id, code); err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
+	// Normalize spaces
+	dateStr = regexp.MustCompile(`\s+`).ReplaceAllString(dateStr, " ")
 
-func batchInsertDemats(ctx context.Context, tx pgx.Tx, batchID string, rows []DematInput, userEmail string) (map[string]string, error) {
-	res := map[string]string{}
-	if len(rows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_demat_upload (entity_name text, dp_id text, depository text, demat_account_number text, depository_participant text, client_id text, default_settlement_account text, status text) ON COMMIT DROP`); err != nil {
-		return nil, err
-	}
-	copyRows := [][]interface{}{}
-	for _, r := range rows {
-		if r.Enriched && r.DematID != "" {
-			res[r.DematAccountNumber] = r.DematID
-			continue
-		}
-		copyRows = append(copyRows, []interface{}{r.EntityName, r.DPID, defaultIfEmpty(r.Depository, "NSDL"), r.DematAccountNumber, r.DepositoryParticipant, r.ClientID, defaultIfEmpty(r.DefaultSettlementAccount, "SYSTEM"), defaultIfEmpty(r.Status, "Active")})
-	}
-	if len(copyRows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_demat_upload"}, []string{"entity_name", "dp_id", "depository", "demat_account_number", "depository_participant", "client_id", "default_settlement_account", "status"}, pgx.CopyFromRows(copyRows)); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO investment.masterdemataccount (entity_name, dp_id, depository, demat_account_number, depository_participant, client_id, default_settlement_account, status, source, batch_id) SELECT t.entity_name, t.dp_id, t.depository, t.demat_account_number, t.depository_participant, t.client_id, t.default_settlement_account, t.status, 'Manual', $1 FROM tmp_demat_upload t WHERE NOT EXISTS (SELECT 1 FROM investment.masterdemataccount m WHERE m.demat_account_number = t.demat_account_number AND COALESCE(m.is_deleted,false)=false)`, batchID); err != nil {
-		return nil, err
-	}
-	rset, err := tx.Query(ctx, `SELECT demat_id, demat_account_number FROM investment.masterdemataccount WHERE demat_account_number IN (SELECT demat_account_number FROM tmp_demat_upload)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rset.Close()
-	for rset.Next() {
-		var id, acc string
-		_ = rset.Scan(&id, &acc)
-		res[acc] = id
-		if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DEMAT',$3,false)`, batchID, id, acc); err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
+	// Try common layouts first
+	layouts := []string{
+		// ISO formats
+		"2006-01-02",
+		"2006/01/02",
+		"2006.01.02",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05.000Z",
 
-func batchInsertFolios(ctx context.Context, tx pgx.Tx, batchID string, rows []FolioInput, userEmail string) (map[string]string, error) {
-	res := map[string]string{}
-	if len(rows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_folio_upload (entity_name text, amc_name text, folio_number text, first_holder_name text, default_subscription_account text, default_redemption_account text, status text) ON COMMIT DROP`); err != nil {
-		return nil, err
-	}
-	copyRows := [][]interface{}{}
-	for _, r := range rows {
-		if r.Enriched && r.FolioID != "" {
-			res[r.FolioNumber] = r.FolioID
-			continue
-		}
-		copyRows = append(copyRows, []interface{}{r.EntityName, r.AmcName, r.FolioNumber, r.FirstHolderName, defaultIfEmpty(r.DefaultSubscriptionAccount, "SYSTEM"), defaultIfEmpty(r.DefaultRedemptionAccount, "SYSTEM"), defaultIfEmpty(r.Status, "Active")})
-	}
-	if len(copyRows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_folio_upload"}, []string{"entity_name", "amc_name", "folio_number", "first_holder_name", "default_subscription_account", "default_redemption_account", "status"}, pgx.CopyFromRows(copyRows)); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO investment.masterfolio (entity_name, amc_name, folio_number, first_holder_name, default_subscription_account, default_redemption_account, status, source, batch_id) SELECT t.entity_name, t.amc_name, t.folio_number, t.first_holder_name, t.default_subscription_account, t.default_redemption_account, t.status, 'Manual', $1 FROM tmp_folio_upload t WHERE NOT EXISTS (SELECT 1 FROM investment.masterfolio m WHERE m.entity_name = t.entity_name AND m.amc_name = t.amc_name AND m.folio_number = t.folio_number AND COALESCE(m.is_deleted,false)=false)`, batchID); err != nil {
-		return nil, err
-	}
-	// fetch folio ids
-	rset, err := tx.Query(ctx, `SELECT folio_id, folio_number FROM investment.masterfolio WHERE folio_number IN (SELECT folio_number FROM tmp_folio_upload)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rset.Close()
-	for rset.Next() {
-		var id, fnum string
-		_ = rset.Scan(&id, &fnum)
-		res[fnum] = id
-		if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'FOLIO',$3,false)`, batchID, id, fnum); err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
+		// DD-MM-YYYY formats
+		"02-01-2006",
+		"02/01/2006",
+		"02.01.2006",
+		"02-01-2006 15:04:05",
+		"02/01/2006 15:04:05",
+		"02.01.2006 15:04:05",
 
-func batchInsertSchemes(ctx context.Context, tx pgx.Tx, batchID string, rows []SchemeInput, userEmail string) (map[string]string, error) {
-	res := map[string]string{}
-	if len(rows) == 0 {
-		return res, nil
+		// MM-DD-YYYY formats
+		"01-02-2006",
+		"01/02/2006",
+		"01.02.2006",
+		"01-02-2006 15:04:05",
+		"01/02/2006 15:04:05",
+		"01.02.2006 15:04:05",
+
+		// Text month formats
+		"02-Jan-2006",
+		"02-Jan-06",
+		"2-Jan-2006",
+		"2-Jan-06",
+		"02-Jan-2006 15:04:05",
+		"02 Jan 2006",
+		"2 Jan 2006",
+		"02 Jan 06",
+		"2 Jan 06",
+		"Jan 02, 2006",
+		"Jan 2, 2006",
+		"January 02, 2006",
+		"January 2, 2006",
+
+		// Single digit day/month formats
+		"2-1-2006",
+		"2/1/2006",
+		"2.1.2006",
+		"1-2-2006",
+		"1/2/2006",
+		"1.2.2006",
+
+		// Short year formats
+		"02-01-06",
+		"02/01/06",
+		"02.01.06",
+		"01-02-06",
+		"01/02/06",
+		"01.02.06",
+		"2-1-06",
+		"2/1/06",
+		"1-2-06",
+		"1/2-06",
+
+		// compact
+		"20060102",
 	}
-	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_scheme_upload (scheme_name text, isin text, amc_name text, internal_scheme_code text, internal_risk_rating text, erp_gl_account text, status text) ON COMMIT DROP`); err != nil {
-		return nil, err
-	}
-	copyRows := [][]interface{}{}
-	for _, r := range rows {
-		if r.Enriched && r.SchemeID != "" {
-			res[r.InternalSchemeCode] = r.SchemeID
-			continue
+
+	for _, l := range layouts {
+		if t, err := time.Parse(l, dateStr); err == nil {
+			if t.Year() < 1900 || t.Year() > 9999 {
+				continue
+			}
+			return t.Format("2006-01-02"), nil
 		}
-		copyRows = append(copyRows, []interface{}{r.SchemeName, r.ISIN, r.AmcName, r.InternalSchemeCode, defaultIfEmpty(r.InternalRiskRating, "Unknown"), r.ErpGlAccount, defaultIfEmpty(r.Status, "Active")})
 	}
-	if len(copyRows) == 0 {
-		return res, nil
-	}
-	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_scheme_upload"}, []string{"scheme_name", "isin", "amc_name", "internal_scheme_code", "internal_risk_rating", "erp_gl_account", "status"}, pgx.CopyFromRows(copyRows)); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO investment.masterscheme (scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source, batch_id) SELECT t.scheme_name, t.isin, t.amc_name, t.internal_scheme_code, t.internal_risk_rating, t.erp_gl_account, t.status, 'Manual', $1 FROM tmp_scheme_upload t WHERE NOT EXISTS (SELECT 1 FROM investment.masterscheme m WHERE m.internal_scheme_code = t.internal_scheme_code AND COALESCE(m.is_deleted,false)=false)`, batchID); err != nil {
-		return nil, err
-	}
-	rset, err := tx.Query(ctx, `SELECT scheme_id, internal_scheme_code FROM investment.masterscheme WHERE internal_scheme_code IN (SELECT internal_scheme_code FROM tmp_scheme_upload) OR isin IN (SELECT isin FROM tmp_scheme_upload)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rset.Close()
-	for rset.Next() {
-		var id, code string
-		_ = rset.Scan(&id, &code)
-		res[code] = id
-		if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'SCHEME',$3,false)`, batchID, id, code); err != nil {
-			return nil, err
+
+	// If the string is purely numeric try several heuristics
+	digits := true
+	for _, r := range dateStr {
+		if r < '0' || r > '9' {
+			digits = false
+			break
 		}
 	}
-	return res, nil
+
+	if digits {
+		// YYYYMMDD
+		if len(dateStr) == 8 {
+			if y, err := strconv.Atoi(dateStr[0:4]); err == nil {
+				if m, err := strconv.Atoi(dateStr[4:6]); err == nil {
+					if d, err := strconv.Atoi(dateStr[6:8]); err == nil {
+						if y >= 1900 && y <= 9999 {
+							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format("2006-01-02"), nil
+						}
+					}
+				}
+			}
+		}
+
+		if v, err := strconv.ParseInt(dateStr, 10, 64); err == nil {
+			var t time.Time
+			switch {
+			case v >= 1e17:
+				// nanoseconds since epoch
+				t = time.Unix(0, v)
+			case v >= 1e14:
+				// microseconds -> ns
+				t = time.Unix(0, v*1000)
+			case v >= 1e11:
+				// milliseconds -> ns
+				t = time.Unix(0, v*1000000)
+			case v >= 1e9:
+				// seconds
+				t = time.Unix(v, 0)
+			default:
+				// Treat as Excel serial date (days since 1899-12-30)
+				base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+				t = base.AddDate(0, 0, int(v))
+			}
+			if t.Year() >= 1900 && t.Year() <= 9999 {
+				return t.Format("2006-01-02"), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("unparseable date: %s", dateStr)
 }
 
 // -------------------------
@@ -1043,6 +1159,179 @@ type DashboardResponse struct {
 	Holdings        []Holding          `json:"holdings"`
 }
 
+// RefreshPortfolioSnapshot recalculates portfolio snapshot with latest NAV data
+func RefreshPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		var req struct {
+			BatchID string `json:"batch_id"`
+		}
+
+		// Support both JSON and form
+		contentType := r.Header.Get("Content-Type")
+		if strings.Contains(contentType, "application/json") {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, 400, "invalid JSON: "+err.Error())
+				return
+			}
+		} else {
+			_ = r.ParseForm()
+			req.BatchID = r.FormValue("batch_id")
+		}
+
+		if req.BatchID == "" {
+			api.RespondWithError(w, 400, "batch_id required")
+			return
+		}
+
+		batchID := req.BatchID
+		log.Printf("[refresh] refreshing portfolio snapshot for batch %s", batchID)
+
+		// Delete existing snapshots for this batch
+		if _, err := pgxPool.Exec(ctx, `DELETE FROM investment.portfolio_snapshot WHERE batch_id = $1`, batchID); err != nil {
+			log.Printf("[refresh] delete existing snapshots failed: %v", err)
+			api.RespondWithError(w, 500, "delete snapshots failed: "+err.Error())
+			return
+		}
+
+		// Recalculate snapshots with current NAV data
+		recalcQ := `
+WITH scheme_resolved AS (
+    SELECT
+        ot.batch_id,
+        ot.transaction_date,
+        ot.transaction_type,
+        ot.amount,
+        ot.units,
+        ot.nav,
+        COALESCE(mf.entity_name, md.entity_name) AS entity_name,
+        ot.folio_number,
+        ot.demat_acc_number,
+        COALESCE(fsm.scheme_id, ms2.scheme_id) AS scheme_id,
+        COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
+        COALESCE(ms.isin, ms2.isin) AS isin
+    FROM investment.onboard_transaction ot
+    LEFT JOIN investment.masterfolio mf 
+        ON mf.folio_number = ot.folio_number
+    LEFT JOIN investment.masterdemataccount md
+        ON md.demat_account_number = ot.demat_acc_number
+    LEFT JOIN investment.folioschememapping fsm 
+        ON fsm.folio_id = mf.folio_id
+    LEFT JOIN investment.masterscheme ms 
+        ON ms.scheme_id = fsm.scheme_id
+    LEFT JOIN investment.masterscheme ms2
+        ON ms2.internal_scheme_code = ot.scheme_internal_code
+    WHERE ot.batch_id = $1
+),
+transaction_summary AS (
+    SELECT
+        entity_name,
+        folio_number,
+        demat_acc_number,
+        scheme_id,
+        scheme_name,
+        isin,
+        SUM(CASE 
+            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+            ELSE units
+        END) AS total_units,
+        SUM(CASE 
+            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
+            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -amount
+            ELSE amount
+        END) AS total_invested_amount,
+        CASE 
+            WHEN SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+                ELSE units
+            END) = 0 THEN 0
+            ELSE SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
+                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -nav * units
+                ELSE nav * units
+            END) / SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+                ELSE units
+            END)
+        END AS avg_nav
+    FROM scheme_resolved
+    GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+),
+latest_nav AS (
+    SELECT DISTINCT ON (scheme_name)
+        scheme_name,
+        isin_div_payout_growth as isin,
+        nav_value,
+        nav_date
+    FROM investment.amfi_nav_staging
+    ORDER BY scheme_name, nav_date DESC
+)
+INSERT INTO investment.portfolio_snapshot (
+  batch_id,
+  entity_name,
+  folio_number,
+  demat_acc_number,
+  scheme_id,
+  scheme_name,
+  isin,
+  total_units,
+  avg_nav,
+  current_nav,
+  current_value,
+  total_invested_amount,
+  gain_loss,
+  gain_losss_percent,
+  created_at
+)
+SELECT
+  $1::uuid AS batch_id,
+  ts.entity_name,
+  ts.folio_number,
+  ts.demat_acc_number,
+  ts.scheme_id,
+  ts.scheme_name,
+  ts.isin,
+  ts.total_units,
+  ts.avg_nav,
+  COALESCE(ln.nav_value, 0) AS current_nav,
+  ts.total_units * COALESCE(ln.nav_value, 0) AS current_value,
+  ts.total_invested_amount,
+  (ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount AS gain_loss,
+  CASE 
+    WHEN ts.total_invested_amount = 0 THEN 0
+    ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100
+  END AS gain_losss_percent,
+  NOW()
+FROM transaction_summary ts
+LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
+WHERE ts.total_units > 0;
+`
+
+		if _, err := pgxPool.Exec(ctx, recalcQ, batchID); err != nil {
+			log.Printf("[refresh] recalculate snapshot failed: %v", err)
+			api.RespondWithError(w, 500, "recalculate snapshot failed: "+err.Error())
+			return
+		}
+
+		// Count new snapshots
+		var snapshotCnt int64
+		if err := pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCnt); err != nil {
+			log.Printf("[refresh] count snapshots failed: %v", err)
+			api.RespondWithError(w, 500, "count snapshots failed: "+err.Error())
+			return
+		}
+
+		log.Printf("[refresh] refreshed %d snapshot rows for batch %s", snapshotCnt, batchID)
+		api.RespondWithPayload(w, true, "portfolio snapshot refreshed", map[string]interface{}{
+			"batch_id":       batchID,
+			"snapshot_count": snapshotCnt,
+		})
+	}
+}
 
 func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
