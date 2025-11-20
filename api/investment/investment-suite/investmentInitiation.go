@@ -33,6 +33,7 @@ type CreateInitiationRequestSingle struct {
 	EntityName      string  `json:"entity_name"`
 	SchemeID        string  `json:"scheme_id"`
 	FolioID         string  `json:"folio_id,omitempty"`
+	DematID         string  `json:"demat_id,omitempty"`
 	Amount          float64 `json:"amount"`
 	Status          string  `json:"status,omitempty"`
 	Source          string  `json:"source,omitempty"`
@@ -244,6 +245,12 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Either folio_id OR demat_id must be provided
+		if strings.TrimSpace(req.FolioID) == "" && strings.TrimSpace(req.DematID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Either folio_id or demat_id is required")
+			return
+		}
+
 		// if source is Proposal, proposal_id is required
 		source := defaultIfEmpty(req.Source, "Manual")
 		if strings.ToUpper(source) == "PROPOSAL" && strings.TrimSpace(req.ProposalID) == "" {
@@ -273,13 +280,14 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		insertQ := `
 			INSERT INTO investment.investment_initiation (
-				proposal_id, transaction_date, entity_name, scheme_id, folio_id, amount, status, source
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, status, source
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			RETURNING initiation_id
 		`
 		var initiationID string
 		proposalID := nullIfEmpty(req.ProposalID)
 		folioID := nullIfEmpty(req.FolioID)
+		dematID := nullIfEmpty(req.DematID)
 		status := defaultIfEmpty(req.Status, "Active")
 
 		if err := tx.QueryRow(ctx, insertQ,
@@ -288,6 +296,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.EntityName,
 			req.SchemeID,
 			folioID,
+			dematID,
 			req.Amount,
 			status,
 			source,
@@ -337,6 +346,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityName      string  `json:"entity_name"`
 				SchemeID        string  `json:"scheme_id"`
 				FolioID         string  `json:"folio_id,omitempty"`
+				DematID         string  `json:"demat_id,omitempty"`
 				Amount          float64 `json:"amount"`
 				Status          string  `json:"status,omitempty"`
 				Source          string  `json:"source,omitempty"`
@@ -381,6 +391,14 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Either folio_id OR demat_id must be provided
+			if strings.TrimSpace(row.FolioID) == "" && strings.TrimSpace(row.DematID) == "" {
+				results = append(results, map[string]interface{}{
+					"success": false, "error": "Either folio_id or demat_id is required",
+				})
+				continue
+			}
+
 			// if source is Proposal, proposal_id is required
 			if strings.ToUpper(source) == "PROPOSAL" && proposalID == "" {
 				results = append(results, map[string]interface{}{
@@ -399,10 +417,10 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var initiationID string
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.investment_initiation (
-					proposal_id, transaction_date, entity_name, scheme_id, folio_id, amount, status, source
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+					proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, status, source
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 				RETURNING initiation_id
-			`, nullIfEmpty(proposalID), txnDate, entityName, schemeID, nullIfEmpty(row.FolioID), row.Amount, defaultIfEmpty(row.Status, "Active"), source).Scan(&initiationID); err != nil {
+			`, nullIfEmpty(proposalID), txnDate, entityName, schemeID, nullIfEmpty(row.FolioID), nullIfEmpty(row.DematID), row.Amount, defaultIfEmpty(row.Status, "Active"), source).Scan(&initiationID); err != nil {
 				results = append(results, map[string]interface{}{
 					"success": false, "proposal_id": proposalID, "error": "Insert failed: " + err.Error(),
 				})
@@ -484,15 +502,15 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch existing values
 		sel := `
-			SELECT proposal_id, transaction_date, entity_name, scheme_id, folio_id, amount, status, source
+			SELECT proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, status, source
 			FROM investment.investment_initiation
 			WHERE initiation_id=$1
 			FOR UPDATE
 		`
-		var oldVals [8]interface{}
+		var oldVals [9]interface{}
 		if err := tx.QueryRow(ctx, sel, req.InitiationID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
+			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
@@ -504,9 +522,10 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"entity_name":      2,
 			"scheme_id":        3,
 			"folio_id":         4,
-			"amount":           5,
-			"status":           6,
-			"source":           7,
+			"demat_id":         5,
+			"amount":           6,
+			"status":           7,
+			"source":           8,
 		}
 
 		var sets []string
@@ -779,7 +798,8 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		var toApprove []string
+		var toApprove []string            // action_ids to approve
+		var toApproveInitiations []string // initiation_ids corresponding to actions being approved
 		var toDeleteActionIDs []string
 		var deleteMasterIDs []string
 
@@ -799,13 +819,14 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if ps == "PENDING_APPROVAL" || ps == "PENDING_EDIT_APPROVAL" {
 				toApprove = append(toApprove, aid)
+				toApproveInitiations = append(toApproveInitiations, iid)
 			}
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
 			api.RespondWithPayload(w, false, "No approvable actions found", map[string]any{
-				"approved_action_ids": []string{},
-				"deleted_initiations": []string{},
+				"approved_initiation_ids": []string{},
+				"deleted_initiations":     []string{},
 			})
 			return
 		}
@@ -845,9 +866,17 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ensure slices are non-nil so JSON marshals empty arrays instead of null
+		if toApproveInitiations == nil {
+			toApproveInitiations = []string{}
+		}
+		if deleteMasterIDs == nil {
+			deleteMasterIDs = []string{}
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
-			"approved_action_ids": toApprove,
-			"deleted_initiations": deleteMasterIDs,
+			"approved_initiation_ids": toApproveInitiations,
+			"deleted_initiations":     deleteMasterIDs,
 		})
 	}
 }
@@ -960,16 +989,46 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		q := `
-			WITH latest AS (
-				SELECT DISTINCT ON (initiation_id) initiation_id, processing_status
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (a.initiation_id)
+					a.initiation_id, a.actiontype, a.processing_status, a.action_id,
+					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
+				FROM investment.auditactioninitiation a
+				ORDER BY a.initiation_id, a.requested_at DESC
+			),
+			history AS (
+				SELECT 
+					initiation_id,
+					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.auditactioninitiation
-				ORDER BY initiation_id, requested_at DESC
+				GROUP BY initiation_id
 			)
-			SELECT m.initiation_id, m.proposal_id, m.transaction_date, m.entity_name, 
-			       m.scheme_id, m.folio_id, m.amount, m.status
+			SELECT
+				m.*,
+				COALESCE(l.actiontype,'') AS action_type,
+				COALESCE(l.processing_status,'') AS processing_status,
+				COALESCE(l.action_id::text,'') AS action_id,
+				COALESCE(l.requested_by,'') AS requested_by,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				COALESCE(l.checker_by,'') AS checker_by,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(l.checker_comment,'') AS checker_comment,
+				COALESCE(l.reason,'') AS reason,
+				COALESCE(h.created_by,'') AS created_by,
+				COALESCE(h.created_at,'') AS created_at,
+				COALESCE(h.edited_by,'') AS edited_by,
+				COALESCE(h.edited_at,'') AS edited_at,
+				COALESCE(h.deleted_by,'') AS deleted_by,
+				COALESCE(h.deleted_at,'') AS deleted_at
 			FROM investment.investment_initiation m
-			JOIN latest l ON l.initiation_id = m.initiation_id
-			WHERE UPPER(l.processing_status) = 'APPROVED'
+			LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
+			LEFT JOIN history h ON h.initiation_id = m.initiation_id
+			WHERE UPPER(COALESCE(l.processing_status,'')) = 'APPROVED'
 			  AND UPPER(m.status) = 'ACTIVE'
 			  AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.transaction_date DESC, m.entity_name;
@@ -1192,7 +1251,8 @@ func stringOrEmpty(val *string) string {
 	return *val
 }
 
-
+// GetInvestmentProposalDetails fetches detailed information about investment proposals
+// including folio details, bank account metadata, and scheme/AMC information
 func GetInvestmentProposalDetails(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1202,7 +1262,9 @@ func GetInvestmentProposalDetails(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var req struct {
-			SchemeID string `json:"scheme_id"`
+			SchemeID           string `json:"scheme_id"`
+			SchemeName         string `json:"scheme_name"`
+			InternalSchemeCode string `json:"internal_scheme_code"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1211,13 +1273,16 @@ func GetInvestmentProposalDetails(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		schemeID := strings.TrimSpace(req.SchemeID)
-		if schemeID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "scheme_id is required")
+		schemeName := strings.TrimSpace(req.SchemeName)
+		internalSchemeCode := strings.TrimSpace(req.InternalSchemeCode)
+
+		if schemeID == "" && schemeName == "" && internalSchemeCode == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "scheme_id, scheme_name, or internal_scheme_code is required")
 			return
 		}
 
 		// Query to fetch comprehensive proposal and initiation details
-		result, err := fetchProposalDetailsByScheme(ctx, pool, schemeID)
+		result, err := fetchProposalDetailsByScheme(ctx, pool, schemeID, schemeName, internalSchemeCode)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to fetch proposal details: %v", err))
 			return
@@ -1227,7 +1292,7 @@ func GetInvestmentProposalDetails(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schemeID string) (map[string]interface{}, error) {
+func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schemeID, schemeName, internalSchemeCode string) (map[string]interface{}, error) {
 	// Main query to fetch proposal, allocation, scheme, AMC, folio, and demat details
 	query := `
 		WITH latest_proposal_audit AS (
@@ -1270,11 +1335,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 				ba.account_number,
 				ba.account_nickname,
 				ba.account_id,
-				ba.currency,
-				ba.account_type,
 				b.bank_name,
 				b.bank_id,
-				b.swift_code,
 				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
 				STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 			FROM public.masterbankaccount ba
@@ -1282,8 +1344,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
 			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
 			LEFT JOIN public.masterclearingcode c ON c.account_id = ba.account_id
-			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, ba.currency, 
-			         ba.account_type, b.bank_name, b.bank_id, b.swift_code, 
+			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, 
+			         b.bank_name, b.bank_id, 
 			         e.entity_name, ec.entity_name
 		),
 		redemption_account AS (
@@ -1291,11 +1353,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 				ba.account_number,
 				ba.account_nickname,
 				ba.account_id,
-				ba.currency,
-				ba.account_type,
 				b.bank_name,
 				b.bank_id,
-				b.swift_code,
 				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
 				STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 			FROM public.masterbankaccount ba
@@ -1303,8 +1362,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
 			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
 			LEFT JOIN public.masterclearingcode c ON c.account_id = ba.account_id
-			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, ba.currency, 
-			         ba.account_type, b.bank_name, b.bank_id, b.swift_code, 
+			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, 
+			         b.bank_name, b.bank_id, 
 			         e.entity_name, ec.entity_name
 		),
 		settlement_account AS (
@@ -1312,11 +1371,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 				ba.account_number,
 				ba.account_nickname,
 				ba.account_id,
-				ba.currency,
-				ba.account_type,
 				b.bank_name,
 				b.bank_id,
-				b.swift_code,
 				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
 				STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
 			FROM public.masterbankaccount ba
@@ -1324,8 +1380,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
 			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
 			LEFT JOIN public.masterclearingcode c ON c.account_id = ba.account_id
-			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, ba.currency, 
-			         ba.account_type, b.bank_name, b.bank_id, b.swift_code, 
+			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, 
+			         b.bank_name, b.bank_id, 
 			         e.entity_name, ec.entity_name
 		)
 		SELECT
@@ -1337,8 +1393,6 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			p.horizon_days,
 			p.source AS proposal_source,
 			p.status AS proposal_status,
-			p.created_at AS proposal_created_at,
-			p.updated_at AS proposal_updated_at,
 			p.batch_id AS proposal_batch_id,
 			lpa.processing_status AS proposal_approval_status,
 			
@@ -1355,8 +1409,6 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			pa.old_post_trade_holding,
 			pa.current_holding,
 			pa.old_current_holding,
-			pa.created_at AS allocation_created_at,
-			pa.updated_at AS allocation_updated_at,
 			
 			-- Scheme details
 			ms.scheme_id,
@@ -1412,33 +1464,24 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			-- Subscription bank account details
 			sub.account_nickname AS sub_account_nickname,
 			sub.account_id AS sub_account_id,
-			sub.currency AS sub_currency,
-			sub.account_type AS sub_account_type,
 			sub.bank_name AS sub_bank_name,
 			sub.bank_id AS sub_bank_id,
-			sub.swift_code AS sub_swift_code,
 			sub.entity_name AS sub_entity_name,
 			sub.clearing_codes AS sub_clearing_codes,
 			
 			-- Redemption bank account details
 			red.account_nickname AS red_account_nickname,
 			red.account_id AS red_account_id,
-			red.currency AS red_currency,
-			red.account_type AS red_account_type,
 			red.bank_name AS red_bank_name,
 			red.bank_id AS red_bank_id,
-			red.swift_code AS red_swift_code,
 			red.entity_name AS red_entity_name,
 			red.clearing_codes AS red_clearing_codes,
 			
 			-- Settlement bank account details (for demat)
 			sett.account_nickname AS sett_account_nickname,
 			sett.account_id AS sett_account_id,
-			sett.currency AS sett_currency,
-			sett.account_type AS sett_account_type,
 			sett.bank_name AS sett_bank_name,
 			sett.bank_id AS sett_bank_id,
-			sett.swift_code AS sett_swift_code,
 			sett.entity_name AS sett_entity_name,
 			sett.clearing_codes AS sett_clearing_codes
 			
@@ -1457,10 +1500,14 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 		LEFT JOIN subscription_account sub ON sub.account_number = mf.default_subscription_account
 		LEFT JOIN redemption_account red ON red.account_number = mf.default_redemption_account
 		LEFT JOIN settlement_account sett ON sett.account_number = dm.default_settlement_account
-		WHERE pa.scheme_id = $1
+		WHERE (
+			($1 != '' AND pa.scheme_id = $1) OR
+			($2 != '' AND ms.scheme_name = $2) OR
+			($3 != '' AND ms.internal_scheme_code = $3)
+		)
 		  AND UPPER(lpa.processing_status) = 'APPROVED'
-		  AND UPPER(lsa.processing_status) = 'APPROVED'
-		  AND UPPER(laa.processing_status) = 'APPROVED'
+		  AND (lsa.processing_status IS NULL OR UPPER(lsa.processing_status) = 'APPROVED')
+		  AND (laa.processing_status IS NULL OR UPPER(laa.processing_status) = 'APPROVED')
 		  AND UPPER(ms.status) = 'ACTIVE'
 		  AND UPPER(ma.status) = 'ACTIVE'
 		  AND COALESCE(ms.is_deleted, false) = false
@@ -1472,7 +1519,7 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 		ORDER BY p.proposal_name, mf.folio_number, dm.demat_account_number;
 	`
 
-	rows, err := pool.Query(ctx, query, schemeID)
+	rows, err := pool.Query(ctx, query, schemeID, schemeName, internalSchemeCode)
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -1488,7 +1535,7 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 		var (
 			// Proposal
 			proposalID, proposalName, proposalEntity, proposalSource, proposalStatus string
-			proposalCreatedAt, proposalUpdatedAt, proposalApprovalStatus             string
+			proposalApprovalStatus                                                   string
 			proposalBatchID                                                          *string
 			totalAmount                                                              float64
 			horizonDays                                                              *int
@@ -1501,7 +1548,6 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			policyStatus                              *bool
 			postTradeHolding, oldPostTradeHolding     *float64
 			currentHolding, oldCurrentHolding         *float64
-			allocationCreatedAt, allocationUpdatedAt  *string
 
 			// Scheme
 			schemeID, schemeName, isin, internalSchemeCode, internalRiskRating *string
@@ -1524,25 +1570,25 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			dematStatus, dematSource, dematApprovalStatus              *string
 
 			// Subscription account
-			subAccountNickname, subAccountID, subCurrency, subAccountType *string
-			subBankName, subBankID, subSwiftCode, subEntityName           *string
-			subClearingCodes                                              *string
+			subAccountNickname, subAccountID      *string
+			subBankName, subBankID, subEntityName *string
+			subClearingCodes                      *string
 
 			// Redemption account
-			redAccountNickname, redAccountID, redCurrency, redAccountType *string
-			redBankName, redBankID, redSwiftCode, redEntityName           *string
-			redClearingCodes                                              *string
+			redAccountNickname, redAccountID      *string
+			redBankName, redBankID, redEntityName *string
+			redClearingCodes                      *string
 
 			// Settlement account (demat)
-			settAccountNickname, settAccountID, settCurrency, settAccountType *string
-			settBankName, settBankID, settSwiftCode, settEntityName           *string
-			settClearingCodes                                                 *string
+			settAccountNickname, settAccountID       *string
+			settBankName, settBankID, settEntityName *string
+			settClearingCodes                        *string
 		)
 
 		err := rows.Scan(
 			// Proposal
 			&proposalID, &proposalName, &proposalEntity, &totalAmount, &horizonDays,
-			&proposalSource, &proposalStatus, &proposalCreatedAt, &proposalUpdatedAt,
+			&proposalSource, &proposalStatus,
 			&proposalBatchID, &proposalApprovalStatus,
 
 			// Allocation (full)
@@ -1551,7 +1597,6 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			&allocationOldAmount, &allocationOldPercent,
 			&policyStatus, &postTradeHolding, &oldPostTradeHolding,
 			&currentHolding, &oldCurrentHolding,
-			&allocationCreatedAt, &allocationUpdatedAt,
 
 			// Scheme
 			&schemeID, &schemeName, &isin, &internalSchemeCode, &internalRiskRating,
@@ -1574,18 +1619,18 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 			&dematStatus, &dematSource, &dematApprovalStatus,
 
 			// Subscription account
-			&subAccountNickname, &subAccountID, &subCurrency, &subAccountType,
-			&subBankName, &subBankID, &subSwiftCode, &subEntityName,
+			&subAccountNickname, &subAccountID,
+			&subBankName, &subBankID, &subEntityName,
 			&subClearingCodes,
 
 			// Redemption account
-			&redAccountNickname, &redAccountID, &redCurrency, &redAccountType,
-			&redBankName, &redBankID, &redSwiftCode, &redEntityName,
+			&redAccountNickname, &redAccountID,
+			&redBankName, &redBankID, &redEntityName,
 			&redClearingCodes,
 
 			// Settlement account
-			&settAccountNickname, &settAccountID, &settCurrency, &settAccountType,
-			&settBankName, &settBankID, &settSwiftCode, &settEntityName,
+			&settAccountNickname, &settAccountID,
+			&settBankName, &settBankID, &settEntityName,
 			&settClearingCodes,
 		)
 
@@ -1603,8 +1648,6 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 				"horizon_days":    horizonDays,
 				"source":          proposalSource,
 				"status":          proposalStatus,
-				"created_at":      proposalCreatedAt,
-				"updated_at":      proposalUpdatedAt,
 				"batch_id":        stringOrEmpty(proposalBatchID),
 				"approval_status": proposalApprovalStatus,
 				"allocation": map[string]interface{}{
@@ -1620,8 +1663,6 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 					"old_post_trade_holding": floatOrNil(oldPostTradeHolding),
 					"current_holding":        floatOrNil(currentHolding),
 					"old_current_holding":    floatOrNil(oldCurrentHolding),
-					"created_at":             stringOrEmpty(allocationCreatedAt),
-					"updated_at":             stringOrEmpty(allocationUpdatedAt),
 				},
 				"scheme": map[string]interface{}{
 					"scheme_id":            stringOrEmpty(schemeID),
@@ -1668,11 +1709,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 					"account_number":   stringOrEmpty(defaultSubscriptionAcct),
 					"account_nickname": stringOrEmpty(subAccountNickname),
 					"account_id":       stringOrEmpty(subAccountID),
-					"currency":         stringOrEmpty(subCurrency),
-					"account_type":     stringOrEmpty(subAccountType),
 					"bank_name":        stringOrEmpty(subBankName),
 					"bank_id":          stringOrEmpty(subBankID),
-					"swift_code":       stringOrEmpty(subSwiftCode),
 					"entity_name":      stringOrEmpty(subEntityName),
 					"clearing_codes":   stringOrEmpty(subClearingCodes),
 				},
@@ -1680,11 +1718,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 					"account_number":   stringOrEmpty(defaultRedemptionAcct),
 					"account_nickname": stringOrEmpty(redAccountNickname),
 					"account_id":       stringOrEmpty(redAccountID),
-					"currency":         stringOrEmpty(redCurrency),
-					"account_type":     stringOrEmpty(redAccountType),
 					"bank_name":        stringOrEmpty(redBankName),
 					"bank_id":          stringOrEmpty(redBankID),
-					"swift_code":       stringOrEmpty(redSwiftCode),
 					"entity_name":      stringOrEmpty(redEntityName),
 					"clearing_codes":   stringOrEmpty(redClearingCodes),
 				},
@@ -1714,11 +1749,8 @@ func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schem
 					"account_number":   stringOrEmpty(dematSettlementAccount),
 					"account_nickname": stringOrEmpty(settAccountNickname),
 					"account_id":       stringOrEmpty(settAccountID),
-					"currency":         stringOrEmpty(settCurrency),
-					"account_type":     stringOrEmpty(settAccountType),
 					"bank_name":        stringOrEmpty(settBankName),
 					"bank_id":          stringOrEmpty(settBankID),
-					"swift_code":       stringOrEmpty(settSwiftCode),
 					"entity_name":      stringOrEmpty(settEntityName),
 					"clearing_codes":   stringOrEmpty(settClearingCodes),
 				},
