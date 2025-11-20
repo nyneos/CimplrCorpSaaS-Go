@@ -4,7 +4,6 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
-	// "database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -49,17 +48,15 @@ type UpdateProposalRequest struct {
 	Allocations  []ProposalAllocationUpsertInput `json:"allocations"`
 }
 
-// ProposalAllocationInput represents a single allocation row
+// ProposalAllocationInput represents a single allocation row for CREATE operations
 type ProposalAllocationInput struct {
-	SchemeID            string   `json:"scheme_id"`
-	SchemeInternalCode  string   `json:"scheme_internal_code"`
-	Amount              float64  `json:"amount"`
-	Percent             *float64 `json:"percent"`
-	PolicyStatus        *bool    `json:"policy_status"`
-	PostTradeHolding    *float64 `json:"post_trade_holding"`
-	OldPostTradeHolding *float64 `json:"old_post_trade_holding"`
-	CurrentHolding      *float64 `json:"current_holding"`
-	OldCurrentHolding   *float64 `json:"old_current_holding"`
+	SchemeID           string   `json:"scheme_id"`
+	SchemeInternalCode string   `json:"scheme_internal_code"`
+	Amount             float64  `json:"amount"`
+	Percent            *float64 `json:"percent"`
+	PolicyStatus       *bool    `json:"policy_status"`
+	PostTradeHolding   *float64 `json:"post_trade_holding"`
+	CurrentHolding     *float64 `json:"current_holding"`
 }
 
 // ProposalAllocationUpsertInput represents allocation operations for updates
@@ -137,12 +134,9 @@ type EntityHoldingsRequest struct {
 
 // EntitySchemeHolding captures per-scheme holding details for an entity
 type EntitySchemeHolding struct {
-	SchemeID           string  `json:"scheme_id"`
-	SchemeName         string  `json:"scheme_name"`
-	SchemeInternalCode string  `json:"scheme_internal_code"`
-	CurrentHolding     float64 `json:"current_holding"`
-	TotalUnits         float64 `json:"total_units"`
-	LastSnapshotAt     string  `json:"last_snapshot_at"`
+	SchemeID       string  `json:"scheme_id"`
+	SchemeName     string  `json:"scheme_name"`
+	CurrentHolding float64 `json:"current_holding"`
 }
 
 // CreateInvestmentProposal exposes POST /investment/proposals
@@ -213,10 +207,10 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// UpdateInvestmentProposal exposes PUT /investment/proposals
+// UpdateInvestmentProposal exposes POST /investment/proposals
 func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut {
+		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -592,7 +586,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 // GetProposalMeta mirrors other master GETs: proposal fields + latest audit + history summary ordered by updated_at.
 func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -642,8 +636,6 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_status,
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(p.is_deleted,false) AS is_deleted,
-				COALESCE(TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
-				COALESCE(TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -654,15 +646,15 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at_history,
+				COALESCE(h.created_at,'') AS created_at,
 				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at_history,
+				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
 				COALESCE(h.deleted_at,'') AS deleted_at
 			FROM investment.investment_proposal p
 			LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
 			LEFT JOIN history h ON h.proposal_id = p.proposal_id
-			ORDER BY p.updated_at DESC NULLS LAST, p.created_at DESC NULLS LAST
+			ORDER BY l.requested_at DESC NULLS LAST
 		`
 
 		rows, err := pool.Query(ctx, metaSQL)
@@ -707,7 +699,7 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 // GetApprovedProposalMeta returns only active proposals whose latest audit is approved.
 func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -757,8 +749,6 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_status,
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(p.is_deleted,false) AS is_deleted,
-				COALESCE(TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
-				COALESCE(TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -769,9 +759,9 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at_history,
+				COALESCE(h.created_at,'') AS created_at,
 				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at_history,
+				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
 				COALESCE(h.deleted_at,'') AS deleted_at
 			FROM investment.investment_proposal p
@@ -886,8 +876,6 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_status,
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(p.batch_id::text,'') AS batch_id,
-				COALESCE(TO_CHAR(p.created_at,'YYYY-MM-DD HH24:MI:SS'),'') AS created_at,
-				COALESCE(TO_CHAR(p.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -898,9 +886,9 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at_history,
+				COALESCE(h.created_at,'') AS created_at,
 				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at_history,
+				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
 				COALESCE(h.deleted_at,'') AS deleted_at
 			FROM investment.investment_proposal p
@@ -1001,6 +989,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// GetEntitySchemeHoldings exposes holdings aggregated per scheme for a given entity
 func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1183,7 +1172,7 @@ func validateUpdateProposalRequest(req *UpdateProposalRequest) error {
 func resolveUserEmail(userID string) (string, bool) {
 	for _, s := range auth.GetActiveSessions() {
 		if s.UserID == userID {
-			return s.Email, true
+			return s.Name, true
 		}
 	}
 	return "", false
@@ -1277,8 +1266,8 @@ func applyProposalUpdate(ctx context.Context, tx pgx.Tx, req *UpdateProposalRequ
 func insertAllocations(ctx context.Context, tx pgx.Tx, proposalID string, allocations []ProposalAllocationInput) ([]int64, error) {
 	const allocSQL = `
 		INSERT INTO investment.investment_proposal_allocation
-		(proposal_id, scheme_id, scheme_internal_code, amount, percent, policy_status, post_trade_holding, old_post_trade_holding, current_holding, old_current_holding)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		(proposal_id, scheme_id, scheme_internal_code, amount, percent, policy_status, post_trade_holding, current_holding)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		RETURNING id
 	`
 	ids := make([]int64, 0, len(allocations))
@@ -1297,11 +1286,9 @@ func insertAllocations(ctx context.Context, tx pgx.Tx, proposalID string, alloca
 		}
 		policyStatus := boolOrDefault(alloc.PolicyStatus, true)
 		postTradeHolding := floatOrZero(alloc.PostTradeHolding)
-		oldPostTradeHolding := floatOrZero(alloc.OldPostTradeHolding)
 		currentHolding := floatOrZero(alloc.CurrentHolding)
-		oldCurrentHolding := floatOrZero(alloc.OldCurrentHolding)
 		var allocationID int64
-		if err := tx.QueryRow(ctx, allocSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, oldPostTradeHolding, currentHolding, oldCurrentHolding).Scan(&allocationID); err != nil {
+		if err := tx.QueryRow(ctx, allocSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, currentHolding).Scan(&allocationID); err != nil {
 			return nil, err
 		}
 		ids = append(ids, allocationID)
@@ -1381,8 +1368,9 @@ func syncProposalAllocations(ctx context.Context, tx pgx.Tx, proposalID string, 
 			continue
 		}
 
+		// New allocation: do NOT set old_* fields on INSERT
 		var newID int64
-		if err := tx.QueryRow(ctx, insertSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, floatOrZero(alloc.OldPostTradeHolding), currentHolding, floatOrZero(alloc.OldCurrentHolding)).Scan(&newID); err != nil {
+		if err := tx.QueryRow(ctx, insertSQL, proposalID, schemeID, schemeCode, alloc.Amount, percent, policyStatus, postTradeHolding, 0.0, currentHolding, 0.0).Scan(&newID); err != nil {
 			return err
 		}
 	}
