@@ -17,15 +17,15 @@ import (
 // ---------------------------
 
 type CreateRedemptionRequestSingle struct {
-	UserID        string  `json:"user_id"`
-	FolioID       string  `json:"folio_id,omitempty"`
-	DematID       string  `json:"demat_id,omitempty"`
-	SchemeID      string  `json:"scheme_id"`
-	EntityName    string  `json:"entity_name,omitempty"`
-	ByAmount      float64 `json:"by_amount,omitempty"`
-	ByUnits       float64 `json:"by_units,omitempty"`
-	Method        string  `json:"method,omitempty"` // FIFO, LIFO, etc.
-	Status        string  `json:"status,omitempty"`
+	UserID     string  `json:"user_id"`
+	FolioID    string  `json:"folio_id,omitempty"`
+	DematID    string  `json:"demat_id,omitempty"`
+	SchemeID   string  `json:"scheme_id"`
+	EntityName string  `json:"entity_name,omitempty"`
+	ByAmount   float64 `json:"by_amount,omitempty"`
+	ByUnits    float64 `json:"by_units,omitempty"`
+	Method     string  `json:"method,omitempty"` // FIFO, LIFO, etc.
+	Status     string  `json:"status,omitempty"`
 }
 
 type UpdateRedemptionRequest struct {
@@ -81,7 +81,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		status := "PENDING_APPROVAL"
+		status := "Active"
 		if strings.TrimSpace(req.Status) != "" {
 			status = req.Status
 		}
@@ -146,14 +146,14 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 			Rows   []struct {
-				FolioID       string  `json:"folio_id,omitempty"`
-				DematID       string  `json:"demat_id,omitempty"`
-				SchemeID      string  `json:"scheme_id"`
-				EntityName    string  `json:"entity_name,omitempty"`
-				ByAmount      float64 `json:"by_amount,omitempty"`
-				ByUnits       float64 `json:"by_units,omitempty"`
-				Method        string  `json:"method,omitempty"`
-				Status        string  `json:"status,omitempty"`
+				FolioID    string  `json:"folio_id,omitempty"`
+				DematID    string  `json:"demat_id,omitempty"`
+				SchemeID   string  `json:"scheme_id"`
+				EntityName string  `json:"entity_name,omitempty"`
+				ByAmount   float64 `json:"by_amount,omitempty"`
+				ByUnits    float64 `json:"by_units,omitempty"`
+				Method     string  `json:"method,omitempty"`
+				Status     string  `json:"status,omitempty"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -203,7 +203,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer tx.Rollback(ctx)
 
-			status := "PENDING_APPROVAL"
+			status := "Active"
 			if strings.TrimSpace(row.Status) != "" {
 				status = row.Status
 			}
@@ -914,21 +914,53 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var redemptionID, folioID, dematID, schemeID, requestedBy, requestedDate, method, status string
+			var redemptionID string
+			var folioID, dematID, schemeID, requestedBy, requestedDate, method, status *string
 			var byAmount, byUnits *float64
-			_ = rows.Scan(&redemptionID, &folioID, &dematID, &schemeID, &requestedBy, &requestedDate,
-				&byAmount, &byUnits, &method, &status)
 
-			rec := map[string]interface{}{
-				"redemption_id":  redemptionID,
-				"folio_id":       folioID,
-				"demat_id":       dematID,
-				"scheme_id":      schemeID,
-				"requested_by":   requestedBy,
-				"requested_date": requestedDate,
-				"method":         method,
-				"status":         status,
+			if err := rows.Scan(&redemptionID, &folioID, &dematID, &schemeID, &requestedBy, &requestedDate,
+				&byAmount, &byUnits, &method, &status); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+err.Error())
+				return
 			}
+
+			rec := map[string]interface{}{"redemption_id": redemptionID}
+			if folioID != nil {
+				rec["folio_id"] = *folioID
+			} else {
+				rec["folio_id"] = ""
+			}
+			if dematID != nil {
+				rec["demat_id"] = *dematID
+			} else {
+				rec["demat_id"] = ""
+			}
+			if schemeID != nil {
+				rec["scheme_id"] = *schemeID
+			} else {
+				rec["scheme_id"] = ""
+			}
+			if requestedBy != nil {
+				rec["requested_by"] = *requestedBy
+			} else {
+				rec["requested_by"] = ""
+			}
+			if requestedDate != nil {
+				rec["requested_date"] = *requestedDate
+			} else {
+				rec["requested_date"] = ""
+			}
+			if method != nil {
+				rec["method"] = *method
+			} else {
+				rec["method"] = ""
+			}
+			if status != nil {
+				rec["status"] = *status
+			} else {
+				rec["status"] = ""
+			}
+
 			if byAmount != nil {
 				rec["by_amount"] = *byAmount
 			}
