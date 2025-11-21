@@ -1039,24 +1039,31 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		out := []map[string]interface{}{}
+
+		fields := rows.FieldDescriptions()
+		out := make([]map[string]interface{}, 0, 1000)
 		for rows.Next() {
-			var initiationID, proposalID, entityName, schemeID, status string
-			var folioID *string
-			var txnDate time.Time
-			var amount float64
-			_ = rows.Scan(&initiationID, &proposalID, &txnDate, &entityName, &schemeID, &folioID, &amount, &status)
-			out = append(out, map[string]interface{}{
-				"initiation_id":    initiationID,
-				"proposal_id":      proposalID,
-				"transaction_date": txnDate.Format("2006-01-02"),
-				"entity_name":      entityName,
-				"scheme_id":        schemeID,
-				"folio_id":         stringOrEmpty(folioID),
-				"amount":           amount,
-				"status":           status,
-			})
+			vals, _ := rows.Values()
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					rec[string(f.Name)] = ""
+				} else {
+					if t, ok := vals[i].(time.Time); ok {
+						rec[string(f.Name)] = t.Format("2006-01-02 15:04:05")
+					} else {
+						rec[string(f.Name)] = vals[i]
+					}
+				}
+			}
+			out = append(out, rec)
 		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			return
+		}
+
 		api.RespondWithPayload(w, true, "", out)
 	}
 }

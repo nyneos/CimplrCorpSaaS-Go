@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv" // Add this import
 	_ "github.com/lib/pq"
 
@@ -51,6 +53,25 @@ func main() {
 		log.Fatal("failed to connect to DB:", err)
 	}
 	appmanager.SetDB(db)
+
+	// Initialize pgx pool for better performance
+	user := os.Getenv("DB_USER")
+	pass := os.Getenv("DB_PASSWORD")
+	host := os.Getenv("DB_HOST")
+	port := os.Getenv("DB_PORT")
+	name := os.Getenv("DB_NAME")
+	pgxConnStr := fmt.Sprintf(
+		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		user, pass, host, port, name,
+	)
+	
+	ctx := context.Background()
+	pgxPool, err := pgxpool.New(ctx, pgxConnStr)
+	if err != nil {
+		log.Fatal("failed to create pgx pool:", err)
+	}
+	defer pgxPool.Close()
+	appmanager.SetPgxPool(pgxPool)
 
 	manager := appmanager.NewAppManager()
 
