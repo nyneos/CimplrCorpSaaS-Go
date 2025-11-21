@@ -1,4 +1,4 @@
-package investmentsuite
+package redemption
 
 import (
 	"CimplrCorpSaas/api"
@@ -1238,6 +1238,13 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func nullIfEmpty(val string) interface{} {
+	if strings.TrimSpace(val) == "" {
+		return nil
+	}
+	return val
 }
 
 func defaultIfEmpty(val, defaultVal string) string {
