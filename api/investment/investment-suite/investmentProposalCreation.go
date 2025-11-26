@@ -27,7 +27,6 @@ type CreateProposalRequest struct {
 	TotalAmount  float64                   `json:"total_amount"`
 	HorizonDays  *int                      `json:"horizon_days"`
 	Source       string                    `json:"source"`
-	Status       string                    `json:"status"`
 	BatchID      string                    `json:"batch_id"`
 	Reason       string                    `json:"reason"`
 	Allocations  []ProposalAllocationInput `json:"allocations"`
@@ -42,7 +41,6 @@ type UpdateProposalRequest struct {
 	TotalAmount  float64                         `json:"total_amount"`
 	HorizonDays  *int                            `json:"horizon_days"`
 	Source       string                          `json:"source"`
-	Status       string                          `json:"status"`
 	BatchID      string                          `json:"batch_id"`
 	Reason       string                          `json:"reason"`
 	Allocations  []ProposalAllocationUpsertInput `json:"allocations"`
@@ -257,7 +255,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_EDIT_APPROVAL"); err != nil {
+		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_APPROVAL"); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
 			return
 		}
@@ -413,36 +411,36 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			}
 		}
 
-		if len(approvedProposals) > 0 {
-			if _, err := tx.Exec(ctx, `
-				UPDATE investment.investment_proposal
-				SET status='Active', is_deleted=false, updated_at=now()
-				WHERE proposal_id = ANY($1)
-			`, approvedProposals); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to update approved proposals")
-				return
+			if len(approvedProposals) > 0 {
+				if _, err := tx.Exec(ctx, `
+					UPDATE investment.investment_proposal
+					SET is_deleted=false, updated_at=now()
+					WHERE proposal_id = ANY($1)
+				`, approvedProposals); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to update approved proposals")
+					return
+				}
 			}
-		}
-		if len(deletedProposals) > 0 {
-			if _, err := tx.Exec(ctx, `
-				UPDATE investment.investment_proposal
-				SET status='Deleted', is_deleted=true, updated_at=now()
-				WHERE proposal_id = ANY($1)
-			`, deletedProposals); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to delete proposals")
-				return
+			if len(deletedProposals) > 0 {
+				if _, err := tx.Exec(ctx, `
+					UPDATE investment.investment_proposal
+					SET is_deleted=true, updated_at=now()
+					WHERE proposal_id = ANY($1)
+				`, deletedProposals); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to delete proposals")
+					return
+				}
 			}
-		}
-		if len(rejectedProposals) > 0 {
-			if _, err := tx.Exec(ctx, `
-				UPDATE investment.investment_proposal
-				SET status='Rejected', updated_at=now()
-				WHERE proposal_id = ANY($1)
-			`, rejectedProposals); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject proposals")
-				return
+			if len(rejectedProposals) > 0 {
+				if _, err := tx.Exec(ctx, `
+					UPDATE investment.investment_proposal
+					SET updated_at=now()
+					WHERE proposal_id = ANY($1)
+				`, rejectedProposals); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to reject proposals")
+					return
+				}
 			}
-		}
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit bulk action")
@@ -554,7 +552,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.investment_proposal
-			SET status='PENDING_DELETE_APPROVAL', updated_at=now()
+			SET updated_at=now()
 			WHERE proposal_id = ANY($1)
 		`, readyForDelete); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to tag proposals for delete")
@@ -632,8 +630,7 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_horizon_days,
 				p.source,
 				p.old_source,
-				p.status,
-				p.old_status,
+				-- status and old_status removed per schema change
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -745,8 +742,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_horizon_days,
 				p.source,
 				p.old_source,
-				p.status,
-				p.old_status,
+				-- status and old_status removed per schema change
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -768,7 +764,6 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN latest_audit l ON l.proposal_id = p.proposal_id
 			LEFT JOIN history h ON h.proposal_id = p.proposal_id
 			WHERE COALESCE(p.is_deleted,false)=false
-				AND UPPER(p.status)='ACTIVE'
 				AND UPPER(l.processing_status)='APPROVED'
 			ORDER BY l.requested_at DESC NULLS LAST
 		`
@@ -872,8 +867,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_horizon_days,
 				p.source,
 				p.old_source,
-				p.status,
-				p.old_status,
+				-- status and old_status removed per schema change
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -1189,12 +1183,94 @@ ORDER BY scheme_name
 		api.RespondWithPayload(w, true, "", holdings)
 	}
 }
+
+// GetEntityAccounts returns basic entity info plus folios and demats for an entity
+func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req EntityHoldingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		entityName := strings.TrimSpace(req.EntityName)
+		if entityName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+
+		ctx := r.Context()
+
+		// Fetch folios for this entity
+		entityFolios := make([]map[string]interface{}, 0)
+		const folioSQL = `
+			SELECT m.folio_id, m.folio_number, m.default_subscription_account, m.default_redemption_account
+			FROM investment.masterfolio m
+			WHERE COALESCE(m.is_deleted,false)=false AND m.entity_name = $1
+			ORDER BY m.folio_number
+		`
+		rows, err := pool.Query(ctx, folioSQL, entityName)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var folioID, folioNumber, subAcct, redAcct string
+				if err := rows.Scan(&folioID, &folioNumber, &subAcct, &redAcct); err != nil {
+					continue
+				}
+				entityFolios = append(entityFolios, map[string]interface{}{
+					"folio_id":                     folioID,
+					"folio_number":                 folioNumber,
+					"entity_name":                  entityName,
+					"default_subscription_account": subAcct,
+					"default_redemption_account":   redAcct,
+				})
+			}
+		}
+
+		// Fetch demats for this entity
+		entityDemats := make([]map[string]interface{}, 0)
+		const dematSQL = `
+			SELECT demat_id, demat_account_number, default_settlement_account
+			FROM investment.masterdemataccount
+			WHERE COALESCE(is_deleted,false)=false AND entity_name = $1
+			ORDER BY demat_account_number
+		`
+		dRows, derr := pool.Query(ctx, dematSQL, entityName)
+		if derr == nil {
+			defer dRows.Close()
+			for dRows.Next() {
+				var dematID, dematNumber, settlement string
+				if err := dRows.Scan(&dematID, &dematNumber, &settlement); err != nil {
+					continue
+				}
+				rec := map[string]interface{}{
+					"demat_id":                   dematID,
+					"demat_account_number":       dematNumber,
+					"default_settlement_account": settlement,
+					"entity_name":                entityName,
+				}
+				entityDemats = append(entityDemats, rec)
+			}
+		}
+
+		payload := map[string]interface{}{
+			"entity":        map[string]interface{}{"entity_name": entityName},
+			"entity_folios": entityFolios,
+			"entity_demats": entityDemats,
+		}
+		api.RespondWithPayload(w, true, "", payload)
+	}
+}
 func normalizeProposalRequest(req *CreateProposalRequest) {
 	req.UserID = strings.TrimSpace(req.UserID)
 	req.ProposalName = strings.TrimSpace(req.ProposalName)
 	req.EntityName = strings.TrimSpace(req.EntityName)
 	req.Source = defaultString(strings.TrimSpace(req.Source), "Manual")
-	req.Status = defaultString(strings.TrimSpace(req.Status), "Active")
 	req.BatchID = strings.TrimSpace(req.BatchID)
 	req.Reason = strings.TrimSpace(req.Reason)
 	for i := range req.Allocations {
@@ -1209,7 +1285,6 @@ func normalizeUpdateProposalRequest(req *UpdateProposalRequest) {
 	req.ProposalName = strings.TrimSpace(req.ProposalName)
 	req.EntityName = strings.TrimSpace(req.EntityName)
 	req.Source = defaultString(strings.TrimSpace(req.Source), "Manual")
-	req.Status = defaultString(strings.TrimSpace(req.Status), "Active")
 	req.BatchID = strings.TrimSpace(req.BatchID)
 	req.Reason = strings.TrimSpace(req.Reason)
 	for i := range req.Allocations {
@@ -1311,8 +1386,8 @@ func parseBatchID(batch string) (*uuid.UUID, error) {
 func insertProposal(ctx context.Context, tx pgx.Tx, req *CreateProposalRequest, batchUUID *uuid.UUID) (string, error) {
 	const insertSQL = `
 		INSERT INTO investment.investment_proposal
-			(proposal_name, entity_name, total_amount, horizon_days, source, status, batch_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+			(proposal_name, entity_name, total_amount, horizon_days, source, batch_id)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING proposal_id
 	`
 	var horizon interface{}
@@ -1330,7 +1405,6 @@ func insertProposal(ctx context.Context, tx pgx.Tx, req *CreateProposalRequest, 
 		req.TotalAmount,
 		horizon,
 		req.Source,
-		req.Status,
 		batch,
 	).Scan(&proposalID)
 	return proposalID, err
@@ -1349,11 +1423,9 @@ func applyProposalUpdate(ctx context.Context, tx pgx.Tx, req *UpdateProposalRequ
 				horizon_days=$4,
 				old_source=source,
 				source=$5,
-				old_status=status,
-				status=$6,
-			batch_id=$7,
+			batch_id=$6,
 			updated_at=now()
-		WHERE proposal_id=$8
+		WHERE proposal_id=$7
 	`
 	var horizon interface{}
 	if req.HorizonDays != nil {
@@ -1369,7 +1441,6 @@ func applyProposalUpdate(ctx context.Context, tx pgx.Tx, req *UpdateProposalRequ
 		req.TotalAmount,
 		horizon,
 		req.Source,
-		req.Status,
 		batch,
 		req.ProposalID,
 	)
