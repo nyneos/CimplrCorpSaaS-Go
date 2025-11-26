@@ -954,7 +954,6 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // ---------------------------
 // GetInitiationsWithAudit
 // ---------------------------
-
 func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -979,7 +978,16 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				GROUP BY initiation_id
 			)
 			SELECT
-				m.*,
+				m.*, 
+				COALESCE(s.scheme_id::text, m.scheme_id::text) AS scheme_id,
+				COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
+				COALESCE(s.amc_name,'') AS amc_name,
+				COALESCE(f.folio_number,'') AS folio_number,
+				COALESCE(f.folio_id::text,'') AS folio_id,
+				COALESCE(d.default_settlement_account,'') AS demat_number,
+				COALESCE(d.demat_id::text,'') AS demat_id,
+				DATE_PART('day', now()::timestamp - m.transaction_date::timestamp)::int AS age_days,
+				COALESCE(m.amount,0) AS gross_investment_amount,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -994,10 +1002,37 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.edited_by,'') AS edited_by,
 				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
+				COALESCE(h.deleted_at,'') AS deleted_at,
+				COALESCE(nav.nav_value,0) AS nav,
+				TO_CHAR(nav.nav_date,'YYYY-MM-DD') AS applicable_nav_date
 			FROM investment.investment_initiation m
 			LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
 			LEFT JOIN history h ON h.initiation_id = m.initiation_id
+			-- allow flexible matching: the initiation column may contain either the id or the human-friendly value
+			LEFT JOIN investment.masterscheme s ON (
+			   s.scheme_id::text = m.scheme_id
+			OR s.scheme_name = m.scheme_id
+			OR s.internal_scheme_code = m.scheme_id
+			OR s.isin = m.scheme_id
+		)
+
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = m.folio_id OR f.folio_number = m.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = m.demat_id OR
+				d.default_settlement_account = m.demat_id OR
+				d.demat_account_number = m.demat_id
+			)
+			LEFT JOIN LATERAL (
+				SELECT ans.nav_value, ans.nav_date
+				FROM investment.amfi_nav_staging ans
+				WHERE (
+					(ans.scheme_code::text = s.internal_scheme_code) OR
+					(ans.isin_div_payout_growth = s.isin) OR
+					(ans.scheme_name = s.scheme_name)
+				)
+				ORDER BY ans.nav_date DESC, ans.file_date DESC
+				LIMIT 1
+			) nav ON true
 			WHERE COALESCE(m.is_deleted, false) = false
 			ORDER BY m.transaction_date DESC, m.entity_name;
 		`
