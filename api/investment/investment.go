@@ -49,9 +49,10 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/proposals/approved-active", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetApprovedProposalMeta(pool))))
 	mux.Handle("/investment/proposals/detail", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetProposalDetail(pool))))
 	mux.Handle("/investment/proposals/entity-holdings", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetEntitySchemeHoldings(pool))))
+	mux.Handle("/investment/proposals/entity-accounts", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetEntityAccounts(pool))))
 
 	// Investment initiation endpoints
-	mux.Handle("/investment/initiation/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.UploadInitiationSimple(pool))))
+	// mux.Handle("/investment/initiation/upload", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.UploadInitiationSimple(pool))))
 	mux.Handle("/investment/initiation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.CreateInitiationSingle(pool))))
 	mux.Handle("/investment/initiation/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.CreateInitiationBulk(pool))))
 	mux.Handle("/investment/initiation/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.UpdateInitiation(pool))))
@@ -80,15 +81,15 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/redemption/calculate-fifo", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CalculateRedemptionFIFO(pool))))
 
 	// Redemption initiation endpoints
-	mux.Handle("/investment/redemption/initiation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateInitiationSingle(pool))))
-	mux.Handle("/investment/redemption/initiation/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateInitiationBulk(pool))))
-	mux.Handle("/investment/redemption/initiation/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.UpdateInitiation(pool))))
-	mux.Handle("/investment/redemption/initiation/update-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.UpdateInitiationBulk(pool))))
-	mux.Handle("/investment/redemption/initiation/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.DeleteInitiation(pool))))
-	mux.Handle("/investment/redemption/initiation/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.BulkApproveInitiationActions(pool))))
-	mux.Handle("/investment/redemption/initiation/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.BulkRejectInitiationActions(pool))))
-	mux.Handle("/investment/redemption/initiation/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetInitiationsWithAudit(pool))))
-	mux.Handle("/investment/redemption/initiation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedActiveInitiations(pool))))
+	mux.Handle("/investment/redemption/initiation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateRedemptionSingle(pool))))
+	mux.Handle("/investment/redemption/initiation/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateRedemptionBulk(pool))))
+	mux.Handle("/investment/redemption/initiation/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.UpdateRedemption(pool))))
+	mux.Handle("/investment/redemption/initiation/update-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.UpdateRedemptionBulk(pool))))
+	mux.Handle("/investment/redemption/initiation/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.DeleteRedemption(pool))))
+	mux.Handle("/investment/redemption/initiation/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.BulkApproveRedemptionActions(pool))))
+	mux.Handle("/investment/redemption/initiation/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.BulkRejectRedemptionActions(pool))))
+	mux.Handle("/investment/redemption/initiation/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionsWithAudit(pool))))
+	mux.Handle("/investment/redemption/initiation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedRedemptions(pool))))
 
 	// Redemption confirmation endpoints
 	mux.Handle("/investment/redemption/confirmation/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CreateRedemptionConfirmationSingle(pool))))
@@ -102,7 +103,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/redemption/confirmation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedRedemptionConfirmations(pool))))
 	mux.Handle("/investment/redemption/confirmation/confirm", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.ConfirmRedemption(pool))))
 
-	mux.Handle("/investment/proposal/initiation/details", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetInvestmentProposalDetails(pool))))
+	// mux.Handle("/investment/proposal/initiation/details", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetInvestmentProposalDetails(pool))))
 	// AMFI sync endpoints
 	mux.HandleFunc("/investment/amfi/sync-schemes", amfisync.SyncSchemesHandler(pool))
 	mux.HandleFunc("/investment/amfi/update-nav", amfisync.UpdateNAVHandler(pool))
@@ -110,7 +111,6 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	// AMFI data retrieval endpoints
 	mux.HandleFunc("/investment/amfi/get-schemes", amfisync.GetSchemeDataHandler(pool))
 
-	// TODO: Add more investment-related endpoints here
 	// Example routes for future implementation:
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
