@@ -884,6 +884,18 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
 				m.is_deleted,
 				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -904,6 +916,19 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation m
 			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = i.scheme_id OR
+				s.scheme_name = i.scheme_id OR
+				s.internal_scheme_code = i.scheme_id OR
+				s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
 			WHERE COALESCE(m.is_deleted, false) = false
 			ORDER BY m.nav_date DESC, m.initiation_id;
 		`
