@@ -1038,6 +1038,18 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.is_deleted,
 				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
 
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount,
+
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -1057,6 +1069,19 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation m
 			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = i.scheme_id OR
+				s.scheme_name = i.scheme_id OR
+				s.internal_scheme_code = i.scheme_id OR
+				s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
 			ORDER BY m.nav_date DESC, m.initiation_id;
 		`
 
@@ -1131,7 +1156,6 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-
 		q := `
 			WITH latest AS (
 				SELECT DISTINCT ON (confirmation_id)
@@ -1152,9 +1176,35 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.actual_allotted_units,
 				m.variance_nav,
 				m.variance_units,
-				m.status
+				m.status,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount
+
 			FROM investment.investment_confirmation m
 			JOIN latest l ON l.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = i.scheme_id OR
+				s.scheme_name = i.scheme_id OR
+				s.internal_scheme_code = i.scheme_id OR
+				s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
 			WHERE 
 				UPPER(l.processing_status) = 'APPROVED'
 				AND COALESCE(m.is_deleted,false)=false
@@ -1168,44 +1218,21 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		out := []map[string]interface{}{}
+		fields := rows.FieldDescriptions()
+		out := make([]map[string]interface{}, 0, 100)
 		for rows.Next() {
-			var confirmationID, initiationID, navDate, status string
-			var nav, allottedUnits, stampDuty, netAmount float64
-			var actualNAV, actualUnits, varianceNAV, varianceUnits *float64
-			_ = rows.Scan(&confirmationID, &initiationID, &navDate, &nav, &allottedUnits, &stampDuty, &netAmount,
-				&actualNAV, &actualUnits, &varianceNAV, &varianceUnits, &status)
-
-			rec := map[string]interface{}{
-				"confirmation_id": confirmationID,
-				"initiation_id":   initiationID,
-				"nav_date":        navDate,
-				"nav":             nav,
-				"allotted_units":  allottedUnits,
-				"stamp_duty":      stampDuty,
-				"net_amount":      netAmount,
-				"status":          status,
-			}
-			// always include these keys; default to 0 if nil
-			if actualNAV != nil {
-				rec["actual_nav"] = *actualNAV
-			} else {
-				rec["actual_nav"] = 0
-			}
-			if actualUnits != nil {
-				rec["actual_allotted_units"] = *actualUnits
-			} else {
-				rec["actual_allotted_units"] = 0
-			}
-			if varianceNAV != nil {
-				rec["variance_nav"] = *varianceNAV
-			} else {
-				rec["variance_nav"] = 0
-			}
-			if varianceUnits != nil {
-				rec["variance_units"] = *varianceUnits
-			} else {
-				rec["variance_units"] = 0
+			vals, _ := rows.Values()
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					rec[string(f.Name)] = ""
+				} else {
+					if t, ok := vals[i].(time.Time); ok {
+						rec[string(f.Name)] = t.Format("2006-01-02 15:04:05")
+					} else {
+						rec[string(f.Name)] = vals[i]
+					}
+				}
 			}
 			out = append(out, rec)
 		}
@@ -1230,16 +1257,8 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Create batch
-	var batchID string
-	batchInsert := `
-		INSERT INTO investment.onboard_batch (user_id, user_email, source, total_records, status)
-		VALUES ($1, $2, $3, 0, $4)
-		RETURNING batch_id
-	`
-	if err := tx.QueryRow(ctx, batchInsert, userID, confirmedBy, "Investment Confirmation Batch", "IN_PROGRESS").Scan(&batchID); err != nil {
-		return nil, fmt.Errorf("batch creation failed: %w", err)
-	}
+	// Use a generated transient batch ID (do not create an entry in `onboard_batch`)
+	batchID := fmt.Sprintf("confirm-%d", time.Now().UnixNano())
 
 	// Fetch confirmation details with related initiation and scheme info
 	query := `
@@ -1521,15 +1540,9 @@ WHERE ts.total_units > 0;
 		snapshotCount = 0
 	}
 
-	// Mark batch as completed
-	updateBatch := `
-		UPDATE investment.onboard_batch
-		SET total_records=$1, status='COMPLETED', completed_at=now()
-		WHERE batch_id=$2
-	`
-	if _, err := tx.Exec(ctx, updateBatch, len(processedIDs), batchID); err != nil {
-		return nil, fmt.Errorf("update batch failed: %w", err)
-	}
+	// NOTE: We no longer create or update an `onboard_batch` row.
+	// The transient `batchID` is used only to group inserted transactions and snapshots,
+	// but no entry is persisted in `investment.onboard_batch`.
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit failed: %w", err)
