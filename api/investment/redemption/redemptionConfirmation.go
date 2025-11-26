@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -832,6 +833,20 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 				m.is_deleted,
 				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
 				
+				-- initiation fields
+				TO_CHAR(i.requested_date, 'YYYY-MM-DD') AS initiation_requested_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.internal_scheme_code,'') AS initiation_scheme_code,
+				COALESCE(s.isin,'') AS initiation_isin,
+				COALESCE(s.amc_name,'') AS initiation_amc_name,
+				COALESCE(f.folio_number,'') AS initiation_folio_number,
+				COALESCE(f.folio_id::text,'') AS initiation_folio_id,
+				COALESCE(d.demat_account_number,'') AS initiation_demat_number,
+				COALESCE(d.demat_id::text,'') AS initiation_demat_id,
+				COALESCE(i.by_amount,0) AS initiation_by_amount,
+				COALESCE(i.by_units,0) AS initiation_by_units,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -851,6 +866,17 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 			FROM investment.redemption_confirmation m
 			LEFT JOIN latest_audit l ON l.redemption_confirm_id = m.redemption_confirm_id
 			LEFT JOIN history h ON h.redemption_confirm_id = m.redemption_confirm_id
+			LEFT JOIN investment.redemption_initiation i ON i.redemption_id = m.redemption_id
+			LEFT JOIN investment.masterscheme s ON (
+			    s.scheme_id::text = i.scheme_id
+			 OR s.scheme_name = i.scheme_id
+			 OR s.internal_scheme_code = i.scheme_id
+			 OR s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR d.default_settlement_account = i.demat_id OR d.demat_account_number = i.demat_id
+			)
 			WHERE COALESCE(m.is_deleted, false) = false
 			ORDER BY m.updated_at DESC, m.redemption_confirm_id;
 		`
@@ -963,16 +989,8 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Create batch for these redemption transactions
-	var batchID string
-	batchInsert := `
-		INSERT INTO investment.onboard_batch (user_id, user_email, source, total_records, status)
-		VALUES ($1, $2, $3, 0, $4)
-		RETURNING batch_id
-	`
-	if err := tx.QueryRow(ctx, batchInsert, userID, confirmedBy, "Redemption Confirmation Batch", "IN_PROGRESS").Scan(&batchID); err != nil {
-		return nil, fmt.Errorf("Batch creation failed: %w", err)
-	}
+	// Use a transient batch ID (do not persist an `onboard_batch` row)
+	batchID := fmt.Sprintf("confirm-%d", time.Now().UnixNano())
 
 	// Fetch redemption confirmation details with related redemption initiation and scheme info
 	fetchQ := `
@@ -996,7 +1014,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			mr.method,
 			mr.entity_name
 		FROM investment.redemption_confirmation rc
-		JOIN investment.masterredemption mr ON rc.redemption_id = mr.redemption_id
+		JOIN investment.redemption_initiation mr ON rc.redemption_id = mr.redemption_id
 		WHERE rc.redemption_confirm_id = ANY($1)
 			AND rc.status = 'CONFIRMED'
 	`
@@ -1187,16 +1205,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		snapshotCount = 0
 	}
 
-	// Mark batch as completed and set total_records
-	updateBatch := `
-		UPDATE investment.onboard_batch
-		SET total_records=$1, status='COMPLETED', completed_at=now()
-		WHERE batch_id=$2
-	`
-	if _, err := tx.Exec(ctx, updateBatch, totalTransactions, batchID); err != nil {
-		return nil, fmt.Errorf("Update batch failed: %w", err)
-	}
-
+	// We do not persist an onboard_batch row here; commit the tx and return transient batch info
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("Commit failed: %w", err)
 	}
