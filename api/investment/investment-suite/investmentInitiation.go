@@ -16,8 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
@@ -35,7 +33,6 @@ type CreateInitiationRequestSingle struct {
 	FolioID         string  `json:"folio_id,omitempty"`
 	DematID         string  `json:"demat_id,omitempty"`
 	Amount          float64 `json:"amount"`
-	Status          string  `json:"status,omitempty"`
 	Source          string  `json:"source,omitempty"`
 }
 
@@ -55,174 +52,6 @@ type UploadInitiationResult struct {
 // ---------------------------
 // UploadInitiationSimple (bulk CSV/XLSX -> COPY -> audit)
 // ---------------------------
-
-func UploadInitiationSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		// identify user
-		userID := r.FormValue("user_id")
-		if userID == "" {
-			var tmp struct {
-				UserID string `json:"user_id"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&tmp)
-			userID = tmp.UserID
-		}
-		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
-			return
-		}
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "user not in active sessions")
-			return
-		}
-
-		// parse multipart
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
-			return
-		}
-		files := r.MultipartForm.File["file"]
-		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No file uploaded")
-			return
-		}
-
-		// allowed columns
-		allowed := map[string]bool{
-			"proposal_id":      true,
-			"transaction_date": true,
-			"entity_name":      true,
-			"scheme_id":        true,
-			"folio_id":         true,
-			"amount":           true,
-			"status":           true,
-			"source":           true,
-		}
-
-		results := make([]UploadInitiationResult, 0, len(files))
-
-		for _, fh := range files {
-			f, err := fh.Open()
-			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
-				return
-			}
-			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
-			f.Close()
-			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file")
-				return
-			}
-
-			headers := normalizeHeader(records[0])
-			dataRows := records[1:]
-
-			validCols := []string{}
-			headerPos := map[string]int{}
-			for i, h := range headers {
-				headerPos[h] = i
-				if allowed[h] {
-					validCols = append(validCols, h)
-				}
-			}
-
-			// require mandatory columns
-			mandatories := []string{"proposal_id", "transaction_date", "entity_name", "scheme_id", "amount"}
-			for _, m := range mandatories {
-				if !contains(validCols, m) {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("CSV must include column: %s", m))
-					return
-				}
-			}
-
-			// build copy rows
-			copyRows := make([][]interface{}, len(dataRows))
-			initiationIDs := make([]string, 0, len(dataRows))
-			for i, row := range dataRows {
-				vals := make([]interface{}, len(validCols))
-				for j, c := range validCols {
-					if pos, ok := headerPos[c]; ok && pos < len(row) {
-						cell := strings.TrimSpace(row[pos])
-						if cell == "" {
-							vals[j] = nil
-						} else {
-							vals[j] = cell
-						}
-					} else {
-						vals[j] = nil
-					}
-				}
-				copyRows[i] = vals
-			}
-
-			// transaction
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
-				return
-			}
-			committed := false
-			defer func() {
-				if !committed {
-					tx.Rollback(ctx)
-				}
-			}()
-
-			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
-
-			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "investment_initiation"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
-				return
-			}
-
-			// get inserted initiation_ids
-			rows, err := tx.Query(ctx, `
-				SELECT initiation_id FROM investment.investment_initiation
-				WHERE source = 'Manual' OR source IS NULL
-				ORDER BY updated_at DESC
-				LIMIT $1
-			`, len(dataRows))
-			if err == nil {
-				for rows.Next() {
-					var id string
-					if rows.Scan(&id) == nil {
-						initiationIDs = append(initiationIDs, id)
-					}
-				}
-				rows.Close()
-			}
-
-			// insert audit rows
-			if len(initiationIDs) > 0 {
-				for _, id := range initiationIDs {
-					_, _ = tx.Exec(ctx, `
-						INSERT INTO investment.auditactioninitiation (initiation_id, actiontype, processing_status, requested_by, requested_at)
-						VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
-					`, id, userName)
-				}
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
-				return
-			}
-			committed = true
-
-			results = append(results, UploadInitiationResult{Success: true, BatchID: uuid.New().String()})
-		}
-
-		api.RespondWithPayload(w, true, "", results)
-	}
-}
 
 // ---------------------------
 // CreateInitiationSingle (single create, source='Manual')
@@ -279,17 +108,15 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		insertQ := `
-			INSERT INTO investment.investment_initiation (
-				proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, status, source
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			RETURNING initiation_id
-		`
+				INSERT INTO investment.investment_initiation (
+					proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, source
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				RETURNING initiation_id
+			`
 		var initiationID string
 		proposalID := nullIfEmpty(req.ProposalID)
 		folioID := nullIfEmpty(req.FolioID)
 		dematID := nullIfEmpty(req.DematID)
-		status := defaultIfEmpty(req.Status, "Active")
-
 		if err := tx.QueryRow(ctx, insertQ,
 			proposalID,
 			req.TransactionDate,
@@ -298,7 +125,6 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			folioID,
 			dematID,
 			req.Amount,
-			status,
 			source,
 		).Scan(&initiationID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
@@ -312,6 +138,18 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, initiationID, userEmail); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
 			return
+		}
+
+		// if this initiation is tied to a proposal+scheme, mark the allocation's initiation_status
+		if strings.TrimSpace(req.ProposalID) != "" && strings.TrimSpace(req.SchemeID) != "" {
+			if _, err := tx.Exec(ctx, `
+				UPDATE investment.investment_proposal_allocation
+				SET initiation_status = true, updated_at = now()
+				WHERE proposal_id = $1 AND scheme_id = $2
+			`, req.ProposalID, req.SchemeID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to update allocation initiation_status: "+err.Error())
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -348,7 +186,6 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FolioID         string  `json:"folio_id,omitempty"`
 				DematID         string  `json:"demat_id,omitempty"`
 				Amount          float64 `json:"amount"`
-				Status          string  `json:"status,omitempty"`
 				Source          string  `json:"source,omitempty"`
 			} `json:"rows"`
 		}
@@ -417,10 +254,10 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var initiationID string
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.investment_initiation (
-					proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, status, source
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+					proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, source
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 				RETURNING initiation_id
-			`, nullIfEmpty(proposalID), txnDate, entityName, schemeID, nullIfEmpty(row.FolioID), nullIfEmpty(row.DematID), row.Amount, defaultIfEmpty(row.Status, "Active"), source).Scan(&initiationID); err != nil {
+			`, nullIfEmpty(proposalID), txnDate, entityName, schemeID, nullIfEmpty(row.FolioID), nullIfEmpty(row.DematID), row.Amount, source).Scan(&initiationID); err != nil {
 				results = append(results, map[string]interface{}{
 					"success": false, "proposal_id": proposalID, "error": "Insert failed: " + err.Error(),
 				})
@@ -452,6 +289,18 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if proposalID != "" {
 				result["proposal_id"] = proposalID
+			}
+
+			// mark allocation initiation_status true for this row if linked to a proposal+scheme
+			if proposalID != "" && schemeID != "" {
+				if _, err := pgxPool.Exec(ctx, `
+					UPDATE investment.investment_proposal_allocation
+					SET initiation_status = true, updated_at = now()
+					WHERE proposal_id = $1 AND scheme_id = $2
+				`, proposalID, schemeID); err != nil {
+					// attach error to result but continue processing other rows
+					result["warning"] = "failed to flag allocation initiation_status: " + err.Error()
+				}
 			}
 			results = append(results, result)
 		}
@@ -502,15 +351,15 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch existing values
 		sel := `
-			SELECT proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, status, source
+			SELECT proposal_id, transaction_date, entity_name, scheme_id, folio_id, demat_id, amount, source
 			FROM investment.investment_initiation
 			WHERE initiation_id=$1
 			FOR UPDATE
 		`
-		var oldVals [9]interface{}
+		var oldVals [8]interface{}
 		if err := tx.QueryRow(ctx, sel, req.InitiationID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
+			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
@@ -524,8 +373,7 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"folio_id":         4,
 			"demat_id":         5,
 			"amount":           6,
-			"status":           7,
-			"source":           8,
+			"source":           7,
 		}
 
 		var sets []string
@@ -623,12 +471,12 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer tx.Rollback(ctx)
 
 			sel := `
-				SELECT proposal_id, transaction_date, entity_name, scheme_id, folio_id, amount, status, source
+				SELECT proposal_id, transaction_date, entity_name, scheme_id, folio_id, amount, source
 				FROM investment.investment_initiation WHERE initiation_id=$1 FOR UPDATE`
-			var oldVals [8]interface{}
+			var oldVals [7]interface{}
 			if err := tx.QueryRow(ctx, sel, row.InitiationID).Scan(
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
+				&oldVals[4], &oldVals[5], &oldVals[6],
 			); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "fetch failed: " + err.Error()})
 				continue
@@ -641,8 +489,7 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"scheme_id":        3,
 				"folio_id":         4,
 				"amount":           5,
-				"status":           6,
-				"source":           7,
+				"source":           6,
 			}
 
 			var sets []string
@@ -1009,7 +856,16 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				GROUP BY initiation_id
 			)
 			SELECT
-				m.*,
+				m.*, 
+				COALESCE(s.scheme_id::text, m.scheme_id::text) AS scheme_id,
+				COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
+				COALESCE(s.amc_name,'') AS amc_name,
+				COALESCE(f.folio_number,'') AS folio_number,
+				COALESCE(f.folio_id::text,'') AS folio_id,
+				COALESCE(d.default_settlement_account,'') AS demat_number,
+				COALESCE(d.demat_id::text,'') AS demat_id,
+				DATE_PART('day', now()::timestamp - m.transaction_date::timestamp)::int AS age_days,
+				COALESCE(m.amount,0) AS gross_investment_amount,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
@@ -1024,13 +880,40 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.edited_by,'') AS edited_by,
 				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
+				COALESCE(h.deleted_at,'') AS deleted_at,
+				COALESCE(nav.nav_value,0) AS nav,
+				TO_CHAR(nav.nav_date,'YYYY-MM-DD') AS applicable_nav_date
 			FROM investment.investment_initiation m
 			LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
 			LEFT JOIN history h ON h.initiation_id = m.initiation_id
+			-- allow flexible matching: the initiation column may contain either the id or the human-friendly value
+			-- LEFT JOIN investment.masterscheme s ON (s.scheme_id::text = m.scheme_id OR s.scheme_name = m.scheme_id)
+			LEFT JOIN investment.masterscheme s ON (
+       s.scheme_id::text = m.scheme_id
+    OR s.scheme_name = m.scheme_id
+    OR s.internal_scheme_code = m.scheme_id
+    OR s.isin = m.scheme_id
+)
+
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = m.folio_id OR f.folio_number = m.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = m.demat_id OR
+				d.default_settlement_account = m.demat_id OR
+				d.demat_account_number = m.demat_id
+			)
+			LEFT JOIN LATERAL (
+				SELECT ans.nav_value, ans.nav_date
+				FROM investment.amfi_nav_staging ans
+				WHERE (
+					(ans.scheme_code::text = s.internal_scheme_code) OR
+					(ans.isin_div_payout_growth = s.isin) OR
+					(ans.scheme_name = s.scheme_name)
+				)
+				ORDER BY ans.nav_date DESC, ans.file_date DESC
+				LIMIT 1
+			) nav ON true
 			WHERE UPPER(COALESCE(l.processing_status,'')) = 'APPROVED'
-			  AND UPPER(m.status) = 'ACTIVE'
-			  AND COALESCE(m.is_deleted, false) = false
+							AND COALESCE(m.is_deleted, false) = false
 			ORDER BY m.transaction_date DESC, m.entity_name;
 		`
 		rows, err := pgxPool.Query(ctx, q)
@@ -1249,565 +1132,4 @@ func defaultIfEmpty(val, defaultVal string) string {
 		return defaultVal
 	}
 	return val
-}
-
-func stringOrEmpty(val *string) string {
-	if val == nil {
-		return ""
-	}
-	return *val
-}
-
-// GetInvestmentProposalDetails fetches detailed information about investment proposals
-// including folio details, bank account metadata, and scheme/AMC information
-func GetInvestmentProposalDetails(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		ctx := r.Context()
-		var req struct {
-			SchemeID           string `json:"scheme_id"`
-			SchemeName         string `json:"scheme_name"`
-			InternalSchemeCode string `json:"internal_scheme_code"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
-			return
-		}
-
-		schemeID := strings.TrimSpace(req.SchemeID)
-		schemeName := strings.TrimSpace(req.SchemeName)
-		internalSchemeCode := strings.TrimSpace(req.InternalSchemeCode)
-
-		if schemeID == "" && schemeName == "" && internalSchemeCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "scheme_id, scheme_name, or internal_scheme_code is required")
-			return
-		}
-
-		// Query to fetch comprehensive proposal and initiation details
-		result, err := fetchProposalDetailsByScheme(ctx, pool, schemeID, schemeName, internalSchemeCode)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to fetch proposal details: %v", err))
-			return
-		}
-
-		api.RespondWithPayload(w, true, "", result)
-	}
-}
-
-func fetchProposalDetailsByScheme(ctx context.Context, pool *pgxpool.Pool, schemeID, schemeName, internalSchemeCode string) (map[string]interface{}, error) {
-	// Main query to fetch proposal, allocation, scheme, AMC, folio, and demat details
-	query := `
-		WITH latest_proposal_audit AS (
-			SELECT DISTINCT ON (proposal_id)
-				proposal_id,
-				processing_status
-			FROM investment.auditactionproposal
-			ORDER BY proposal_id, requested_at DESC
-		),
-		latest_folio_audit AS (
-			SELECT DISTINCT ON (folio_id)
-				folio_id,
-				processing_status
-			FROM investment.auditactionfolio
-			ORDER BY folio_id, requested_at DESC
-		),
-		latest_scheme_audit AS (
-			SELECT DISTINCT ON (scheme_id)
-				scheme_id,
-				processing_status
-			FROM investment.auditactionscheme
-			ORDER BY scheme_id, requested_at DESC
-		),
-		latest_amc_audit AS (
-			SELECT DISTINCT ON (amc_id)
-				amc_id,
-				processing_status
-			FROM investment.auditactionamc
-			ORDER BY amc_id, requested_at DESC
-		),
-		latest_demat_audit AS (
-			SELECT DISTINCT ON (demat_id)
-				demat_id,
-				processing_status
-			FROM investment.auditactiondemat
-			ORDER BY demat_id, requested_at DESC
-		),
-		subscription_account AS (
-			SELECT 
-				ba.account_number,
-				ba.account_nickname,
-				ba.account_id,
-				b.bank_name,
-				b.bank_id,
-				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-				STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
-			FROM public.masterbankaccount ba
-			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterclearingcode c ON c.account_id = ba.account_id
-			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, 
-			         b.bank_name, b.bank_id, 
-			         e.entity_name, ec.entity_name
-		),
-		redemption_account AS (
-			SELECT 
-				ba.account_number,
-				ba.account_nickname,
-				ba.account_id,
-				b.bank_name,
-				b.bank_id,
-				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-				STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
-			FROM public.masterbankaccount ba
-			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterclearingcode c ON c.account_id = ba.account_id
-			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, 
-			         b.bank_name, b.bank_id, 
-			         e.entity_name, ec.entity_name
-		),
-		settlement_account AS (
-			SELECT 
-				ba.account_number,
-				ba.account_nickname,
-				ba.account_id,
-				b.bank_name,
-				b.bank_id,
-				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
-				STRING_AGG(c.code_type || ':' || c.code_value, ', ') AS clearing_codes
-			FROM public.masterbankaccount ba
-			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
-			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
-			LEFT JOIN public.masterclearingcode c ON c.account_id = ba.account_id
-			GROUP BY ba.account_number, ba.account_nickname, ba.account_id, 
-			         b.bank_name, b.bank_id, 
-			         e.entity_name, ec.entity_name
-		)
-		SELECT
-			-- Proposal details
-			p.proposal_id,
-			p.proposal_name,
-			p.entity_name AS proposal_entity,
-			p.total_amount,
-			p.horizon_days,
-			p.source AS proposal_source,
-			p.status AS proposal_status,
-			p.batch_id AS proposal_batch_id,
-			lpa.processing_status AS proposal_approval_status,
-			
-			-- Allocation details (full)
-			pa.id AS allocation_id,
-			pa.scheme_id AS allocation_scheme_id,
-			pa.scheme_internal_code AS allocation_scheme_code,
-			pa.amount AS allocation_amount,
-			pa.percent AS allocation_percent,
-			pa.old_amount AS allocation_old_amount,
-			pa.old_percent AS allocation_old_percent,
-			pa.policy_status,
-			pa.post_trade_holding,
-			pa.old_post_trade_holding,
-			pa.current_holding,
-			pa.old_current_holding,
-			
-			-- Scheme details
-			ms.scheme_id,
-			ms.scheme_name,
-			ms.isin,
-			ms.internal_scheme_code,
-			ms.internal_risk_rating,
-			ms.erp_gl_account,
-			ms.status AS scheme_status,
-			ms.source AS scheme_source,
-			lsa.processing_status AS scheme_approval_status,
-			
-			-- AMC details
-			ma.amc_id,
-			ma.amc_name,
-			ma.internal_amc_code,
-			ma.primary_contact_name,
-			ma.primary_contact_email,
-			ma.sebi_registration_no,
-			ma.amc_beneficiary_name,
-			ma.amc_bank_account_no,
-			ma.amc_bank_name,
-			ma.amc_bank_ifsc,
-			ma.mfu_amc_code,
-			ma.cams_amc_code,
-			ma.erp_vendor_code,
-			ma.status AS amc_status,
-			laa.processing_status AS amc_approval_status,
-			
-			-- Folio details
-			mf.folio_id,
-			mf.entity_name AS folio_entity,
-			mf.folio_number,
-			mf.first_holder_name,
-			mf.default_subscription_account,
-			mf.default_redemption_account,
-			mf.status AS folio_status,
-			lfa.processing_status AS folio_approval_status,
-			
-			-- Demat details for the proposal entity
-			dm.demat_id,
-			dm.entity_name AS demat_entity,
-			dm.dp_id,
-			dm.depository,
-			dm.demat_account_number,
-			dm.depository_participant,
-			dm.client_id,
-			dm.default_settlement_account AS demat_settlement_account,
-			dm.status AS demat_status,
-			dm.source AS demat_source,
-			lda.processing_status AS demat_approval_status,
-			
-			-- Subscription bank account details
-			sub.account_nickname AS sub_account_nickname,
-			sub.account_id AS sub_account_id,
-			sub.bank_name AS sub_bank_name,
-			sub.bank_id AS sub_bank_id,
-			sub.entity_name AS sub_entity_name,
-			sub.clearing_codes AS sub_clearing_codes,
-			
-			-- Redemption bank account details
-			red.account_nickname AS red_account_nickname,
-			red.account_id AS red_account_id,
-			red.bank_name AS red_bank_name,
-			red.bank_id AS red_bank_id,
-			red.entity_name AS red_entity_name,
-			red.clearing_codes AS red_clearing_codes,
-			
-			-- Settlement bank account details (for demat)
-			sett.account_nickname AS sett_account_nickname,
-			sett.account_id AS sett_account_id,
-			sett.bank_name AS sett_bank_name,
-			sett.bank_id AS sett_bank_id,
-			sett.entity_name AS sett_entity_name,
-			sett.clearing_codes AS sett_clearing_codes
-			
-		FROM investment.investment_proposal_allocation pa
-		INNER JOIN investment.investment_proposal p ON p.proposal_id = pa.proposal_id
-		INNER JOIN investment.masterscheme ms ON ms.scheme_id = pa.scheme_id
-		INNER JOIN investment.masteramc ma ON ma.amc_name = ms.amc_name
-		LEFT JOIN investment.folioschememapping fsm ON fsm.scheme_id = ms.scheme_id
-		LEFT JOIN investment.masterfolio mf ON mf.folio_id = fsm.folio_id AND mf.amc_name = ma.amc_name
-		LEFT JOIN investment.masterdemataccount dm ON dm.entity_name = p.entity_name AND COALESCE(dm.is_deleted, false) = false
-		LEFT JOIN latest_proposal_audit lpa ON lpa.proposal_id = p.proposal_id
-		LEFT JOIN latest_folio_audit lfa ON lfa.folio_id = mf.folio_id
-		LEFT JOIN latest_scheme_audit lsa ON lsa.scheme_id = ms.scheme_id
-		LEFT JOIN latest_amc_audit laa ON laa.amc_id = ma.amc_id
-		LEFT JOIN latest_demat_audit lda ON lda.demat_id = dm.demat_id
-		LEFT JOIN subscription_account sub ON sub.account_number = mf.default_subscription_account
-		LEFT JOIN redemption_account red ON red.account_number = mf.default_redemption_account
-		LEFT JOIN settlement_account sett ON sett.account_number = dm.default_settlement_account
-		WHERE (
-			($1 != '' AND pa.scheme_id = $1) OR
-			($2 != '' AND ms.scheme_name = $2) OR
-			($3 != '' AND ms.internal_scheme_code = $3)
-		)
-		  AND UPPER(lpa.processing_status) = 'APPROVED'
-		  AND (lsa.processing_status IS NULL OR UPPER(lsa.processing_status) = 'APPROVED')
-		  AND (laa.processing_status IS NULL OR UPPER(laa.processing_status) = 'APPROVED')
-		  AND UPPER(ms.status) = 'ACTIVE'
-		  AND UPPER(ma.status) = 'ACTIVE'
-		  AND COALESCE(ms.is_deleted, false) = false
-		  AND COALESCE(ma.is_deleted, false) = false
-		  AND (lfa.processing_status IS NULL OR UPPER(lfa.processing_status) = 'APPROVED')
-		  AND (mf.folio_id IS NULL OR (UPPER(mf.status) = 'ACTIVE' AND COALESCE(mf.is_deleted, false) = false))
-		  AND (lda.processing_status IS NULL OR UPPER(lda.processing_status) = 'APPROVED')
-		  AND (dm.demat_id IS NULL OR (UPPER(dm.status) = 'ACTIVE' AND COALESCE(dm.is_deleted, false) = false))
-		ORDER BY p.proposal_name, mf.folio_number, dm.demat_account_number;
-	`
-
-	rows, err := pool.Query(ctx, query, schemeID, schemeName, internalSchemeCode)
-	if err != nil {
-		return nil, fmt.Errorf("query execution failed: %w", err)
-	}
-	defer rows.Close()
-
-	// Parse results
-	var proposals []map[string]interface{}
-	folioMap := make(map[string][]map[string]interface{})
-	dematMap := make(map[string][]map[string]interface{})
-	proposalMap := make(map[string]map[string]interface{})
-
-	for rows.Next() {
-		var (
-			// Proposal
-			proposalID, proposalName, proposalEntity, proposalSource, proposalStatus string
-			proposalApprovalStatus                                                   string
-			proposalBatchID                                                          *string
-			totalAmount                                                              float64
-			horizonDays                                                              *int
-
-			// Allocation (full)
-			allocationID                              int64
-			allocationSchemeID, allocationSchemeCode  *string
-			allocationAmount, allocationPercent       *float64
-			allocationOldAmount, allocationOldPercent *float64
-			policyStatus                              *bool
-			postTradeHolding, oldPostTradeHolding     *float64
-			currentHolding, oldCurrentHolding         *float64
-
-			// Scheme
-			schemeID, schemeName, isin, internalSchemeCode, internalRiskRating *string
-			erpGLAccount, schemeStatus, schemeSource, schemeApprovalStatus     *string
-
-			// AMC
-			amcID, amcName, internalAmcCode, primaryContactName, primaryContactEmail *string
-			sebiRegistrationNo, amcBeneficiaryName, amcBankAccountNo, amcBankName    *string
-			amcBankIfsc, mfuAmcCode, camsAmcCode, erpVendorCode                      *string
-			amcStatus, amcApprovalStatus                                             *string
-
-			// Folio
-			folioID, folioEntity, folioNumber, firstHolderName *string
-			defaultSubscriptionAcct, defaultRedemptionAcct     *string
-			folioStatus, folioApprovalStatus                   *string
-
-			// Demat
-			dematID, dematEntity, dpID, depository, dematAccountNumber *string
-			depositoryParticipant, clientID, dematSettlementAccount    *string
-			dematStatus, dematSource, dematApprovalStatus              *string
-
-			// Subscription account
-			subAccountNickname, subAccountID      *string
-			subBankName, subBankID, subEntityName *string
-			subClearingCodes                      *string
-
-			// Redemption account
-			redAccountNickname, redAccountID      *string
-			redBankName, redBankID, redEntityName *string
-			redClearingCodes                      *string
-
-			// Settlement account (demat)
-			settAccountNickname, settAccountID       *string
-			settBankName, settBankID, settEntityName *string
-			settClearingCodes                        *string
-		)
-
-		err := rows.Scan(
-			// Proposal
-			&proposalID, &proposalName, &proposalEntity, &totalAmount, &horizonDays,
-			&proposalSource, &proposalStatus,
-			&proposalBatchID, &proposalApprovalStatus,
-
-			// Allocation (full)
-			&allocationID, &allocationSchemeID, &allocationSchemeCode,
-			&allocationAmount, &allocationPercent,
-			&allocationOldAmount, &allocationOldPercent,
-			&policyStatus, &postTradeHolding, &oldPostTradeHolding,
-			&currentHolding, &oldCurrentHolding,
-
-			// Scheme
-			&schemeID, &schemeName, &isin, &internalSchemeCode, &internalRiskRating,
-			&erpGLAccount, &schemeStatus, &schemeSource, &schemeApprovalStatus,
-
-			// AMC
-			&amcID, &amcName, &internalAmcCode, &primaryContactName, &primaryContactEmail,
-			&sebiRegistrationNo, &amcBeneficiaryName, &amcBankAccountNo, &amcBankName,
-			&amcBankIfsc, &mfuAmcCode, &camsAmcCode, &erpVendorCode,
-			&amcStatus, &amcApprovalStatus,
-
-			// Folio
-			&folioID, &folioEntity, &folioNumber, &firstHolderName,
-			&defaultSubscriptionAcct, &defaultRedemptionAcct,
-			&folioStatus, &folioApprovalStatus,
-
-			// Demat
-			&dematID, &dematEntity, &dpID, &depository, &dematAccountNumber,
-			&depositoryParticipant, &clientID, &dematSettlementAccount,
-			&dematStatus, &dematSource, &dematApprovalStatus,
-
-			// Subscription account
-			&subAccountNickname, &subAccountID,
-			&subBankName, &subBankID, &subEntityName,
-			&subClearingCodes,
-
-			// Redemption account
-			&redAccountNickname, &redAccountID,
-			&redBankName, &redBankID, &redEntityName,
-			&redClearingCodes,
-
-			// Settlement account
-			&settAccountNickname, &settAccountID,
-			&settBankName, &settBankID, &settEntityName,
-			&settClearingCodes,
-		)
-
-		if err != nil {
-			return nil, fmt.Errorf("row scan failed: %w", err)
-		}
-
-		// Build proposal if not exists
-		if _, exists := proposalMap[proposalID]; !exists {
-			proposalMap[proposalID] = map[string]interface{}{
-				"proposal_id":     proposalID,
-				"proposal_name":   proposalName,
-				"entity_name":     proposalEntity,
-				"total_amount":    totalAmount,
-				"horizon_days":    horizonDays,
-				"source":          proposalSource,
-				"status":          proposalStatus,
-				"batch_id":        stringOrEmpty(proposalBatchID),
-				"approval_status": proposalApprovalStatus,
-				"allocation": map[string]interface{}{
-					"allocation_id":          allocationID,
-					"scheme_id":              stringOrEmpty(allocationSchemeID),
-					"scheme_internal_code":   stringOrEmpty(allocationSchemeCode),
-					"amount":                 floatOrNil(allocationAmount),
-					"percent":                floatOrNil(allocationPercent),
-					"old_amount":             floatOrNil(allocationOldAmount),
-					"old_percent":            floatOrNil(allocationOldPercent),
-					"policy_status":          policyStatus,
-					"post_trade_holding":     floatOrNil(postTradeHolding),
-					"old_post_trade_holding": floatOrNil(oldPostTradeHolding),
-					"current_holding":        floatOrNil(currentHolding),
-					"old_current_holding":    floatOrNil(oldCurrentHolding),
-				},
-				"scheme": map[string]interface{}{
-					"scheme_id":            stringOrEmpty(schemeID),
-					"scheme_name":          stringOrEmpty(schemeName),
-					"isin":                 stringOrEmpty(isin),
-					"internal_scheme_code": stringOrEmpty(internalSchemeCode),
-					"internal_risk_rating": stringOrEmpty(internalRiskRating),
-					"erp_gl_account":       stringOrEmpty(erpGLAccount),
-					"status":               stringOrEmpty(schemeStatus),
-					"source":               stringOrEmpty(schemeSource),
-					"approval_status":      stringOrEmpty(schemeApprovalStatus),
-				},
-				"amc": map[string]interface{}{
-					"amc_id":                stringOrEmpty(amcID),
-					"amc_name":              stringOrEmpty(amcName),
-					"internal_amc_code":     stringOrEmpty(internalAmcCode),
-					"primary_contact_name":  stringOrEmpty(primaryContactName),
-					"primary_contact_email": stringOrEmpty(primaryContactEmail),
-					"sebi_registration_no":  stringOrEmpty(sebiRegistrationNo),
-					"amc_beneficiary_name":  stringOrEmpty(amcBeneficiaryName),
-					"amc_bank_account_no":   stringOrEmpty(amcBankAccountNo),
-					"amc_bank_name":         stringOrEmpty(amcBankName),
-					"amc_bank_ifsc":         stringOrEmpty(amcBankIfsc),
-					"mfu_amc_code":          stringOrEmpty(mfuAmcCode),
-					"cams_amc_code":         stringOrEmpty(camsAmcCode),
-					"erp_vendor_code":       stringOrEmpty(erpVendorCode),
-					"status":                stringOrEmpty(amcStatus),
-					"approval_status":       stringOrEmpty(amcApprovalStatus),
-				},
-			}
-		}
-
-		// Build folio details
-		if folioID != nil && *folioID != "" {
-			folioKey := *folioID
-			folioDetails := map[string]interface{}{
-				"folio_id":          stringOrEmpty(folioID),
-				"entity_name":       stringOrEmpty(folioEntity),
-				"folio_number":      stringOrEmpty(folioNumber),
-				"first_holder_name": stringOrEmpty(firstHolderName),
-				"status":            stringOrEmpty(folioStatus),
-				"approval_status":   stringOrEmpty(folioApprovalStatus),
-				"subscription_account": map[string]interface{}{
-					"account_number":   stringOrEmpty(defaultSubscriptionAcct),
-					"account_nickname": stringOrEmpty(subAccountNickname),
-					"account_id":       stringOrEmpty(subAccountID),
-					"bank_name":        stringOrEmpty(subBankName),
-					"bank_id":          stringOrEmpty(subBankID),
-					"entity_name":      stringOrEmpty(subEntityName),
-					"clearing_codes":   stringOrEmpty(subClearingCodes),
-				},
-				"redemption_account": map[string]interface{}{
-					"account_number":   stringOrEmpty(defaultRedemptionAcct),
-					"account_nickname": stringOrEmpty(redAccountNickname),
-					"account_id":       stringOrEmpty(redAccountID),
-					"bank_name":        stringOrEmpty(redBankName),
-					"bank_id":          stringOrEmpty(redBankID),
-					"entity_name":      stringOrEmpty(redEntityName),
-					"clearing_codes":   stringOrEmpty(redClearingCodes),
-				},
-			}
-
-			// Avoid duplicate folios
-			if _, exists := folioMap[folioKey]; !exists {
-				folioMap[folioKey] = []map[string]interface{}{folioDetails}
-			}
-		}
-
-		// Build demat details
-		if dematID != nil && *dematID != "" {
-			dematKey := *dematID
-			dematDetails := map[string]interface{}{
-				"demat_id":               stringOrEmpty(dematID),
-				"entity_name":            stringOrEmpty(dematEntity),
-				"dp_id":                  stringOrEmpty(dpID),
-				"depository":             stringOrEmpty(depository),
-				"demat_account_number":   stringOrEmpty(dematAccountNumber),
-				"depository_participant": stringOrEmpty(depositoryParticipant),
-				"client_id":              stringOrEmpty(clientID),
-				"status":                 stringOrEmpty(dematStatus),
-				"source":                 stringOrEmpty(dematSource),
-				"approval_status":        stringOrEmpty(dematApprovalStatus),
-				"settlement_account": map[string]interface{}{
-					"account_number":   stringOrEmpty(dematSettlementAccount),
-					"account_nickname": stringOrEmpty(settAccountNickname),
-					"account_id":       stringOrEmpty(settAccountID),
-					"bank_name":        stringOrEmpty(settBankName),
-					"bank_id":          stringOrEmpty(settBankID),
-					"entity_name":      stringOrEmpty(settEntityName),
-					"clearing_codes":   stringOrEmpty(settClearingCodes),
-				},
-			}
-
-			// Avoid duplicate demats
-			if _, exists := dematMap[dematKey]; !exists {
-				dematMap[dematKey] = []map[string]interface{}{dematDetails}
-			}
-		}
-	}
-
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("row iteration failed: %w", rows.Err())
-	}
-
-	// Consolidate folios and demats into proposal
-	for _, proposal := range proposalMap {
-		var allFolios []map[string]interface{}
-		for _, folios := range folioMap {
-			allFolios = append(allFolios, folios...)
-		}
-		proposal["folios"] = allFolios
-
-		var allDemats []map[string]interface{}
-		for _, demats := range dematMap {
-			allDemats = append(allDemats, demats...)
-		}
-		proposal["demats"] = allDemats
-
-		proposals = append(proposals, proposal)
-	}
-
-	if len(proposals) == 0 {
-		return map[string]interface{}{
-			"proposals": []map[string]interface{}{},
-			"message":   "No approved active proposals found for the given scheme",
-		}, nil
-	}
-
-	return map[string]interface{}{
-		"proposals": proposals,
-		"count":     len(proposals),
-	}, nil
-}
-
-// Helper function to safely handle nullable floats
-func floatOrNil(f *float64) interface{} {
-	if f == nil {
-		return nil
-	}
-	return *f
 }
