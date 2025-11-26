@@ -257,7 +257,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_APPROVAL"); err != nil {
+		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_EDIT_APPROVAL"); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
 			return
 		}
@@ -981,9 +981,128 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		allocRows.Close()
 
+		// Enrich allocations with scheme name and amc name
+		schemeIDs := make([]string, 0)
+		schemeSet := make(map[string]struct{})
+		for _, a := range allocations {
+			if sid, ok := a["scheme_id"].(string); ok && strings.TrimSpace(sid) != "" {
+				if _, seen := schemeSet[sid]; !seen {
+					schemeSet[sid] = struct{}{}
+					schemeIDs = append(schemeIDs, sid)
+				}
+			}
+		}
+		schemeMap := make(map[string]map[string]interface{})
+		if len(schemeIDs) > 0 {
+			const schemeQ = `SELECT scheme_id, scheme_name, amc_name FROM investment.masterscheme WHERE scheme_id = ANY($1)`
+			rows, err := pool.Query(ctx, schemeQ, schemeIDs)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var sid, sname, amc string
+					if err := rows.Scan(&sid, &sname, &amc); err != nil {
+						continue
+					}
+					schemeMap[sid] = map[string]interface{}{"scheme_name": sname, "amc_name": amc}
+				}
+			}
+		}
+
+		// enrich allocations with schemes and placeholder for entity-specific accounts (will set below)
+		for i, a := range allocations {
+			if sid, ok := a["scheme_id"].(string); ok && sid != "" {
+				if info, ok2 := schemeMap[sid]; ok2 {
+					a["scheme_name"] = info["scheme_name"]
+					a["amc_name"] = info["amc_name"]
+				} else {
+					a["scheme_name"] = ""
+					a["amc_name"] = ""
+				}
+			} else {
+				a["scheme_name"] = ""
+				a["amc_name"] = ""
+			}
+			allocations[i] = a
+		}
+
 		payload := map[string]interface{}{
 			"proposal":    proposal,
 			"allocations": allocations,
+		}
+
+		// enrich with folios/schemes and demats for the same entity
+		entityFolios := make([]map[string]interface{}, 0)
+		entityDemats := make([]map[string]interface{}, 0)
+		entityName := ""
+		if v, ok := proposal["entity_name"].(string); ok {
+			entityName = v
+		}
+		if strings.TrimSpace(entityName) != "" {
+			// Fetch folios for this entity (no scheme array; include entity_name)
+			const folioSQL = `
+			SELECT m.folio_id, m.folio_number, m.default_subscription_account, m.default_redemption_account
+			FROM investment.masterfolio m
+			WHERE COALESCE(m.is_deleted,false)=false AND m.entity_name = $1
+			ORDER BY m.folio_number
+			`
+			rows, err := pool.Query(ctx, folioSQL, entityName)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var folioID, folioNumber, subAcct, redAcct string
+					if err := rows.Scan(&folioID, &folioNumber, &subAcct, &redAcct); err != nil {
+						continue
+					}
+					entityFolios = append(entityFolios, map[string]interface{}{
+						"folio_id":                     folioID,
+						"folio_number":                 folioNumber,
+						"entity_name":                  entityName,
+						"default_subscription_account": subAcct,
+						"default_redemption_account":   redAcct,
+					})
+				}
+			}
+
+			// Fetch demat accounts for this entity
+			const dematSQL = `
+			SELECT demat_id, demat_account_number, default_settlement_account
+			FROM investment.masterdemataccount
+			WHERE COALESCE(is_deleted,false)=false AND entity_name = $1
+			ORDER BY demat_account_number
+			`
+			dRows, derr := pool.Query(ctx, dematSQL, entityName)
+			if derr == nil {
+				defer dRows.Close()
+				for dRows.Next() {
+					var dematID, dematNumber, settlement string
+					if err := dRows.Scan(&dematID, &dematNumber, &settlement); err != nil {
+						continue
+					}
+					entityDemats = append(entityDemats, map[string]interface{}{
+						"demat_id":                    dematID,
+						"demat_account_number":        dematNumber,
+						"default_settlement_account":  settlement,
+					})
+				}
+			}
+		}
+
+		// annotate demats with entity (do not include amc names)
+		for i, d := range entityDemats {
+			if _, ok := d["entity_name"]; !ok {
+				d["entity_name"] = entityName
+			}
+			entityDemats[i] = d
+		}
+
+		payload["entity_folios"] = entityFolios
+		payload["entity_demats"] = entityDemats
+
+		// attach entity folios/demats into each allocation
+		for i, a := range allocations {
+			a["entity_folios"] = entityFolios
+			a["entity_demats"] = entityDemats
+			allocations[i] = a
 		}
 		api.RespondWithPayload(w, true, "", payload)
 	}
