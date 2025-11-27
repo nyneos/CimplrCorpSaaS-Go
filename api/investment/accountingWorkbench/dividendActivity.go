@@ -52,6 +52,10 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate required fields
+		if strings.TrimSpace(req.EffectiveDate) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "effective_date is required")
+			return
+		}
 		if strings.TrimSpace(req.SchemeID) == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "scheme_id is required")
 			return
