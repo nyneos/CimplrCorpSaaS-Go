@@ -130,7 +130,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Aggregate holdings by entity -> scheme (resolved by scheme_id/internal code/isin) and folio/demat
-		// We join onboard_transaction -> portfolio_snapshot (to get entity_name via batch_id)
+		// We compute net units = sum(buys) - sum(sells) but compute avg_nav and invested amount from buys only.
 		aggQuery := `
 			WITH ot AS (
 				SELECT
@@ -142,7 +142,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ms.scheme_id = t.scheme_id OR ms.internal_scheme_code = t.scheme_internal_code OR ms.isin = t.scheme_id
 				)
 				WHERE ps.entity_name = $1
-				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription')
+				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
 			)
 			SELECT
 				ot.entity_name,
@@ -151,11 +151,20 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id) AS scheme_id,
 				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code) AS scheme_name,
 				COALESCE(ot.ms_isin,'') AS isin,
-				SUM(COALESCE(ot.units,0)) AS total_units,
-				CASE WHEN SUM(COALESCE(ot.units,0))=0 THEN 0 ELSE SUM(COALESCE(ot.nav,0)*COALESCE(ot.units,0))/SUM(COALESCE(ot.units,0)) END AS avg_nav,
-				SUM(COALESCE(ot.amount,0)) AS total_invested_amount
+				-- net units: buys (positive) minus sells (absolute)
+				SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END) AS total_units,
+				-- avg_nav based only on buy transactions
+				CASE WHEN SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)=0 THEN 0
+					ELSE SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.nav,0)*COALESCE(ot.units,0) ELSE 0 END)
+						/ SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+				END AS avg_nav,
+				-- invested amount based only on buy transactions
+				SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.amount,0) ELSE 0 END) AS total_invested_amount
 			FROM ot
 			GROUP BY ot.entity_name, COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id), COALESCE(ot.ms_scheme_name, ot.scheme_internal_code), COALESCE(ot.ms_isin,'')
+			HAVING (SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)) > 0
 			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
 		`
 
@@ -347,28 +356,27 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 
 		// We'll compute holdings from transaction rows so totals are aggregated across batches.
-		// Fetch all BUY/PURCHASE transactions ordered by date (FIFO)
+		// Fetch all BUY/PURCHASE transactions ordered by date (FIFO) with flexible scheme matching and entity filter
 		txQuery := `
 			SELECT 
-				id,
-				TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
-				COALESCE(units, 0) AS units,
-				COALESCE(amount, 0) AS amount,
-				COALESCE(nav, 0) AS nav,
-				scheme_internal_code,
-				folio_number,
-				demat_acc_number
-			FROM investment.onboard_transaction
-			WHERE scheme_id = $1
-				AND (
-					($2::text IS NOT NULL AND folio_number = $2)
-					OR ($3::text IS NOT NULL AND demat_acc_number = $3)
-				)
-				AND LOWER(transaction_type) IN ('buy', 'purchase', 'subscription')
-			ORDER BY transaction_date ASC, id ASC
+				ot.id,
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				COALESCE(ot.units, 0) AS units,
+				COALESCE(ot.amount, 0) AS amount,
+				COALESCE(ot.nav, 0) AS nav,
+				ot.scheme_internal_code,
+				ot.folio_number,
+				ot.demat_acc_number
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+			WHERE ot.entity_name = $1
+				AND LOWER(ot.transaction_type) IN ('buy', 'purchase', 'subscription')
+				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
+			ORDER BY ot.transaction_date ASC, ot.id ASC
 		`
 
-		rows, err := pgxPool.Query(ctx, txQuery, req.SchemeID, req.FolioNumber, req.DematAccNumber)
+		rows, err := pgxPool.Query(ctx, txQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 			return
@@ -427,19 +435,18 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch all existing SELL/REDEMPTION transactions to calculate already redeemed units
 		sellQuery := `
 			SELECT 
-				TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
-				COALESCE(units, 0) AS units
-			FROM investment.onboard_transaction
-			WHERE scheme_id = $1
-				AND (
-					($2::text IS NOT NULL AND folio_number = $2)
-					OR ($3::text IS NOT NULL AND demat_acc_number = $3)
-				)
-				AND LOWER(transaction_type) IN ('sell', 'redemption')
-			ORDER BY transaction_date ASC, id ASC
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				COALESCE(ot.units, 0) AS units
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+			WHERE ot.entity_name = $1
+				AND LOWER(ot.transaction_type) IN ('sell', 'redemption')
+				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
+			ORDER BY ot.transaction_date ASC, ot.id ASC
 		`
 
-		sellRows, err := pgxPool.Query(ctx, sellQuery, req.SchemeID, req.FolioNumber, req.DematAccNumber)
+		sellRows, err := pgxPool.Query(ctx, sellQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Sell query failed: "+err.Error())
 			return
@@ -456,10 +463,10 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			existingSells = append(existingSells, tx)
 		}
 
-		// compute sum of sold units
+		// compute sum of sold units (treat sells as absolute units)
 		var sumSellUnits float64
 		for _, s := range existingSells {
-			sumSellUnits += s.Units
+			sumSellUnits += math.Abs(s.Units)
 		}
 
 		// total holding available = purchases - sells
