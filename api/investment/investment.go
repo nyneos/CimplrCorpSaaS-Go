@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"CimplrCorpSaas/api"
+	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkBench"
 	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
@@ -103,7 +104,43 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/redemption/confirmation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedRedemptionConfirmations(pool))))
 	mux.Handle("/investment/redemption/confirmation/confirm", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.ConfirmRedemption(pool))))
 
-	// mux.Handle("/investment/proposal/initiation/details", api.BusinessUnitMiddleware(db)(http.HandlerFunc(investmentsuite.GetInvestmentProposalDetails(pool))))
+	// Accounting Workbench - Main Activity endpoints
+	mux.Handle("/investment/accounting/activity/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateActivitySingle(pool))))
+	mux.Handle("/investment/accounting/activity/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateActivityBulk(pool))))
+	mux.Handle("/investment/accounting/activity/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateActivity(pool))))
+	mux.Handle("/investment/accounting/activity/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.DeleteActivity(pool))))
+	mux.Handle("/investment/accounting/activity/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.BulkApproveActivityActions(pool))))
+	mux.Handle("/investment/accounting/activity/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.BulkRejectActivityActions(pool))))
+	mux.Handle("/investment/accounting/activity/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetActivitiesWithAudit(pool))))
+	mux.Handle("/investment/accounting/activity/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetApprovedActivities(pool))))
+	
+	// Accounting Workbench - Journal Entry endpoints
+	mux.Handle("/investment/accounting/journal-entries", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetJournalEntries(pool))))
+
+	// Accounting Workbench - MTM endpoints
+	mux.Handle("/investment/accounting/mtm/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateMTMSingle(pool))))
+	mux.Handle("/investment/accounting/mtm/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateMTMBulk(pool))))
+	mux.Handle("/investment/accounting/mtm/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateMTM(pool))))
+	mux.Handle("/investment/accounting/mtm/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetMTMWithAudit(pool))))
+
+	// Accounting Workbench - Dividend endpoints
+	mux.Handle("/investment/accounting/dividend/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateDividendSingle(pool))))
+	mux.Handle("/investment/accounting/dividend/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateDividendBulk(pool))))
+	mux.Handle("/investment/accounting/dividend/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateDividend(pool))))
+	mux.Handle("/investment/accounting/dividend/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetDividendsWithAudit(pool))))
+
+	// Accounting Workbench - Corporate Action endpoints
+	mux.Handle("/investment/accounting/corporate-action/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateCorporateActionSingle(pool))))
+	mux.Handle("/investment/accounting/corporate-action/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateCorporateActionBulk(pool))))
+	mux.Handle("/investment/accounting/corporate-action/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateCorporateAction(pool))))
+	mux.Handle("/investment/accounting/corporate-action/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetCorporateActionsWithAudit(pool))))
+
+	// Accounting Workbench - Fair Value Override endpoints
+	mux.Handle("/investment/accounting/fvo/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateFVOSingle(pool))))
+	mux.Handle("/investment/accounting/fvo/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateFVOBulk(pool))))
+	mux.Handle("/investment/accounting/fvo/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateFVO(pool))))
+	mux.Handle("/investment/accounting/fvo/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetFVOsWithAudit(pool))))
+
 	// AMFI sync endpoints
 	mux.HandleFunc("/investment/amfi/sync-schemes", amfisync.SyncSchemesHandler(pool))
 	mux.HandleFunc("/investment/amfi/update-nav", amfisync.UpdateNAVHandler(pool))
