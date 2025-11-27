@@ -256,7 +256,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		currentTime := time.Now()
 		requestMonth, _ := time.Parse("2006-01", fmt.Sprintf("%s-%s", year, monthNum))
 		if requestMonth.After(currentTime) {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format("JAN 2006")))
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format("2006-01")))
 			return
 		}
 
@@ -290,9 +290,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					entity_name,
 					scheme_id,
 					folio_number,
-					folio_id,
 					demat_acc_number,
-					demat_id,
 					total_units,
 					current_nav,
 					created_at
@@ -303,8 +301,8 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			SELECT
 				ms.scheme_id,
-				ms.folio_id,
-				ms.demat_id,
+				ms.folio_number,
+				ms.demat_acc_number,
 				ms.total_units,
 				ms.current_nav AS start_nav,
 				COALESCE(sch.scheme_name, ms.scheme_id) AS scheme_name,
@@ -325,20 +323,20 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Collect holdings
 		type HoldingData struct {
-			SchemeID     string
-			FolioID      *string
-			DematID      *string
-			Units        float64
-			StartNAV     float64  // NAV at start of month
-			SchemeName   string
-			ISIN         string
-			InternalCode string
+			SchemeID        string
+			FolioNumber     *string
+			DematAccNumber  *string
+			Units           float64
+			StartNAV        float64  // NAV at start of month
+			SchemeName      string
+			ISIN            string
+			InternalCode    string
 		}
 
 		holdings := []HoldingData{}
 		for holdingsRows.Next() {
 			var h HoldingData
-			if err := holdingsRows.Scan(&h.SchemeID, &h.FolioID, &h.DematID, &h.Units, &h.StartNAV, &h.SchemeName, &h.ISIN, &h.InternalCode); err != nil {
+			if err := holdingsRows.Scan(&h.SchemeID, &h.FolioNumber, &h.DematAccNumber, &h.Units, &h.StartNAV, &h.SchemeName, &h.ISIN, &h.InternalCode); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Holdings scan failed: "+err.Error())
 				return
 			}
@@ -483,6 +481,21 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				unrealizedGLPct = (unrealizedGL / prevValue) * 100
 			}
 
+			// Lookup folio_id and demat_id from master tables
+			var folioID, dematID *string
+			if h.FolioNumber != nil && *h.FolioNumber != "" {
+				var fid string
+				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 LIMIT 1`, *h.FolioNumber).Scan(&fid); err == nil {
+					folioID = &fid
+				}
+			}
+			if h.DematAccNumber != nil && *h.DematAccNumber != "" {
+				var did string
+				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemat WHERE demat_acc_number = $1 LIMIT 1`, *h.DematAccNumber).Scan(&did); err == nil {
+					dematID = &did
+				}
+			}
+
 			var mtmID int64
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.accounting_mtm (
@@ -490,7 +503,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					prev_value, curr_value, unrealized_gain_loss, unrealized_gain_loss_pct
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 				RETURNING mtm_id
-			`, activityID, h.SchemeID, h.FolioID, h.DematID,
+			`, activityID, h.SchemeID, folioID, dematID,
 				h.Units, h.StartNAV, endNAV, actualEndDate,
 				prevValue, currValue, unrealizedGL, unrealizedGLPct).Scan(&mtmID); err != nil {
 				results = append(results, map[string]interface{}{
