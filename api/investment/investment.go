@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"CimplrCorpSaas/api"
-	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkBench"
+	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
 	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
