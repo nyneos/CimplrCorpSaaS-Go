@@ -51,8 +51,23 @@ func CreateCorporateActionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate required fields
+		if strings.TrimSpace(req.EffectiveDate) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "effective_date is required")
+			return
+		}
 		if strings.TrimSpace(req.ActionType) == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "action_type is required")
+			return
+		}
+		// Validate action_type enum
+		validActionTypes := map[string]bool{
+			"SCHEME_NAME_CHANGE": true,
+			"SCHEME_MERGER":      true,
+			"SPLIT":              true,
+			"BONUS":              true,
+		}
+		if !validActionTypes[req.ActionType] {
+			api.RespondWithError(w, http.StatusBadRequest, "action_type must be one of: SCHEME_NAME_CHANGE, SCHEME_MERGER, SPLIT, BONUS")
 			return
 		}
 		if strings.TrimSpace(req.SourceSchemeID) == "" {
@@ -109,7 +124,7 @@ func CreateCorporateActionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				activity_id, action_type, source_scheme_id, target_scheme_id, new_scheme_name,
 				ratio_new, ratio_old, conversion_ratio, bonus_units
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			RETURNING corporate_action_id
+			RETURNING ca_id
 		`, activityID, req.ActionType, req.SourceSchemeID, nullIfEmptyString(req.TargetSchemeID),
 			nullIfEmptyString(req.NewSchemeName), nullIfZeroFloat(req.RatioNew),
 			nullIfZeroFloat(req.RatioOld), nullIfZeroFloat(req.ConversionRatio),
@@ -236,7 +251,7 @@ func CreateCorporateActionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					activity_id, action_type, source_scheme_id, target_scheme_id, new_scheme_name,
 					ratio_new, ratio_old, conversion_ratio, bonus_units
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-				RETURNING corporate_action_id
+				RETURNING ca_id
 			`, activityID, row.ActionType, row.SourceSchemeID, nullIfEmptyString(row.TargetSchemeID),
 				nullIfEmptyString(row.NewSchemeName), nullIfZeroFloat(row.RatioNew),
 				nullIfZeroFloat(row.RatioOld), nullIfZeroFloat(row.ConversionRatio),
@@ -318,7 +333,7 @@ func UpdateCorporateAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT activity_id, action_type, source_scheme_id, target_scheme_id, new_scheme_name,
 			       ratio_new, ratio_old, conversion_ratio, bonus_units
 			FROM investment.accounting_corporate_action
-			WHERE corporate_action_id=$1
+			WHERE ca_id=$1
 			FOR UPDATE
 		`
 		var activityID string
@@ -361,7 +376,7 @@ func UpdateCorporateAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		q := fmt.Sprintf("UPDATE investment.accounting_corporate_action SET %s, updated_at=now() WHERE corporate_action_id=$%d", strings.Join(sets, ", "), pos)
+		q := fmt.Sprintf("UPDATE investment.accounting_corporate_action SET %s, updated_at=now() WHERE ca_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.CorporateActionID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
@@ -414,7 +429,7 @@ func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY a.activity_id, a.requested_at DESC
 			)
 			SELECT
-				ca.corporate_action_id,
+				ca.ca_id,
 				ca.activity_id,
 				act.activity_type,
 				TO_CHAR(act.effective_date, 'YYYY-MM-DD') AS effective_date,
@@ -454,7 +469,7 @@ func GetCorporateActionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.activity_id = ca.activity_id
 			WHERE COALESCE(ca.is_deleted, false) = false
 				AND COALESCE(act.is_deleted, false) = false
-			ORDER BY ca.updated_at DESC, ca.corporate_action_id;
+			ORDER BY ca.updated_at DESC, ca.ca_id;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
