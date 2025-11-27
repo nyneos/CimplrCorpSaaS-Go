@@ -282,36 +282,79 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// STEP 1: Fetch all active holdings from portfolio_snapshot as of start of month
-		// We need holdings that existed at the beginning of the accounting period
+		// STEP 1: Aggregate holdings from onboard_transaction (similar to redemption.go pattern)
+		// Calculate net units and avg_nav based on transaction history up to accounting period
 		holdingsQuery := `
-			WITH month_start_snapshot AS (
-				SELECT DISTINCT ON (entity_name, scheme_id, COALESCE(folio_number,''), COALESCE(demat_acc_number,''))
-					entity_name,
-					scheme_id,
-					folio_number,
-					demat_acc_number,
-					total_units,
-					current_nav,
-					created_at
-				FROM investment.portfolio_snapshot
-				WHERE created_at <= $1::date  -- Start of month
-					AND total_units > 0
-				ORDER BY entity_name, scheme_id, COALESCE(folio_number,''), COALESCE(demat_acc_number,''), created_at DESC
+			WITH ot AS (
+				SELECT
+					t.*,
+					ms.scheme_name AS ms_scheme_name, 
+					ms.isin AS ms_isin, 
+					ms.scheme_id AS ms_scheme_id, 
+					ms.internal_scheme_code AS ms_internal_code
+				FROM investment.onboard_transaction t
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = t.scheme_id 
+					OR ms.internal_scheme_code = t.scheme_internal_code 
+					OR ms.isin = t.scheme_id
+				)
+				WHERE t.transaction_date <= $1::date  -- Only transactions up to start of accounting period
+				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
 			)
 			SELECT
-				ms.scheme_id,
-				ms.folio_number,
-				ms.demat_acc_number,
-				ms.total_units,
-				ms.current_nav AS start_nav,
-				COALESCE(sch.scheme_name, ms.scheme_id) AS scheme_name,
-				COALESCE(sch.isin, '') AS isin,
-				COALESCE(sch.internal_scheme_code, '') AS internal_code
-			FROM month_start_snapshot ms
-			LEFT JOIN investment.masterscheme sch ON sch.scheme_id = ms.scheme_id
-			WHERE ms.total_units > 0
-			ORDER BY ms.entity_name, ms.scheme_id
+				COALESCE(ot.folio_number,'') AS folio_number,
+				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
+				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id) AS scheme_id,
+				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code) AS scheme_name,
+				COALESCE(ot.ms_isin,'') AS isin,
+				COALESCE(ot.ms_internal_code,'') AS internal_code,
+				-- net units: buys (positive) minus sells (absolute)
+				SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+					THEN COALESCE(ot.units,0) 
+					ELSE 0 
+				END) - SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') 
+					THEN ABS(COALESCE(ot.units,0)) 
+					ELSE 0 
+				END) AS total_units,
+				-- avg_nav based only on buy transactions (weighted average cost basis)
+				CASE 
+					WHEN SUM(CASE 
+						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+						THEN COALESCE(ot.units,0) 
+						ELSE 0 
+					END) = 0 THEN 0
+					ELSE SUM(CASE 
+						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+						THEN COALESCE(ot.nav,0) * COALESCE(ot.units,0) 
+						ELSE 0 
+					END) / SUM(CASE 
+						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+						THEN COALESCE(ot.units,0) 
+						ELSE 0 
+					END)
+				END AS avg_nav
+			FROM ot
+			GROUP BY 
+				COALESCE(ot.folio_number,''), 
+				COALESCE(ot.demat_acc_number,''), 
+				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id), 
+				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code), 
+				COALESCE(ot.ms_isin,''),
+				COALESCE(ot.ms_internal_code,'')
+			HAVING (
+				SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+					THEN COALESCE(ot.units,0) 
+					ELSE 0 
+				END) - SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') 
+					THEN ABS(COALESCE(ot.units,0)) 
+					ELSE 0 
+				END)
+			) > 0
+			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
 		`
 
 		holdingsRows, err := tx.Query(ctx, holdingsQuery, startDate)
@@ -323,20 +366,20 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Collect holdings
 		type HoldingData struct {
+			FolioNumber     string
+			DematAccNumber  string
 			SchemeID        string
-			FolioNumber     *string
-			DematAccNumber  *string
-			Units           float64
-			StartNAV        float64  // NAV at start of month
 			SchemeName      string
 			ISIN            string
 			InternalCode    string
+			Units           float64
+			AvgNAV          float64  // Weighted average cost basis from buy transactions
 		}
 
 		holdings := []HoldingData{}
 		for holdingsRows.Next() {
 			var h HoldingData
-			if err := holdingsRows.Scan(&h.SchemeID, &h.FolioNumber, &h.DematAccNumber, &h.Units, &h.StartNAV, &h.SchemeName, &h.ISIN, &h.InternalCode); err != nil {
+			if err := holdingsRows.Scan(&h.FolioNumber, &h.DematAccNumber, &h.SchemeID, &h.SchemeName, &h.ISIN, &h.InternalCode, &h.Units, &h.AvgNAV); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Holdings scan failed: "+err.Error())
 				return
 			}
@@ -344,7 +387,15 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(holdings) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No active holdings found for the given accounting_period")
+			// Check if onboard_transaction table has any data at all
+			var txCount int
+			tx.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount)
+			
+			if txCount == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No investment transactions found. Please upload transaction data before running MTM for %s", req.AccountingPeriod))
+			} else {
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No active holdings found for accounting period %s (start date: %s). Found %d total buy transactions but all were after this date or fully redeemed.", req.AccountingPeriod, startDate, txCount))
+			}
 			return
 		}
 
@@ -374,18 +425,19 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// STEP 2: For each holding, fetch historical NAV and calculate MTM
 		for _, h := range holdings {
-			// Validate start NAV
-			if h.StartNAV <= 0 {
+			// Use avg_nav as previous NAV (cost basis)
+			prevNAV := h.AvgNAV
+			if prevNAV <= 0 {
 				results = append(results, map[string]interface{}{
 					"success":     false,
 					"scheme_id":   h.SchemeID,
 					"scheme_name": h.SchemeName,
-					"error":       "Invalid start NAV (start_nav <= 0)",
+					"error":       "Invalid avg_nav (prev_nav <= 0)",
 				})
-			continue
+				continue
 			}
 
-			// Try to fetch end-of-month NAV from MFapi.in using ISIN or internal code
+			// Try to fetch current/end-of-month NAV from MFapi.in using ISIN or internal code
 			// MFapi uses scheme_code which maps to AMFI codes
 			var endNAV float64
 			var actualEndDate string
@@ -472,8 +524,8 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Calculate MTM values (start of month → end of month)
-			prevValue := h.Units * h.StartNAV
+			// Calculate MTM values (average cost → current market NAV)
+			prevValue := h.Units * prevNAV
 			currValue := h.Units * endNAV
 			unrealizedGL := currValue - prevValue
 			var unrealizedGLPct float64
@@ -483,15 +535,15 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Lookup folio_id and demat_id from master tables
 			var folioID, dematID *string
-			if h.FolioNumber != nil && *h.FolioNumber != "" {
+			if h.FolioNumber != "" {
 				var fid string
-				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 LIMIT 1`, *h.FolioNumber).Scan(&fid); err == nil {
+				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 LIMIT 1`, h.FolioNumber).Scan(&fid); err == nil {
 					folioID = &fid
 				}
 			}
-			if h.DematAccNumber != nil && *h.DematAccNumber != "" {
+			if h.DematAccNumber != "" {
 				var did string
-				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemat WHERE demat_acc_number = $1 LIMIT 1`, *h.DematAccNumber).Scan(&did); err == nil {
+				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number = $1 LIMIT 1`, h.DematAccNumber).Scan(&did); err == nil {
 					dematID = &did
 				}
 			}
@@ -504,7 +556,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 				RETURNING mtm_id
 			`, activityID, h.SchemeID, folioID, dematID,
-				h.Units, h.StartNAV, endNAV, actualEndDate,
+				h.Units, prevNAV, endNAV, actualEndDate,
 				prevValue, currValue, unrealizedGL, unrealizedGLPct).Scan(&mtmID); err != nil {
 				results = append(results, map[string]interface{}{
 					"success":     false,
@@ -521,8 +573,8 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"scheme_id":             h.SchemeID,
 				"scheme_name":           h.SchemeName,
 				"units":                 h.Units,
-				"start_nav":             h.StartNAV,
-				"end_nav":               endNAV,
+				"prev_nav":              prevNAV,
+				"curr_nav":              endNAV,
 				"nav_date":              actualEndDate,
 				"unrealized_gain_loss": unrealizedGL,
 				"unrealized_gain_loss_pct": unrealizedGLPct,
