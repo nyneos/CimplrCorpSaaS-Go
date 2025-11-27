@@ -19,15 +19,18 @@ import (
 // ---------------------------
 
 type CreateRedemptionRequestSingle struct {
-	UserID     string  `json:"user_id"`
-	FolioID    string  `json:"folio_id,omitempty"`
-	DematID    string  `json:"demat_id,omitempty"`
-	SchemeID   string  `json:"scheme_id"`
-	EntityName string  `json:"entity_name,omitempty"`
-	ByAmount   float64 `json:"by_amount,omitempty"`
-	ByUnits    float64 `json:"by_units,omitempty"`
-	Method     string  `json:"method,omitempty"` // FIFO, LIFO, etc.
-	Status     string  `json:"status,omitempty"`
+	UserID            string  `json:"user_id"`
+	FolioID           string  `json:"folio_id,omitempty"`
+	DematID           string  `json:"demat_id,omitempty"`
+	SchemeID          string  `json:"scheme_id"`
+	EntityName        string  `json:"entity_name,omitempty"`
+	ByAmount          float64 `json:"by_amount,omitempty"`
+	ByUnits           float64 `json:"by_units,omitempty"`
+	Method            string  `json:"method,omitempty"`           // FIFO, LIFO, etc.
+	TransactionDate   string  `json:"transaction_date,omitempty"` // YYYY-MM-DD (optional)
+	EstimatedProceeds float64 `json:"estimated_proceeds,omitempty"`
+	GainLoss          float64 `json:"gain_loss,omitempty"`
+	Status            string  `json:"status,omitempty"`
 }
 
 type UpdateRedemptionRequest struct {
@@ -90,11 +93,11 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		insertQ := `
-			INSERT INTO investment.redemption_initiation (
-				folio_id, demat_id, scheme_id, requested_by, requested_date,
-				by_amount, by_units, method, entity_name, old_entity_name
-			) VALUES ($1, $2, $3, $4, now()::date, $5, $6, $7, $8, $9)
-			RETURNING redemption_id
+		    INSERT INTO investment.redemption_initiation (
+			    folio_id, demat_id, scheme_id, requested_by, requested_date, transaction_date,
+			    by_amount, by_units, method, entity_name, old_entity_name, estimated_proceeds, gain_loss
+		    ) VALUES ($1, $2, $3, $4, now()::date, $5, $6, $7, $8, $9, $10, $11, $12)
+		    RETURNING redemption_id
 		`
 		var redemptionID string
 		// requested_by is set from session email; requested_date uses current date
@@ -103,11 +106,14 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullIfEmptyString(req.DematID),
 			req.SchemeID,
 			userEmail,
+			nullIfEmptyString(req.TransactionDate),
 			nullIfZeroFloat(req.ByAmount),
 			nullIfZeroFloat(req.ByUnits),
 			method,
 			nullIfEmptyString(req.EntityName),
 			nil,
+			nullIfZeroFloat(req.EstimatedProceeds),
+			nullIfZeroFloat(req.GainLoss),
 		).Scan(&redemptionID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
 			return
@@ -143,14 +149,17 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 			Rows   []struct {
-				FolioID    string  `json:"folio_id,omitempty"`
-				DematID    string  `json:"demat_id,omitempty"`
-				SchemeID   string  `json:"scheme_id"`
-				EntityName string  `json:"entity_name,omitempty"`
-				ByAmount   float64 `json:"by_amount,omitempty"`
-				ByUnits    float64 `json:"by_units,omitempty"`
-				Method     string  `json:"method,omitempty"`
-				Status     string  `json:"status,omitempty"`
+				FolioID           string  `json:"folio_id,omitempty"`
+				DematID           string  `json:"demat_id,omitempty"`
+				SchemeID          string  `json:"scheme_id"`
+				EntityName        string  `json:"entity_name,omitempty"`
+				ByAmount          float64 `json:"by_amount,omitempty"`
+				ByUnits           float64 `json:"by_units,omitempty"`
+				Method            string  `json:"method,omitempty"`
+				TransactionDate   string  `json:"transaction_date,omitempty"`
+				EstimatedProceeds float64 `json:"estimated_proceeds,omitempty"`
+				GainLoss          float64 `json:"gain_loss,omitempty"`
+				Status            string  `json:"status,omitempty"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -209,12 +218,12 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var redemptionID string
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.redemption_initiation (
-					folio_id, demat_id, scheme_id, requested_by, requested_date,
-					by_amount, by_units, method, entity_name
-				) VALUES ($1, $2, $3, $4, now()::date, $5, $6, $7, $8)
+						folio_id, demat_id, scheme_id, requested_by, requested_date, transaction_date,
+						by_amount, by_units, method, entity_name, estimated_proceeds, gain_loss
+				) VALUES ($1, $2, $3, $4, now()::date, $5, $6, $7, $8, $9, $10, $11)
 				RETURNING redemption_id
 			`, nullIfEmptyString(row.FolioID), nullIfEmptyString(row.DematID), row.SchemeID, userEmail,
-				nullIfZeroFloat(row.ByAmount), nullIfZeroFloat(row.ByUnits), method, nullIfEmptyString(row.EntityName)).Scan(&redemptionID); err != nil {
+				nullIfEmptyString(row.TransactionDate), nullIfZeroFloat(row.ByAmount), nullIfZeroFloat(row.ByUnits), method, nullIfEmptyString(row.EntityName), nullIfZeroFloat(row.EstimatedProceeds), nullIfZeroFloat(row.GainLoss)).Scan(&redemptionID); err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
 				continue
 			}
@@ -282,32 +291,32 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Fetch existing values
+		// Fetch existing values (include transaction_date so scans align with fieldPairs)
 		sel := `
-			SELECT folio_id, demat_id, scheme_id, requested_by, requested_date,
-				   by_amount, by_units, method
-			FROM investment.redemption_initiation
-			WHERE redemption_id=$1
-			FOR UPDATE
-		`
-		var oldVals [8]interface{}
+			SELECT folio_id, demat_id, scheme_id, requested_by, requested_date, transaction_date,
+				   by_amount, by_units, method, estimated_proceeds, gain_loss
+			FROM investment.redemption_initiation WHERE redemption_id=$1 FOR UPDATE`
+		var oldVals [11]interface{}
 		if err := tx.QueryRow(ctx, sel, req.RedemptionID).Scan(
-			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
-			&oldVals[5], &oldVals[6], &oldVals[7],
+			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5],
+			&oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
 		}
 
 		fieldPairs := map[string]int{
-			"folio_id":       0,
-			"demat_id":       1,
-			"scheme_id":      2,
-			"requested_by":   3,
-			"requested_date": 4,
-			"by_amount":      5,
-			"by_units":       6,
-			"method":         7,
+			"folio_id":           0,
+			"demat_id":           1,
+			"scheme_id":          2,
+			"requested_by":       3,
+			"requested_date":     4,
+			"transaction_date":   5,
+			"by_amount":          6,
+			"by_units":           7,
+			"method":             8,
+			"estimated_proceeds": 9,
+			"gain_loss":          10,
 		}
 
 		var sets []string
@@ -405,27 +414,30 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer tx.Rollback(ctx)
 
 			sel := `
-				SELECT folio_id, demat_id, scheme_id, requested_by, requested_date,
-				       by_amount, by_units, method, status
+				SELECT folio_id, demat_id, scheme_id, requested_by, requested_date, transaction_date,
+					   by_amount, by_units, method, estimated_proceeds, gain_loss
 				FROM investment.redemption_initiation WHERE redemption_id=$1 FOR UPDATE`
-			var oldVals [9]interface{}
+			var oldVals [11]interface{}
 			if err := tx.QueryRow(ctx, sel, row.RedemptionID).Scan(
-				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
-				&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
+				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4], &oldVals[5],
+				&oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10],
 			); err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_id": row.RedemptionID, constants.ValueError: "fetch failed: " + err.Error()})
 				continue
 			}
 
 			fieldPairs := map[string]int{
-				"folio_id":       0,
-				"demat_id":       1,
-				"scheme_id":      2,
-				"requested_by":   3,
-				"requested_date": 4,
-				"by_amount":      5,
-				"by_units":       6,
-				"method":         7,
+				"folio_id":           0,
+				"demat_id":           1,
+				"scheme_id":          2,
+				"requested_by":       3,
+				"requested_date":     4,
+				"transaction_date":   5,
+				"by_amount":          6,
+				"by_units":           7,
+				"method":             8,
+				"estimated_proceeds": 9,
+				"gain_loss":          10,
 			}
 
 			var sets []string
@@ -811,6 +823,13 @@ func GetRedemptionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_requested_by,
 				TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
 				TO_CHAR(m.old_requested_date, 'YYYY-MM-DD') AS old_requested_date,
+				TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				TO_CHAR(m.old_transaction_date, 'YYYY-MM-DD') AS old_transaction_date,
+				m.estimated_proceeds,
+				m.old_estimated_proceeds,
+				m.gain_loss,
+				m.old_gain_loss,
+				DATE_PART('day', now()::timestamp - COALESCE(m.transaction_date, m.requested_date)::timestamp)::int AS age_days,
 				m.by_amount,
 				m.old_by_amount,
 				m.by_units,
@@ -911,9 +930,13 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(d.demat_account_number,'') AS demat_number,
 				m.requested_by,
 				TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
+				TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
 				m.by_amount,
 				m.by_units,
-				m.method
+				m.method,
+				m.estimated_proceeds,
+				m.gain_loss,
+				DATE_PART('day', now()::timestamp - COALESCE(m.transaction_date, m.requested_date)::timestamp)::int AS age_days
 			FROM investment.redemption_initiation m
 			JOIN latest l ON l.redemption_id = m.redemption_id
 			LEFT JOIN investment.masterscheme s ON (
