@@ -913,7 +913,10 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) nav ON true
 			WHERE UPPER(COALESCE(l.processing_status,'')) = 'APPROVED'
-							AND COALESCE(m.is_deleted, false) = false
+					AND COALESCE(m.is_deleted, false) = false
+					AND m.initiation_id NOT IN (
+						SELECT initiation_id FROM investment.investment_confirmation 
+					)
 			ORDER BY m.transaction_date DESC, m.entity_name;
 		`
 		rows, err := pgxPool.Query(ctx, q)
@@ -954,6 +957,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // ---------------------------
 // GetInitiationsWithAudit
 // ---------------------------
+
 func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
