@@ -18,15 +18,20 @@ import (
 // ---------------------------
 
 type CreateRedemptionConfirmationRequest struct {
-	UserID        string  `json:"user_id"`
-	RedemptionID  string  `json:"redemption_id"`
-	ActualNAV     float64 `json:"actual_nav"`
-	ActualUnits   float64 `json:"actual_units"`
-	GrossProceeds float64 `json:"gross_proceeds"`
-	ExitLoad      float64 `json:"exit_load,omitempty"`
-	TDS           float64 `json:"tds,omitempty"`
-	NetCredited   float64 `json:"net_credited"`
-	Status        string  `json:"status,omitempty"`
+	UserID                       string  `json:"user_id"`
+	RedemptionID                 string  `json:"redemption_id"`
+	ActualNAV                    float64 `json:"actual_nav"`
+	ActualUnits                  float64 `json:"actual_units"`
+	GrossProceeds                float64 `json:"gross_proceeds"`
+	ExitLoad                     float64 `json:"exit_load,omitempty"`
+	TDS                          float64 `json:"tds,omitempty"`
+	NetCredited                  float64 `json:"net_credited"`
+	STTCharges                   float64 `json:"stt_charges,omitempty"`
+	ResolutionVariance           string  `json:"resolution_variance,omitempty"`
+	ResolutionComment            string  `json:"resolution_comment,omitempty"`
+	VarianceProceeds             float64 `json:"variance_proceeds,omitempty"`
+	FinalRealisedCapitalGainLoss float64 `json:"final_realised_capital_gain_loss,omitempty"`
+	Status                       string  `json:"status,omitempty"`
 }
 
 type UpdateRedemptionConfirmationRequest struct {
@@ -86,8 +91,9 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		insertQ := `
 			INSERT INTO investment.redemption_confirmation (
 				redemption_id, actual_nav, actual_units, gross_proceeds,
-				exit_load, tds, net_credited, status
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				exit_load, tds, net_credited, stt_charges, resolution_variance, resolution_comment,
+				variance_proceeds, final_realised_capital_gain_loss, status
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			RETURNING redemption_confirm_id
 		`
 		var confirmID string
@@ -99,6 +105,11 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			req.ExitLoad,
 			req.TDS,
 			req.NetCredited,
+			nullIfZeroFloat(req.STTCharges),
+			req.ResolutionVariance,
+			req.ResolutionComment,
+			nullIfZeroFloat(req.VarianceProceeds),
+			nullIfZeroFloat(req.FinalRealisedCapitalGainLoss),
 			status,
 		).Scan(&confirmID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
@@ -136,14 +147,19 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 			Rows   []struct {
-				RedemptionID  string  `json:"redemption_id"`
-				ActualNAV     float64 `json:"actual_nav"`
-				ActualUnits   float64 `json:"actual_units"`
-				GrossProceeds float64 `json:"gross_proceeds"`
-				ExitLoad      float64 `json:"exit_load,omitempty"`
-				TDS           float64 `json:"tds,omitempty"`
-				NetCredited   float64 `json:"net_credited"`
-				Status        string  `json:"status,omitempty"`
+				RedemptionID                 string  `json:"redemption_id"`
+				ActualNAV                    float64 `json:"actual_nav"`
+				ActualUnits                  float64 `json:"actual_units"`
+				GrossProceeds                float64 `json:"gross_proceeds"`
+				ExitLoad                     float64 `json:"exit_load,omitempty"`
+				TDS                          float64 `json:"tds,omitempty"`
+				NetCredited                  float64 `json:"net_credited"`
+				STTCharges                   float64 `json:"stt_charges,omitempty"`
+				ResolutionVariance           string  `json:"resolution_variance,omitempty"`
+				ResolutionComment            string  `json:"resolution_comment,omitempty"`
+				VarianceProceeds             float64 `json:"variance_proceeds,omitempty"`
+				FinalRealisedCapitalGainLoss float64 `json:"final_realised_capital_gain_loss,omitempty"`
+				Status                       string  `json:"status,omitempty"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -198,11 +214,12 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.redemption_confirmation (
 					redemption_id, actual_nav, actual_units, gross_proceeds,
-					exit_load, tds, net_credited, status
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+					exit_load, tds, net_credited, stt_charges, resolution_variance, resolution_comment,
+					variance_proceeds, final_realised_capital_gain_loss, status
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 				RETURNING redemption_confirm_id
 			`, row.RedemptionID, row.ActualNAV, row.ActualUnits, row.GrossProceeds,
-				row.ExitLoad, row.TDS, row.NetCredited, status).Scan(&confirmID); err != nil {
+				row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), status).Scan(&confirmID); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "error": "Insert failed: " + err.Error()})
 				continue
 			}
@@ -274,29 +291,35 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch existing values
 		sel := `
 			SELECT redemption_id, actual_nav, actual_units, gross_proceeds,
-			       exit_load, tds, net_credited, status
+				   exit_load, tds, net_credited, status, stt_charges, resolution_variance, resolution_comment,
+				   variance_proceeds, final_realised_capital_gain_loss
 			FROM investment.redemption_confirmation
 			WHERE redemption_confirm_id=$1
 			FOR UPDATE
 		`
-		var oldVals [8]interface{}
+		var oldVals [13]interface{}
 		if err := tx.QueryRow(ctx, sel, req.RedemptionConfirmID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
+			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
 		}
 
 		fieldPairs := map[string]int{
-			"redemption_id":  0,
-			"actual_nav":     1,
-			"actual_units":   2,
-			"gross_proceeds": 3,
-			"exit_load":      4,
-			"tds":            5,
-			"net_credited":   6,
-			"status":         7,
+			"redemption_id":                    0,
+			"actual_nav":                       1,
+			"actual_units":                     2,
+			"gross_proceeds":                   3,
+			"exit_load":                        4,
+			"tds":                              5,
+			"net_credited":                     6,
+			"status":                           7,
+			"stt_charges":                      8,
+			"resolution_variance":              9,
+			"resolution_comment":               10,
+			"variance_proceeds":                11,
+			"final_realised_capital_gain_loss": 12,
 		}
 
 		var sets []string
@@ -395,26 +418,32 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			sel := `
 				SELECT redemption_id, actual_nav, actual_units, gross_proceeds,
-				       exit_load, tds, net_credited, status
+					   exit_load, tds, net_credited, status, stt_charges, resolution_variance, resolution_comment,
+					   variance_proceeds, final_realised_capital_gain_loss
 				FROM investment.redemption_confirmation WHERE redemption_confirm_id=$1 FOR UPDATE`
-			var oldVals [8]interface{}
+			var oldVals [13]interface{}
 			if err := tx.QueryRow(ctx, sel, row.RedemptionConfirmID).Scan(
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
+				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 			); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "fetch failed: " + err.Error()})
 				continue
 			}
 
 			fieldPairs := map[string]int{
-				"redemption_id":  0,
-				"actual_nav":     1,
-				"actual_units":   2,
-				"gross_proceeds": 3,
-				"exit_load":      4,
-				"tds":            5,
-				"net_credited":   6,
-				"status":         7,
+				"redemption_id":                    0,
+				"actual_nav":                       1,
+				"actual_units":                     2,
+				"gross_proceeds":                   3,
+				"exit_load":                        4,
+				"tds":                              5,
+				"net_credited":                     6,
+				"status":                           7,
+				"stt_charges":                      8,
+				"resolution_variance":              9,
+				"resolution_comment":               10,
+				"variance_proceeds":                11,
+				"final_realised_capital_gain_loss": 12,
 			}
 
 			var sets []string
@@ -826,6 +855,16 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 				m.old_tds,
 				m.net_credited,
 				m.old_net_credited,
+				m.stt_charges,
+				m.old_stt_charges,
+				COALESCE(m.resolution_variance,'') AS resolution_variance,
+				COALESCE(m.old_resolution_variance,'') AS old_resolution_variance,
+				COALESCE(m.resolution_comment,'') AS resolution_comment,
+				COALESCE(m.old_resolution_comment,'') AS old_resolution_comment,
+				m.variance_proceeds,
+				m.old_variance_proceeds,
+				m.final_realised_capital_gain_loss,
+				m.old_final_realised_capital_gain_loss,
 				m.status,
 				m.old_status,
 				m.confirmed_by,
@@ -933,6 +972,11 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				m.exit_load,
 				m.tds,
 				m.net_credited,
+				m.stt_charges,
+				COALESCE(m.resolution_variance, ''),
+				COALESCE(m.resolution_comment, ''),
+				m.variance_proceeds,
+				m.final_realised_capital_gain_loss,
 				m.status
 			FROM investment.redemption_confirmation m
 			JOIN latest l ON l.redemption_confirm_id = m.redemption_confirm_id
@@ -953,19 +997,26 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		for rows.Next() {
 			var confirmID, redemptionID, status string
 			var actualNAV, actualUnits, grossProceeds, exitLoad, tds, netCredited float64
+			var sttCharges, varianceProceeds, finalRealised float64
+			var resolutionVariance, resolutionComment string
 			_ = rows.Scan(&confirmID, &redemptionID, &actualNAV, &actualUnits, &grossProceeds,
-				&exitLoad, &tds, &netCredited, &status)
+				&exitLoad, &tds, &netCredited, &sttCharges, &resolutionVariance, &resolutionComment, &varianceProceeds, &finalRealised, &status)
 
 			out = append(out, map[string]interface{}{
-				"redemption_confirm_id": confirmID,
-				"redemption_id":         redemptionID,
-				"actual_nav":            actualNAV,
-				"actual_units":          actualUnits,
-				"gross_proceeds":        grossProceeds,
-				"exit_load":             exitLoad,
-				"tds":                   tds,
-				"net_credited":          netCredited,
-				"status":                status,
+				"redemption_confirm_id":            confirmID,
+				"redemption_id":                    redemptionID,
+				"actual_nav":                       actualNAV,
+				"actual_units":                     actualUnits,
+				"gross_proceeds":                   grossProceeds,
+				"exit_load":                        exitLoad,
+				"tds":                              tds,
+				"net_credited":                     netCredited,
+				"stt_charges":                      sttCharges,
+				"resolution_variance":              resolutionVariance,
+				"resolution_comment":               resolutionComment,
+				"variance_proceeds":                varianceProceeds,
+				"final_realised_capital_gain_loss": finalRealised,
+				"status":                           status,
 			})
 		}
 
@@ -985,7 +1036,7 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, userID string, confirmedBy string, redemptionConfirmationIDs []string) (map[string]any, error) {
 	tx, err := pgxPool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("TX begin failed: %w", err)
+		return nil, fmt.Errorf("tx begin failed: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -1021,7 +1072,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 
 	rows, err := tx.Query(ctx, fetchQ, redemptionConfirmationIDs)
 	if err != nil {
-		return nil, fmt.Errorf("Fetch confirmations failed: %w", err)
+		return nil, fmt.Errorf("fetch confirmations failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -1067,17 +1118,17 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			&cd.Method,
 			&cd.EntityName,
 		); err != nil {
-			return nil, fmt.Errorf("Scan failed: %w", err)
+			return nil, fmt.Errorf("scan failed: %w", err)
 		}
 		confirmations = append(confirmations, cd)
 	}
 
 	if rows.Err() != nil {
-		return nil, fmt.Errorf("Rows error: %w", rows.Err())
+		return nil, fmt.Errorf("rows error: %w", rows.Err())
 	}
 
 	if len(confirmations) == 0 {
-		return nil, fmt.Errorf("No confirmed redemptions found")
+		return nil, fmt.Errorf("no confirmed redemptions found")
 	}
 
 	totalTransactions := 0
@@ -1124,7 +1175,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			cd.DematID,
 			cd.EntityName,
 		); err != nil {
-			return nil, fmt.Errorf("Transaction insert failed: %w", err)
+			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
 
 		totalTransactions++
@@ -1136,7 +1187,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			WHERE redemption_confirm_id=$2
 		`
 		if _, err := tx.Exec(ctx, updateConfirm, confirmedBy, cd.RedemptionConfirmID); err != nil {
-			return nil, fmt.Errorf("Update confirmation failed: %w", err)
+			return nil, fmt.Errorf("update confirmation failed: %w", err)
 		}
 	}
 
@@ -1151,7 +1202,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		)
 	`
 	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
-		return nil, fmt.Errorf("Delete snapshot failed: %w", err)
+		return nil, fmt.Errorf("delete snapshot failed: %w", err)
 	}
 
 	// Rebuild portfolio snapshot by aggregating all transactions
@@ -1194,7 +1245,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		HAVING SUM(t.units) > 0
 	`
 	if _, err := tx.Exec(ctx, rebuildSnap, batchID); err != nil {
-		return nil, fmt.Errorf("Rebuild snapshot failed: %w", err)
+		return nil, fmt.Errorf("rebuild snapshot failed: %w", err)
 	}
 
 	// Count snapshots created
@@ -1207,7 +1258,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 
 	// We do not persist an onboard_batch row here; commit the tx and return transient batch info
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("Commit failed: %w", err)
+		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 
 	return map[string]any{
