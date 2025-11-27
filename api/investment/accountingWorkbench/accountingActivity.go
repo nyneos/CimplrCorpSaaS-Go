@@ -1006,6 +1006,22 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
+			// Process corporate actions BEFORE generating journal entries
+			// This updates master scheme tables and portfolio holdings
+			for _, actID := range toApproveActivityIDs {
+				// Check if this is a corporate action
+				var activityType string
+				if err := tx.QueryRow(ctx, `
+					SELECT activity_type FROM investment.accounting_activity WHERE activity_id = $1
+				`, actID).Scan(&activityType); err == nil && activityType == "CORPORATE_ACTION" {
+					// Process corporate action (merger, name change, split, bonus)
+					if err := ProcessCorporateAction(ctx, tx, actID); err != nil {
+						api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("corporate action processing failed for activity %s: %v", actID, err))
+						return
+					}
+				}
+			}
+
 			// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
 			// If journal generation fails, entire approval rolls back
 			for _, actID := range toApproveActivityIDs {
@@ -1181,6 +1197,108 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.auditactionaccountingactivity
 				GROUP BY activity_id
+			),
+			mtm_data AS (
+				SELECT 
+					mt.activity_id,
+					json_agg(
+						json_build_object(
+							'mtm_id', mt.mtm_id,
+							'scheme_id', mt.scheme_id,
+							'scheme_name', COALESCE(sch.scheme_name, mt.scheme_id),
+							'folio_id', COALESCE(mt.folio_id::text, ''),
+							'folio_number', COALESCE(fol.folio_number, ''),
+							'demat_id', COALESCE(mt.demat_id::text, ''),
+							'demat_number', COALESCE(dem.demat_account_number, ''),
+							'units', mt.units,
+							'prev_nav', mt.prev_nav,
+							'curr_nav', mt.curr_nav,
+							'nav_date', TO_CHAR(mt.nav_date, 'YYYY-MM-DD'),
+							'prev_value', mt.prev_value,
+							'curr_value', mt.curr_value,
+							'unrealized_gain_loss', mt.unrealized_gain_loss,
+							'unrealized_gain_loss_pct', COALESCE(mt.unrealized_gain_loss_pct, 0)
+						)
+					) AS mtm_records
+				FROM investment.accounting_mtm mt
+				LEFT JOIN investment.masterscheme sch ON sch.scheme_id = mt.scheme_id
+				LEFT JOIN investment.masterfolio fol ON fol.folio_id::text = mt.folio_id
+				LEFT JOIN investment.masterdemataccount dem ON dem.demat_id::text = mt.demat_id
+				WHERE COALESCE(mt.is_deleted, false) = false
+				GROUP BY mt.activity_id
+			),
+			dividend_data AS (
+				SELECT 
+					dv.activity_id,
+					json_agg(
+						json_build_object(
+							'dividend_id', dv.dividend_id,
+							'scheme_id', dv.scheme_id,
+							'scheme_name', COALESCE(sch.scheme_name, dv.scheme_id),
+							'folio_id', COALESCE(dv.folio_id::text, ''),
+							'folio_number', COALESCE(fol.folio_number, ''),
+							'transaction_type', dv.transaction_type,
+							'dividend_amount', dv.dividend_amount,
+							'reinvest_units', COALESCE(dv.reinvest_units, 0),
+							'reinvest_nav', COALESCE(dv.reinvest_nav, 0),
+							'record_date', TO_CHAR(dv.record_date, 'YYYY-MM-DD'),
+							'ex_date', TO_CHAR(dv.ex_date, 'YYYY-MM-DD'),
+							'payment_date', TO_CHAR(dv.payment_date, 'YYYY-MM-DD')
+						)
+					) AS dividend_records
+				FROM investment.accounting_dividend dv
+				LEFT JOIN investment.masterscheme sch ON sch.scheme_id = dv.scheme_id
+				LEFT JOIN investment.masterfolio fol ON fol.folio_id::text = dv.folio_id
+				WHERE COALESCE(dv.is_deleted, false) = false
+				GROUP BY dv.activity_id
+			),
+			fvo_data AS (
+				SELECT 
+					fv.activity_id,
+					json_agg(
+						json_build_object(
+							'fvo_id', fv.fvo_id,
+							'scheme_id', fv.scheme_id,
+							'scheme_name', COALESCE(sch.scheme_name, fv.scheme_id),
+							'valuation_date', TO_CHAR(fv.valuation_date, 'YYYY-MM-DD'),
+							'market_nav', COALESCE(fv.market_nav, 0),
+							'override_nav', fv.override_nav,
+							'variance', COALESCE(fv.variance, 0),
+							'variance_pct', COALESCE(fv.variance_pct, 0),
+							'units_affected', COALESCE(fv.units_affected, 0),
+							'valuation_adjustment', COALESCE(fv.valuation_adjustment, 0),
+							'justification', fv.justification,
+							'evidence_file_id', COALESCE(fv.evidence_file_id::text, '')
+						)
+					) AS fvo_records
+				FROM investment.accounting_fvo fv
+				LEFT JOIN investment.masterscheme sch ON sch.scheme_id = fv.scheme_id
+				WHERE COALESCE(fv.is_deleted, false) = false
+				GROUP BY fv.activity_id
+			),
+			corporate_action_data AS (
+				SELECT 
+					ca.activity_id,
+					json_agg(
+						json_build_object(
+							'ca_id', ca.ca_id,
+							'action_type', ca.action_type,
+							'source_scheme_id', ca.source_scheme_id,
+							'source_scheme_name', COALESCE(sch_src.scheme_name, ca.source_scheme_id),
+							'target_scheme_id', COALESCE(ca.target_scheme_id, ''),
+							'target_scheme_name', COALESCE(sch_tgt.scheme_name, ''),
+							'new_scheme_name', COALESCE(ca.new_scheme_name, ''),
+							'ratio_new', COALESCE(ca.ratio_new, 0),
+							'ratio_old', COALESCE(ca.ratio_old, 0),
+							'conversion_ratio', COALESCE(ca.conversion_ratio, 0),
+							'bonus_units', COALESCE(ca.bonus_units, 0)
+						)
+					) AS corporate_action_records
+				FROM investment.accounting_corporate_action ca
+				LEFT JOIN investment.masterscheme sch_src ON sch_src.scheme_id = ca.source_scheme_id
+				LEFT JOIN investment.masterscheme sch_tgt ON sch_tgt.scheme_id = ca.target_scheme_id
+				WHERE COALESCE(ca.is_deleted, false) = false
+				GROUP BY ca.activity_id
 			)
 			SELECT
 				m.activity_id,
@@ -1190,8 +1308,8 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.old_activity_subtype,'') AS old_activity_subtype,
 				TO_CHAR(m.effective_date, 'YYYY-MM-DD') AS effective_date,
 				TO_CHAR(m.old_effective_date, 'YYYY-MM-DD') AS old_effective_date,
-				TO_CHAR(m.accounting_period, 'YYYY-MM-DD') AS accounting_period,
-				TO_CHAR(m.old_accounting_period, 'YYYY-MM-DD') AS old_accounting_period,
+				COALESCE(m.accounting_period, '') AS accounting_period,
+				COALESCE(m.old_accounting_period, '') AS old_accounting_period,
 				m.data_source,
 				COALESCE(m.old_data_source,'') AS old_data_source,
 				m.status,
@@ -1214,10 +1332,20 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.edited_by,'') AS edited_by,
 				COALESCE(h.edited_at,'') AS edited_at,
 				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
+				COALESCE(h.deleted_at,'') AS deleted_at,
+				
+				-- Include all activity type details
+				COALESCE(mtm.mtm_records, '[]'::json) AS mtm_details,
+				COALESCE(dv.dividend_records, '[]'::json) AS dividend_details,
+				COALESCE(fvo.fvo_records, '[]'::json) AS fvo_details,
+				COALESCE(ca.corporate_action_records, '[]'::json) AS corporate_action_details
 			FROM investment.accounting_activity m
 			LEFT JOIN latest_audit l ON l.activity_id = m.activity_id
 			LEFT JOIN history h ON h.activity_id = m.activity_id
+			LEFT JOIN mtm_data mtm ON mtm.activity_id = m.activity_id
+			LEFT JOIN dividend_data dv ON dv.activity_id = m.activity_id
+			LEFT JOIN fvo_data fvo ON fvo.activity_id = m.activity_id
+			LEFT JOIN corporate_action_data ca ON ca.activity_id = m.activity_id
 			WHERE COALESCE(m.is_deleted, false) = false
 			ORDER BY m.updated_at DESC, m.activity_id;
 		`
@@ -1270,7 +1398,7 @@ func GetApprovedActivities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.activity_type,
 				COALESCE(m.activity_subtype,'') AS activity_subtype,
 				TO_CHAR(m.effective_date, 'YYYY-MM-DD') AS effective_date,
-				TO_CHAR(m.accounting_period, 'YYYY-MM-DD') AS accounting_period,
+				COALESCE(m.accounting_period, '') AS accounting_period,
 				m.data_source,
 				m.status
 			FROM investment.accounting_activity m
