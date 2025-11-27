@@ -175,35 +175,61 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Month name to number mapping
-		monthMap := map[string]string{
-			"JAN": "01", "JANUARY":   "01",
-			"FEB": "02", "FEBRUARY":  "02",
-			"MAR": "03", "MARCH":     "03",
-			"APR": "04", "APRIL":     "04",
-			"MAY": "05",
-			"JUN": "06", "JUNE":      "06",
-			"JUL": "07", "JULY":      "07",
-			"AUG": "08", "AUGUST":    "08",
-			"SEP": "09", "SEPTEMBER": "09",
-			"OCT": "10", "OCTOBER":   "10",
-			"NOV": "11", "NOVEMBER":  "11",
-			"DEC": "12", "DECEMBER":  "12",
-		}
+		// Parse accounting period - supports two formats:
+		// 1. "JAN 2025" or "JANUARY 2025" (text format)
+		// 2. "2025-12" (YYYY-MM format)
+		var monthNum, year string
+		accountingPeriod := strings.TrimSpace(req.AccountingPeriod)
+		
+		// Check if it's in YYYY-MM format
+		if strings.Contains(accountingPeriod, "-") && len(accountingPeriod) == 7 {
+			// Format: "2025-12"
+			parts := strings.Split(accountingPeriod, "-")
+			if len(parts) != 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "accounting_period format should be 'YYYY-MM' or 'MONTH YYYY' (e.g., '2025-12' or 'JAN 2025')")
+				return
+			}
+			year = parts[0]
+			monthNum = parts[1]
+			
+			// Validate month is between 01-12
+			monthInt := 0
+			fmt.Sscanf(monthNum, "%d", &monthInt)
+			if monthInt < 1 || monthInt > 12 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid month in accounting_period (must be 01-12)")
+				return
+			}
+		} else {
+			// Text format: "JAN 2025" or "JANUARY 2025"
+			monthMap := map[string]string{
+				"JAN": "01", "JANUARY":   "01",
+				"FEB": "02", "FEBRUARY":  "02",
+				"MAR": "03", "MARCH":     "03",
+				"APR": "04", "APRIL":     "04",
+				"MAY": "05",
+				"JUN": "06", "JUNE":      "06",
+				"JUL": "07", "JULY":      "07",
+				"AUG": "08", "AUGUST":    "08",
+				"SEP": "09", "SEPTEMBER": "09",
+				"OCT": "10", "OCTOBER":   "10",
+				"NOV": "11", "NOVEMBER":  "11",
+				"DEC": "12", "DECEMBER":  "12",
+			}
 
-		// Parse accounting period (e.g., "JAN 2025" or "JANUARY 2025")
-		parts := strings.Fields(strings.ToUpper(strings.TrimSpace(req.AccountingPeriod)))
-		if len(parts) != 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "accounting_period format should be 'MONTH YYYY' (e.g., 'JAN 2025')")
-			return
-		}
+			parts := strings.Fields(strings.ToUpper(accountingPeriod))
+			if len(parts) != 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "accounting_period format should be 'MONTH YYYY' or 'YYYY-MM' (e.g., 'JAN 2025' or '2025-12')")
+				return
+			}
 
-		monthNum, ok := monthMap[parts[0]]
-		if !ok {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid month name in accounting_period")
-			return
+			var ok bool
+			monthNum, ok = monthMap[parts[0]]
+			if !ok {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid month name in accounting_period")
+				return
+			}
+			year = parts[1]
 		}
-		year := parts[1]
 
 		// Construct start and end dates for the month
 		startDate := fmt.Sprintf("%s-%s-01", year, monthNum)
