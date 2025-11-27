@@ -18,16 +18,18 @@ import (
 // ---------------------------
 
 type CreateConfirmationRequest struct {
-	UserID        string  `json:"user_id"`
-	InitiationID  string  `json:"initiation_id"`
-	NAVDate       string  `json:"nav_date"` // YYYY-MM-DD
-	NAV           float64 `json:"nav"`
-	AllottedUnits float64 `json:"allotted_units"`
-	StampDuty     float64 `json:"stamp_duty,omitempty"`
-	NetAmount     float64 `json:"net_amount"`
-	ActualNAV     float64 `json:"actual_nav,omitempty"`
-	ActualUnits   float64 `json:"actual_allotted_units,omitempty"`
-	Status        string  `json:"status,omitempty"`
+	UserID             string  `json:"user_id"`
+	InitiationID       string  `json:"initiation_id"`
+	NAVDate            string  `json:"nav_date"` // YYYY-MM-DD
+	NAV                float64 `json:"nav"`
+	AllottedUnits      float64 `json:"allotted_units"`
+	StampDuty          float64 `json:"stamp_duty,omitempty"`
+	NetAmount          float64 `json:"net_amount"`
+	ActualNAV          float64 `json:"actual_nav,omitempty"`
+	ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
+	ResolutionComments string  `json:"resolution_comments,omitempty"`
+	ResolutionVariance string  `json:"resolution_variance,omitempty"`
+	Status             string  `json:"status,omitempty"`
 }
 
 type UpdateConfirmationRequest struct {
@@ -98,8 +100,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertQ := `
 			INSERT INTO investment.investment_confirmation (
 				initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-				actual_nav, actual_allotted_units, variance_nav, variance_units, status
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comments, resolution_variance, status
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			RETURNING confirmation_id
 		`
 		var confirmationID string
@@ -114,6 +116,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullIfZero(req.ActualUnits),
 			varianceNAV,
 			varianceUnits,
+			req.ResolutionComments,
+			req.ResolutionVariance,
 			status,
 		).Scan(&confirmationID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
@@ -151,15 +155,17 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 			Rows   []struct {
-				InitiationID  string  `json:"initiation_id"`
-				NAVDate       string  `json:"nav_date"`
-				NAV           float64 `json:"nav"`
-				AllottedUnits float64 `json:"allotted_units"`
-				StampDuty     float64 `json:"stamp_duty,omitempty"`
-				NetAmount     float64 `json:"net_amount"`
-				ActualNAV     float64 `json:"actual_nav,omitempty"`
-				ActualUnits   float64 `json:"actual_allotted_units,omitempty"`
-				Status        string  `json:"status,omitempty"`
+				InitiationID       string  `json:"initiation_id"`
+				NAVDate            string  `json:"nav_date"`
+				NAV                float64 `json:"nav"`
+				AllottedUnits      float64 `json:"allotted_units"`
+				StampDuty          float64 `json:"stamp_duty,omitempty"`
+				NetAmount          float64 `json:"net_amount"`
+				ActualNAV          float64 `json:"actual_nav,omitempty"`
+				ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
+				ResolutionComments string  `json:"resolution_comments,omitempty"`
+				ResolutionVariance string  `json:"resolution_variance,omitempty"`
+				Status             string  `json:"status,omitempty"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -224,11 +230,11 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.investment_confirmation (
 					initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-					actual_nav, actual_allotted_units, variance_nav, variance_units, status
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+					actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comments, resolution_variance, status
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 				RETURNING confirmation_id
 			`, initiationID, navDate, row.NAV, row.AllottedUnits, row.StampDuty, row.NetAmount,
-				nullIfZero(row.ActualNAV), nullIfZero(row.ActualUnits), varianceNAV, varianceUnits, status).Scan(&confirmationID); err != nil {
+				nullIfZero(row.ActualNAV), nullIfZero(row.ActualUnits), varianceNAV, varianceUnits, row.ResolutionComments, row.ResolutionVariance, status).Scan(&confirmationID); err != nil {
 				results = append(results, map[string]interface{}{
 					"success": false, "initiation_id": initiationID, "error": "Insert failed: " + err.Error(),
 				})
@@ -306,15 +312,16 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// fetch existing values
 		sel := `
 			SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount, 
-			       actual_nav, actual_allotted_units, variance_nav, variance_units, status
+				   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
+				   resolution_comments, resolution_variance
 			FROM investment.investment_confirmation
 			WHERE confirmation_id=$1
 			FOR UPDATE
 		`
-		var oldVals [11]interface{}
+		var oldVals [13]interface{}
 		if err := tx.QueryRow(ctx, sel, req.ConfirmationID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
-			&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10],
+			&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
@@ -332,6 +339,8 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"variance_nav":          8,
 			"variance_units":        9,
 			"status":                10,
+			"resolution_comments":   11,
+			"resolution_variance":   12,
 		}
 
 		var sets []string
@@ -430,12 +439,13 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			sel := `
 				SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-				       actual_nav, actual_allotted_units, variance_nav, variance_units, status
+					   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
+					   resolution_comments, resolution_variance
 				FROM investment.investment_confirmation WHERE confirmation_id=$1 FOR UPDATE`
-			var oldVals [11]interface{}
+			var oldVals [13]interface{}
 			if err := tx.QueryRow(ctx, sel, row.ConfirmationID).Scan(
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
-				&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10],
+				&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 			); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "confirmation_id": row.ConfirmationID, "error": "fetch failed: " + err.Error()})
 				continue
@@ -453,6 +463,8 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"variance_nav":          8,
 				"variance_units":        9,
 				"status":                10,
+				"resolution_comments":   11,
+				"resolution_variance":   12,
 			}
 
 			var sets []string
@@ -878,6 +890,10 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_variance_nav,
 				m.variance_units,
 				m.old_variance_units,
+	                m.resolution_comments,
+	                m.old_resolution_comment,
+	                m.resolution_variance,
+	                m.old_resolution_variance,
 				m.status,
 				m.old_status,
 				m.confirmed_by,
@@ -1056,6 +1072,10 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_variance_nav,
 				m.variance_units,
 				m.old_variance_units,
+	                m.resolution_comments,
+	                m.old_resolution_comment,
+	                m.resolution_variance,
+	                m.old_resolution_variance,
 				m.status,
 				m.old_status,
 				m.confirmed_by,
@@ -1201,6 +1221,10 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.actual_allotted_units,
 				m.variance_nav,
 				m.variance_units,
+				m.resolution_comments,
+				m.old_resolution_comment,
+				m.resolution_variance,
+				m.old_resolution_variance,
 				m.status,
 
 				-- initiation fields
