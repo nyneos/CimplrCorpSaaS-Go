@@ -929,6 +929,9 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE 
 				UPPER(l.processing_status) = 'APPROVED'
 				AND COALESCE(m.is_deleted,false)=false
+				AND m.redemption_id NOT IN (
+					SELECT redemption_id FROM investment.redemption_confirmation
+				)
 			ORDER BY m.requested_date DESC;
 		`
 
