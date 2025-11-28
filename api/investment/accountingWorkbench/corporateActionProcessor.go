@@ -192,10 +192,10 @@ func processSplit(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	// Log split in scheme master (optional)
 	_, err = tx.Exec(ctx, `
 		UPDATE investment.masterscheme 
-		SET scheme_name = scheme_name || ' (Split ' || $1::text || ':' || $2::text || ')'
+		SET scheme_name = scheme_name || ' (Split ' || $1 || ':' || $2 || ')'
 		WHERE scheme_id = $3 
 		  AND scheme_name NOT LIKE '%Split%'
-	`, *ratioNew, *ratioOld, sourceSchemeID)
+	`, fmt.Sprintf("%.0f", *ratioNew), fmt.Sprintf("%.0f", *ratioOld), sourceSchemeID)
 
 	return err
 }
