@@ -27,7 +27,7 @@ type CreateConfirmationRequest struct {
 	NetAmount          float64 `json:"net_amount"`
 	ActualNAV          float64 `json:"actual_nav,omitempty"`
 	ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
-	ResolutionComments string  `json:"resolution_comments,omitempty"`
+	ResolutionComments string  `json:"resolution_comment,omitempty"`
 	ResolutionVariance string  `json:"resolution_variance,omitempty"`
 	Status             string  `json:"status,omitempty"`
 }
@@ -100,7 +100,7 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertQ := `
 			INSERT INTO investment.investment_confirmation (
 				initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comments, resolution_variance, status
+				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			RETURNING confirmation_id
 		`
@@ -163,7 +163,7 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				NetAmount          float64 `json:"net_amount"`
 				ActualNAV          float64 `json:"actual_nav,omitempty"`
 				ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
-				ResolutionComments string  `json:"resolution_comments,omitempty"`
+				ResolutionComments string  `json:"resolution_comment,omitempty"`
 				ResolutionVariance string  `json:"resolution_variance,omitempty"`
 				Status             string  `json:"status,omitempty"`
 			} `json:"rows"`
@@ -230,7 +230,7 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.investment_confirmation (
 					initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-					actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comments, resolution_variance, status
+					actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 				RETURNING confirmation_id
 			`, initiationID, navDate, row.NAV, row.AllottedUnits, row.StampDuty, row.NetAmount,
@@ -313,7 +313,7 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sel := `
 			SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount, 
 				   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
-				   resolution_comments, resolution_variance
+				   resolution_comment, resolution_variance
 			FROM investment.investment_confirmation
 			WHERE confirmation_id=$1
 			FOR UPDATE
@@ -339,7 +339,7 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"variance_nav":          8,
 			"variance_units":        9,
 			"status":                10,
-			"resolution_comments":   11,
+			"resolution_comment":   11,
 			"resolution_variance":   12,
 		}
 
@@ -440,7 +440,7 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sel := `
 				SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
 					   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
-					   resolution_comments, resolution_variance
+					   resolution_comment, resolution_variance
 				FROM investment.investment_confirmation WHERE confirmation_id=$1 FOR UPDATE`
 			var oldVals [13]interface{}
 			if err := tx.QueryRow(ctx, sel, row.ConfirmationID).Scan(
@@ -463,7 +463,7 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"variance_nav":          8,
 				"variance_units":        9,
 				"status":                10,
-				"resolution_comments":   11,
+				"resolution_comment":   11,
 				"resolution_variance":   12,
 			}
 
@@ -890,7 +890,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_variance_nav,
 				m.variance_units,
 				m.old_variance_units,
-	                m.resolution_comments,
+	                m.resolution_comment,
 	                m.old_resolution_comment,
 	                m.resolution_variance,
 	                m.old_resolution_variance,
@@ -1072,7 +1072,7 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_variance_nav,
 				m.variance_units,
 				m.old_variance_units,
-	                m.resolution_comments,
+	                m.resolution_comment,
 	                m.old_resolution_comment,
 	                m.resolution_variance,
 	                m.old_resolution_variance,
@@ -1221,7 +1221,7 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.actual_allotted_units,
 				m.variance_nav,
 				m.variance_units,
-				m.resolution_comments,
+				m.resolution_comment,
 				m.old_resolution_comment,
 				m.resolution_variance,
 				m.old_resolution_variance,
