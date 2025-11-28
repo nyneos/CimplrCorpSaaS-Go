@@ -210,6 +210,15 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	// Bonus ratio: x for y means you get 'x' bonus units for every 'y' held units
 	bonusRatio := *ratioNew / *ratioOld
 
+	// Struct to hold holding data
+	type holdingData struct {
+		folioNumber   *string
+		dematAccNumber *string
+		entityName    *string
+		totalUnits    float64
+		avgCost       float64
+	}
+
 	// Fetch all holdings for this scheme
 	rows, err := tx.Query(ctx, `
 		SELECT folio_number, demat_acc_number, total_units, 
@@ -221,22 +230,31 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	if err != nil {
 		return fmt.Errorf("failed to fetch holdings: %w", err)
 	}
-	defer rows.Close()
 
+	// Collect all holdings first to avoid "conn busy" error
+	var holdings []holdingData
 	for rows.Next() {
-		var folioNumber, dematAccNumber, entityName *string
-		var totalUnits, avgCost float64
-
-		if err := rows.Scan(&folioNumber, &dematAccNumber, &totalUnits, &avgCost, &entityName); err != nil {
+		var h holdingData
+		if err := rows.Scan(&h.folioNumber, &h.dematAccNumber, &h.totalUnits, &h.avgCost, &h.entityName); err != nil {
+			rows.Close()
 			return fmt.Errorf("failed to scan holding: %w", err)
 		}
+		holdings = append(holdings, h)
+	}
+	rows.Close() // Close rows before executing updates
 
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating holdings: %w", err)
+	}
+
+	// Now update each holding
+	for _, h := range holdings {
 		// Calculate bonus units: floor to 3 decimal places
-		bonusUnits := math.Floor((totalUnits * bonusRatio) * 1000) / 1000
-		newTotalUnits := totalUnits + bonusUnits
+		bonusUnits := math.Floor((h.totalUnits * bonusRatio) * 1000) / 1000
+		newTotalUnits := h.totalUnits + bonusUnits
 
 		// Calculate new average cost: Old Cost Basis / New Total Units
-		oldCostBasis := totalUnits * avgCost
+		oldCostBasis := h.totalUnits * h.avgCost
 		newAvgCost := oldCostBasis / newTotalUnits
 
 		// Update holding
@@ -248,15 +266,11 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 			  AND COALESCE(folio_number, '') = COALESCE($4, '')
 			  AND COALESCE(demat_acc_number, '') = COALESCE($5, '')
 			  AND COALESCE(entity_name, '') = COALESCE($6, '')
-		`, newTotalUnits, newAvgCost, sourceSchemeID, folioNumber, dematAccNumber, entityName)
+		`, newTotalUnits, newAvgCost, sourceSchemeID, h.folioNumber, h.dematAccNumber, h.entityName)
 		
 		if err != nil {
 			return fmt.Errorf("failed to update holding with bonus: %w", err)
 		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating holdings: %w", err)
 	}
 
 	// Log bonus in scheme master (optional)
