@@ -1089,7 +1089,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		DematID             *string
 		SchemeID            string
 		RequestedBy         string
-		RequestedDate       string
+		RequestedDate       time.Time
 		ByAmount            *float64
 		ByUnits             *float64
 		Method              string
@@ -1139,8 +1139,8 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, folio_id, demat_id, entity_name
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 		`
 
 		// Get folio_number and demat_acc_number from master tables if needed
@@ -1154,7 +1154,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 		if cd.DematID != nil {
 			var dn string
-			_ = tx.QueryRow(ctx, `SELECT demat_acc_number FROM investment.masterdemat WHERE demat_id=$1`, *cd.DematID).Scan(&dn)
+			_ = tx.QueryRow(ctx, `SELECT demat_account_number FROM investment.masterdemataccount WHERE demat_id=$1`, *cd.DematID).Scan(&dn)
 			if dn != "" {
 				dematAccNumber = &dn
 			}
@@ -1173,7 +1173,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			cd.SchemeID,
 			cd.FolioID,
 			cd.DematID,
-			cd.EntityName,
+			nil, // scheme_internal_code
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
