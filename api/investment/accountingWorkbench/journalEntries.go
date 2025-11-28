@@ -285,7 +285,7 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 	// Fetch bank account - if no folio, find one linked to this scheme
 	var bankAccount *BankAccountInfo
 	var err error
-	
+
 	if folioID != "" {
 		// Folio specified - use it directly
 		bankAccount, err = GetBankAccountFromFolio(ctx, executor, folioID)
@@ -293,40 +293,52 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 			return nil, fmt.Errorf("failed to get folio bank account for dividend: %w", err)
 		}
 	} else {
-		// No folio - find ANY folio linked to this scheme via folioschememapping
-		var linkedFolioID string
-		err := executor.QueryRow(ctx, `
-			SELECT f.folio_id::text
+		// No folio specified - use comprehensive JOIN to find bank account via scheme
+		query := `
+			SELECT 
+				COALESCE(ba.account_number, '') AS account_number,
+				COALESCE(ba.account_nickname, '') AS account_name,
+				COALESCE(b.bank_name, '') AS bank_name,
+				COALESCE(e.entity_name, ec.entity_name, '') AS entity_name,
+				f.folio_id::text
 			FROM investment.folioschememapping fsm
 			JOIN investment.masterfolio f ON f.folio_id = fsm.folio_id
-			WHERE fsm.scheme_id = $1 
+			LEFT JOIN public.masterbankaccount ba ON (
+				ba.account_number = f.default_redemption_account 
+				OR ba.account_id = f.default_redemption_account
+				OR ba.account_nickname = f.default_redemption_account
+			)
+			LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+			LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+			WHERE fsm.scheme_id = $1
 			  AND COALESCE(fsm.status, 'Active') = 'Active'
 			  AND COALESCE(f.is_deleted, false) = false
+			  AND ba.account_number IS NOT NULL
+			ORDER BY f.created_at DESC
 			LIMIT 1
-		`, schemeID).Scan(&linkedFolioID)
+		`
 		
-		if err != nil || linkedFolioID == "" {
-			// No folio found for this scheme - use generic dividend account
-			bankAccount = &BankAccountInfo{
-				AccountNumber: "DIV-DEFAULT-001",
-				AccountName:   "Default Dividend Account",
-				BankName:      "Corporate Bank",
-				EntityName:    "Corporate",
-			}
-		} else {
-			// Found a linked folio - get its bank account
-			folioID = linkedFolioID
-			bankAccount, err = GetBankAccountFromFolio(ctx, executor, folioID)
-			if err != nil {
-				// Folio exists but no bank account configured
-				bankAccount = &BankAccountInfo{
-					AccountNumber: "DIV-DEFAULT-001",
-					AccountName:   "Default Dividend Account",
-					BankName:      "Corporate Bank",
-					EntityName:    "Corporate",
-				}
-			}
+		var linkedFolioID string
+		info := &BankAccountInfo{}
+		err := executor.QueryRow(ctx, query, schemeID).Scan(
+			&info.AccountNumber,
+			&info.AccountName,
+			&info.BankName,
+			&info.EntityName,
+			&linkedFolioID,
+		)
+		
+		if err != nil {
+			return nil, fmt.Errorf("no bank account found for scheme %s - ensure folio-scheme mapping and bank account are configured: %w", schemeID, err)
 		}
+		
+		if info.AccountNumber == "" {
+			return nil, fmt.Errorf("no bank account configured for any folio linked to scheme %s", schemeID)
+		}
+		
+		folioID = linkedFolioID
+		bankAccount = info
 	}
 
 	je := &JournalEntry{
