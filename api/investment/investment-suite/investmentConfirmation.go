@@ -55,10 +55,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// validate required fields
 		if strings.TrimSpace(req.InitiationID) == "" ||
 			strings.TrimSpace(req.NAVDate) == "" ||
-			req.NAV <= 0 ||
-			req.AllottedUnits <= 0 ||
 			req.NetAmount <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields: initiation_id, nav_date, nav, allotted_units, net_amount")
+			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields: initiation_id, nav_date, net_amount")
 			return
 		}
 
@@ -198,9 +196,9 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			initiationID := strings.TrimSpace(row.InitiationID)
 			navDate := strings.TrimSpace(row.NAVDate)
 
-			if initiationID == "" || navDate == "" || row.NAV <= 0 || row.AllottedUnits <= 0 || row.NetAmount <= 0 {
+			if initiationID == "" || navDate == "" || row.NetAmount <= 0 {
 				results = append(results, map[string]interface{}{
-					"success": false, "error": "Missing required fields: initiation_id, nav_date, nav, allotted_units, net_amount",
+					"success": false, "error": "Missing required fields: initiation_id, nav_date, net_amount",
 				})
 				continue
 			}
