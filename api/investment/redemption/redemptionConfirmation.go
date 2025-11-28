@@ -1045,6 +1045,8 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	batchID := uuid.New().String()
 
 	// Fetch redemption confirmation details with related redemption initiation and scheme info
+	// NOTE: redemption_initiation stores string identifiers in scheme_id/folio_id/demat_id, not UUIDs
+	// We need to resolve these to actual master table IDs
 	fetchQ := `
 		SELECT 
 			rc.redemption_confirm_id,
@@ -1056,17 +1058,44 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			rc.tds,
 			rc.net_credited,
 			
-			mr.folio_id,
-			mr.demat_id,
-			mr.scheme_id,
+			mr.folio_id AS folio_identifier,
+			mr.demat_id AS demat_identifier,
+			mr.scheme_id AS scheme_identifier,
 			mr.requested_by,
 			mr.requested_date,
 			mr.by_amount,
 			mr.by_units,
 			mr.method,
-			mr.entity_name
+			mr.entity_name,
+			
+			-- Resolve actual scheme details
+			COALESCE(s.scheme_id::text, s2.scheme_id::text, s3.scheme_id::text, s4.scheme_id::text) AS resolved_scheme_id,
+			COALESCE(s.scheme_name, s2.scheme_name, s3.scheme_name, s4.scheme_name) AS scheme_name,
+			COALESCE(s.isin, s2.isin, s3.isin, s4.isin) AS isin,
+			COALESCE(s.internal_scheme_code, s2.internal_scheme_code, s3.internal_scheme_code, s4.internal_scheme_code) AS internal_scheme_code,
+			-- Resolve actual folio details
+			f.folio_id::text AS resolved_folio_id,
+			f.folio_number,
+			f.entity_name AS folio_entity_name,
+			-- Resolve actual demat details
+			d.demat_id::text AS resolved_demat_id,
+			d.demat_account_number,
+			d.entity_name AS demat_entity_name
 		FROM investment.redemption_confirmation rc
 		JOIN investment.redemption_initiation mr ON rc.redemption_id = mr.redemption_id
+		-- Resolve scheme by trying multiple match strategies
+		LEFT JOIN investment.masterscheme s ON s.scheme_id::text = mr.scheme_id
+		LEFT JOIN investment.masterscheme s2 ON s2.scheme_name = mr.scheme_id
+		LEFT JOIN investment.masterscheme s3 ON s3.internal_scheme_code = mr.scheme_id
+		LEFT JOIN investment.masterscheme s4 ON s4.isin = mr.scheme_id
+		-- Resolve folio by trying folio_id or folio_number
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = mr.folio_id OR f.folio_number = mr.folio_id)
+		-- Resolve demat by trying demat_id or demat_account_number
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = mr.demat_id OR 
+			d.demat_account_number = mr.demat_id OR
+			d.default_settlement_account = mr.demat_id
+		)
 		WHERE rc.redemption_confirm_id = ANY($1)
 			AND rc.status = 'CONFIRMED'
 	`
@@ -1078,23 +1107,33 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	defer rows.Close()
 
 	type confirmationData struct {
-		RedemptionConfirmID string
-		RedemptionID        string
-		ActualNAV           float64
-		ActualUnits         float64
-		GrossProceeds       float64
-		ExitLoad            float64
-		TDS                 float64
-		NetCredited         float64
-		FolioID             *string
-		DematID             *string
-		SchemeID            string
-		RequestedBy         string
-		RequestedDate       time.Time
-		ByAmount            *float64
-		ByUnits             *float64
-		Method              string
-		EntityName          *string
+		RedemptionConfirmID  string
+		RedemptionID         string
+		ActualNAV            float64
+		ActualUnits          float64
+		GrossProceeds        float64
+		ExitLoad             float64
+		TDS                  float64
+		NetCredited          float64
+		FolioIdentifier      *string  // String from initiation
+		DematIdentifier      *string  // String from initiation
+		SchemeIdentifier     string   // String from initiation
+		RequestedBy          string
+		RequestedDate        time.Time
+		ByAmount             *float64
+		ByUnits              *float64
+		Method               string
+		EntityName           *string
+		ResolvedSchemeID     *string  // Actual scheme_id from masterscheme (string/varchar)
+		SchemeName           *string
+		ISIN                 *string
+		InternalSchemeCode   *string
+		ResolvedFolioID      *string  // Actual folio_id from masterfolio (string/varchar)
+		FolioNumber          *string
+		FolioEntityName      *string
+		ResolvedDematID      *string  // Actual demat_id from masterdemataccount (string/varchar)
+		DematAccountNumber   *string
+		DematEntityName      *string
 	}
 
 	confirmations := []confirmationData{}
@@ -1109,15 +1148,25 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			&cd.ExitLoad,
 			&cd.TDS,
 			&cd.NetCredited,
-			&cd.FolioID,
-			&cd.DematID,
-			&cd.SchemeID,
+			&cd.FolioIdentifier,
+			&cd.DematIdentifier,
+			&cd.SchemeIdentifier,
 			&cd.RequestedBy,
 			&cd.RequestedDate,
 			&cd.ByAmount,
 			&cd.ByUnits,
 			&cd.Method,
 			&cd.EntityName,
+			&cd.ResolvedSchemeID,
+			&cd.SchemeName,
+			&cd.ISIN,
+			&cd.InternalSchemeCode,
+			&cd.ResolvedFolioID,
+			&cd.FolioNumber,
+			&cd.FolioEntityName,
+			&cd.ResolvedDematID,
+			&cd.DematAccountNumber,
+			&cd.DematEntityName,
 		); err != nil {
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
@@ -1136,6 +1185,20 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 
 	// Process each confirmation
 	for _, cd := range confirmations {
+		// Use resolved folio_number and demat_account_number (already fetched from JOINs)
+		var folioNumber, dematAccNumber *string
+		if cd.FolioNumber != nil && *cd.FolioNumber != "" {
+			folioNumber = cd.FolioNumber
+		}
+		if cd.DematAccountNumber != nil && *cd.DematAccountNumber != "" {
+			dematAccNumber = cd.DematAccountNumber
+		}
+
+		// Validate we have essential data
+		if cd.ResolvedSchemeID == nil {
+			return nil, fmt.Errorf("failed to resolve scheme for redemption %s - scheme identifier: %s", cd.RedemptionConfirmID, cd.SchemeIdentifier)
+		}
+
 		// Create SELL transaction
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
@@ -1144,23 +1207,6 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 		`
 
-		// Get folio_number and demat_acc_number from master tables if needed
-		var folioNumber, dematAccNumber *string
-		if cd.FolioID != nil {
-			var fn string
-			_ = tx.QueryRow(ctx, `SELECT folio_number FROM investment.masterfolio WHERE folio_id=$1`, *cd.FolioID).Scan(&fn)
-			if fn != "" {
-				folioNumber = &fn
-			}
-		}
-		if cd.DematID != nil {
-			var dn string
-			_ = tx.QueryRow(ctx, `SELECT demat_account_number FROM investment.masterdemataccount WHERE demat_id=$1`, *cd.DematID).Scan(&dn)
-			if dn != "" {
-				dematAccNumber = &dn
-			}
-		}
-
 		// Insert SELL transaction with negative units
 		if _, err := tx.Exec(ctx, txInsert,
 			batchID,
@@ -1168,13 +1214,13 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			"SELL",
 			folioNumber,
 			dematAccNumber,
-			-cd.GrossProceeds, // negative amount for redemption
-			-cd.ActualUnits,   // negative units for redemption
+			-cd.GrossProceeds,      // negative amount for redemption
+			-cd.ActualUnits,        // negative units for redemption
 			cd.ActualNAV,
-			cd.SchemeID,
-			cd.FolioID,
-			cd.DematID,
-			nil, // scheme_internal_code
+			cd.ResolvedSchemeID,    // Use actual scheme_id (string)
+			cd.ResolvedFolioID,     // Use actual folio_id (string)
+			cd.ResolvedDematID,     // Use actual demat_id (string)
+			cd.InternalSchemeCode,
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
@@ -1192,68 +1238,145 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 	}
 
-	// Refresh portfolio snapshot based on the batch transactions
-	// First delete any existing snapshots for entities in this batch
+	// Refresh portfolio snapshot based on ALL transactions for affected entities
+	// Delete existing snapshots for entities involved in this batch
 	deleteSnap := `
 		DELETE FROM investment.portfolio_snapshot
 		WHERE entity_name IN (
-			SELECT DISTINCT entity_name
-			FROM investment.onboard_transaction
-			WHERE batch_id = $1
+			SELECT DISTINCT COALESCE(mf.entity_name, md.entity_name)
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
+			LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
+			WHERE ot.batch_id = $1
 		)
 	`
 	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
 		return nil, fmt.Errorf("delete snapshot failed: %w", err)
 	}
 
-	// Rebuild portfolio snapshot by aggregating all transactions
-	rebuildSnap := `
-		INSERT INTO investment.portfolio_snapshot (
-			batch_id, entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin,
-			total_units, avg_nav, current_nav, current_value, total_invested_amount,
-			gain_loss, gain_losss_percent
-		)
-		SELECT
-			$1 AS batch_id,
-			t.entity_name,
-			t.folio_number,
-			t.demat_acc_number,
-			t.scheme_id,
-			MAX(s.scheme_name) AS scheme_name,
-			MAX(s.isin) AS isin,
-			SUM(t.units) AS total_units,
-			CASE
-				WHEN SUM(t.units) > 0 THEN SUM(t.amount) / SUM(t.units)
-				ELSE 0
-			END AS avg_nav,
-			MAX(s.latest_nav) AS current_nav,
-			SUM(t.units) * MAX(s.latest_nav) AS current_value,
-			SUM(t.amount) AS total_invested_amount,
-			(SUM(t.units) * MAX(s.latest_nav)) - SUM(t.amount) AS gain_loss,
-			CASE
-				WHEN SUM(t.amount) != 0 THEN
-					(((SUM(t.units) * MAX(s.latest_nav)) - SUM(t.amount)) / ABS(SUM(t.amount))) * 100
-				ELSE 0
-			END AS gain_losss_percent
-		FROM investment.onboard_transaction t
-		LEFT JOIN investment.amfi_schemes s ON t.scheme_id = s.scheme_id
-		WHERE t.entity_name IN (
-			SELECT DISTINCT entity_name
-			FROM investment.onboard_transaction
-			WHERE batch_id = $1
-		)
-		GROUP BY t.entity_name, t.folio_number, t.demat_acc_number, t.scheme_id
-		HAVING SUM(t.units) > 0
-	`
-	if _, err := tx.Exec(ctx, rebuildSnap, batchID); err != nil {
+	// Rebuild snapshots for affected entities using ALL their transactions (not just current batch)
+	snapshotQ := `
+WITH affected_entities AS (
+    SELECT DISTINCT COALESCE(mf.entity_name, md.entity_name) AS entity_name
+    FROM investment.onboard_transaction ot
+    LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
+    LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
+    WHERE ot.batch_id = $1
+),
+scheme_resolved AS (
+    SELECT
+        ot.batch_id,
+        ot.transaction_date,
+        ot.transaction_type,
+        ot.amount,
+        ot.units,
+        ot.nav,
+        COALESCE(mf.entity_name, md.entity_name) AS entity_name,
+        ot.folio_number,
+        ot.demat_acc_number,
+        COALESCE(fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
+        COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
+        COALESCE(ms.isin, ms2.isin) AS isin
+    FROM investment.onboard_transaction ot
+    LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
+    LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
+    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
+    LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
+    LEFT JOIN investment.masterscheme ms2 ON ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code
+    WHERE COALESCE(mf.entity_name, md.entity_name) IN (SELECT entity_name FROM affected_entities)
+),
+transaction_summary AS (
+    SELECT
+        entity_name,
+        folio_number,
+        demat_acc_number,
+        scheme_id,
+        scheme_name,
+        isin,
+        -- Net units: BUY positive, SELL negative
+        SUM(CASE 
+            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN units
+            ELSE units
+        END) AS total_units,
+        -- Total invested: sum of BUY amounts only
+        SUM(CASE 
+            WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
+            ELSE 0
+        END) AS total_invested_amount,
+        -- Avg NAV: weighted average of BUY transactions only
+        CASE 
+            WHEN SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+                ELSE 0
+            END) = 0 THEN 0
+            ELSE SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
+                ELSE 0
+            END) / SUM(CASE 
+                WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
+                ELSE 0
+            END)
+        END AS avg_nav
+    FROM scheme_resolved
+    GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+),
+latest_nav AS (
+    SELECT DISTINCT ON (scheme_name)
+        scheme_name,
+        isin_div_payout_growth as isin,
+        nav_value,
+        nav_date
+    FROM investment.amfi_nav_staging
+    ORDER BY scheme_name, nav_date DESC
+)
+INSERT INTO investment.portfolio_snapshot (
+  batch_id,
+  entity_name,
+  folio_number,
+  demat_acc_number,
+  scheme_id,
+  scheme_name,
+  isin,
+  total_units,
+  avg_nav,
+  current_nav,
+  current_value,
+  total_invested_amount,
+  gain_loss,
+  gain_losss_percent,
+  created_at
+)
+SELECT
+  $1 AS batch_id,
+  ts.entity_name,
+  ts.folio_number,
+  ts.demat_acc_number,
+  ts.scheme_id,
+  ts.scheme_name,
+  ts.isin,
+  ts.total_units,
+  ts.avg_nav,
+  COALESCE(ln.nav_value, 0) AS current_nav,
+  ts.total_units * COALESCE(ln.nav_value, 0) AS current_value,
+  ts.total_invested_amount,
+  (ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount AS gain_loss,
+  CASE 
+    WHEN ts.total_invested_amount = 0 THEN 0
+    ELSE (((ts.total_units * COALESCE(ln.nav_value, 0)) - ts.total_invested_amount) / ts.total_invested_amount) * 100
+  END AS gain_losss_percent,
+  NOW()
+FROM transaction_summary ts
+LEFT JOIN latest_nav ln ON (ln.scheme_name = ts.scheme_name OR ln.isin = ts.isin)
+WHERE ts.total_units > 0;
+`
+	if _, err := tx.Exec(ctx, snapshotQ, batchID); err != nil {
 		return nil, fmt.Errorf("rebuild snapshot failed: %w", err)
 	}
 
 	// Count snapshots created
-	var snapshotCount int
-	if err := tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1
-	`, batchID).Scan(&snapshotCount); err != nil {
+	var snapshotCount int64
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM investment.portfolio_snapshot WHERE batch_id=$1`, batchID).Scan(&snapshotCount); err != nil {
 		snapshotCount = 0
 	}
 
