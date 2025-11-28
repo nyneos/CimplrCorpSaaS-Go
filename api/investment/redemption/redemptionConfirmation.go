@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1041,7 +1042,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	defer tx.Rollback(ctx)
 
 	// Use a transient batch ID (do not persist an `onboard_batch` row)
-	batchID := fmt.Sprintf("confirm-%d", time.Now().UnixNano())
+	batchID := uuid.New().String()
 
 	// Fetch redemption confirmation details with related redemption initiation and scheme info
 	fetchQ := `
