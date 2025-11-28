@@ -465,6 +465,11 @@ func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, settings *S
 			return fmt.Errorf("generate Dividend journal failed: %w", err)
 		}
 
+		// Skip if no journal entry generated (e.g., zero amount)
+		if je == nil || len(je.Lines) == 0 {
+			continue
+		}
+
 		if err := SaveJournalEntry(ctx, tx, je); err != nil {
 			return fmt.Errorf("save Dividend journal failed: %w", err)
 		}
