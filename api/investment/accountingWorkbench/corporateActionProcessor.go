@@ -181,7 +181,7 @@ func processSplit(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	_, err := tx.Exec(ctx, `
 		UPDATE investment.portfolio_snapshot
 		SET total_units = ROUND(total_units * $1, 3),
-		    average_cost = average_cost * $2
+		    avg_nav = avg_nav * $2
 		WHERE scheme_id = $3
 	`, splitMultiplier, *ratioOld / *ratioNew, sourceSchemeID)
 	
@@ -213,7 +213,7 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	// Fetch all holdings for this scheme
 	rows, err := tx.Query(ctx, `
 		SELECT folio_id, folio_number, demat_id, demat_acc_number, total_units, 
-		       average_cost, entity_name
+		       avg_nav, entity_name
 		FROM investment.portfolio_snapshot
 		WHERE scheme_id = $1 AND total_units > 0
 		FOR UPDATE
@@ -243,7 +243,7 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 		_, err := tx.Exec(ctx, `
 			UPDATE investment.portfolio_snapshot
 			SET total_units = $1,
-			    average_cost = $2
+			    avg_nav = $2
 			WHERE scheme_id = $3 
 			  AND COALESCE(folio_id, '') = COALESCE($4, '')
 			  AND COALESCE(folio_number, '') = COALESCE($5, '')
