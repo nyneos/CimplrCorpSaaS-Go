@@ -279,7 +279,7 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 		SET scheme_name = scheme_name || ' (Bonus ' || $1::text || ':' || $2::text || ')'
 		WHERE scheme_id = $3
 		  AND scheme_name NOT LIKE '%Bonus%'
-	`, *ratioNew, *ratioOld, sourceSchemeID)
+	`, fmt.Sprintf("%.0f", *ratioNew), fmt.Sprintf("%.0f", *ratioOld), sourceSchemeID)
 
 	return err
 }
