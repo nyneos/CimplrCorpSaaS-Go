@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -1307,7 +1308,7 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	defer tx.Rollback(ctx)
 
 	// Use a generated transient batch ID (do not create an entry in `onboard_batch`)
-	batchID := fmt.Sprintf("confirm-%d", time.Now().UnixNano())
+	batchID := uuid.New().String()
 
 	// Fetch confirmation details with related initiation and scheme info
 	query := `
