@@ -381,7 +381,7 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 			Narration:     fmt.Sprintf("Dividend income - %s", schemeName),
 		})
 
-	} else if transactionType == "REINVEST" {
+	} else if transactionType == "REINVEST" || transactionType == "REINVESTMENT" {
 		// Dividend Reinvestment: DR Bank Account (Investment), CR Dividend Income
 		je.EntryType = "DIVIDEND_REINVEST"
 		je.Description = fmt.Sprintf("Dividend reinvestment in %s", schemeName)
