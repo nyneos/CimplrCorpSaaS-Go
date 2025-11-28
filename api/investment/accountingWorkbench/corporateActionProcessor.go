@@ -212,7 +212,7 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 
 	// Fetch all holdings for this scheme
 	rows, err := tx.Query(ctx, `
-		SELECT folio_id, folio_number, demat_id, demat_acc_number, total_units, 
+		SELECT folio_number, demat_acc_number, total_units, 
 		       avg_nav, entity_name
 		FROM investment.portfolio_snapshot
 		WHERE scheme_id = $1 AND total_units > 0
@@ -224,10 +224,10 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	defer rows.Close()
 
 	for rows.Next() {
-		var folioID, folioNumber, dematID, dematAccNumber, entityName *string
+		var folioNumber, dematAccNumber, entityName *string
 		var totalUnits, avgCost float64
 
-		if err := rows.Scan(&folioID, &folioNumber, &dematID, &dematAccNumber, &totalUnits, &avgCost, &entityName); err != nil {
+		if err := rows.Scan(&folioNumber, &dematAccNumber, &totalUnits, &avgCost, &entityName); err != nil {
 			return fmt.Errorf("failed to scan holding: %w", err)
 		}
 
@@ -245,12 +245,10 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 			SET total_units = $1,
 			    avg_nav = $2
 			WHERE scheme_id = $3 
-			  AND COALESCE(folio_id, '') = COALESCE($4, '')
-			  AND COALESCE(folio_number, '') = COALESCE($5, '')
-			  AND COALESCE(demat_id, '') = COALESCE($6, '')
-			  AND COALESCE(demat_acc_number, '') = COALESCE($7, '')
-			  AND COALESCE(entity_name, '') = COALESCE($8, '')
-		`, newTotalUnits, newAvgCost, sourceSchemeID, folioID, folioNumber, dematID, dematAccNumber, entityName)
+			  AND COALESCE(folio_number, '') = COALESCE($4, '')
+			  AND COALESCE(demat_acc_number, '') = COALESCE($5, '')
+			  AND COALESCE(entity_name, '') = COALESCE($6, '')
+		`, newTotalUnits, newAvgCost, sourceSchemeID, folioNumber, dematAccNumber, entityName)
 		
 		if err != nil {
 			return fmt.Errorf("failed to update holding with bonus: %w", err)
