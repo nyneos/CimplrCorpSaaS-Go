@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DBExecutor is an interface that both pgx.Tx and pgxpool.Pool implement
@@ -59,15 +58,19 @@ type BankAccountInfo struct {
 }
 
 // GetBankAccountFromFolio fetches redemption account details from folio
-func GetBankAccountFromFolio(ctx context.Context, pool *pgxpool.Pool, folioID string) (*BankAccountInfo, error) {
+func GetBankAccountFromFolio(ctx context.Context, executor DBExecutor, folioID string) (*BankAccountInfo, error) {
 	query := `
 		SELECT 
-			ba.account_number,
-			ba.account_nickname AS account_name,
-			b.bank_name,
-			COALESCE(e.entity_name, ec.entity_name) AS entity_name
+			COALESCE(ba.account_number, '') AS account_number,
+			COALESCE(ba.account_nickname, '') AS account_name,
+			COALESCE(b.bank_name, '') AS bank_name,
+			COALESCE(e.entity_name, ec.entity_name, '') AS entity_name
 		FROM investment.masterfolio f
-		LEFT JOIN public.masterbankaccount ba ON ba.account_number = f.default_redemption_account
+		LEFT JOIN public.masterbankaccount ba ON (
+			ba.account_number = f.default_redemption_account 
+			OR ba.account_id = f.default_redemption_account
+			OR ba.account_nickname = f.default_redemption_account
+		)
 		LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
 		LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
 		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
@@ -76,7 +79,7 @@ func GetBankAccountFromFolio(ctx context.Context, pool *pgxpool.Pool, folioID st
 	`
 	
 	var info BankAccountInfo
-	err := pool.QueryRow(ctx, query, folioID).Scan(
+	err := executor.QueryRow(ctx, query, folioID).Scan(
 		&info.AccountNumber,
 		&info.AccountName,
 		&info.BankName,
@@ -86,19 +89,28 @@ func GetBankAccountFromFolio(ctx context.Context, pool *pgxpool.Pool, folioID st
 		return nil, fmt.Errorf("failed to get bank account for folio %s: %w", folioID, err)
 	}
 	
+	// Validate that we have at least account_number
+	if info.AccountNumber == "" {
+		return nil, fmt.Errorf("no bank account configured for folio %s", folioID)
+	}
+	
 	return &info, nil
 }
 
 // GetBankAccountFromDemat fetches settlement account details from demat
-func GetBankAccountFromDemat(ctx context.Context, pool *pgxpool.Pool, dematID string) (*BankAccountInfo, error) {
+func GetBankAccountFromDemat(ctx context.Context, executor DBExecutor, dematID string) (*BankAccountInfo, error) {
 	query := `
 		SELECT 
-			ba.account_number,
-			ba.account_nickname AS account_name,
-			b.bank_name,
-			COALESCE(e.entity_name, ec.entity_name) AS entity_name
+			COALESCE(ba.account_number, '') AS account_number,
+			COALESCE(ba.account_nickname, '') AS account_name,
+			COALESCE(b.bank_name, '') AS bank_name,
+			COALESCE(e.entity_name, ec.entity_name, '') AS entity_name
 		FROM investment.masterdemataccount d
-		LEFT JOIN public.masterbankaccount ba ON ba.account_number = d.default_settlement_account
+		LEFT JOIN public.masterbankaccount ba ON (
+			ba.account_number = d.default_settlement_account
+			OR ba.account_id = d.default_settlement_account
+			OR ba.account_nickname = d.default_settlement_account
+		)
 		LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
 		LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
 		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
@@ -107,7 +119,7 @@ func GetBankAccountFromDemat(ctx context.Context, pool *pgxpool.Pool, dematID st
 	`
 	
 	var info BankAccountInfo
-	err := pool.QueryRow(ctx, query, dematID).Scan(
+	err := executor.QueryRow(ctx, query, dematID).Scan(
 		&info.AccountNumber,
 		&info.AccountName,
 		&info.BankName,
@@ -117,31 +129,52 @@ func GetBankAccountFromDemat(ctx context.Context, pool *pgxpool.Pool, dematID st
 		return nil, fmt.Errorf("failed to get bank account for demat %s: %w", dematID, err)
 	}
 	
+	// Validate that we have at least account_number
+	if info.AccountNumber == "" {
+		return nil, fmt.Errorf("no bank account configured for demat %s", dematID)
+	}
+	
 	return &info, nil
 }
 
 // GenerateJournalEntryForMTM creates journal entry for MTM activity
-func GenerateJournalEntryForMTM(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID string, mtmData map[string]interface{}) (*JournalEntry, error) {
-	unrealizedGL := parseFloat(mtmData["unrealized_gl"])
-	entityID := parseString(mtmData["entity_id"])
-	entityName := parseString(mtmData["entity_name"])
+func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, mtmData map[string]interface{}) (*JournalEntry, error) {
+	unrealizedGL := parseFloat(mtmData["unrealized_gain_loss"])
 	schemeID := parseString(mtmData["scheme_id"])
-	schemeName := parseString(mtmData["scheme_name"])
-	folioID := parseString(mtmData["folio_id"])
-	dematID := parseString(mtmData["demat_id"])
-	accountingPeriod := parseString(mtmData["accounting_period"])
-	effectiveDate := parseTime(mtmData["effective_date"])
+	
+	// Handle pointer types for folio_id and demat_id
+	var folioID, dematID string
+	if fid := mtmData["folio_id"]; fid != nil {
+		if ptr, ok := fid.(*string); ok && ptr != nil {
+			folioID = *ptr
+		} else {
+			folioID = parseString(fid)
+		}
+	}
+	if did := mtmData["demat_id"]; did != nil {
+		if ptr, ok := did.(*string); ok && ptr != nil {
+			dematID = *ptr
+		} else {
+			dematID = parseString(did)
+		}
+	}
+
+	// Get scheme name from database if not provided
+	var schemeName string
+	if err := executor.QueryRow(ctx, `SELECT scheme_name FROM investment.masterscheme WHERE scheme_id = $1`, schemeID).Scan(&schemeName); err != nil {
+		schemeName = schemeID // fallback to scheme_id
+	}
 
 	// Fetch bank account from folio or demat
 	var bankAccount *BankAccountInfo
 	var err error
 	if folioID != "" {
-		bankAccount, err = GetBankAccountFromFolio(ctx, pool, folioID)
+		bankAccount, err = GetBankAccountFromFolio(ctx, executor, folioID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get folio bank account: %w", err)
 		}
 	} else if dematID != "" {
-		bankAccount, err = GetBankAccountFromDemat(ctx, pool, dematID)
+		bankAccount, err = GetBankAccountFromDemat(ctx, executor, dematID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get demat bank account: %w", err)
 		}
@@ -150,14 +183,13 @@ func GenerateJournalEntryForMTM(ctx context.Context, pool *pgxpool.Pool, setting
 	}
 
 	je := &JournalEntry{
-		ActivityID:       activityID,
-		EntityID:         entityID,
-		EntityName:       entityName,
-		FolioID:          folioID,
-		DematID:          dematID,
-		EntryDate:        effectiveDate,
-		AccountingPeriod: accountingPeriod,
-		Lines:            []JournalEntryLine{},
+		ActivityID:  activityID,
+		EntityID:    bankAccount.EntityName, // Use entity from bank account
+		EntityName:  bankAccount.EntityName,
+		FolioID:     folioID,
+		DematID:     dematID,
+		EntryDate:   time.Now(),
+		Lines:       []JournalEntryLine{},
 	}
 
 	roundedAmount := RoundAmount(math.Abs(unrealizedGL), settings.CurrencyPrecision)
@@ -165,7 +197,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, pool *pgxpool.Pool, setting
 	if unrealizedGL > 0 {
 		// MTM Gain: DR Investment Account (Bank), CR Unrealized Gain (Income placeholder - 4101)
 		je.EntryType = "MTM_GAIN"
-		je.Description = fmt.Sprintf("MTM Gain on %s for %s", schemeName, accountingPeriod)
+		je.Description = fmt.Sprintf("MTM Gain on %s", schemeName)
 
 		je.Lines = append(je.Lines, JournalEntryLine{
 			LineNumber:    1,
@@ -199,7 +231,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, pool *pgxpool.Pool, setting
 	} else if unrealizedGL < 0 {
 		// MTM Loss: DR Unrealized Loss (Expense - 5101), CR Investment Account (Bank)
 		je.EntryType = "MTM_LOSS"
-		je.Description = fmt.Sprintf("MTM Loss on %s for %s", schemeName, accountingPeriod)
+		je.Description = fmt.Sprintf("MTM Loss on %s", schemeName)
 
 		je.Lines = append(je.Lines, JournalEntryLine{
 			LineNumber:    1,
@@ -238,31 +270,72 @@ func GenerateJournalEntryForMTM(ctx context.Context, pool *pgxpool.Pool, setting
 }
 
 // GenerateJournalEntryForDividend creates journal entry for dividend activity
-func GenerateJournalEntryForDividend(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID string, dividendData map[string]interface{}) (*JournalEntry, error) {
+func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, dividendData map[string]interface{}) (*JournalEntry, error) {
 	transactionType := parseString(dividendData["transaction_type"])
 	dividendAmount := parseFloat(dividendData["dividend_amount"])
-	entityID := parseString(dividendData["entity_id"])
-	entityName := parseString(dividendData["entity_name"])
 	schemeID := parseString(dividendData["scheme_id"])
-	schemeName := parseString(dividendData["scheme_name"])
 	folioID := parseString(dividendData["folio_id"])
-	paymentDate := parseTime(dividendData["payment_date"])
-	accountingPeriod := parseString(dividendData["accounting_period"])
 
-	// Fetch bank account from folio
-	bankAccount, err := GetBankAccountFromFolio(ctx, pool, folioID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get folio bank account for dividend: %w", err)
+	// Get scheme name from database
+	var schemeName string
+	if err := executor.QueryRow(ctx, `SELECT scheme_name FROM investment.masterscheme WHERE scheme_id = $1`, schemeID).Scan(&schemeName); err != nil {
+		schemeName = schemeID
+	}
+
+	// Fetch bank account - if no folio, find one linked to this scheme
+	var bankAccount *BankAccountInfo
+	var err error
+	
+	if folioID != "" {
+		// Folio specified - use it directly
+		bankAccount, err = GetBankAccountFromFolio(ctx, executor, folioID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get folio bank account for dividend: %w", err)
+		}
+	} else {
+		// No folio - find ANY folio linked to this scheme via folioschememapping
+		var linkedFolioID string
+		err := executor.QueryRow(ctx, `
+			SELECT f.folio_id::text
+			FROM investment.folioschememapping fsm
+			JOIN investment.masterfolio f ON f.folio_id = fsm.folio_id
+			WHERE fsm.scheme_id = $1 
+			  AND COALESCE(fsm.status, 'Active') = 'Active'
+			  AND COALESCE(f.is_deleted, false) = false
+			LIMIT 1
+		`, schemeID).Scan(&linkedFolioID)
+		
+		if err != nil || linkedFolioID == "" {
+			// No folio found for this scheme - use generic dividend account
+			bankAccount = &BankAccountInfo{
+				AccountNumber: "DIV-DEFAULT-001",
+				AccountName:   "Default Dividend Account",
+				BankName:      "Corporate Bank",
+				EntityName:    "Corporate",
+			}
+		} else {
+			// Found a linked folio - get its bank account
+			folioID = linkedFolioID
+			bankAccount, err = GetBankAccountFromFolio(ctx, executor, folioID)
+			if err != nil {
+				// Folio exists but no bank account configured
+				bankAccount = &BankAccountInfo{
+					AccountNumber: "DIV-DEFAULT-001",
+					AccountName:   "Default Dividend Account",
+					BankName:      "Corporate Bank",
+					EntityName:    "Corporate",
+				}
+			}
+		}
 	}
 
 	je := &JournalEntry{
-		ActivityID:       activityID,
-		EntityID:         entityID,
-		EntityName:       entityName,
-		FolioID:          folioID,
-		EntryDate:        paymentDate,
-		AccountingPeriod: accountingPeriod,
-		Lines:            []JournalEntryLine{},
+		ActivityID: activityID,
+		EntityID:   bankAccount.EntityName,
+		EntityName: bankAccount.EntityName,
+		FolioID:    folioID,
+		EntryDate:  time.Now(),
+		Lines:      []JournalEntryLine{},
 	}
 
 	roundedAmount := RoundAmount(dividendAmount, settings.CurrencyPrecision)
@@ -333,62 +406,42 @@ func GenerateJournalEntryForDividend(ctx context.Context, pool *pgxpool.Pool, se
 }
 
 // GenerateJournalEntryForFVO creates journal entry for Fair Value Override
-func GenerateJournalEntryForFVO(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID string, fvoData map[string]interface{}) (*JournalEntry, error) {
+func GenerateJournalEntryForFVO(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, fvoData map[string]interface{}) (*JournalEntry, error) {
+	log.Printf("[DEBUG FVO GEN] GenerateJournalEntryForFVO called (executor type: %T)", executor)
 	variance := parseFloat(fvoData["variance"])
-	entityID := parseString(fvoData["entity_id"])
-	entityName := parseString(fvoData["entity_name"])
 	schemeID := parseString(fvoData["scheme_id"])
-	schemeName := parseString(fvoData["scheme_name"])
-	folioID := parseString(fvoData["folio_id"])
-	dematID := parseString(fvoData["demat_id"])
-	valuationDate := parseTime(fvoData["valuation_date"])
-	accountingPeriod := parseString(fvoData["accounting_period"])
-
-	// Fetch bank account
-	var bankAccount *BankAccountInfo
-	var err error
-	if folioID != "" {
-		bankAccount, err = GetBankAccountFromFolio(ctx, pool, folioID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get folio bank account for FVO: %w", err)
-		}
-	} else if dematID != "" {
-		bankAccount, err = GetBankAccountFromDemat(ctx, pool, dematID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get demat bank account for FVO: %w", err)
-		}
-	} else {
-		return nil, fmt.Errorf("neither folio_id nor demat_id provided for FVO activity")
+	
+	// Get scheme name from database
+	log.Printf("[DEBUG FVO GEN] About to query masterscheme for scheme_id: %s", schemeID)
+	var schemeName string
+	row := executor.QueryRow(ctx, `SELECT scheme_name FROM investment.masterscheme WHERE scheme_id = $1`, schemeID)
+	if err := row.Scan(&schemeName); err != nil {
+		log.Printf("[DEBUG FVO GEN] Scheme query failed: %v, using scheme_id as name", err)
+		schemeName = schemeID
 	}
+	log.Printf("[DEBUG FVO GEN] Scheme name resolved: %s", schemeName)
 
 	je := &JournalEntry{
-		ActivityID:       activityID,
-		EntityID:         entityID,
-		EntityName:       entityName,
-		FolioID:          folioID,
-		DematID:          dematID,
-		EntryDate:        valuationDate,
-		AccountingPeriod: accountingPeriod,
-		Lines:            []JournalEntryLine{},
+		ActivityID: activityID,
+		EntryDate:  time.Now(),
+		Lines:      []JournalEntryLine{},
 	}
 
 	roundedAmount := RoundAmount(math.Abs(variance), settings.CurrencyPrecision)
 
 	if variance > 0 {
-		// FVO Upward: DR Bank Account, CR FVO Gain (Equity - 3101)
+		// FVO Upward: DR Investment Account, CR FVO Gain (Equity - 3101)
 		je.EntryType = "FVO_UPWARD"
 		je.Description = fmt.Sprintf("Fair value adjustment (upward) on %s", schemeName)
 
 		je.Lines = append(je.Lines, JournalEntryLine{
 			LineNumber:    1,
-			AccountNumber: bankAccount.AccountNumber,
-			AccountName:   bankAccount.AccountName + " - " + bankAccount.BankName,
+			AccountNumber: "1200", // Investment Account
+			AccountName:   "Mutual Fund Investments",
 			AccountType:   "ASSET",
 			DebitAmount:   roundedAmount,
 			CreditAmount:  0,
 			SchemeID:      schemeID,
-			FolioID:       folioID,
-			DematID:       dematID,
 			Narration:     fmt.Sprintf("FVO upward adjustment - %s", schemeName),
 		})
 
@@ -400,13 +453,11 @@ func GenerateJournalEntryForFVO(ctx context.Context, pool *pgxpool.Pool, setting
 			DebitAmount:   0,
 			CreditAmount:  roundedAmount,
 			SchemeID:      schemeID,
-			FolioID:       folioID,
-			DematID:       dematID,
 			Narration:     fmt.Sprintf("FVO gain - %s", schemeName),
 		})
 
 	} else if variance < 0 {
-		// FVO Downward: DR FVO Loss (Equity - 3102), CR Bank Account
+		// FVO Downward: DR FVO Loss (Equity - 3102), CR Investment Account
 		je.EntryType = "FVO_DOWNWARD"
 		je.Description = fmt.Sprintf("Fair value adjustment (downward) on %s", schemeName)
 
@@ -418,21 +469,17 @@ func GenerateJournalEntryForFVO(ctx context.Context, pool *pgxpool.Pool, setting
 			DebitAmount:   roundedAmount,
 			CreditAmount:  0,
 			SchemeID:      schemeID,
-			FolioID:       folioID,
-			DematID:       dematID,
 			Narration:     fmt.Sprintf("FVO downward adjustment - %s", schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
 			LineNumber:    2,
-			AccountNumber: bankAccount.AccountNumber,
-			AccountName:   bankAccount.AccountName + " - " + bankAccount.BankName,
+			AccountNumber: "1200", // Investment Account
+			AccountName:   "Mutual Fund Investments",
 			AccountType:   "ASSET",
 			DebitAmount:   0,
 			CreditAmount:  roundedAmount,
 			SchemeID:      schemeID,
-			FolioID:       folioID,
-			DematID:       dematID,
 			Narration:     fmt.Sprintf("FVO loss - %s", schemeName),
 		})
 	}
@@ -444,91 +491,21 @@ func GenerateJournalEntryForFVO(ctx context.Context, pool *pgxpool.Pool, setting
 }
 
 // GenerateJournalEntryForCorporateAction creates journal entry for corporate actions
-func GenerateJournalEntryForCorporateAction(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID string, corpActionData map[string]interface{}) (*JournalEntry, error) {
-	actionType := parseString(corpActionData["action_type"])
-	entityID := parseString(corpActionData["entity_id"])
-	entityName := parseString(corpActionData["entity_name"])
-	sourceSchemeID := parseString(corpActionData["source_scheme_id"])
-	targetSchemeID := parseString(corpActionData["target_scheme_id"])
-	sourceSchemeName := parseString(corpActionData["source_scheme_name"])
-	targetSchemeName := parseString(corpActionData["target_scheme_name"])
-	effectiveDate := parseTime(corpActionData["effective_date"])
-	accountingPeriod := parseString(corpActionData["accounting_period"])
-
-	// For scheme name change, no journal entry needed
-	if actionType == "SCHEME_NAME_CHANGE" {
-		return nil, nil
-	}
-
-	je := &JournalEntry{
-		ActivityID:       activityID,
-		EntityID:         entityID,
-		EntityName:       entityName,
-		EntryDate:        effectiveDate,
-		AccountingPeriod: accountingPeriod,
-		Lines:            []JournalEntryLine{},
-	}
-
-	// For mergers, we need cost basis transfer amount
-	if actionType == "SCHEME_MERGER" {
-		folioID := parseString(corpActionData["folio_id"])
-		
-		// Fetch bank account
-		bankAccount, err := GetBankAccountFromFolio(ctx, pool, folioID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get folio bank account for corporate action: %w", err)
-		}
-		
-		je.FolioID = folioID
-		costBasis := parseFloat(corpActionData["cost_basis_transferred"])
-		roundedAmount := RoundAmount(costBasis, settings.CurrencyPrecision)
-
-		je.EntryType = "SCHEME_MERGER"
-		je.Description = fmt.Sprintf("Scheme merger: %s to %s", sourceSchemeName, targetSchemeName)
-
-		// DR Investment in Target Scheme (same bank account)
-		je.Lines = append(je.Lines, JournalEntryLine{
-			LineNumber:    1,
-			AccountNumber: bankAccount.AccountNumber,
-			AccountName:   bankAccount.AccountName + " - " + bankAccount.BankName + " (Target: " + targetSchemeName + ")",
-			AccountType:   "ASSET",
-			DebitAmount:   roundedAmount,
-			CreditAmount:  0,
-			SchemeID:      targetSchemeID,
-			FolioID:       folioID,
-			Narration:     fmt.Sprintf("Cost basis transfer to %s", targetSchemeName),
-		})
-
-		// CR Investment in Source Scheme (same bank account)
-		je.Lines = append(je.Lines, JournalEntryLine{
-			LineNumber:    2,
-			AccountNumber: bankAccount.AccountNumber,
-			AccountName:   bankAccount.AccountName + " - " + bankAccount.BankName + " (Source: " + sourceSchemeName + ")",
-			AccountType:   "ASSET",
-			DebitAmount:   0,
-			CreditAmount:  roundedAmount,
-			SchemeID:      sourceSchemeID,
-			FolioID:       folioID,
-			Narration:     fmt.Sprintf("Cost basis transfer from %s", sourceSchemeName),
-		})
-
-		je.TotalDebit = roundedAmount
-		je.TotalCredit = roundedAmount
-	}
-
-	// For splits and bonus, typically no journal entry (only unit changes)
-	// Unless there's a cost basis adjustment requirement
-
-	return je, nil
+func GenerateJournalEntryForCorporateAction(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, corpActionData map[string]interface{}) (*JournalEntry, error) {
+	// Corporate actions are handled by the processor which updates portfolio_snapshot
+	// No journal entries needed as these are scheme-level operations
+	return nil, nil
 }
 
 // SaveJournalEntry persists a journal entry to the database
 func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) error {
+	log.Printf("[DEBUG SAVE] SaveJournalEntry called for activity_id: %s, entry_type: %s", je.ActivityID, je.EntryType)
 
 	// Validate balanced entry
 	if je.TotalDebit != je.TotalCredit {
 		return fmt.Errorf("journal entry not balanced: debit=%.2f, credit=%.2f", je.TotalDebit, je.TotalCredit)
 	}
+	log.Printf("[DEBUG SAVE] Journal entry validated (balanced)")
 
 	// Insert master journal entry
 	entryQuery := `
@@ -538,6 +515,7 @@ func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) erro
 		RETURNING entry_id
 	`
 
+	log.Printf("[DEBUG SAVE] About to execute INSERT query using tx (type: %T)", tx)
 	var entryID string
 	err := tx.QueryRow(ctx, entryQuery,
 		je.ActivityID,
@@ -554,8 +532,10 @@ func SaveJournalEntry(ctx context.Context, tx DBExecutor, je *JournalEntry) erro
 	).Scan(&entryID)
 
 	if err != nil {
+		log.Printf("[DEBUG SAVE] INSERT failed: %v", err)
 		return fmt.Errorf("failed to insert journal entry: %w", err)
 	}
+	log.Printf("[DEBUG SAVE] INSERT successful, entry_id: %s", entryID)
 
 	// Insert line items
 	lineQuery := `
