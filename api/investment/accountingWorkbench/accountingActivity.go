@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -21,15 +22,24 @@ import (
 // GenerateAndSaveJournalEntries fetches activity details and generates journal entries (standalone)
 func GenerateAndSaveJournalEntries(ctx context.Context, pool *pgxpool.Pool, activityID string) error {
 	// Get activity details
-	var activityType, activitySubtype string
+	var activityType string
+	var activitySubtype *string
 	err := pool.QueryRow(ctx, `
-		SELECT activity_type, activity_subtype
+		SELECT activity_type, COALESCE(activity_subtype, '')
 		FROM investment.accounting_activity
 		WHERE activity_id = $1 AND status = 'APPROVED'
 	`, activityID).Scan(&activityType, &activitySubtype)
 	
 	if err != nil {
 		return fmt.Errorf("failed to fetch activity: %w", err)
+	}
+	
+	// Auto-populate subtype for CORPORATE_ACTION from action_type
+	if activityType == "CORPORATE_ACTION" && (activitySubtype == nil || *activitySubtype == "") {
+		var actionType string
+		if err := pool.QueryRow(ctx, `SELECT action_type FROM investment.accounting_corporate_action WHERE activity_id = $1 LIMIT 1`, activityID).Scan(&actionType); err == nil {
+			activitySubtype = &actionType
+		}
 	}
 
 	// Get cached settings
@@ -42,7 +52,11 @@ func GenerateAndSaveJournalEntries(ctx context.Context, pool *pgxpool.Pool, acti
 	case "DIVIDEND":
 		return generateDividendJournal(ctx, pool, settings, activityID)
 	case "CORPORATE_ACTION":
-		return generateCorporateActionJournal(ctx, pool, settings, activityID, activitySubtype)
+		subtypeStr := ""
+		if activitySubtype != nil {
+			subtypeStr = *activitySubtype
+		}
+		return generateCorporateActionJournal(ctx, pool, settings, activityID, subtypeStr)
 	case "FVO":
 		return generateFVOJournal(ctx, pool, settings, activityID)
 	default:
@@ -52,17 +66,26 @@ func GenerateAndSaveJournalEntries(ctx context.Context, pool *pgxpool.Pool, acti
 
 // GenerateAndSaveJournalEntriesInTx generates journal entries within an existing transaction
 // Used during approval to ensure atomicity - if journal generation fails, approval rolls back
-func GenerateAndSaveJournalEntriesInTx(ctx context.Context, tx DBExecutor, pool *pgxpool.Pool, activityID string) error {
+func GenerateAndSaveJournalEntriesInTx(ctx context.Context, tx DBExecutor, activityID string) error {
 	// Get activity details
-	var activityType, activitySubtype string
+	var activityType string
+	var activitySubtype *string
 	err := tx.QueryRow(ctx, `
-		SELECT activity_type, activity_subtype
+		SELECT activity_type, COALESCE(activity_subtype, '')
 		FROM investment.accounting_activity
 		WHERE activity_id = $1 AND status = 'APPROVED'
 	`, activityID).Scan(&activityType, &activitySubtype)
 	
 	if err != nil {
 		return fmt.Errorf("failed to fetch activity: %w", err)
+	}
+	
+	// Auto-populate subtype for CORPORATE_ACTION from action_type
+	if activityType == "CORPORATE_ACTION" && (activitySubtype == nil || *activitySubtype == "") {
+		var actionType string
+		if err := tx.QueryRow(ctx, `SELECT action_type FROM investment.accounting_corporate_action WHERE activity_id = $1 LIMIT 1`, activityID).Scan(&actionType); err == nil {
+			activitySubtype = &actionType
+		}
 	}
 
 	// Get cached settings
@@ -71,13 +94,17 @@ func GenerateAndSaveJournalEntriesInTx(ctx context.Context, tx DBExecutor, pool 
 	// Fetch and generate journal entries based on activity type
 	switch activityType {
 	case "MTM":
-		return generateMTMJournalInTx(ctx, tx, pool, settings, activityID)
+		return generateMTMJournalInTx(ctx, tx, settings, activityID)
 	case "DIVIDEND":
-		return generateDividendJournalInTx(ctx, tx, pool, settings, activityID)
+		return generateDividendJournalInTx(ctx, tx, settings, activityID)
 	case "CORPORATE_ACTION":
-		return generateCorporateActionJournalInTx(ctx, tx, pool, settings, activityID, activitySubtype)
+		subtypeStr := ""
+		if activitySubtype != nil {
+			subtypeStr = *activitySubtype
+		}
+		return generateCorporateActionJournalInTx(ctx, tx, settings, activityID, subtypeStr)
 	case "FVO":
-		return generateFVOJournalInTx(ctx, tx, pool, settings, activityID)
+		return generateFVOJournalInTx(ctx, tx, settings, activityID)
 	default:
 		return fmt.Errorf("unsupported activity type: %s", activityType)
 	}
@@ -94,8 +121,8 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 
 	// Fetch MTM data
 	rows, err := tx.Query(ctx, `
-		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.market_nav,
-		       m.cost_nav, m.total_units, m.unrealized_gain_loss, m.entity_id
+		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.curr_nav,
+		       m.prev_nav, m.units, m.unrealized_gain_loss
 		FROM investment.accounting_mtm m
 		WHERE m.activity_id = $1
 	`, activityID)
@@ -105,11 +132,11 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	defer rows.Close()
 
 	for rows.Next() {
-		var mtmID, schemeID, entityID string
+		var mtmID, schemeID string
 		var folioID, dematID *string
-		var marketNav, costNav, totalUnits, unrealizedGL float64
+		var currNav, prevNav, units, unrealizedGL float64
 		
-		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &marketNav, &costNav, &totalUnits, &unrealizedGL, &entityID); err != nil {
+		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
 			return fmt.Errorf("scan MTM data failed: %w", err)
 		}
 
@@ -119,15 +146,14 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 			"scheme_id":             schemeID,
 			"folio_id":              folioID,
 			"demat_id":              dematID,
-			"market_nav":            marketNav,
-			"cost_nav":              costNav,
-			"total_units":           totalUnits,
+			"market_nav":            currNav,
+			"cost_nav":              prevNav,
+			"total_units":           units,
 			"unrealized_gain_loss":  unrealizedGL,
-			"entity_id":             entityID,
 		}
 
 		// Generate journal entry
-		je, err := GenerateJournalEntryForMTM(ctx, pool, settings, activityID, data)
+		je, err := GenerateJournalEntryForMTM(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate MTM journal failed: %w", err)
 		}
@@ -155,7 +181,7 @@ func generateDividendJournal(ctx context.Context, pool *pgxpool.Pool, settings *
 
 	rows, err := tx.Query(ctx, `
 		SELECT d.dividend_id, d.scheme_id, d.folio_id, d.dividend_amount,
-		       d.reinvest_units, d.transaction_type, d.entity_id
+		       d.reinvest_units, d.transaction_type
 		FROM investment.accounting_dividend d
 		WHERE d.activity_id = $1
 	`, activityID)
@@ -165,25 +191,31 @@ func generateDividendJournal(ctx context.Context, pool *pgxpool.Pool, settings *
 	defer rows.Close()
 
 	for rows.Next() {
-		var dividendID, schemeID, folioID, transactionType, entityID string
+		var dividendID, schemeID, transactionType string
+		var folioID *string
 		var dividendAmount float64
 		var reinvestUnits *float64
 		
-		if err := rows.Scan(&dividendID, &schemeID, &folioID, &dividendAmount, &reinvestUnits, &transactionType, &entityID); err != nil {
+		if err := rows.Scan(&dividendID, &schemeID, &folioID, &dividendAmount, &reinvestUnits, &transactionType); err != nil {
 			return fmt.Errorf("scan Dividend data failed: %w", err)
+		}
+
+		// Convert *string to string for folio_id
+		folioIDStr := ""
+		if folioID != nil {
+			folioIDStr = *folioID
 		}
 
 		data := map[string]interface{}{
 			"dividend_id":       dividendID,
 			"scheme_id":         schemeID,
-			"folio_id":          folioID,
+			"folio_id":          folioIDStr,
 			"dividend_amount":   dividendAmount,
 			"reinvest_units":    reinvestUnits,
 			"transaction_type":  transactionType,
-			"entity_id":         entityID,
 		}
 
-		je, err := GenerateJournalEntryForDividend(ctx, pool, settings, activityID, data)
+		je, err := GenerateJournalEntryForDividend(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate Dividend journal failed: %w", err)
 		}
@@ -209,9 +241,9 @@ func generateCorporateActionJournal(ctx context.Context, pool *pgxpool.Pool, set
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx, `
-		SELECT ca.corporate_action_id, ca.action_type, ca.source_scheme_id,
-		       ca.target_scheme_id, ca.folio_id, ca.exchange_ratio_num,
-		       ca.exchange_ratio_denom, ca.source_units_affected, ca.new_units_issued, ca.entity_id
+		SELECT ca.ca_id, ca.action_type, ca.source_scheme_id,
+		       ca.target_scheme_id, ca.new_scheme_name, ca.ratio_new, ca.ratio_old,
+		       ca.conversion_ratio, ca.bonus_units
 		FROM investment.accounting_corporate_action ca
 		WHERE ca.activity_id = $1
 	`, activityID)
@@ -221,34 +253,36 @@ func generateCorporateActionJournal(ctx context.Context, pool *pgxpool.Pool, set
 	defer rows.Close()
 
 	for rows.Next() {
-		var caID, actionType, sourceSchemeID, folioID, entityID string
-		var targetSchemeID *string
-		var ratioNum, ratioDenom, sourceUnits, newUnits float64
+		var caID, actionType, sourceSchemeID string
+		var targetSchemeID, newSchemeName *string
+		var ratioNew, ratioOld, conversionRatio, bonusUnits *float64
 		
-		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &folioID, &ratioNum, &ratioDenom, &sourceUnits, &newUnits, &entityID); err != nil {
+		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &newSchemeName, &ratioNew, &ratioOld, &conversionRatio, &bonusUnits); err != nil {
 			return fmt.Errorf("scan Corporate Action data failed: %w", err)
 		}
 
 		data := map[string]interface{}{
-			"corporate_action_id":     caID,
-			"action_type":             actionType,
-			"source_scheme_id":        sourceSchemeID,
-			"target_scheme_id":        targetSchemeID,
-			"folio_id":                folioID,
-			"exchange_ratio_num":      ratioNum,
-			"exchange_ratio_denom":    ratioDenom,
-			"source_units_affected":   sourceUnits,
-			"new_units_issued":        newUnits,
-			"entity_id":               entityID,
+			"corporate_action_id": caID,
+			"action_type":         actionType,
+			"source_scheme_id":    sourceSchemeID,
+			"target_scheme_id":    targetSchemeID,
+			"new_scheme_name":     newSchemeName,
+			"ratio_new":           ratioNew,
+			"ratio_old":           ratioOld,
+			"conversion_ratio":    conversionRatio,
+			"bonus_units":         bonusUnits,
 		}
 
-		je, err := GenerateJournalEntryForCorporateAction(ctx, pool, settings, activityID, data)
+		je, err := GenerateJournalEntryForCorporateAction(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate Corporate Action journal failed: %w", err)
 		}
 
-		if err := SaveJournalEntry(ctx, tx, je); err != nil {
-			return fmt.Errorf("save Corporate Action journal failed: %w", err)
+		// Corporate actions may not generate journal entries (handled by processor)
+		if je != nil {
+			if err := SaveJournalEntry(ctx, tx, je); err != nil {
+				return fmt.Errorf("save Corporate Action journal failed: %w", err)
+			}
 		}
 	}
 
@@ -268,9 +302,11 @@ func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	defer tx.Rollback(ctx)
 
 	rows, err := tx.Query(ctx, `
-		SELECT f.fvo_id, f.scheme_id, f.folio_id, f.demat_id, f.market_nav,
-		       f.override_nav, f.variance, f.variance_pct, f.units_affected,
-		       f.justification, f.entity_id
+		SELECT f.fvo_id, f.scheme_id, COALESCE(f.market_nav, 0) as market_nav, 
+		       f.override_nav, COALESCE(f.variance, 0) as variance, 
+		       COALESCE(f.variance_pct, 0) as variance_pct, 
+		       COALESCE(f.units_affected, 0) as units_affected,
+		       f.justification
 		FROM investment.accounting_fvo f
 		WHERE f.activity_id = $1
 	`, activityID)
@@ -280,29 +316,25 @@ func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	defer rows.Close()
 
 	for rows.Next() {
-		var fvoID, schemeID, justification, entityID string
-		var folioID, dematID *string
+		var fvoID, schemeID, justification string
 		var marketNav, overrideNav, variance, variancePct, unitsAffected float64
 		
-		if err := rows.Scan(&fvoID, &schemeID, &folioID, &dematID, &marketNav, &overrideNav, &variance, &variancePct, &unitsAffected, &justification, &entityID); err != nil {
+		if err := rows.Scan(&fvoID, &schemeID, &marketNav, &overrideNav, &variance, &variancePct, &unitsAffected, &justification); err != nil {
 			return fmt.Errorf("scan FVO data failed: %w", err)
 		}
 
 		data := map[string]interface{}{
 			"fvo_id":          fvoID,
 			"scheme_id":       schemeID,
-			"folio_id":        folioID,
-			"demat_id":        dematID,
 			"market_nav":      marketNav,
 			"override_nav":    overrideNav,
 			"variance":        variance,
 			"variance_pct":    variancePct,
 			"units_affected":  unitsAffected,
 			"justification":   justification,
-			"entity_id":       entityID,
 		}
 
-		je, err := GenerateJournalEntryForFVO(ctx, pool, settings, activityID, data)
+		je, err := GenerateJournalEntryForFVO(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate FVO journal failed: %w", err)
 		}
@@ -325,40 +357,49 @@ func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 // ---------------------------
 
 // generateMTMJournalInTx generates journal entries for MTM within existing transaction
-func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, pool *pgxpool.Pool, settings *SettingsCache, activityID string) error {
+func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
 	rows, err := tx.Query(ctx, `
-		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.market_nav,
-		       m.cost_nav, m.total_units, m.unrealized_gain_loss, m.entity_id
+		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.curr_nav,
+		       m.prev_nav, m.units, m.unrealized_gain_loss
 		FROM investment.accounting_mtm m
 		WHERE m.activity_id = $1
 	`, activityID)
 	if err != nil {
 		return fmt.Errorf("fetch MTM data failed: %w", err)
 	}
-	defer rows.Close()
 
+	// Read all rows first to free connection
+	var mtmRecords []map[string]interface{}
 	for rows.Next() {
-		var mtmID, schemeID, entityID string
+		var mtmID, schemeID string
 		var folioID, dematID *string
-		var marketNav, costNav, totalUnits, unrealizedGL float64
+		var currNav, prevNav, units, unrealizedGL float64
 		
-		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &marketNav, &costNav, &totalUnits, &unrealizedGL, &entityID); err != nil {
+		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan MTM data failed: %w", err)
 		}
 
-		data := map[string]interface{}{
+		mtmRecords = append(mtmRecords, map[string]interface{}{
 			"mtm_id":                mtmID,
 			"scheme_id":             schemeID,
 			"folio_id":              folioID,
 			"demat_id":              dematID,
-			"market_nav":            marketNav,
-			"cost_nav":              costNav,
-			"total_units":           totalUnits,
+			"market_nav":            currNav,
+			"cost_nav":              prevNav,
+			"total_units":           units,
 			"unrealized_gain_loss":  unrealizedGL,
-			"entity_id":             entityID,
-		}
+		})
+	}
+	rows.Close()
 
-		je, err := GenerateJournalEntryForMTM(ctx, pool, settings, activityID, data)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Process records after closing rows
+	for _, data := range mtmRecords {
+		je, err := GenerateJournalEntryForMTM(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate MTM journal failed: %w", err)
 		}
@@ -368,42 +409,58 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, pool *pgxpool.Po
 		}
 	}
 
-	return rows.Err()
+	return nil
 }
 
 // generateDividendJournalInTx generates journal entries for Dividend within existing transaction
-func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, pool *pgxpool.Pool, settings *SettingsCache, activityID string) error {
+func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
 	rows, err := tx.Query(ctx, `
 		SELECT d.dividend_id, d.scheme_id, d.folio_id, d.dividend_amount,
-		       d.reinvest_units, d.transaction_type, d.entity_id
+		       d.reinvest_units, d.transaction_type
 		FROM investment.accounting_dividend d
 		WHERE d.activity_id = $1
 	`, activityID)
 	if err != nil {
 		return fmt.Errorf("fetch Dividend data failed: %w", err)
 	}
-	defer rows.Close()
 
+	// Read all rows first to free connection
+	var dividendRecords []map[string]interface{}
 	for rows.Next() {
-		var dividendID, schemeID, folioID, transactionType, entityID string
+		var dividendID, schemeID, transactionType string
+		var folioID *string
 		var dividendAmount float64
 		var reinvestUnits *float64
 		
-		if err := rows.Scan(&dividendID, &schemeID, &folioID, &dividendAmount, &reinvestUnits, &transactionType, &entityID); err != nil {
+		if err := rows.Scan(&dividendID, &schemeID, &folioID, &dividendAmount, &reinvestUnits, &transactionType); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan Dividend data failed: %w", err)
 		}
 
-		data := map[string]interface{}{
+		// Convert *string to string for folio_id
+		folioIDStr := ""
+		if folioID != nil {
+			folioIDStr = *folioID
+		}
+
+		dividendRecords = append(dividendRecords, map[string]interface{}{
 			"dividend_id":       dividendID,
 			"scheme_id":         schemeID,
-			"folio_id":          folioID,
+			"folio_id":          folioIDStr,
 			"dividend_amount":   dividendAmount,
 			"reinvest_units":    reinvestUnits,
 			"transaction_type":  transactionType,
-			"entity_id":         entityID,
-		}
+		})
+	}
+	rows.Close()
 
-		je, err := GenerateJournalEntryForDividend(ctx, pool, settings, activityID, data)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Process records after closing rows
+	for _, data := range dividendRecords {
+		je, err := GenerateJournalEntryForDividend(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate Dividend journal failed: %w", err)
 		}
@@ -413,106 +470,137 @@ func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, pool *pgxpo
 		}
 	}
 
-	return rows.Err()
+	return nil
 }
 
 // generateCorporateActionJournalInTx generates journal entries for Corporate Action within existing transaction
-func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, pool *pgxpool.Pool, settings *SettingsCache, activityID, subtype string) error {
+func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID, subtype string) error {
 	rows, err := tx.Query(ctx, `
-		SELECT ca.corporate_action_id, ca.action_type, ca.source_scheme_id,
-		       ca.target_scheme_id, ca.folio_id, ca.exchange_ratio_num,
-		       ca.exchange_ratio_denom, ca.source_units_affected, ca.new_units_issued, ca.entity_id
+		SELECT ca.ca_id, ca.action_type, ca.source_scheme_id,
+		       ca.target_scheme_id, ca.new_scheme_name, ca.ratio_new, ca.ratio_old,
+		       ca.conversion_ratio, ca.bonus_units
 		FROM investment.accounting_corporate_action ca
 		WHERE ca.activity_id = $1
 	`, activityID)
 	if err != nil {
 		return fmt.Errorf("fetch Corporate Action data failed: %w", err)
 	}
-	defer rows.Close()
 
+	// Read all rows first to free connection
+	var caRecords []map[string]interface{}
 	for rows.Next() {
-		var caID, actionType, sourceSchemeID, folioID, entityID string
-		var targetSchemeID *string
-		var ratioNum, ratioDenom, sourceUnits, newUnits float64
+		var caID, actionType, sourceSchemeID string
+		var targetSchemeID, newSchemeName *string
+		var ratioNew, ratioOld, conversionRatio, bonusUnits *float64
 		
-		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &folioID, &ratioNum, &ratioDenom, &sourceUnits, &newUnits, &entityID); err != nil {
+		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &newSchemeName, &ratioNew, &ratioOld, &conversionRatio, &bonusUnits); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan Corporate Action data failed: %w", err)
 		}
 
-		data := map[string]interface{}{
-			"corporate_action_id":     caID,
-			"action_type":             actionType,
-			"source_scheme_id":        sourceSchemeID,
-			"target_scheme_id":        targetSchemeID,
-			"folio_id":                folioID,
-			"exchange_ratio_num":      ratioNum,
-			"exchange_ratio_denom":    ratioDenom,
-			"source_units_affected":   sourceUnits,
-			"new_units_issued":        newUnits,
-			"entity_id":               entityID,
-		}
+		caRecords = append(caRecords, map[string]interface{}{
+			"corporate_action_id": caID,
+			"action_type":         actionType,
+			"source_scheme_id":    sourceSchemeID,
+			"target_scheme_id":    targetSchemeID,
+			"new_scheme_name":     newSchemeName,
+			"ratio_new":           ratioNew,
+			"ratio_old":           ratioOld,
+			"conversion_ratio":    conversionRatio,
+			"bonus_units":         bonusUnits,
+		})
+	}
+	rows.Close()
 
-		je, err := GenerateJournalEntryForCorporateAction(ctx, pool, settings, activityID, data)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Process records after closing rows
+	for _, data := range caRecords {
+		je, err := GenerateJournalEntryForCorporateAction(ctx, tx, settings, activityID, data)
 		if err != nil {
 			return fmt.Errorf("generate Corporate Action journal failed: %w", err)
 		}
 
-		if err := SaveJournalEntry(ctx, tx, je); err != nil {
-			return fmt.Errorf("save Corporate Action journal failed: %w", err)
+		// Corporate actions may not generate journal entries (handled by processor)
+		if je != nil {
+			if err := SaveJournalEntry(ctx, tx, je); err != nil {
+				return fmt.Errorf("save Corporate Action journal failed: %w", err)
+			}
 		}
 	}
 
-	return rows.Err()
+	return nil
 }
 
 // generateFVOJournalInTx generates journal entries for FVO within existing transaction
-func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, pool *pgxpool.Pool, settings *SettingsCache, activityID string) error {
+func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
+	log.Printf("[DEBUG FVO] Starting generateFVOJournalInTx for activity: %s", activityID)
 	rows, err := tx.Query(ctx, `
-		SELECT f.fvo_id, f.scheme_id, f.folio_id, f.demat_id, f.market_nav,
-		       f.override_nav, f.variance, f.variance_pct, f.units_affected,
-		       f.justification, f.entity_id
+		SELECT f.fvo_id, f.scheme_id, COALESCE(f.market_nav, 0) as market_nav, 
+		       f.override_nav, COALESCE(f.variance, 0) as variance, 
+		       COALESCE(f.variance_pct, 0) as variance_pct, 
+		       COALESCE(f.units_affected, 0) as units_affected,
+		       f.justification
 		FROM investment.accounting_fvo f
 		WHERE f.activity_id = $1
 	`, activityID)
 	if err != nil {
 		return fmt.Errorf("fetch FVO data failed: %w", err)
 	}
-	defer rows.Close()
+	log.Printf("[DEBUG FVO] Query executed successfully")
 
+	// Read all rows into memory first, then close rows to free the connection
+	// This prevents "conn busy" errors when GenerateJournalEntryForFVO queries other tables
+	var fvoRecords []map[string]interface{}
 	for rows.Next() {
-		var fvoID, schemeID, justification, entityID string
-		var folioID, dematID *string
+		var fvoID, schemeID, justification string
 		var marketNav, overrideNav, variance, variancePct, unitsAffected float64
 		
-		if err := rows.Scan(&fvoID, &schemeID, &folioID, &dematID, &marketNav, &overrideNav, &variance, &variancePct, &unitsAffected, &justification, &entityID); err != nil {
+		if err := rows.Scan(&fvoID, &schemeID, &marketNav, &overrideNav, &variance, &variancePct, &unitsAffected, &justification); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan FVO data failed: %w", err)
 		}
 
-		data := map[string]interface{}{
+		fvoRecords = append(fvoRecords, map[string]interface{}{
 			"fvo_id":          fvoID,
 			"scheme_id":       schemeID,
-			"folio_id":        folioID,
-			"demat_id":        dematID,
 			"market_nav":      marketNav,
 			"override_nav":    overrideNav,
 			"variance":        variance,
 			"variance_pct":    variancePct,
 			"units_affected":  unitsAffected,
 			"justification":   justification,
-			"entity_id":       entityID,
-		}
+		})
+	}
+	rows.Close()
+	log.Printf("[DEBUG FVO] Read %d FVO records, rows closed", len(fvoRecords))
 
-		je, err := GenerateJournalEntryForFVO(ctx, pool, settings, activityID, data)
-		if err != nil {
-			return fmt.Errorf("generate FVO journal failed: %w", err)
-		}
-
-		if err := SaveJournalEntry(ctx, tx, je); err != nil {
-			return fmt.Errorf("save FVO journal failed: %w", err)
-		}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
-	return rows.Err()
+	// Now process the records - connection is free for other queries
+	for _, data := range fvoRecords {
+		fvoID := data["fvo_id"].(string)
+		log.Printf("[DEBUG FVO] Processing fvo_id: %s", fvoID)
+		
+		je, err := GenerateJournalEntryForFVO(ctx, tx, settings, activityID, data)
+		if err != nil {
+			log.Printf("[DEBUG FVO] GenerateJournalEntryForFVO failed: %v", err)
+			return fmt.Errorf("generate FVO journal failed: %w", err)
+		}
+		log.Printf("[DEBUG FVO] Journal entry generated, calling SaveJournalEntry")
+
+		if err := SaveJournalEntry(ctx, tx, je); err != nil {
+			log.Printf("[DEBUG FVO] SaveJournalEntry failed: %v", err)
+			return fmt.Errorf("save FVO journal failed: %w", err)
+		}
+		log.Printf("[DEBUG FVO] Journal entry saved successfully for fvo_id: %s", fvoID)
+	}
+
+	return nil
 }
 
 // ---------------------------
@@ -1006,33 +1094,45 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// Process corporate actions BEFORE generating journal entries
+			// Process corporate actions and FVO BEFORE generating journal entries
 			// This updates master scheme tables and portfolio holdings
 			for _, actID := range toApproveActivityIDs {
-				// Check if this is a corporate action
 				var activityType string
 				if err := tx.QueryRow(ctx, `
 					SELECT activity_type FROM investment.accounting_activity WHERE activity_id = $1
-				`, actID).Scan(&activityType); err == nil && activityType == "CORPORATE_ACTION" {
-					// Process corporate action (merger, name change, split, bonus)
-					if err := ProcessCorporateAction(ctx, tx, actID); err != nil {
-						api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("corporate action processing failed for activity %s: %v", actID, err))
-						return
+				`, actID).Scan(&activityType); err == nil {
+					switch activityType {
+					case "CORPORATE_ACTION":
+						// Process corporate action (merger, name change, split, bonus)
+						if err := ProcessCorporateAction(ctx, tx, actID); err != nil {
+							api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("corporate action processing failed for activity %s: %v", actID, err))
+							return
+						}
+					case "FVO":
+						// Process FVO NAV override (updates masterscheme NAV)
+						if err := ProcessFVONavOverride(ctx, tx, actID); err != nil {
+							api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("FVO NAV override processing failed for activity %s: %v", actID, err))
+							return
+						}
 					}
 				}
 			}
 
-			// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
-			// If journal generation fails, entire approval rolls back
-			for _, actID := range toApproveActivityIDs {
-				if err := GenerateAndSaveJournalEntriesInTx(ctx, tx, pgxPool, actID); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("journal generation failed for activity %s: %v", actID, err))
-					return
-				}
+		// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
+		// If journal generation fails, entire approval rolls back
+		log.Printf("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
+		for _, actID := range toApproveActivityIDs {
+			log.Printf("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
+			if err := GenerateAndSaveJournalEntriesInTx(ctx, tx, actID); err != nil {
+				log.Printf("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
+				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("journal generation failed for activity %s: %v", actID, err))
+				return
 			}
+			log.Printf("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
 		}
-
-		if len(toDeleteActionIDs) > 0 {
+	}
+	
+	if len(toDeleteActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionaccountingactivity
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
