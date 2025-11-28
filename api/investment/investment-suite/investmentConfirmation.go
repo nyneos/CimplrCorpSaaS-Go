@@ -1394,9 +1394,8 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, scheme_name, isin, folio_id, demat_id,
-				scheme_internal_code, entity_name
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 		`
 
 		// Resolve folio_number or demat_account_number from IDs
@@ -1431,12 +1430,9 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			cd.AllottedUnits,
 			cd.NAV,
 			cd.SchemeID,
-			cd.SchemeName,
-			cd.ISIN,
 			cd.FolioID,
 			cd.DematID,
 			cd.InternalSchemeCode,
-			cd.EntityName,
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
