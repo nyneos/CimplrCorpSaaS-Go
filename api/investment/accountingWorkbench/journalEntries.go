@@ -315,7 +315,7 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 			  AND COALESCE(fsm.status, 'Active') = 'Active'
 			  AND COALESCE(f.is_deleted, false) = false
 			  AND ba.account_number IS NOT NULL
-			ORDER BY f.created_at DESC
+			ORDER BY f.folio_id
 			LIMIT 1
 		`
 		
