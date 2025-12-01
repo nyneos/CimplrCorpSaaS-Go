@@ -18,7 +18,7 @@ services:
   - name: auth
     start_order: 4
     config:
-      max_users: 2
+      max_users: 100
       session_timeout: 60
       max_login_attempts : 2
       account_lock_duration: 1
@@ -53,3 +53,4 @@ services:
     start_order: 13
     config:
       batch_size: 1000
+
