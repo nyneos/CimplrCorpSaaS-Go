@@ -2,15 +2,16 @@ package fx
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/fx/exposures"
+	"CimplrCorpSaas/api/fx/forwards"
+	v91 "CimplrCorpSaas/api/fx/v91"
 	"context"
-	"os"
-	"CimplrCorpSaas/api/fx/exposures" 
-	"CimplrCorpSaas/api/fx/forwards" 
-	v91 "CimplrCorpSaas/api/fx/v91"  
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,7 +22,7 @@ func StartFXService(db *sql.DB) {
 		w.Write([]byte("FX Service is active"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
-	
+
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
@@ -35,7 +36,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 uploader: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			// ensure pool closed when request processing finishes
@@ -51,7 +52,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -63,7 +64,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -75,7 +76,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 bulk-update: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -87,7 +88,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 bulk-approve: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -99,7 +100,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 bulk-reject: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -111,7 +112,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 bulk-delete: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -123,7 +124,7 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 batches minimal: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
@@ -136,11 +137,11 @@ func StartFXService(db *sql.DB) {
 			pool, err := pgxpool.New(context.Background(), dsn)
 			if err != nil {
 				log.Printf("v91 edit-allocation: failed to create pgx pool: %v", err)
-				http.Error(w, "internal server error: db connection", http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
 				return
 			}
 			defer pool.Close()
-			h := v91.EditAllocationHandler(pool)
+			h := v91.EditAllocationsHandler(pool)
 			h.ServeHTTP(w, r)
 		})
 
@@ -156,7 +157,7 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/exposures/get-file/v91", api.BusinessUnitMiddleware(db)(v91BatchesMinimal))
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")
-	}	
+	}
 	/*-------------     exposures    ;)      --------------------*/
 	/*upload */
 
@@ -167,7 +168,6 @@ func StartFXService(db *sql.DB) {
 	mux.Handle("/fx/exposures/reject-multiple-headers", api.BusinessUnitMiddleware(db)(exposures.RejectMultipleExposureHeaders(db)))
 	mux.Handle("/fx/exposures/approve-multiple-headers", api.BusinessUnitMiddleware(db)(exposures.ApproveMultipleExposureHeaders(db)))
 	mux.Handle("/fx/exposures/batch-upload-staging", api.BusinessUnitMiddleware(db)(exposures.BatchUploadStagingData(db)))
-	
 
 	/*bucketing */
 	mux.Handle("/fx/exposures/update-bucketing", api.BusinessUnitMiddleware(db)(exposures.UpdateExposureHeadersLineItemsBucketing(db)))
@@ -220,6 +220,3 @@ func StartFXService(db *sql.DB) {
 		log.Fatalf("FX Service failed: %v", err)
 	}
 }
-
-
-

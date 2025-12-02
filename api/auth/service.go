@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
@@ -22,29 +23,48 @@ type UserSession struct {
 	IsLoggedIn    bool
 }
 
-type AuthService struct {
-	db           *sql.DB
-	maxUsers     int
-	users        map[string]*UserSession
-	userPointers map[string]*UserSession
-	mu           sync.Mutex
-	stopCh       chan struct{}
+type failedAttempt struct {
+	count    int
+	lastTry  time.Time
+	isLocked bool
+	unlockAt time.Time
 }
 
-func NewAuthService(db *sql.DB, maxUsers int) serviceiface.Service {
+type AuthService struct {
+	db                   *sql.DB
+	maxUsers             int
+	users                map[string]*UserSession
+	SessionTimeout       int
+	MaxLoginAttempts     int
+	AccountLockDuration  int
+	SessionCleanerPeriod int
+	userPointers         map[string]*UserSession
+	mu                   sync.Mutex
+	stopCh               chan struct{}
+	failedAttempts       map[string]*failedAttempt
+}
+
+func NewAuthService(db *sql.DB, maxUsers int, SessionTimeout int, MaxLoginAttempts int, AccountLockDuration int, SessionCleanerPeriod int) serviceiface.Service {
 	return &AuthService{
-		db:           db,
-		maxUsers:     maxUsers,
-		users:        make(map[string]*UserSession),
-		userPointers: make(map[string]*UserSession),
-		stopCh:       make(chan struct{}),
+		db:                   db,
+		maxUsers:             maxUsers,
+		SessionTimeout:       SessionTimeout,
+		MaxLoginAttempts:     MaxLoginAttempts,
+		AccountLockDuration:  AccountLockDuration,
+		SessionCleanerPeriod: SessionCleanerPeriod,
+		users:                make(map[string]*UserSession),
+		userPointers:         make(map[string]*UserSession),
+		stopCh:               make(chan struct{}),
+		failedAttempts:       make(map[string]*failedAttempt),
 	}
 }
 
 func (a *AuthService) Name() string { return "auth" }
 
 func (a *AuthService) Start() error {
-	go a.sessionCleaner()
+	if a.SessionCleanerPeriod > 0 {
+		go a.sessionCleaner()
+	}
 	return nil
 }
 
@@ -57,69 +77,110 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Check if user already has active sessions (optional logging only)
-	for _, session := range a.users {
-		if session.Email == username && session.IsLoggedIn {
-			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf(
-					"User %s is logging in from another device/IP", username))
-			}
-			// Do NOT return here; allow new session creation
-			break
-		}
-	}
+	var dbUserID string
+	var dbName string
+	var dbEmail string
+	var dbPassword sql.NullString
+	var dbStatus sql.NullString
 
-	// Enforce maximum concurrent sessions
-	if len(a.users) >= a.maxUsers {
-		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit("[ERROR] maximum concurrent users reached for login attempt: " + username)
-		}
-		return nil, errors.New("maximum concurrent users reached")
-	}
-
-	// Fetch user and role from DB
-	var (
-		userID, name, email        string
-		roleID, roleName, roleCode sql.NullString
-		userStatus, roleStatus     sql.NullString
-	)
-
-	query := `
-    SELECT
-        u.id AS user_id,
-        u.employee_name,
-        u.email,
-        u.status AS user_status,
-        r.id AS role_id,
-        r.name AS role_name,
-        r.rolecode,
-        r.status AS role_status
-    FROM users u
-    LEFT JOIN user_roles ur ON u.id = ur.user_id
-    LEFT JOIN roles r ON ur.role_id = r.id
-    WHERE u.email = $1 AND u.password = $2
-    `
-
-	err := a.db.QueryRow(query, username, password).Scan(
-		&userID, &name, &email, &userStatus,
-		&roleID, &roleName, &roleCode, &roleStatus,
-	)
+	err := a.db.QueryRow(`SELECT id, employee_name, email, password, status FROM users WHERE email = $1`, username).
+		Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			if logger.GlobalLogger != nil {
+				logger.GlobalLogger.LogAudit(fmt.Sprintf("Login attempt for unknown user: %s", username))
+			}
+			return nil, errors.New("Invalid Username or Password")
+		}
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("Login DB error for %s: %v", username, err))
 		} else {
 			fmt.Println("Login DB error:", err)
 		}
-		return nil, errors.New("invalid credentials or user not found")
+		return nil, errors.New("internal error")
 	}
 
-	// Create new session
+	// Check if user is already logged in - force logout from all sessions
+	for sid, session := range a.users {
+		if session.IsLoggedIn && session.UserID == dbUserID {
+			if logger.GlobalLogger != nil {
+				if session.ClientIP == clientIP {
+					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s logging in again from same IP - validating credentials", dbEmail))
+				} else {
+					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s is logging in from another device/IP", dbEmail))
+				}
+			}
+
+			go func(oldUserID string, reason string) {
+
+				dashboard.SendToUser(oldUserID, []byte(`{"type":"force_logout","reason":"login_from_other_ip"}`))
+
+			}(session.UserID, "re_login")
+
+			delete(a.users, sid)
+			delete(a.userPointers, session.UserID)
+			break
+		}
+	}
+
+	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
+		if logger.GlobalLogger != nil {
+			logger.GlobalLogger.LogAudit("[ERROR] maximum concurrent users reached for login attempt: " + dbEmail)
+		}
+		return nil, errors.New("maximum concurrent users reached")
+	}
+
+	if a.MaxLoginAttempts > 0 {
+		if fa, ok := a.failedAttempts[dbUserID]; ok {
+			if fa.isLocked && time.Now().Before(fa.unlockAt) {
+				return nil, errors.New("Account has been locked due to multiple failed login attempts")
+			}
+
+			if fa.isLocked && time.Now().After(fa.unlockAt) {
+				fa.isLocked = false
+				fa.count = 0
+			}
+		}
+	}
+
+	if !dbPassword.Valid || dbPassword.String != password {
+		if a.MaxLoginAttempts > 0 {
+			fa, ok := a.failedAttempts[dbUserID]
+			if !ok {
+				fa = &failedAttempt{count: 0}
+				a.failedAttempts[dbUserID] = fa
+			}
+			fa.count++
+			fa.lastTry = time.Now()
+			if fa.count >= a.MaxLoginAttempts {
+				fa.isLocked = true
+				if a.AccountLockDuration > 0 {
+					fa.unlockAt = time.Now().Add(time.Duration(a.AccountLockDuration) * time.Minute)
+				} else {
+
+					fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
+				}
+				return nil, errors.New("Account has been locked due to multiple failed login attempts")
+			}
+			attemptsLeft := a.MaxLoginAttempts - fa.count
+			if attemptsLeft < 0 {
+				attemptsLeft = 0
+			}
+			return nil, fmt.Errorf("Invalid credentials, %d/%d attempts left", attemptsLeft, a.MaxLoginAttempts)
+		}
+		return nil, errors.New("Invalid credentials")
+	}
+
+	var roleID, roleName, roleCode sql.NullString
+	_ = a.db.QueryRow(`SELECT r.id, r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`, dbUserID).
+		Scan(&roleID, &roleName, &roleCode)
+
 	sessionID := generateSessionID()
 	session := &UserSession{
 		SessionID:     sessionID,
-		UserID:        userID,
-		Name:          name,
-		Email:         email,
+		UserID:        dbUserID,
+		Name:          dbName,
+		Email:         dbEmail,
 		Role:          roleName.String,
 		RoleCode:      roleCode.String,
 		LastLoginTime: time.Now().Format(time.RFC3339),
@@ -128,7 +189,11 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	}
 
 	a.users[sessionID] = session
-	a.userPointers[userID] = session
+	a.userPointers[dbUserID] = session
+
+	if a.MaxLoginAttempts > 0 {
+		delete(a.failedAttempts, dbUserID)
+	}
 
 	if logger.GlobalLogger != nil {
 		logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged in: %s", username))
@@ -137,20 +202,19 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 	return session, nil
 }
 
-
 func (a *AuthService) Logout(UserID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	found := false
-	// Remove all sessions for this user
 	for sessionID, session := range a.users {
 		if session.UserID == UserID {
+
 			delete(a.users, sessionID)
 			delete(a.userPointers, session.UserID)
 			found = true
 			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit("User logged out: " + session.UserID)
+				logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged out: %s (%s)", session.UserID, session.Email))
 			}
 		}
 	}
@@ -161,6 +225,7 @@ func (a *AuthService) Logout(UserID string) error {
 }
 
 var globalAuthService *AuthService
+
 func SetGlobalAuthService(svc *AuthService) {
 	globalAuthService = svc
 }
@@ -182,13 +247,40 @@ func (a *AuthService) GetActiveSessions() []*UserSession {
 }
 
 func (a *AuthService) sessionCleaner() {
-	ticker := time.NewTicker(10 * time.Minute)
+	period := time.Duration(a.SessionCleanerPeriod) * time.Minute
+	if period <= 0 {
+		return
+	}
+	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-a.stopCh:
 			return
 		case <-ticker.C:
+			if a.SessionTimeout > 0 {
+				cutoff := time.Now().Add(-time.Duration(a.SessionTimeout) * time.Minute)
+				a.mu.Lock()
+				for sid, sess := range a.users {
+					if sess.LastLoginTime != "" {
+						if t, err := time.Parse(time.RFC3339, sess.LastLoginTime); err == nil {
+							if t.Before(cutoff) {
+								// Send SSE notification before removing session
+								go func(userID string) {
+									dashboard.SendToUser(userID, []byte(`{"type":"session_expired","reason":"session_expired"}`))
+								}(sess.UserID)
+
+								delete(a.users, sid)
+								delete(a.userPointers, sess.UserID)
+								if logger.GlobalLogger != nil {
+									logger.GlobalLogger.LogAudit(fmt.Sprintf("Session expired and removed: %s (user: %s)", sid, sess.Email))
+								}
+							}
+						}
+					}
+				}
+				a.mu.Unlock()
+			}
 		}
 	}
 }
@@ -197,5 +289,18 @@ func generateSessionID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
+func (a *AuthService) LogDifferentIPRequest(userID string, clientIP string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 
-
+	for _, s := range a.users {
+		if s.UserID == userID && s.IsLoggedIn {
+			if s.ClientIP != clientIP {
+				if logger.GlobalLogger != nil {
+					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s made a request from different IP: %s (session IP: %s)", userID, clientIP, s.ClientIP))
+				}
+			}
+			break
+		}
+	}
+}
