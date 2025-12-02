@@ -181,6 +181,7 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/scheme/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectSchemeActions(pgxPool)))
 	mux.Handle("/master/scheme/approved-active", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveSchemes(pgxPool)))
 	mux.Handle("/master/scheme/all", api.BusinessUnitMiddleware(db)(investmentMasters.GetSchemesWithAudit(pgxPool)))
+	mux.Handle("/master/scheme/by-amc", api.BusinessUnitMiddleware(db)(investmentMasters.GetApprovedActiveSchemesByAMC(pgxPool)))
 	
 	// DP Master routes
 	mux.Handle("/master/dp/upload", api.BusinessUnitMiddleware(db)(investmentMasters.UploadDPSimple(pgxPool)))
@@ -218,10 +219,12 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/folio/bulk-approve", api.BusinessUnitMiddleware(db)(investmentMasters.BulkApproveFolioActions(pgxPool)))
 	mux.Handle("/master/folio/bulk-reject", api.BusinessUnitMiddleware(db)(investmentMasters.BulkRejectFolioActions(pgxPool)))
 	mux.Handle("/master/folio/meta", api.BusinessUnitMiddleware(db)(investmentMasters.GetSingleFolioWithAudit(pgxPool)))
-	
+	mux.Handle("/master/folio/schemes-by-approved", api.BusinessUnitMiddleware(db)(investmentMasters.GetSchemesByApprovedFolios(pgxPool)))
+
 	// AMFI Config Master routes
 	mux.Handle("/master/amfi/scheme", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
 	mux.Handle("/master/amfi/nav", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFINavStagingSimple(pgxPool)))
+	mux.Handle("/master/amfi/approved-amc", api.BusinessUnitMiddleware(db)(investmentMasters.GetAMFISchemeMasterSimple(pgxPool)))
 	
 	// Holiday calendar exports (ICS/feed/share links)
 	mux.Handle("/master/calendar/export/ics/", api.BusinessUnitMiddleware(db)(investmentMasters.ExportCalendarICS(pgxPool)))
@@ -252,6 +255,9 @@ func StartMasterService(db *sql.DB) {
 		log.Fatalf("Master Service failed: %v", err)
 	}
 }
+
+
+
 
 
 

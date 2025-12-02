@@ -180,30 +180,50 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			upsertSQL := `
-				INSERT INTO investment.masterfolio (
-					entity_name, amc_name, folio_number, first_holder_name,
-					default_subscription_account, default_redemption_account,
-					status, source
-				)
-				SELECT entity_name, amc_name, folio_number, first_holder_name,
-					   default_subscription_account, default_redemption_account,
-					   COALESCE(status,'Active'), COALESCE(source,'Upload')
-				FROM tmp_folio
-				ON CONFLICT (entity_name, amc_name, folio_number)
-				DO UPDATE SET
-					entity_name = EXCLUDED.entity_name,
-					amc_name = EXCLUDED.amc_name,
-					first_holder_name = EXCLUDED.first_holder_name,
-					default_subscription_account = EXCLUDED.default_subscription_account,
-					default_redemption_account = EXCLUDED.default_redemption_account,
-					status = EXCLUDED.status,
-					source = EXCLUDED.source;
-			`
-			if _, err := tx.Exec(ctx, upsertSQL); err != nil {
-				api.RespondWithError(w, 500, "upsert masterfolio: "+err.Error())
-				return
-			}
+		
+updateSQL := `
+	UPDATE investment.masterfolio m
+	SET 
+		first_holder_name = COALESCE(t.first_holder_name, m.first_holder_name),
+		default_subscription_account = COALESCE(t.default_subscription_account, m.default_subscription_account),
+		default_redemption_account = COALESCE(t.default_redemption_account, m.default_redemption_account),
+		status = COALESCE(t.status, m.status),
+		source = COALESCE(t.source, m.source)
+	FROM tmp_folio t
+	WHERE m.entity_name = t.entity_name
+	  AND m.amc_name = t.amc_name
+	  AND m.folio_number = t.folio_number
+	  AND m.is_deleted = false;
+`
+if _, err := tx.Exec(ctx, updateSQL); err != nil {
+	api.RespondWithError(w, 500, "update masterfolio: "+err.Error())
+	return
+}
+
+insertSQL := `
+	INSERT INTO investment.masterfolio (
+		entity_name, amc_name, folio_number, first_holder_name,
+		default_subscription_account, default_redemption_account,
+		status, source
+	)
+	SELECT t.entity_name, t.amc_name, t.folio_number, t.first_holder_name,
+		   t.default_subscription_account, t.default_redemption_account,
+		   COALESCE(t.status,'Active'), COALESCE(t.source,'Upload')
+	FROM tmp_folio t
+	WHERE NOT EXISTS (
+		SELECT 1 FROM investment.masterfolio m
+		WHERE m.entity_name = t.entity_name
+		  AND m.amc_name = t.amc_name
+		  AND m.folio_number = t.folio_number
+		  AND m.is_deleted = false
+	);
+`
+if _, err := tx.Exec(ctx, insertSQL); err != nil {
+	api.RespondWithError(w, 500, "insert masterfolio: "+err.Error())
+	return
+}
+
+
 
 			auditSQL := `
 				INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
@@ -1424,6 +1444,166 @@ func GetSingleFolioWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if rows.Err() != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+rows.Err().Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// GetSchemesByApprovedFolios returns schemes linked to approved and active folios/demats
+// with approved and active bank accounts
+func GetSchemesByApprovedFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		q := `
+			WITH latest_folio_audit AS (
+				SELECT DISTINCT ON (folio_id)
+					folio_id,
+					processing_status
+				FROM investment.auditactionfolio
+				ORDER BY folio_id, requested_at DESC
+			),
+			latest_scheme_audit AS (
+				SELECT DISTINCT ON (scheme_id)
+					scheme_id,
+					processing_status
+				FROM investment.auditactionscheme
+				ORDER BY scheme_id, requested_at DESC
+			),
+			latest_demat_audit AS (
+				SELECT DISTINCT ON (demat_id)
+					demat_id,
+					processing_status
+				FROM investment.auditactiondemat
+				ORDER BY demat_id, requested_at DESC
+			),
+			latest_bank_audit AS (
+				SELECT DISTINCT ON (account_id)
+					account_id,
+					processing_status
+				FROM public.auditactionbankaccount
+				ORDER BY account_id, requested_at DESC
+			),
+			-- Active approved bank accounts with all possible identifiers
+			approved_active_bank_accounts AS (
+				SELECT 
+					ba.account_number, 
+					ba.account_id,
+					ba.account_nickname
+				FROM public.masterbankaccount ba
+				LEFT JOIN latest_bank_audit lba ON lba.account_id = ba.account_id
+				WHERE 
+					(UPPER(COALESCE(lba.processing_status, 'APPROVED')) = 'APPROVED')
+					AND UPPER(COALESCE(ba.status, 'Active')) = 'ACTIVE'
+			),
+			-- Approved active folios with valid bank accounts (flexible matching)
+			approved_active_folios AS (
+				SELECT m.folio_id
+				FROM investment.masterfolio m
+				JOIN latest_folio_audit lfa ON lfa.folio_id = m.folio_id
+				-- Check subscription account is approved/active (flexible match on account_number, account_id, or account_nickname)
+				JOIN approved_active_bank_accounts sub_ba ON (
+					sub_ba.account_number = m.default_subscription_account
+					OR sub_ba.account_id::text = m.default_subscription_account
+					OR sub_ba.account_nickname = m.default_subscription_account
+				)
+				-- Check redemption account is approved/active (flexible match)
+				JOIN approved_active_bank_accounts red_ba ON (
+					red_ba.account_number = m.default_redemption_account
+					OR red_ba.account_id::text = m.default_redemption_account
+					OR red_ba.account_nickname = m.default_redemption_account
+				)
+				WHERE 
+					UPPER(lfa.processing_status) = 'APPROVED'
+					AND UPPER(m.status) = 'ACTIVE'
+					AND COALESCE(m.is_deleted, false) = false
+			),
+			-- Approved active demats with valid bank accounts (flexible matching)
+			approved_active_demats AS (
+				SELECT d.demat_id, d.demat_account_number
+				FROM investment.masterdemataccount d
+				JOIN latest_demat_audit lda ON lda.demat_id = d.demat_id
+				-- Check default settlement account is approved/active (flexible match)
+				JOIN approved_active_bank_accounts ba ON (
+					ba.account_number = d.default_settlement_account
+					OR ba.account_id::text = d.default_settlement_account
+					OR ba.account_nickname = d.default_settlement_account
+				)
+				WHERE 
+					UPPER(lda.processing_status) = 'APPROVED'
+					AND UPPER(d.status) = 'ACTIVE'
+					AND COALESCE(d.is_deleted, false) = false
+			),
+			-- Approved active schemes
+			approved_active_schemes AS (
+				SELECT s.scheme_id
+				FROM investment.masterscheme s
+				JOIN latest_scheme_audit lsa ON lsa.scheme_id = s.scheme_id
+				WHERE 
+					UPPER(lsa.processing_status) = 'APPROVED'
+					AND UPPER(s.status) = 'ACTIVE'
+					AND COALESCE(s.is_deleted, false) = false
+			),
+			-- Schemes from folio-scheme mapping
+			schemes_from_folio AS (
+				SELECT DISTINCT fsm.scheme_id
+				FROM investment.folioschememapping fsm
+				JOIN approved_active_folios aaf ON aaf.folio_id = fsm.folio_id
+				JOIN approved_active_schemes aas ON aas.scheme_id = fsm.scheme_id
+				WHERE COALESCE(fsm.status, 'Active') = 'Active'
+			),
+			-- Schemes from demat via portfolio_snapshot
+			schemes_from_demat AS (
+				SELECT DISTINCT ps.scheme_id
+				FROM investment.portfolio_snapshot ps
+				JOIN approved_active_demats aad ON aad.demat_account_number = ps.demat_acc_number
+				JOIN approved_active_schemes aas ON aas.scheme_id = ps.scheme_id
+				WHERE ps.total_units > 0
+			),
+			-- Combined schemes from both folio and demat
+			all_schemes AS (
+				SELECT scheme_id FROM schemes_from_folio
+				UNION
+				SELECT scheme_id FROM schemes_from_demat
+			)
+			SELECT DISTINCT
+				s.scheme_id,
+				s.scheme_name,
+				COALESCE(s.isin, '') AS isin,
+				COALESCE(s.internal_scheme_code, '') AS internal_scheme_code,
+				COALESCE(s.amfi_scheme_code, '') AS amfi_code
+			FROM all_schemes als
+			JOIN investment.masterscheme s ON s.scheme_id = als.scheme_id
+			ORDER BY s.scheme_name;
+		`
+
+		rows, err := pgxPool.Query(ctx, q)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := []map[string]interface{}{}
+		for rows.Next() {
+			var schemeID, schemeName, isin, internalCode, amfiCode string
+			if err := rows.Scan(&schemeID, &schemeName, &isin, &internalCode, &amfiCode); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
+				return
+			}
+			out = append(out, map[string]interface{}{
+				"scheme_id":            schemeID,
+				"scheme_name":          schemeName,
+				"isin":                 isin,
+				"internal_scheme_code": internalCode,
+				"amfi_code":            amfiCode,
+			})
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "rows error: "+rows.Err().Error())
 			return
 		}
 

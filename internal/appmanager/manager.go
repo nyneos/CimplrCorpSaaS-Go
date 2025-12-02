@@ -72,7 +72,8 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		return master.NewMasterService(cfg, db)
 	},
 	"investment": func(cfg map[string]interface{}) serviceiface.Service {
-		return investment.NewInvestmentService(cfg, pgxPool)
+		// return investment.NewInvestmentService(cfg, pgxPool)
+		return investment.NewInvestmentService(cfg, pgxPool, db)
 	},
 	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		return api.NewGatewayService(cfg)
@@ -291,3 +292,4 @@ func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	}
 	return nil
 }
+

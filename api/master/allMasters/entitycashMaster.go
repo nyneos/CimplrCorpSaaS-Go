@@ -140,25 +140,48 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		// Sync relationships
-		relationshipsAdded := []map[string]interface{}{}
-		for _, entity := range req.Entities {
-			if entity.ParentEntityName == "" || entityIDs[entity.EntityName] == "" {
-				continue
-			}
-			parentId := entity.ParentEntityName
-			childId := entityIDs[entity.EntityName]
-			// Insert relationship if not exists
-			var exists int
-			err := pgxPool.QueryRow(r.Context(), `SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2`, parentId, childId).Scan(&exists)
-			if err == pgx.ErrNoRows {
-				relQuery := `INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`
-				var relID int
-				relErr := pgxPool.QueryRow(r.Context(), relQuery, parentId, childId).Scan(&relID)
-				if relErr == nil {
-					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_name": parentId, "child_entity_name": childId})
-				}
-			}
+relationshipsAdded := []map[string]interface{}{}
+for _, entity := range req.Entities {
+	// Skip if parent is empty (top-level entity)
+	if strings.TrimSpace(entity.ParentEntityName) == "" {
+		continue
+	}
+
+	parentName := entity.ParentEntityName
+	childName := entity.EntityName
+
+	var exists int
+	err := pgxPool.QueryRow(r.Context(),
+		`SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2`,
+		parentName, childName,
+	).Scan(&exists)
+
+	if err == pgx.ErrNoRows {
+		relQuery := `
+			INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status)
+			VALUES ($1, $2, 'Active')
+			RETURNING relationship_id
+		`
+		var relID int
+		relErr := pgxPool.QueryRow(r.Context(), relQuery, parentName, childName).Scan(&relID)
+		if relErr == nil {
+			relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
+				"success":            true,
+				"relationship_id":    relID,
+				"parent_entity_name": parentName,
+				"child_entity_name":  childName,
+			})
+		} else {
+			relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
+				"success":            false,
+				"error":              relErr.Error(),
+				"parent_entity_name": parentName,
+				"child_entity_name":  childName,
+			})
 		}
+	}
+}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":            true,
