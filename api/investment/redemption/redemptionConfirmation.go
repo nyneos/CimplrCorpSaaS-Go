@@ -1200,27 +1200,39 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 
 		// Create SELL transaction
+		// Resolve entity_name: prefer folio/demat entity, fallback to initiation entity
+		var entityName *string
+		if cd.FolioEntityName != nil && *cd.FolioEntityName != "" {
+			entityName = cd.FolioEntityName
+		} else if cd.DematEntityName != nil && *cd.DematEntityName != "" {
+			entityName = cd.DematEntityName
+		} else if cd.EntityName != nil && *cd.EntityName != "" {
+			entityName = cd.EntityName
+		}
+
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		`
 
-		// Insert SELL transaction with negative units
+		// Insert SELL transaction with POSITIVE values
+		// Transaction type 'SELL' indicates this reduces holdings
 		if _, err := tx.Exec(ctx, txInsert,
 			batchID,
 			cd.RequestedDate,
 			"SELL",
 			folioNumber,
 			dematAccNumber,
-			-cd.GrossProceeds,      // negative amount for redemption
-			-cd.ActualUnits,        // negative units for redemption
+			cd.GrossProceeds,       // positive amount (proceeds received)
+			cd.ActualUnits,         // positive units (quantity redeemed)
 			cd.ActualNAV,
 			cd.ResolvedSchemeID,    // Use actual scheme_id (string)
 			cd.ResolvedFolioID,     // Use actual folio_id (string)
 			cd.ResolvedDematID,     // Use actual demat_id (string)
 			cd.InternalSchemeCode,
+			entityName,             // Entity from folio/demat or initiation
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
@@ -1238,30 +1250,35 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 	}
 
-	// Refresh portfolio snapshot based on ALL transactions for affected entities
-	// Delete existing snapshots for entities involved in this batch
+	// Refresh portfolio snapshot based on ALL transactions for affected folio_id/demat_id
+	// Group by folio_id and demat_id (unique identifiers) instead of non-unique folio_number/demat_acc_number
+	// Delete existing snapshots for affected folio_id/demat_id combinations
 	deleteSnap := `
 		DELETE FROM investment.portfolio_snapshot
-		WHERE entity_name IN (
-			SELECT DISTINCT COALESCE(mf.entity_name, md.entity_name)
+		WHERE (folio_id IS NOT NULL AND folio_id IN (
+			SELECT DISTINCT ot.folio_id
 			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-			LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
-			WHERE ot.batch_id = $1
-		)
+			WHERE ot.batch_id = $1 AND ot.folio_id IS NOT NULL
+		))
+		OR (demat_id IS NOT NULL AND demat_id IN (
+			SELECT DISTINCT ot.demat_id
+			FROM investment.onboard_transaction ot
+			WHERE ot.batch_id = $1 AND ot.demat_id IS NOT NULL
+		))
 	`
 	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
 		return nil, fmt.Errorf("delete snapshot failed: %w", err)
 	}
 
-	// Rebuild snapshots for affected entities using ALL their transactions (not just current batch)
+	// Rebuild snapshots for affected folio_id/demat_id using ALL their transactions (not just current batch)
 	snapshotQ := `
-WITH affected_entities AS (
-    SELECT DISTINCT COALESCE(mf.entity_name, md.entity_name) AS entity_name
+WITH affected_folios_demats AS (
+    SELECT DISTINCT 
+        ot.folio_id,
+        ot.demat_id
     FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-    LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
     WHERE ot.batch_id = $1
+        AND (ot.folio_id IS NOT NULL OR ot.demat_id IS NOT NULL)
 ),
 scheme_resolved AS (
     SELECT
@@ -1274,22 +1291,27 @@ scheme_resolved AS (
         COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
         ot.demat_acc_number,
-        COALESCE(fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
-        COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
-        COALESCE(ms.isin, ms2.isin) AS isin
+        ot.folio_id,
+        ot.demat_id,
+        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
+        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
+        COALESCE(ms2.isin, ms.isin) AS isin
     FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-    LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
-    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
+    LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
+    LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
+    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
     LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
     LEFT JOIN investment.masterscheme ms2 ON ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code
-    WHERE COALESCE(mf.entity_name, md.entity_name) IN (SELECT entity_name FROM affected_entities)
+    WHERE (ot.folio_id IN (SELECT folio_id FROM affected_folios_demats WHERE folio_id IS NOT NULL)
+        OR ot.demat_id IN (SELECT demat_id FROM affected_folios_demats WHERE demat_id IS NOT NULL))
 ),
 transaction_summary AS (
     SELECT
         entity_name,
         folio_number,
         demat_acc_number,
+        folio_id,
+        demat_id,
         scheme_id,
         scheme_name,
         isin,
@@ -1319,7 +1341,7 @@ transaction_summary AS (
             END)
         END AS avg_nav
     FROM scheme_resolved
-    GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
 ),
 latest_nav AS (
     SELECT DISTINCT ON (scheme_name)
@@ -1335,6 +1357,8 @@ INSERT INTO investment.portfolio_snapshot (
   entity_name,
   folio_number,
   demat_acc_number,
+  folio_id,
+  demat_id,
   scheme_id,
   scheme_name,
   isin,
@@ -1352,6 +1376,8 @@ SELECT
   ts.entity_name,
   ts.folio_number,
   ts.demat_acc_number,
+  ts.folio_id,
+  ts.demat_id,
   ts.scheme_id,
   ts.scheme_name,
   ts.isin,

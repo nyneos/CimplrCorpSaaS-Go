@@ -13,14 +13,17 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 
 		query := `
-			SELECT DISTINCT ON (amc_name)
-			amc_name,
-			scheme_name,
-			isin_div_payout_growth
-			FROM investment.amfi_scheme_master_staging
-			WHERE isin_div_payout_growth IS NOT NULL 
- 			AND isin_div_payout_growth <> ''
-			ORDER BY amc_name, scheme_name, isin_div_payout_growth;
+			SELECT DISTINCT ON (sm.scheme_code)
+			sm.scheme_code,
+			sm.amc_name,
+			sm.scheme_name,
+			COALESCE(sm.isin_div_reinvestment, '') AS isin
+			FROM investment.amfi_scheme_master_staging sm
+			LEFT JOIN investment.masterscheme ms
+				ON (ms.amfi_scheme_code = sm.scheme_code::text 
+					OR (ms.scheme_name = sm.scheme_name AND ms.amc_name = sm.amc_name))
+			WHERE ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true
+			ORDER BY sm.scheme_code, sm.scheme_name;
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -32,9 +35,11 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
+			var schemeCode int64
 			var amcName, schemeName, isin string
-			_ = rows.Scan(&amcName, &schemeName, &isin)
+			_ = rows.Scan(&schemeCode, &amcName, &schemeName, &isin)
 			out = append(out, map[string]interface{}{
+				"scheme_code": schemeCode,
 				"amc_name":    amcName,
 				"scheme_name": schemeName,
 				"isin":        isin,
@@ -50,12 +55,19 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 
 		query := `
-			SELECT DISTINCT
-				amc_name,
-				scheme_name,
-				isin_div_payout_growth
-			FROM investment.amfi_nav_staging
-			ORDER BY amc_name, scheme_name, nav_date DESC
+			SELECT DISTINCT ON (nv.scheme_code)
+				nv.scheme_code,
+				nv.amc_name,
+				nv.scheme_name,
+				COALESCE(nv.isin_div_reinvestment, '') AS isin,
+				nv.nav_value,
+				nv.nav_date
+			FROM investment.amfi_nav_staging nv
+			LEFT JOIN investment.masterscheme ms
+				ON (ms.amfi_scheme_code = nv.scheme_code::text 
+					OR (ms.scheme_name = nv.scheme_name AND ms.amc_name = nv.amc_name))
+			WHERE ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true
+			ORDER BY nv.scheme_code, nv.nav_date DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
@@ -67,12 +79,18 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
+			var schemeCode int64
 			var amcName, schemeName, isin string
-			_ = rows.Scan(&amcName, &schemeName, &isin)
+			var navValue *float64
+			var navDate *string
+			_ = rows.Scan(&schemeCode, &amcName, &schemeName, &isin, &navValue, &navDate)
 			out = append(out, map[string]interface{}{
+				"scheme_code": schemeCode,
 				"amc_name":    amcName,
 				"scheme_name": schemeName,
 				"isin":        isin,
+				"nav_value":   navValue,
+				"nav_date":    navDate,
 			})
 		}
 
@@ -80,6 +98,50 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func GetDistinctAMCNamesFromAMFI(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// Get distinct AMC names from both AMFI staging tables
+		// Exclude AMCs that exist in masteramc and are deleted
+		query := `
+			WITH amfi_amcs AS (
+				SELECT DISTINCT amc_name
+				FROM investment.amfi_scheme_master_staging
+				WHERE amc_name IS NOT NULL AND amc_name <> ''
+				UNION
+				SELECT DISTINCT amc_name
+				FROM investment.amfi_nav_staging
+				WHERE amc_name IS NOT NULL AND amc_name <> ''
+			)
+			SELECT a.amc_name
+			FROM amfi_amcs a
+			LEFT JOIN investment.masteramc m ON m.amc_name = a.amc_name
+			WHERE m.amc_id IS NULL OR COALESCE(m.is_deleted, false) = true
+			ORDER BY a.amc_name;
+		`
+
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch AMC names: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := []map[string]interface{}{}
+		for rows.Next() {
+			var amcName string
+			if err := rows.Scan(&amcName); err != nil {
+				continue
+			}
+			out = append(out, map[string]interface{}{
+				"amc_name": amcName,
+			})
+		}
+
+		api.RespondWithPayload(w, true, "", out)
+	}
+}
 
 func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -95,9 +157,9 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT m.amc_id, m.amc_name
 			FROM investment.masteramc m
 			JOIN latest_audit l ON l.amc_id = m.amc_id
-			WHERE COALESCE(m.is_deleted,false)=false
-			  AND UPPER(l.processing_status)='APPROVED'
-			  AND UPPER(m.status)='ACTIVE'
+			WHERE COALESCE(m.is_deleted, false) = false
+			  AND UPPER(l.processing_status) = 'APPROVED'
+			  AND UPPER(m.status) = 'ACTIVE'
 			ORDER BY m.amc_name;
 		`
 
@@ -130,14 +192,22 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		schemeQuery := `
-			SELECT 
-				amc_name,
-				scheme_code,
-				scheme_name,
-				COALESCE(isin_div_reinvestment, '') AS isin
-			FROM investment.amfi_scheme_master_staging
-			WHERE amc_name = ANY($1)
-			ORDER BY amc_name, scheme_name;
+			SELECT DISTINCT ON (sm.scheme_code)
+				sm.amc_name,
+				sm.scheme_code,
+				sm.scheme_name,
+				COALESCE(sm.isin_div_reinvestment, '') AS isin,
+				nv.nav_value,
+				nv.nav_date
+			FROM investment.amfi_scheme_master_staging sm
+			LEFT JOIN investment.amfi_nav_staging nv 
+				ON nv.scheme_code = sm.scheme_code
+			LEFT JOIN investment.masterscheme ms
+				ON (ms.amfi_scheme_code = sm.scheme_code::text 
+					OR (ms.scheme_name = sm.scheme_name AND ms.amc_name = sm.amc_name))
+			WHERE sm.amc_name = ANY($1)
+				AND (ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true)
+			ORDER BY sm.scheme_code, nv.nav_date DESC NULLS LAST;
 		`
 
 		schemeRows, err := pgxPool.Query(ctx, schemeQuery, amcNames)
@@ -158,14 +228,18 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for schemeRows.Next() {
 			var amcName, schemeName, isin string
 			var schemeCode int64
-			if err := schemeRows.Scan(&amcName, &schemeCode, &schemeName, &isin); err != nil {
+			var navValue *float64
+			var navDate *string
+			if err := schemeRows.Scan(&amcName, &schemeCode, &schemeName, &isin, &navValue, &navDate); err != nil {
 				continue
 			}
 			result = append(result, map[string]interface{}{
-				"amc_name":     amcName,
-				"scheme_code":  schemeCode,
-				"scheme_name":  schemeName,
-				"isin":         isin,
+				"amc_name":    amcName,
+				"scheme_code": schemeCode,
+				"scheme_name": schemeName,
+				"isin":        isin,
+				"nav_value":   navValue,
+				"nav_date":    navDate,
 			})
 		}
 
@@ -177,4 +251,3 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", result)
 	}
 }
-

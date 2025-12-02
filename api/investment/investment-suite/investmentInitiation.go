@@ -917,7 +917,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					AND m.initiation_id NOT IN (
 						SELECT initiation_id FROM investment.investment_confirmation 
 					)
-			ORDER BY m.transaction_date DESC, m.entity_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
@@ -1038,7 +1038,7 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) nav ON true
 			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY m.transaction_date DESC, m.entity_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)

@@ -11,6 +11,7 @@ import (
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	redemption "CimplrCorpSaas/api/investment/redemption"
+	portfolio "CimplrCorpSaas/api/investment/portfolio"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -79,6 +80,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 
 	// Investment redemption/portfolio endpoints
 	mux.Handle("/investment/portfolio/get", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetPortfolioWithTransactions(pool))))
+	mux.Handle("/investment/portfolio/refresh", api.BusinessUnitMiddleware(db)(http.HandlerFunc(portfolio.RefreshPortfolioSnapshots(pool))))
 	mux.Handle("/investment/redemption/calculate-fifo", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CalculateRedemptionFIFO(pool))))
 
 	// Redemption initiation endpoints
