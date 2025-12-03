@@ -207,6 +207,12 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					OR (ms.scheme_name = sm.scheme_name AND ms.amc_name = sm.amc_name))
 			WHERE sm.amc_name = ANY($1)
 				AND (ms.scheme_id IS NULL OR COALESCE(ms.is_deleted, false) = true)
+				-- Ensure we don't return schemes that already exist in masterscheme by exact amfi_scheme_code match
+				AND NOT EXISTS (
+					SELECT 1 FROM investment.masterscheme m2
+					WHERE m2.amfi_scheme_code = sm.scheme_code::text
+					  AND COALESCE(m2.is_deleted, false) = false
+				)
 			ORDER BY sm.scheme_code, nv.nav_date DESC NULLS LAST;
 		`
 
