@@ -61,7 +61,7 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nv.scheme_name,
 				COALESCE(nv.isin_div_reinvestment, '') AS isin,
 				nv.nav_value,
-				nv.nav_date
+				TO_CHAR(nv.nav_date, 'YYYY-MM-DD') AS nav_date
 			FROM investment.amfi_nav_staging nv
 			LEFT JOIN investment.masterscheme ms
 				ON (ms.amfi_scheme_code = nv.scheme_code::text 
@@ -198,7 +198,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sm.scheme_name,
 				COALESCE(sm.isin_div_reinvestment, '') AS isin,
 				nv.nav_value,
-				nv.nav_date
+				TO_CHAR(nv.nav_date, 'YYYY-MM-DD') AS nav_date
 			FROM investment.amfi_scheme_master_staging sm
 			LEFT JOIN investment.amfi_nav_staging nv 
 				ON nv.scheme_code = sm.scheme_code
