@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	// "log"
 	"net/http"
 	"strings"
@@ -180,8 +181,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-		
-updateSQL := `
+			updateSQL := `
 	UPDATE investment.masterfolio m
 	SET 
 		first_holder_name = COALESCE(t.first_holder_name, m.first_holder_name),
@@ -195,12 +195,12 @@ updateSQL := `
 	  AND m.folio_number = t.folio_number
 	  AND m.is_deleted = false;
 `
-if _, err := tx.Exec(ctx, updateSQL); err != nil {
-	api.RespondWithError(w, 500, "update masterfolio: "+err.Error())
-	return
-}
+			if _, err := tx.Exec(ctx, updateSQL); err != nil {
+				api.RespondWithError(w, 500, "update masterfolio: "+err.Error())
+				return
+			}
 
-insertSQL := `
+			insertSQL := `
 	INSERT INTO investment.masterfolio (
 		entity_name, amc_name, folio_number, first_holder_name,
 		default_subscription_account, default_redemption_account,
@@ -218,12 +218,10 @@ insertSQL := `
 		  AND m.is_deleted = false
 	);
 `
-if _, err := tx.Exec(ctx, insertSQL); err != nil {
-	api.RespondWithError(w, 500, "insert masterfolio: "+err.Error())
-	return
-}
-
-
+			if _, err := tx.Exec(ctx, insertSQL); err != nil {
+				api.RespondWithError(w, 500, "insert masterfolio: "+err.Error())
+				return
+			}
 
 			auditSQL := `
 				INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at)
@@ -450,7 +448,7 @@ func GetFoliosWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN red_ac red ON red.account_number = m.default_redemption_account
 			LEFT JOIN schemes sch ON sch.folio_id = m.folio_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.entity_name, m.folio_number;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -546,7 +544,6 @@ func GetApprovedActiveFolios(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", out)
 	}
 }
-
 
 func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

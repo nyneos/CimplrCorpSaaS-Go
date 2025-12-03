@@ -58,7 +58,7 @@ func isAMCApproved(ctx context.Context, pgxPool *pgxpool.Pool, amcName string) (
 		WITH latest AS (
 			SELECT DISTINCT ON (amc_id) amc_id, processing_status
 			FROM investment.auditactionamc
-			ORDER BY amc_id, requested_at DESC
+			ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		)
 		SELECT 1
 		FROM investment.masteramc m
@@ -379,9 +379,10 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{
-			"scheme_id":   schemeID,
-			"scheme_name": req.SchemeName,
-			"source":      "Manual",
+			"scheme_id":        schemeID,
+			"scheme_name":      req.SchemeName,
+			"amfi_scheme_code": req.AmfiSchemeCode,
+			"source":           "Manual",
 		})
 	}
 }
@@ -622,7 +623,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, actiontype, processing_status
 			FROM investment.auditactionscheme
 			WHERE scheme_id = ANY($1)
-			ORDER BY scheme_id, requested_at DESC
+			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
@@ -745,7 +746,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, processing_status
 			FROM investment.auditactionscheme
 			WHERE scheme_id = ANY($1)
-			ORDER BY scheme_id, requested_at DESC
+			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
@@ -956,7 +957,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.scheme_id = m.scheme_id
 			LEFT JOIN history h ON h.scheme_id = m.scheme_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.scheme_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1131,11 +1132,12 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			results = append(results, map[string]interface{}{
-				"success":     true,
-				"scheme_id":   schemeID,
-				"scheme_name": row.SchemeName,
-				"source":      "Manual",
-				"requested":   userEmail,
+				"success":          true,
+				"scheme_id":        schemeID,
+				"scheme_name":      row.SchemeName,
+				"amfi_scheme_code": row.AmfiSchemeCode,
+				"source":           "Manual",
+				"requested":        userEmail,
 			})
 		}
 

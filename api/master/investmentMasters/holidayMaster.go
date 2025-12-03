@@ -956,7 +956,7 @@ FROM investment.mastercalendar mc
 LEFT JOIN latest_audit l ON l.calendar_id = mc.calendar_id
 LEFT JOIN history h ON h.calendar_id = mc.calendar_id
 WHERE COALESCE(mc.is_deleted,false) = false
-ORDER BY l.requested_at DESC NULLS LAST, mc.calendar_name, mc.calendar_code;
+ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	, mc.calendar_name, mc.calendar_code;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1015,8 +1015,7 @@ SELECT
 FROM investment.mastercalendar mc
 LEFT JOIN latest_audit la ON la.calendar_id = mc.calendar_id
 WHERE COALESCE(mc.is_deleted,false) = false
-ORDER BY 
-    la.requested_at DESC NULLS LAST,
+ORDER BY GREATEST(COALESCE(la.requested_at, '1970-01-01'::timestamp), COALESCE(la.checker_at, '1970-01-01'::timestamp)) DESC,
     mc.calendar_name;
 		`
 
@@ -2084,7 +2083,6 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-
 		allowed := map[string]bool{
 			"calendar_code": true, "calendar_name": true, "scope": true, "country": true,
 			"state": true, "city": true, "timezone": true, "weekend_pattern": true,
@@ -2142,7 +2140,6 @@ func UpdateCalendarWithHolidays(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-
 
 		holidayResults := []map[string]string{}
 

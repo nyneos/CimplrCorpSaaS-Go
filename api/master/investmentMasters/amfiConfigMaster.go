@@ -152,7 +152,7 @@ func GetApprovedAMCsAndSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT DISTINCT ON (a.amc_id)
 					a.amc_id, a.processing_status, a.requested_at
 				FROM investment.auditactionamc a
-				ORDER BY a.amc_id, a.requested_at DESC
+				ORDER BY a.amc_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			)
 			SELECT m.amc_id, m.amc_name
 			FROM investment.masteramc m
