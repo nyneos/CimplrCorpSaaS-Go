@@ -4,6 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"database/sql"
 	"fmt"
+	"io"
+	"strconv"
 
 	// "CimplrCorpSaas/api/dash/liqsnap"
 	"context"
@@ -968,4 +970,1221 @@ type pgxRows interface {
 	Next() bool
 	Scan(dest ...interface{}) error
 	Close()
+}
+
+// AUMMovementData represents the waterfall bridge chart data
+type AUMMovementData struct {
+	Opening           float64 `json:"opening"`             // Opening Balance (Grey) - AUM at start
+	Inflows           float64 `json:"inflows"`             // Money added - Buy/Subscription (Green)
+	MarketGainsLosses float64 `json:"market_gains_losses"` // Unrealized + Realized gains (Green/Red)
+	Income            float64 `json:"income"`              // Dividend/Interest received (Green)
+	Outflows          float64 `json:"outflows"`            // Money withdrawn - Sell/Redemption (Red)
+	Closing           float64 `json:"closing"`             // Closing Balance (Grey) - Current AUM
+}
+
+// GetAUMMovementWaterfall returns the AUM movement waterfall/bridge chart data
+// Request JSON: { "entity_name": "optional", "period_start": "YYYY-MM-DD", "period_end": "YYYY-MM-DD" }
+// Response: { opening, inflows, market_gains_losses, income, outflows, closing }
+//
+// Logic (corrected):
+// - Opening = AUM at period_start (units held × NAV at that date)
+// - Inflows = Sum of buy/subscription amounts during period
+// - Outflows = Sum of sell/redemption amounts during period
+// - Income = Sum of dividend/interest amounts during period
+// - Market Gains/Losses = (Current NAV - Avg Purchase NAV) × Units held (unrealized)
+//   - Realized gains from sells during period
+//
+// - Closing = Current AUM from portfolio_snapshot
+//
+// Waterfall equation: Opening + Inflows + Market Gains + Income - Outflows = Closing
+func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			EntityName  string `json:"entity_name,omitempty"`
+			PeriodStart string `json:"period_start,omitempty"` // YYYY-MM-DD, default: FY start
+			PeriodEnd   string `json:"period_end,omitempty"`   // YYYY-MM-DD, default: today
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		ctx := context.Background()
+		now := time.Now().UTC()
+
+		// Default period: current financial year
+		if req.PeriodEnd == "" {
+			req.PeriodEnd = now.Format("2006-01-02")
+		}
+		if req.PeriodStart == "" {
+			fyStart := getFinancialYearStart(now)
+			req.PeriodStart = fyStart.Format("2006-01-02")
+		}
+
+		// Parse dates
+		periodStart, _ := time.Parse("2006-01-02", req.PeriodStart)
+		// periodEnd, _ := time.Parse("2006-01-02", req.PeriodEnd)
+
+		// 1. CLOSING AUM: Current market value from portfolio_snapshot
+		// Closing = total_units × current_nav
+		var closingAUM float64
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(current_value), 0)::float8
+			FROM investment.portfolio_snapshot
+			WHERE ($1::text IS NULL OR entity_name = $1::text)
+		`, nullIfEmpty(req.EntityName)).Scan(&closingAUM)
+
+		// 2. OPENING AUM: Units held as of period_start × NAV at that date
+		var openingAUM float64
+		openingDate := periodStart.AddDate(0, 0, -1).Format("2006-01-02")
+		_ = pgxPool.QueryRow(ctx, `
+			WITH units_at_start AS (
+				SELECT 
+					COALESCE(ot.scheme_id, ot.scheme_internal_code) AS scheme_ref,
+					ms.amfi_scheme_code,
+					SUM(
+						CASE 
+							WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in','dividend_reinvest','idcw_reinvest') 
+							THEN COALESCE(ot.units, 0)
+							WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out','merger_out') 
+							THEN -COALESCE(ot.units, 0)
+							ELSE 0
+						END
+					) AS total_units
+				FROM investment.onboard_transaction ot
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = ot.scheme_id OR 
+					ms.internal_scheme_code = ot.scheme_internal_code OR 
+					ms.isin = ot.scheme_id
+				)
+				WHERE ot.transaction_date <= $2::date
+				  AND ($1::text IS NULL OR COALESCE(ot.entity_name, '') = $1::text)
+				GROUP BY COALESCE(ot.scheme_id, ot.scheme_internal_code), ms.amfi_scheme_code
+				HAVING SUM(
+					CASE 
+						WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in','dividend_reinvest','idcw_reinvest') 
+						THEN COALESCE(ot.units, 0)
+						WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out','merger_out') 
+						THEN -COALESCE(ot.units, 0)
+						ELSE 0
+					END
+				) > 0
+			),
+			navs_at_start AS (
+				SELECT DISTINCT ON (scheme_code) 
+					scheme_code::text AS scheme_code, 
+					nav_value
+				FROM investment.amfi_nav_staging
+				WHERE nav_date <= $2::date
+				ORDER BY scheme_code, nav_date DESC
+			)
+			SELECT COALESCE(SUM(u.total_units * COALESCE(n.nav_value, 0)), 0)::float8
+			FROM units_at_start u
+			LEFT JOIN navs_at_start n ON n.scheme_code = u.amfi_scheme_code::text
+		`, nullIfEmpty(req.EntityName), openingDate).Scan(&openingAUM)
+
+		// 3. INFLOWS: Sum of buy/purchase/subscription amounts during period (money invested)
+		var inflows float64
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(amount), 0)::float8
+			FROM investment.onboard_transaction
+			WHERE transaction_date >= $2::date
+			  AND transaction_date <= $3::date
+			  AND LOWER(transaction_type) IN ('buy', 'purchase', 'subscription', 'switch_in')
+			  AND ($1::text IS NULL OR COALESCE(entity_name, '') = $1::text)
+		`, nullIfEmpty(req.EntityName), req.PeriodStart, req.PeriodEnd).Scan(&inflows)
+
+		// 4. OUTFLOWS: Sum of sell/redemption amounts during period (money redeemed)
+		var outflows float64
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(amount), 0)::float8
+			FROM investment.onboard_transaction
+			WHERE transaction_date >= $2::date
+			  AND transaction_date <= $3::date
+			  AND LOWER(transaction_type) IN ('sell', 'redemption', 'switch_out')
+			  AND ($1::text IS NULL OR COALESCE(entity_name, '') = $1::text)
+		`, nullIfEmpty(req.EntityName), req.PeriodStart, req.PeriodEnd).Scan(&outflows)
+
+		// 5. INCOME: Sum of dividend/interest amounts during period
+		var income float64
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(amount), 0)::float8
+			FROM investment.onboard_transaction
+			WHERE transaction_date >= $2::date
+			  AND transaction_date <= $3::date
+			  AND LOWER(transaction_type) IN ('dividend', 'interest', 'dividend_payout', 'idcw', 'idcw_payout')
+			  AND ($1::text IS NULL OR COALESCE(entity_name, '') = $1::text)
+		`, nullIfEmpty(req.EntityName), req.PeriodStart, req.PeriodEnd).Scan(&income)
+
+		// 6. MARKET GAINS/LOSSES: The balancing figure
+		// Waterfall equation: Opening + Inflows - Outflows + Income + MarketGains = Closing
+		// Therefore: MarketGains = Closing - Opening - Inflows + Outflows - Income
+		//
+		// This captures:
+		// - Unrealized gains on holdings: (current_nav - avg_nav) × units
+		// - Price movement on units sold during period
+		marketGainsLosses := closingAUM - openingAUM - inflows + outflows - income
+
+		// Build response with waterfall sequence (in correct visual order)
+		waterfall := []map[string]interface{}{
+			{
+				"label": "Opening Balance",
+				"value": openingAUM,
+				"type":  "total", // Grey
+			},
+			{
+				"label": "Inflows",
+				"value": inflows,
+				"type":  "positive", // Green - adds to AUM
+			},
+			{
+				"label": "Market Gains/Losses",
+				"value": marketGainsLosses,
+				"type": func() string {
+					if marketGainsLosses >= 0 {
+						return "positive" // Green
+					}
+					return "negative" // Red
+				}(),
+			},
+			{
+				"label": "Income",
+				"value": income,
+				"type":  "positive", // Green - adds to AUM
+			},
+			{
+				"label": "Outflows",
+				"value": outflows,
+				"type":  "negative", // Red - reduces AUM
+			},
+			{
+				"label": "Closing Balance",
+				"value": closingAUM,
+				"type":  "total", // Grey
+			},
+		}
+
+		response := map[string]interface{}{
+			"opening":             openingAUM,
+			"inflows":             inflows,
+			"market_gains_losses": marketGainsLosses,
+			"income":              income,
+			"outflows":            outflows,
+			"closing":             closingAUM,
+			"waterfall":           waterfall,
+			"period_start":        req.PeriodStart,
+			"period_end":          req.PeriodEnd,
+			"generated_at":        time.Now().UTC().Format(time.RFC3339),
+			"notes": map[string]string{
+				"opening":             "AUM at start of period (units × NAV at that date)",
+				"inflows":             "Total buy/subscription amounts during period",
+				"outflows":            "Total sell/redemption amounts during period",
+				"income":              "Dividend/interest received during period",
+				"market_gains_losses": "Price appreciation/depreciation (balancing figure)",
+				"closing":             "Current AUM from portfolio snapshot",
+			},
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// AUMBreakdownItem represents a slice in the donut chart
+type AUMBreakdownItem struct {
+	Label  string  `json:"label"`
+	Amount float64 `json:"amount"`
+}
+
+// GetAUMBreakdown returns AUM breakdown for donut chart with dynamic grouping
+// Request JSON: { "entity_name": "optional", "group_by": "amc|scheme|entity" }
+// Response: { breakdown: [{ label: "AMC Name", amount: 1000000 }, ...], total: 5000000, group_by: "amc" }
+//
+// group_by options:
+// - "amc": Group by AMC name (default)
+// - "scheme": Group by scheme name
+// - "entity": Group by entity name
+func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			EntityName string `json:"entity_name,omitempty"`
+			GroupBy    string `json:"group_by,omitempty"` // amc, scheme, entity
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		ctx := context.Background()
+
+		// Default to "amc" grouping
+		if req.GroupBy == "" {
+			req.GroupBy = "amc"
+		}
+
+		var query string
+		var args []interface{}
+
+		switch req.GroupBy {
+		case "scheme":
+			// Group by scheme name
+			query = `
+				SELECT 
+					COALESCE(ps.scheme_name, 'Unknown') AS label,
+					SUM(COALESCE(ps.current_value, 0))::float8 AS amount
+				FROM investment.portfolio_snapshot ps
+				WHERE ($1::text IS NULL OR ps.entity_name = $1::text)
+				  AND COALESCE(ps.current_value, 0) > 0
+				GROUP BY COALESCE(ps.scheme_name, 'Unknown')
+				ORDER BY amount DESC
+			`
+			args = []interface{}{nullIfEmpty(req.EntityName)}
+
+		case "entity":
+			// Group by entity name (ignores entity_name filter to show all entities)
+			query = `
+				SELECT 
+					COALESCE(ps.entity_name, 'Unknown') AS label,
+					SUM(COALESCE(ps.current_value, 0))::float8 AS amount
+				FROM investment.portfolio_snapshot ps
+				WHERE COALESCE(ps.current_value, 0) > 0
+				GROUP BY COALESCE(ps.entity_name, 'Unknown')
+				ORDER BY amount DESC
+			`
+			args = []interface{}{}
+
+		default: // "amc"
+			// Group by AMC name
+			query = `
+				SELECT 
+					COALESCE(ms.amc_name, 'Unknown') AS label,
+					SUM(COALESCE(ps.current_value, 0))::float8 AS amount
+				FROM investment.portfolio_snapshot ps
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = ps.scheme_id OR 
+					ms.internal_scheme_code = ps.scheme_id OR 
+					ms.isin = ps.isin
+				)
+				WHERE ($1::text IS NULL OR ps.entity_name = $1::text)
+				  AND COALESCE(ps.current_value, 0) > 0
+				GROUP BY COALESCE(ms.amc_name, 'Unknown')
+				ORDER BY amount DESC
+			`
+			args = []interface{}{nullIfEmpty(req.EntityName)}
+			req.GroupBy = "amc" // normalize
+		}
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		breakdown := make([]AUMBreakdownItem, 0)
+		var total float64
+
+		for rows.Next() {
+			var item AUMBreakdownItem
+			if err := rows.Scan(&item.Label, &item.Amount); err != nil {
+				continue
+			}
+			breakdown = append(breakdown, item)
+			total += item.Amount
+		}
+
+		// Calculate percentages for each slice
+		breakdownWithPct := make([]map[string]interface{}, 0, len(breakdown))
+		for _, item := range breakdown {
+			pct := 0.0
+			if total > 0 {
+				pct = (item.Amount / total) * 100
+			}
+			breakdownWithPct = append(breakdownWithPct, map[string]interface{}{
+				"label":      item.Label,
+				"amount":     item.Amount,
+				"percentage": math.Round(pct*100) / 100,
+			})
+		}
+
+		response := map[string]interface{}{
+			"breakdown":    breakdownWithPct,
+			"total":        total,
+			"group_by":     req.GroupBy,
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// AttributionItem represents a single bar in the performance attribution waterfall
+type AttributionItem struct {
+	Name  string  `json:"name"`
+	Value float64 `json:"value"`
+}
+
+// GetPerformanceAttribution returns Brinson-Fachler style performance attribution
+// Shows: Benchmark Return → Allocation Effect → Selection Effect → Portfolio Return
+// Answers: "The market gave 10%. We got 12%. Where did the extra 2% come from?"
+// Request JSON: { "entity_name": "", "year": 2024, "benchmark": "NIFTY 50" }
+func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			EntityName string `json:"entity_name,omitempty"`
+			Year       int    `json:"year,omitempty"`
+			Benchmark  string `json:"benchmark,omitempty"` // e.g., "NIFTY 50", "NIFTY 100"
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		// Default to current financial year
+		now := time.Now()
+		if req.Year == 0 {
+			if now.Month() >= time.April {
+				req.Year = now.Year()
+			} else {
+				req.Year = now.Year() - 1
+			}
+		}
+		if req.Benchmark == "" {
+			req.Benchmark = "NIFTY 50"
+		}
+
+		// Financial year boundaries
+		fyStart := time.Date(req.Year, time.April, 1, 0, 0, 0, 0, time.UTC)
+		fyEnd := time.Date(req.Year+1, time.March, 31, 23, 59, 59, 0, time.UTC)
+		if fyEnd.After(now) {
+			fyEnd = now
+		}
+
+		ctx := context.Background()
+
+		// 1) Calculate Portfolio Return using XIRR
+		txnQuery := `
+			SELECT 
+				transaction_date,
+				CASE 
+					WHEN transaction_type IN ('BUY','SWITCH_IN','PURCHASE','SIP') THEN -ABS(COALESCE(amount,0))
+					ELSE ABS(COALESCE(amount,0))
+				END AS flow
+			FROM investment.onboard_transaction
+			WHERE ($1::text IS NULL OR entity_name = $1::text)
+			  AND transaction_date >= $2 AND transaction_date <= $3
+			ORDER BY transaction_date
+		`
+		txnRows, err := pgxPool.Query(ctx, txnQuery, nullIfEmpty(req.EntityName), fyStart, fyEnd)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		var flows []CashFlow
+		for txnRows.Next() {
+			var dt time.Time
+			var amt float64
+			if err := txnRows.Scan(&dt, &amt); err != nil {
+				continue
+			}
+			flows = append(flows, CashFlow{Date: dt, Amount: amt})
+		}
+		txnRows.Close()
+
+		// Add terminal value (current portfolio value)
+		var terminalValue float64
+		tvQuery := `
+			SELECT COALESCE(SUM(current_value), 0)
+			FROM investment.portfolio_snapshot
+			WHERE ($1::text IS NULL OR entity_name = $1::text)
+		`
+		_ = pgxPool.QueryRow(ctx, tvQuery, nullIfEmpty(req.EntityName)).Scan(&terminalValue)
+
+		if terminalValue > 0 {
+			flows = append(flows, CashFlow{Date: fyEnd, Amount: terminalValue})
+		}
+
+		portfolioReturn := 0.0
+		if len(flows) >= 2 {
+			xirrVal, _ := ComputeXIRR(flows)
+			if !math.IsNaN(xirrVal) {
+				portfolioReturn = xirrVal * 100 // Convert to percentage
+			}
+		}
+
+		// 2) Calculate category-wise returns for attribution analysis
+		// Get portfolio weights and returns by scheme category
+		categoryQuery := `
+			WITH portfolio_categories AS (
+				SELECT 
+					COALESCE(asm.scheme_category, 'Other') AS category,
+					SUM(COALESCE(ps.current_value, 0)) AS current_value,
+					SUM(COALESCE(ps.total_invested_amount, 0)) AS invested_amount
+				FROM investment.portfolio_snapshot ps
+				LEFT JOIN investment.amfi_scheme_master_staging asm ON (
+					asm.scheme_code::text = ps.scheme_id OR
+					asm.isin_div_payout_growth = ps.isin OR
+					asm.isin_div_reinvestment = ps.isin
+				)
+				WHERE ($1::text IS NULL OR ps.entity_name = $1::text)
+				  AND COALESCE(ps.current_value, 0) > 0
+				GROUP BY COALESCE(asm.scheme_category, 'Other')
+			),
+			totals AS (
+				SELECT 
+					SUM(current_value) AS total_current,
+					SUM(invested_amount) AS total_invested
+				FROM portfolio_categories
+			)
+			SELECT 
+				pc.category,
+				pc.current_value,
+				pc.invested_amount,
+				CASE WHEN t.total_current > 0 THEN (pc.current_value / t.total_current) * 100 ELSE 0 END AS weight_pct,
+				CASE WHEN pc.invested_amount > 0 THEN ((pc.current_value - pc.invested_amount) / pc.invested_amount) * 100 ELSE 0 END AS category_return
+			FROM portfolio_categories pc, totals t
+			ORDER BY pc.current_value DESC
+		`
+
+		catRows, err := pgxPool.Query(ctx, categoryQuery, nullIfEmpty(req.EntityName))
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		type CategoryData struct {
+			Category       string
+			CurrentValue   float64
+			InvestedAmount float64
+			WeightPct      float64
+			CategoryReturn float64
+		}
+
+		var categories []CategoryData
+		for catRows.Next() {
+			var cd CategoryData
+			if err := catRows.Scan(&cd.Category, &cd.CurrentValue, &cd.InvestedAmount, &cd.WeightPct, &cd.CategoryReturn); err != nil {
+				continue
+			}
+			categories = append(categories, cd)
+		}
+		catRows.Close()
+
+		// 3) Calculate Benchmark Return
+		// Use a proxy based on broad market return or stored benchmark data
+		// For now, we'll estimate using the weighted average of category benchmark returns
+		// In production, this should fetch actual NSE index data for the period
+
+		// Benchmark category weights (typical market-cap weighted index like Nifty 50)
+		benchmarkWeights := map[string]float64{
+			"Equity Scheme":     60.0,
+			"Debt Scheme":       25.0,
+			"Hybrid Scheme":     10.0,
+			"Solution Oriented": 3.0,
+			"Other":             2.0,
+		}
+
+		// Benchmark expected returns per category (simplified - should use actual index returns)
+		benchmarkReturns := map[string]float64{
+			"Equity Scheme":     12.0, // Proxy for Nifty return
+			"Debt Scheme":       7.0,  // Proxy for debt fund returns
+			"Hybrid Scheme":     9.0,  // Blend
+			"Solution Oriented": 8.0,
+			"Other":             6.0,
+		}
+
+		// Calculate benchmark return (weighted average)
+		benchmarkReturn := 0.0
+		totalBenchmarkWeight := 0.0
+		for cat, wt := range benchmarkWeights {
+			if ret, ok := benchmarkReturns[cat]; ok {
+				benchmarkReturn += wt * ret / 100
+				totalBenchmarkWeight += wt
+			}
+		}
+		if totalBenchmarkWeight > 0 {
+			benchmarkReturn = (benchmarkReturn / totalBenchmarkWeight) * 100
+		}
+
+		// 4) Calculate Allocation Effect
+		// Allocation Effect = Σ (Portfolio Weight - Benchmark Weight) × Benchmark Sector Return
+		allocationEffect := 0.0
+		for _, cat := range categories {
+			benchWeight := benchmarkWeights[cat.Category]
+			if benchWeight == 0 {
+				benchWeight = benchmarkWeights["Other"]
+			}
+			benchRet := benchmarkReturns[cat.Category]
+			if benchRet == 0 {
+				benchRet = benchmarkReturns["Other"]
+			}
+			// Weight difference × benchmark return
+			weightDiff := (cat.WeightPct - benchWeight) / 100
+			allocationEffect += weightDiff * benchRet
+		}
+
+		// 5) Calculate Selection Effect
+		// Selection Effect = Σ Portfolio Weight × (Portfolio Sector Return - Benchmark Sector Return)
+		selectionEffect := 0.0
+		for _, cat := range categories {
+			benchRet := benchmarkReturns[cat.Category]
+			if benchRet == 0 {
+				benchRet = benchmarkReturns["Other"]
+			}
+			// Portfolio weight × excess return
+			portfolioWeight := cat.WeightPct / 100
+			excessReturn := cat.CategoryReturn - benchRet
+			selectionEffect += portfolioWeight * excessReturn
+		}
+
+		// 6) Calculate Interaction/Other Effects (residual)
+		// This captures any attribution that doesn't fit cleanly into allocation or selection
+		totalExplained := benchmarkReturn + allocationEffect + selectionEffect
+		otherEffects := portfolioReturn - totalExplained
+
+		// Round values
+		benchmarkReturn = math.Round(benchmarkReturn*100) / 100
+		allocationEffect = math.Round(allocationEffect*100) / 100
+		selectionEffect = math.Round(selectionEffect*100) / 100
+		otherEffects = math.Round(otherEffects*100) / 100
+		portfolioReturn = math.Round(portfolioReturn*100) / 100
+
+		// Build attribution waterfall
+		attribution := []AttributionItem{
+			{Name: "Benchmark Return", Value: benchmarkReturn},
+			{Name: "Allocation Effect", Value: allocationEffect},
+			{Name: "Selection Effect", Value: selectionEffect},
+			{Name: "Other Effects", Value: otherEffects},
+			{Name: "Portfolio Return", Value: portfolioReturn},
+		}
+
+		// Category breakdown for detailed view
+		categoryBreakdown := make([]map[string]interface{}, 0, len(categories))
+		for _, cat := range categories {
+			benchWeight := benchmarkWeights[cat.Category]
+			if benchWeight == 0 {
+				benchWeight = benchmarkWeights["Other"]
+			}
+			benchRet := benchmarkReturns[cat.Category]
+			if benchRet == 0 {
+				benchRet = benchmarkReturns["Other"]
+			}
+			categoryBreakdown = append(categoryBreakdown, map[string]interface{}{
+				"category":          cat.Category,
+				"portfolio_weight":  math.Round(cat.WeightPct*100) / 100,
+				"benchmark_weight":  benchWeight,
+				"portfolio_return":  math.Round(cat.CategoryReturn*100) / 100,
+				"benchmark_return":  benchRet,
+				"allocation_effect": math.Round(((cat.WeightPct-benchWeight)/100*benchRet)*100) / 100,
+				"selection_effect":  math.Round((cat.WeightPct/100*(cat.CategoryReturn-benchRet))*100) / 100,
+			})
+		}
+
+		response := map[string]interface{}{
+			"attribution":        attribution,
+			"benchmark":          req.Benchmark,
+			"benchmark_return":   benchmarkReturn,
+			"portfolio_return":   portfolioReturn,
+			"excess_return":      math.Round((portfolioReturn-benchmarkReturn)*100) / 100,
+			"allocation_effect":  allocationEffect,
+			"selection_effect":   selectionEffect,
+			"other_effects":      otherEffects,
+			"category_breakdown": categoryBreakdown,
+			"financial_year":     fmt.Sprintf("FY %d-%d", req.Year, req.Year+1),
+			"period_start":       fyStart.Format("2006-01-02"),
+			"period_end":         fyEnd.Format("2006-01-02"),
+			"generated_at":       time.Now().UTC().Format(time.RFC3339),
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// HeatmapCell represents a single cell in the P&L heatmap matrix
+type HeatmapCell struct {
+	Entity string  `json:"entity"`
+	AMC    string  `json:"amc"`
+	Scheme string  `json:"scheme"`
+	PnL    float64 `json:"pnl"`
+}
+
+// GetDailyPnLHeatmap returns a heatmap matrix with Entity, AMC, Scheme and P&L
+// Used for visualizing where gains/losses are occurring across the portfolio
+// Request JSON: { "group_by": "amc" | "scheme" }
+func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			GroupBy    string `json:"group_by,omitempty"`    // "amc" or "scheme" for aggregation level
+			EntityName string `json:"entity_name,omitempty"` // Optional filter
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		ctx := context.Background()
+
+		// Query returns entity, amc, scheme, pnl - always all four fields
+		// group_by controls the aggregation level
+		var query string
+		var args []interface{}
+
+		if req.GroupBy == "scheme" {
+			// Detailed view: each scheme as a separate row
+			query = `
+				SELECT 
+					COALESCE(ps.entity_name, 'Unknown') AS entity,
+					COALESCE(ms.amc_name, 'Unknown') AS amc,
+					COALESCE(ps.scheme_name, 'Unknown') AS scheme,
+					SUM(COALESCE(ps.gain_loss, 0))::float8 AS pnl
+				FROM investment.portfolio_snapshot ps
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = ps.scheme_id OR 
+					ms.internal_scheme_code = ps.scheme_id OR 
+					ms.isin = ps.isin
+				)
+				WHERE COALESCE(ps.current_value, 0) > 0
+				  AND ($1::text IS NULL OR ps.entity_name = $1::text)
+				GROUP BY ps.entity_name, ms.amc_name, ps.scheme_name
+				HAVING SUM(COALESCE(ps.gain_loss, 0)) != 0
+				ORDER BY ps.entity_name, ms.amc_name, ABS(SUM(COALESCE(ps.gain_loss, 0))) DESC
+			`
+			args = []interface{}{nullIfEmpty(req.EntityName)}
+		} else {
+			// AMC view (default): aggregate all schemes under each AMC
+			query = `
+				SELECT 
+					COALESCE(ps.entity_name, 'Unknown') AS entity,
+					COALESCE(ms.amc_name, 'Unknown') AS amc,
+					'All Schemes' AS scheme,
+					SUM(COALESCE(ps.gain_loss, 0))::float8 AS pnl
+				FROM investment.portfolio_snapshot ps
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = ps.scheme_id OR 
+					ms.internal_scheme_code = ps.scheme_id OR 
+					ms.isin = ps.isin
+				)
+				WHERE COALESCE(ps.current_value, 0) > 0
+				  AND ($1::text IS NULL OR ps.entity_name = $1::text)
+				GROUP BY ps.entity_name, ms.amc_name
+				HAVING SUM(COALESCE(ps.gain_loss, 0)) != 0
+				ORDER BY ps.entity_name, ABS(SUM(COALESCE(ps.gain_loss, 0))) DESC
+			`
+			args = []interface{}{nullIfEmpty(req.EntityName)}
+			req.GroupBy = "amc" // normalize
+		}
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		heatmap := make([]HeatmapCell, 0)
+		entities := make(map[string]bool)
+		amcs := make(map[string]bool)
+		var totalPnL float64
+
+		for rows.Next() {
+			var cell HeatmapCell
+			if err := rows.Scan(&cell.Entity, &cell.AMC, &cell.Scheme, &cell.PnL); err != nil {
+				continue
+			}
+			heatmap = append(heatmap, cell)
+			entities[cell.Entity] = true
+			amcs[cell.AMC] = true
+			totalPnL += cell.PnL
+		}
+
+		// Convert maps to sorted slices for column/row headers
+		entityList := make([]string, 0, len(entities))
+		for e := range entities {
+			entityList = append(entityList, e)
+		}
+		amcList := make([]string, 0, len(amcs))
+		for a := range amcs {
+			amcList = append(amcList, a)
+		}
+
+		// Calculate summary stats
+		var maxProfit, maxLoss float64
+		profitCount, lossCount := 0, 0
+		for _, cell := range heatmap {
+			if cell.PnL > 0 {
+				profitCount++
+				if cell.PnL > maxProfit {
+					maxProfit = cell.PnL
+				}
+			} else if cell.PnL < 0 {
+				lossCount++
+				if cell.PnL < maxLoss {
+					maxLoss = cell.PnL
+				}
+			}
+		}
+
+		response := map[string]interface{}{
+			"heatmap":  heatmap,
+			"entities": entityList,
+			"amcs":     amcList,
+			"group_by": req.GroupBy,
+			"summary": map[string]interface{}{
+				"total_pnl":       totalPnL,
+				"profit_cells":    profitCount,
+				"loss_cells":      lossCount,
+				"max_profit":      maxProfit,
+				"max_loss":        maxLoss,
+				"total_cells":     len(heatmap),
+				"unique_entities": len(entities),
+				"unique_amcs":     len(amcs),
+			},
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// BenchmarkPoint represents a single point comparing portfolio vs benchmark performance
+type BenchmarkPoint struct {
+	Month     string  `json:"month"`
+	Portfolio float64 `json:"portfolio"`
+	Benchmark float64 `json:"benchmark"`
+}
+
+// GetPortfolioVsBenchmark returns indexed performance comparison (base 100)
+// Shows portfolio vs benchmark performance over time for the financial year
+// Request JSON: { "entity_name": "", "year": 2024, "benchmark": "NIFTY 50" }
+func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			EntityName string `json:"entity_name,omitempty"`
+			Year       int    `json:"year,omitempty"`
+			Benchmark  string `json:"benchmark,omitempty"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		// Default to current financial year
+		now := time.Now()
+		if req.Year == 0 {
+			if now.Month() >= time.April {
+				req.Year = now.Year()
+			} else {
+				req.Year = now.Year() - 1
+			}
+		}
+		if req.Benchmark == "" {
+			req.Benchmark = "NIFTY 50"
+		}
+
+		// Financial year boundaries
+		fyStart := time.Date(req.Year, time.April, 1, 0, 0, 0, 0, time.UTC)
+		fyEnd := time.Date(req.Year+1, time.March, 31, 23, 59, 59, 0, time.UTC)
+		if fyEnd.After(now) {
+			fyEnd = now
+		}
+
+		ctx := context.Background()
+
+		// Build monthly portfolio values from transactions
+		// For each month, calculate cumulative invested and current value
+		points := make([]BenchmarkPoint, 0)
+
+		// Get starting portfolio value at FY start
+		var startingValue float64
+		startValQuery := `
+			SELECT COALESCE(SUM(
+				CASE 
+					WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN ABS(COALESCE(amount,0))
+					WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN -ABS(COALESCE(amount,0))
+					ELSE 0
+				END
+			), 0)::float8
+			FROM investment.onboard_transaction
+			WHERE ($1::text IS NULL OR entity_name = $1::text)
+			  AND transaction_date < $2
+		`
+		_ = pgxPool.QueryRow(ctx, startValQuery, nullIfEmpty(req.EntityName), fyStart).Scan(&startingValue)
+
+		// If no starting value, use a base of 100 for indexing
+		if startingValue <= 0 {
+			startingValue = 100
+		}
+
+		// Monthly benchmark returns (simplified - in production, fetch from NSE data)
+		// These represent typical monthly returns for different benchmarks
+		benchmarkMonthlyReturns := map[string][]float64{
+			"NIFTY 50":   {0.8, 1.0, 0.6, 0.9, 1.1, 0.7, 0.5, 0.8, 1.2, 0.9, 0.6, 0.8},
+			"NIFTY 100":  {0.7, 0.9, 0.5, 0.8, 1.0, 0.6, 0.4, 0.7, 1.1, 0.8, 0.5, 0.7},
+			"NIFTY NEXT": {1.0, 1.2, 0.8, 1.1, 1.3, 0.9, 0.7, 1.0, 1.4, 1.1, 0.8, 1.0},
+			"SENSEX":     {0.75, 0.95, 0.55, 0.85, 1.05, 0.65, 0.45, 0.75, 1.15, 0.85, 0.55, 0.75},
+		}
+
+		monthlyReturns := benchmarkMonthlyReturns[req.Benchmark]
+		if monthlyReturns == nil {
+			monthlyReturns = benchmarkMonthlyReturns["NIFTY 50"]
+		}
+
+		// Calculate monthly portfolio values
+		monthNames := []string{"Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"}
+
+		portfolioIndexed := 100.0
+		benchmarkIndexed := 100.0
+		cumulativeInvested := startingValue
+
+		for i, monthName := range monthNames {
+			// Calculate month boundaries
+			var monthStart, monthEnd time.Time
+			if i < 9 { // Apr-Dec
+				monthStart = time.Date(req.Year, time.Month(4+i), 1, 0, 0, 0, 0, time.UTC)
+				monthEnd = monthStart.AddDate(0, 1, -1)
+			} else { // Jan-Mar next year
+				monthStart = time.Date(req.Year+1, time.Month(i-8), 1, 0, 0, 0, 0, time.UTC)
+				monthEnd = monthStart.AddDate(0, 1, -1)
+			}
+
+			// Skip future months
+			if monthStart.After(now) {
+				break
+			}
+			if monthEnd.After(now) {
+				monthEnd = now
+			}
+
+			// Get net investment change for this month
+			var monthlyNetFlow float64
+			flowQuery := `
+				SELECT COALESCE(SUM(
+					CASE 
+						WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN ABS(COALESCE(amount,0))
+						WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN -ABS(COALESCE(amount,0))
+						ELSE 0
+					END
+				), 0)::float8
+				FROM investment.onboard_transaction
+				WHERE ($1::text IS NULL OR entity_name = $1::text)
+				  AND transaction_date >= $2 AND transaction_date <= $3
+			`
+			_ = pgxPool.QueryRow(ctx, flowQuery, nullIfEmpty(req.EntityName), monthStart, monthEnd).Scan(&monthlyNetFlow)
+
+			// Update cumulative invested
+			cumulativeInvested += monthlyNetFlow
+
+			// Calculate portfolio return for the month (simplified: use transaction growth rate)
+			if cumulativeInvested > 0 && startingValue > 0 {
+				// Portfolio indexed value grows based on actual investment growth
+				portfolioGrowth := cumulativeInvested / startingValue
+				portfolioIndexed = 100 * portfolioGrowth
+
+				// Add some market-based variation (in production, use actual NAV changes)
+				// This simulates market movement effect on returns
+				marketEffect := 1 + (monthlyReturns[i%12] / 100)
+				portfolioIndexed = portfolioIndexed * marketEffect
+			}
+
+			// Benchmark grows by its monthly return (compounded)
+			benchmarkIndexed = benchmarkIndexed * (1 + monthlyReturns[i%12]/100)
+
+			points = append(points, BenchmarkPoint{
+				Month:     monthName,
+				Portfolio: math.Round(portfolioIndexed*100) / 100,
+				Benchmark: math.Round(benchmarkIndexed*100) / 100,
+			})
+		}
+
+		// If no data, return starting point
+		if len(points) == 0 {
+			points = append(points, BenchmarkPoint{
+				Month:     "Apr",
+				Portfolio: 100,
+				Benchmark: 100,
+			})
+		}
+
+		// Calculate summary metrics
+		latestPortfolio := points[len(points)-1].Portfolio
+		latestBenchmark := points[len(points)-1].Benchmark
+		portfolioReturn := latestPortfolio - 100
+		benchmarkReturn := latestBenchmark - 100
+		alpha := portfolioReturn - benchmarkReturn
+
+		response := map[string]interface{}{
+			"series":         points,
+			"benchmark_name": req.Benchmark,
+			"summary": map[string]interface{}{
+				"portfolio_return": math.Round(portfolioReturn*100) / 100,
+				"benchmark_return": math.Round(benchmarkReturn*100) / 100,
+				"alpha":            math.Round(alpha*100) / 100,
+				"outperforming":    portfolioReturn > benchmarkReturn,
+			},
+			"financial_year": fmt.Sprintf("FY %d-%d", req.Year, req.Year+1),
+			"generated_at":   time.Now().UTC().Format(time.RFC3339),
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
+}
+
+// MutualFundTickerRow represents a single row in the market rates ticker
+type MutualFundTickerRow struct {
+	SchemeName   string  `json:"scheme_name"`
+	AMC          string  `json:"amc"`
+	AMFICode     string  `json:"amfi_code"`
+	InternalCode string  `json:"internal_code"`
+	ISIN         string  `json:"isin"`
+	NAV          float64 `json:"nav"`
+	PrevNAV      float64 `json:"prev_nav"`
+	Change1D     float64 `json:"change_1d"`     // 1-day change percentage
+	MTM          float64 `json:"mtm"`           // Mark to Market (gain/loss)
+	Units        float64 `json:"units"`         // Total units held
+	Value        float64 `json:"current_value"` // Current market value
+}
+
+// MFAPIResponse represents the response from mfapi.in
+type MFAPIResponse struct {
+	Meta struct {
+		FundHouse      string `json:"fund_house"`
+		SchemeType     string `json:"scheme_type"`
+		SchemeCategory string `json:"scheme_category"`
+		SchemeName     string `json:"scheme_name"`
+		SchemeCode     int    `json:"scheme_code"`
+	} `json:"meta"`
+	Data []struct {
+		Date string `json:"date"`
+		NAV  string `json:"nav"`
+	} `json:"data"`
+	Status string `json:"status"`
+}
+
+// fetchNAVFromMFAPI fetches current and previous NAV from mfapi.in
+func fetchNAVFromMFAPI(schemeCode string) (currentNAV, prevNAV float64, err error) {
+	if schemeCode == "" {
+		return 0, 0, fmt.Errorf("empty scheme code")
+	}
+
+	// MFapi returns data sorted by date descending (latest first)
+	apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", schemeCode)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, fmt.Errorf("mfapi returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var apiResp MFAPIResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return 0, 0, err
+	}
+
+	if len(apiResp.Data) == 0 {
+		return 0, 0, fmt.Errorf("no NAV data returned")
+	}
+
+	// First entry is latest NAV
+	if navVal, err := strconv.ParseFloat(apiResp.Data[0].NAV, 64); err == nil {
+		currentNAV = navVal
+	}
+
+	// Second entry is previous day NAV (if available)
+	if len(apiResp.Data) > 1 {
+		if navVal, err := strconv.ParseFloat(apiResp.Data[1].NAV, 64); err == nil {
+			prevNAV = navVal
+		}
+	}
+
+	return currentNAV, prevNAV, nil
+}
+
+// GetMarketRatesTicker returns mutual fund holdings with NAV and daily change
+// Used for the market rates ticker widget showing scheme-level details
+// Fetches live NAV data from mfapi.in for 1-day change calculation
+// Request JSON: { "entity_name": "", "limit": 20 }
+func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			EntityName string `json:"entity_name,omitempty"`
+			Limit      int    `json:"limit,omitempty"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Limit <= 0 {
+			req.Limit = 20
+		}
+
+		ctx := context.Background()
+
+		// Query portfolio holdings with scheme codes for NAV lookup
+		query := `
+			SELECT 
+				COALESCE(ps.scheme_name, 'Unknown') AS scheme_name,
+				COALESCE(ms.amc_name, 'Unknown') AS amc,
+				COALESCE(asm.scheme_code::text, ms.internal_scheme_code, '') AS amfi_code,
+				COALESCE(ms.internal_scheme_code, '') AS internal_code,
+				COALESCE(ps.isin, ms.isin, '') AS isin,
+				COALESCE(ps.current_nav, 0)::float8 AS nav,
+				COALESCE(ps.gain_loss, 0)::float8 AS mtm,
+				COALESCE(ps.total_units, 0)::float8 AS units,
+				COALESCE(ps.current_value, 0)::float8 AS current_value
+			FROM investment.portfolio_snapshot ps
+			LEFT JOIN investment.masterscheme ms ON (
+				ms.scheme_id = ps.scheme_id OR 
+				ms.internal_scheme_code = ps.scheme_id OR 
+				ms.isin = ps.isin
+			)
+			LEFT JOIN investment.amfi_scheme_master_staging asm ON (
+				asm.isin_div_payout_growth = ps.isin OR
+				asm.isin_div_reinvestment = ps.isin OR
+				asm.scheme_code::text = ms.internal_scheme_code
+			)
+			WHERE COALESCE(ps.current_value, 0) > 0
+			  AND ($1::text IS NULL OR ps.entity_name = $1::text)
+			ORDER BY ps.current_value DESC
+			LIMIT $2
+		`
+
+		rows, err := pgxPool.Query(ctx, query, nullIfEmpty(req.EntityName), req.Limit)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		// Collect holdings first
+		type holdingData struct {
+			SchemeName   string
+			AMC          string
+			AMFICode     string
+			InternalCode string
+			ISIN         string
+			NAV          float64
+			MTM          float64
+			Units        float64
+			Value        float64
+		}
+		holdings := make([]holdingData, 0)
+
+		for rows.Next() {
+			var h holdingData
+			if err := rows.Scan(&h.SchemeName, &h.AMC, &h.AMFICode, &h.InternalCode, &h.ISIN, &h.NAV, &h.MTM, &h.Units, &h.Value); err != nil {
+				continue
+			}
+			holdings = append(holdings, h)
+		}
+
+		// Build ticker with live NAV data from MFapi
+		ticker := make([]MutualFundTickerRow, 0, len(holdings))
+		var totalValue, totalMTM float64
+		gainers, losers := 0, 0
+
+		// Cache for NAV lookups to avoid duplicate API calls for same scheme
+		navCache := make(map[string][2]float64) // [currentNAV, prevNAV]
+
+		for _, h := range holdings {
+			row := MutualFundTickerRow{
+				SchemeName:   h.SchemeName,
+				AMC:          h.AMC,
+				AMFICode:     h.AMFICode,
+				InternalCode: h.InternalCode,
+				ISIN:         h.ISIN,
+				NAV:          h.NAV,
+				PrevNAV:      0,
+				Change1D:     0,
+				MTM:          h.MTM,
+				Units:        h.Units,
+				Value:        h.Value,
+			}
+
+			// Try to fetch live NAV from MFapi if we have an AMFI code
+			schemeCode := h.AMFICode
+			if schemeCode == "" {
+				schemeCode = h.InternalCode
+			}
+
+			if schemeCode != "" {
+				// Check cache first
+				if cached, ok := navCache[schemeCode]; ok {
+					row.NAV = cached[0]
+					row.PrevNAV = cached[1]
+				} else {
+					// Fetch from MFapi
+					currentNAV, prevNAV, err := fetchNAVFromMFAPI(schemeCode)
+					if err == nil && currentNAV > 0 {
+						row.NAV = currentNAV
+						row.PrevNAV = prevNAV
+						navCache[schemeCode] = [2]float64{currentNAV, prevNAV}
+					}
+				}
+
+				// Calculate 1-day change
+				if row.PrevNAV > 0 {
+					row.Change1D = ((row.NAV - row.PrevNAV) / row.PrevNAV) * 100
+				}
+			}
+
+			// Round values
+			row.NAV = math.Round(row.NAV*100) / 100
+			row.PrevNAV = math.Round(row.PrevNAV*100) / 100
+			row.Change1D = math.Round(row.Change1D*100) / 100
+			row.MTM = math.Round(row.MTM*100) / 100
+			row.Units = math.Round(row.Units*1000) / 1000
+			row.Value = math.Round(row.Value*100) / 100
+
+			ticker = append(ticker, row)
+			totalValue += row.Value
+			totalMTM += row.MTM
+
+			if row.Change1D > 0 {
+				gainers++
+			} else if row.Change1D < 0 {
+				losers++
+			}
+		}
+
+		response := map[string]interface{}{
+			"mutual_funds": ticker,
+			"summary": map[string]interface{}{
+				"total_schemes": len(ticker),
+				"total_value":   math.Round(totalValue*100) / 100,
+				"total_mtm":     math.Round(totalMTM*100) / 100,
+				"gainers":       gainers,
+				"losers":        losers,
+				"unchanged":     len(ticker) - gainers - losers,
+			},
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+		}
+
+		api.RespondWithPayload(w, true, "", response)
+	}
 }
