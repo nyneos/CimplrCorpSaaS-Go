@@ -4,16 +4,17 @@ import (
 	"CimplrCorpSaas/api"
 	bankbalance "CimplrCorpSaas/api/dash/bank-balance"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
+	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
 	"CimplrCorpSaas/api/dash/cfo"
+	forecastVsActual "CimplrCorpSaas/api/dash/forecastVsActual"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
-	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
-	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
+	investmentdashboards "CimplrCorpSaas/api/dash/investmentDashboards"
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
-	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
+	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
+	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	reports "CimplrCorpSaas/api/dash/reports"
-	forecastVsActual "CimplrCorpSaas/api/dash/forecastVsActual"
 	"context"
 	"database/sql"
 	"fmt"
@@ -98,6 +99,18 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/liquidity/kpi", api.BusinessUnitMiddleware(db)(liqsnap.KpiCardsHandler(pgxPool)))
 	mux.Handle("/dash/liquidity/daily", api.BusinessUnitMiddleware(db)(liqsnap.DetailedDailyCashFlowHandler(pgxPool)))
 
+	// Investment Overview KPIs
+	mux.Handle("/dash/investment/overview/kpis", api.BusinessUnitMiddleware(db)(investmentdashboards.GetInvestmentOverviewKPIs(pgxPool)))
+	// Investment: Entity Performance (YTD P&L per scheme)
+	mux.Handle("/dash/investment/overview/entity", api.BusinessUnitMiddleware(db)(investmentdashboards.GetEntityPerformance(pgxPool)))
+	// Investment: AMC Performance (start-of-FY vs now AUM + P&L)
+	mux.Handle("/dash/investment/overview/amc-performance", api.BusinessUnitMiddleware(db)(investmentdashboards.GetAMCPerformance(pgxPool)))
+	// Investment: Contribution to AUM Change (AMC-wise waterfall)
+	mux.Handle("/dash/investment/overview/waterfall", api.BusinessUnitMiddleware(db)(investmentdashboards.GetAMCWaterfall(pgxPool)))
+	// Investment: Top performing assets (YTD)
+	mux.Handle("/dash/investment/overview/top-performing", api.BusinessUnitMiddleware(db)(investmentdashboards.GetTopPerformingAssets(pgxPool)))
+	// Investment: Consolidated Risk Gauge (entity-level)
+	mux.Handle("/dash/investment/overview/consolidated", api.BusinessUnitMiddleware(db)(investmentdashboards.GetConsolidatedRisk(pgxPool)))
 	// Cashflow Forecast (monthly aggregated projections + KPIs)
 	mux.Handle("/dash/cash/forecast/monthly", api.BusinessUnitMiddleware(db)(cashflowforecast.GetCashflowForecastHandler(pgxPool)))
 	mux.Handle("/dash/cash/forecast/kpi", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastKPIsHandler(pgxPool)))
@@ -110,12 +123,12 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/forecast-vs-actual/kpi", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualKPIHandler(pgxPool)))
 	mux.Handle("/dash/forecast-vs-actual/by-date", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualByDateHandler(pgxPool)))
 	mux.Handle("/dash/forecast-vs-actual/by-month", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualByMonthHandler(pgxPool)))
-	
+
 	// --- Reports Dashboard Routes ---
 	mux.Handle("/dash/reports/exposure-summary", api.BusinessUnitMiddleware(db)(reports.GetExposureSummary(db)))
 	mux.Handle("/dash/reports/linked-summary-by-category", api.BusinessUnitMiddleware(db)(reports.GetLinkedSummaryByCategory(db)))
 
-	// Projection Pipeline Dashboard 
+	// Projection Pipeline Dashboard
 	mux.Handle("/dash/projection-pipeline/kpi", api.BusinessUnitMiddleware(db)(projectiondash.GetProjectionPipelineKPI(pgxPool)))
 	mux.Handle("/dash/projection-pipeline/detailed", api.BusinessUnitMiddleware(db)(projectiondash.GetDetailedPipeline(pgxPool)))
 	mux.Handle("/dash/projection-pipeline/by-entity", api.BusinessUnitMiddleware(db)(projectiondash.GetProjectionByEntity(pgxPool)))
@@ -125,7 +138,7 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/payrec/forecast", api.BusinessUnitMiddleware(db)(payablereceivabledash.GetPayRecForecast(pgxPool)))
 
 	// Planned Inflow/Outflow Dashboard
-	mux.Handle("/dash/planned-inflow-outflow", api.BusinessUnitMiddleware(db)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))	
+	mux.Handle("/dash/planned-inflow-outflow", api.BusinessUnitMiddleware(db)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
 
 	log.Println("Dashboard Service started on :4143")
 	err = http.ListenAndServe(":4143", mux)
@@ -133,15 +146,3 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
