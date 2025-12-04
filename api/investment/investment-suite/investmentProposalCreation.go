@@ -653,7 +653,8 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_proposal p
 			LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
 			LEFT JOIN history h ON h.proposal_id = p.proposal_id
-			ORDER BY l.requested_at DESC NULLS LAST
+			WHERE COALESCE(p.is_deleted,false)=false
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pool.Query(ctx, metaSQL)
@@ -1125,7 +1126,7 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		
+
 		// Build query with optional AMC filter
 		holdingsSQL := `
 WITH snapshot_agg AS (
@@ -1171,16 +1172,16 @@ all_schemes AS (
 			AND COALESCE(ma.is_deleted, false) = false
 			AND UPPER(laa.processing_status) = 'APPROVED'
 		))`
-		
+
 		args := []interface{}{entityName}
-		
+
 		// Add AMC filter if provided
 		if len(req.AMCNames) > 0 {
 			holdingsSQL += `
 		AND ms.amc_name = ANY($2)`
 			args = append(args, req.AMCNames)
 		}
-		
+
 		holdingsSQL += `
 )
 SELECT 

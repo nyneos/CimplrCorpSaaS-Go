@@ -122,6 +122,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	// Accounting Workbench - MTM endpoints
 	mux.Handle("/investment/accounting/mtm/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateMTMSingle(pool))))
 	mux.Handle("/investment/accounting/mtm/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateMTMBulk(pool))))
+	mux.Handle("/investment/accounting/mtm/preview", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.PreviewMTMBulk(pool))))
+	mux.Handle("/investment/accounting/mtm/commit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CommitMTMBulk(pool))))
 	mux.Handle("/investment/accounting/mtm/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateMTM(pool))))
 	mux.Handle("/investment/accounting/mtm/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetMTMWithAudit(pool))))
 
