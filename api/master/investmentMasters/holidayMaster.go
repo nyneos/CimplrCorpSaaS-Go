@@ -1002,9 +1002,10 @@ func GetCalendarListLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 WITH latest_audit AS (
     SELECT DISTINCT ON (calendar_id)
         calendar_id,
-        requested_at
+        requested_at,
+        checker_at
     FROM investment.auditactioncalendar
-    ORDER BY calendar_id, requested_at DESC
+    ORDER BY calendar_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 )
 SELECT
     mc.calendar_id,
