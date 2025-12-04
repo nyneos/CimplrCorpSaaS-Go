@@ -864,7 +864,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(f.folio_id::text,'') AS folio_id,
 				COALESCE(d.default_settlement_account,'') AS demat_number,
 				COALESCE(d.demat_id::text,'') AS demat_id,
-				DATE_PART('day', now()::timestamp - m.transaction_date::timestamp)::int AS age_days,
+				DATE_PART('day',  m.transaction_date::timestamp-now()::timestamp)::int AS age_days,
 				COALESCE(m.amount,0) AS gross_investment_amount,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -1037,7 +1037,7 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY ans.nav_date DESC, ans.file_date DESC
 				LIMIT 1
 			) nav ON true
-			WHERE COALESCE(m.is_deleted, false) = false
+			WHERE COALESCE(m.is_deleted, false) = false 
 			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 

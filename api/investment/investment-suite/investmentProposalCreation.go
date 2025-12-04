@@ -255,7 +255,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_APPROVAL"); err != nil {
+		if err := insertProposalAudit(ctx, tx, req.ProposalID, userEmail, req.Reason, "EDIT", "PENDING_EDIT_APPROVAL"); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("failed to insert audit record: %v", err))
 			return
 		}
@@ -411,36 +411,36 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			}
 		}
 
-			if len(approvedProposals) > 0 {
-				if _, err := tx.Exec(ctx, `
+		if len(approvedProposals) > 0 {
+			if _, err := tx.Exec(ctx, `
 					UPDATE investment.investment_proposal
 					SET is_deleted=false, updated_at=now()
 					WHERE proposal_id = ANY($1)
 				`, approvedProposals); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "failed to update approved proposals")
-					return
-				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to update approved proposals")
+				return
 			}
-			if len(deletedProposals) > 0 {
-				if _, err := tx.Exec(ctx, `
+		}
+		if len(deletedProposals) > 0 {
+			if _, err := tx.Exec(ctx, `
 					UPDATE investment.investment_proposal
 					SET is_deleted=true, updated_at=now()
 					WHERE proposal_id = ANY($1)
 				`, deletedProposals); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "failed to delete proposals")
-					return
-				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to delete proposals")
+				return
 			}
-			if len(rejectedProposals) > 0 {
-				if _, err := tx.Exec(ctx, `
+		}
+		if len(rejectedProposals) > 0 {
+			if _, err := tx.Exec(ctx, `
 					UPDATE investment.investment_proposal
 					SET updated_at=now()
 					WHERE proposal_id = ANY($1)
 				`, rejectedProposals); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "failed to reject proposals")
-					return
-				}
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject proposals")
+				return
 			}
+		}
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit bulk action")
@@ -1073,9 +1073,9 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 						continue
 					}
 					entityDemats = append(entityDemats, map[string]interface{}{
-						"demat_id":                    dematID,
-						"demat_account_number":        dematNumber,
-						"default_settlement_account":  settlement,
+						"demat_id":                   dematID,
+						"demat_account_number":       dematNumber,
+						"default_settlement_account": settlement,
 					})
 				}
 			}
