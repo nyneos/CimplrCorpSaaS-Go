@@ -750,3 +750,222 @@ func formatPercent(v float64) string {
 	}
 	return fmt.Sprintf("%s%.1f%% YTD", sign, v)
 }
+
+// GetAUMCompositionTrend returns monthly AUM breakdown by AMC for stacked area chart (Financial Year: Apr-Mar)
+// Request JSON: { "entity_name": "optional", "year": 2025 } (year = FY start year, e.g., 2025 means FY 2025-26: Apr 2025 to Mar 2026)
+// Response: { rows: [{ month: "Apr", "AMC1": 1000, "AMC2": 2000, ... }, ...], amc_names: [...] }
+//
+// NOTE: Uses portfolio_snapshot for current AUM (authoritative) and transaction history + NAV for historical months.
+func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			return
+		}
+
+		var req struct {
+			EntityName string `json:"entity_name,omitempty"`
+			Year       int    `json:"year,omitempty"` // FY start year (e.g., 2025 = Apr 2025 to Mar 2026)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		// Default to current financial year
+		now := time.Now().UTC()
+		if req.Year <= 0 {
+			// Determine current FY start year
+			if now.Month() >= time.April {
+				req.Year = now.Year()
+			} else {
+				req.Year = now.Year() - 1
+			}
+		}
+
+		ctx := context.Background()
+
+		// Step 1: Get all unique AMC names from portfolio_snapshot (current holdings)
+		amcQuery := `
+			SELECT DISTINCT COALESCE(ms.amc_name, 'Unknown') AS amc_name
+			FROM investment.portfolio_snapshot ps
+			LEFT JOIN investment.masterscheme ms ON (
+				ms.scheme_id = ps.scheme_id OR 
+				ms.internal_scheme_code = ps.scheme_id OR 
+				ms.isin = ps.isin
+			)
+			WHERE ($1::text IS NULL OR ps.entity_name = $1::text)
+			  AND COALESCE(ms.amc_name, '') != ''
+			ORDER BY amc_name
+		`
+		amcRows, err := pgxPool.Query(ctx, amcQuery, nullIfEmpty(req.EntityName))
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		amcNames := make([]string, 0)
+		for amcRows.Next() {
+			var amc string
+			if err := amcRows.Scan(&amc); err == nil && amc != "" {
+				amcNames = append(amcNames, amc)
+			}
+		}
+		amcRows.Close()
+
+		// Step 2: Generate 12 months for FY (April to March)
+		type monthInfo struct {
+			Label     string
+			EndDate   time.Time
+			IsCurrent bool
+		}
+		fyMonths := []time.Month{
+			time.April, time.May, time.June, time.July, time.August, time.September,
+			time.October, time.November, time.December, time.January, time.February, time.March,
+		}
+		months := make([]monthInfo, 0, 12)
+		for i, m := range fyMonths {
+			year := req.Year
+			if i >= 9 { // Jan, Feb, Mar are in next calendar year
+				year = req.Year + 1
+			}
+			// Last day of month
+			firstOfMonth := time.Date(year, m, 1, 0, 0, 0, 0, time.UTC)
+			lastOfMonth := firstOfMonth.AddDate(0, 1, -1)
+
+			// Don't include future months
+			if lastOfMonth.After(now) {
+				// For current month, use today as end date
+				if firstOfMonth.Before(now) || firstOfMonth.Equal(now) {
+					months = append(months, monthInfo{
+						Label:     m.String()[:3],
+						EndDate:   now,
+						IsCurrent: true,
+					})
+				}
+				continue
+			}
+
+			months = append(months, monthInfo{
+				Label:     m.String()[:3],
+				EndDate:   lastOfMonth,
+				IsCurrent: false,
+			})
+		}
+
+		// Query for current month: use portfolio_snapshot (authoritative current value)
+		currentMonthQuery := `
+			SELECT COALESCE(ms.amc_name, 'Unknown') AS amc_name,
+			       SUM(COALESCE(ps.current_value::numeric, 0))::float8 AS aum_value
+			FROM investment.portfolio_snapshot ps
+			LEFT JOIN investment.masterscheme ms ON (
+				ms.scheme_id = ps.scheme_id OR 
+				ms.internal_scheme_code = ps.scheme_id OR 
+				ms.isin = ps.isin
+			)
+			WHERE ($1::text IS NULL OR ps.entity_name = $1::text)
+			GROUP BY COALESCE(ms.amc_name, 'Unknown')
+		`
+
+		// Query for historical months: use transactions + NAV
+		historicalQuery := `
+			WITH units_by_scheme AS (
+				SELECT 
+					COALESCE(ot.scheme_id, ot.scheme_internal_code) AS scheme_ref,
+					COALESCE(ms.amc_name, 'Unknown') AS amc_name,
+					SUM(
+						CASE 
+							WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in') 
+							THEN COALESCE(ot.units, 0)
+							WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out','merger_out') 
+							THEN -COALESCE(ot.units, 0)
+							ELSE 0
+						END
+					) AS total_units,
+					ms.amfi_scheme_code
+				FROM investment.onboard_transaction ot
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = ot.scheme_id OR 
+					ms.internal_scheme_code = ot.scheme_internal_code OR 
+					ms.isin = ot.scheme_id
+				)
+				WHERE ot.transaction_date <= $2::date
+				  AND ($1::text IS NULL OR COALESCE(ot.entity_name, '') = $1::text)
+				GROUP BY COALESCE(ot.scheme_id, ot.scheme_internal_code), COALESCE(ms.amc_name, 'Unknown'), ms.amfi_scheme_code
+				HAVING SUM(
+					CASE 
+						WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','switch_in','bonus','merger_in') 
+						THEN COALESCE(ot.units, 0)
+						WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out','merger_out') 
+						THEN -COALESCE(ot.units, 0)
+						ELSE 0
+					END
+				) > 0
+			),
+			navs AS (
+				SELECT DISTINCT ON (scheme_code) 
+					scheme_code::text AS scheme_code, 
+					nav_value
+				FROM investment.amfi_nav_staging
+				WHERE nav_date <= $2::date
+				ORDER BY scheme_code, nav_date DESC
+			)
+			SELECT 
+				u.amc_name,
+				SUM(u.total_units * COALESCE(n.nav_value, 0))::float8 AS aum_value
+			FROM units_by_scheme u
+			LEFT JOIN navs n ON n.scheme_code = u.amfi_scheme_code::text
+			GROUP BY u.amc_name
+		`
+
+		// Build output rows for each month
+		outRows := make([]map[string]interface{}, 0, len(months))
+
+		for _, m := range months {
+			row := map[string]interface{}{
+				"month": m.Label,
+			}
+			// Initialize all AMCs to 0
+			for _, amc := range amcNames {
+				row[amc] = 0.0
+			}
+
+			var rows pgxRows
+			var err error
+
+			if m.IsCurrent {
+				// Use portfolio_snapshot for current month
+				rows, err = pgxPool.Query(ctx, currentMonthQuery, nullIfEmpty(req.EntityName))
+			} else {
+				// Use transaction history for historical months
+				rows, err = pgxPool.Query(ctx, historicalQuery, nullIfEmpty(req.EntityName), m.EndDate.Format("2006-01-02"))
+			}
+
+			if err != nil {
+				outRows = append(outRows, row)
+				continue
+			}
+
+			for rows.Next() {
+				var amcName string
+				var aumValue float64
+				if err := rows.Scan(&amcName, &aumValue); err == nil {
+					row[amcName] = aumValue
+				}
+			}
+			rows.Close()
+
+			outRows = append(outRows, row)
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"rows":         outRows,
+			"amc_names":    amcNames,
+			"fy_label":     fmt.Sprintf("FY %d-%d", req.Year, (req.Year+1)%100),
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+}
+
+// pgxRows interface to handle both query result types
+type pgxRows interface {
+	Next() bool
+	Scan(dest ...interface{}) error
+	Close()
+}
