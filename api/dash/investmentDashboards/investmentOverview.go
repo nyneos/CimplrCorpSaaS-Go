@@ -404,14 +404,17 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Use current_value if present, else total_units * current_nav as value
 		q := `
         SELECT
-          COALESCE( SUM(val * (
+          COALESCE(
+            SUM(val * (
                 CASE LOWER(COALESCE(ms.internal_risk_rating, 'medium'))
                   WHEN 'low' THEN 15
                   WHEN 'medium' THEN 50
                   WHEN 'high' THEN 85
                   ELSE 50
                 END
-          )), 0) / NULLIF(COALESCE(SUM(val),0),0) AS lcr,
+            )) / NULLIF(SUM(val), 0),
+            0
+          ) AS lcr,
           COALESCE(SUM(val),0) AS total_value,
           COALESCE(SUM(CASE WHEN LOWER(COALESCE(ms.internal_risk_rating,'medium')) = 'low' THEN val ELSE 0 END),0) AS low_value,
           COALESCE(SUM(CASE WHEN LOWER(COALESCE(ms.internal_risk_rating,'medium')) = 'medium' THEN val ELSE 0 END),0) AS medium_value,
