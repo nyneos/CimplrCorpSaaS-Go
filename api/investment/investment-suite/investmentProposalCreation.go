@@ -127,13 +127,15 @@ type ProposalDetailRequest struct {
 
 // EntityHoldingsRequest models the payload to fetch holdings for an entity
 type EntityHoldingsRequest struct {
-	EntityName string `json:"entity_name"`
+	EntityName string   `json:"entity_name"`
+	AMCNames   []string `json:"amc_names,omitempty"` // Optional filter for AMC names
 }
 
 // EntitySchemeHolding captures per-scheme holding details for an entity
 type EntitySchemeHolding struct {
 	SchemeID       string  `json:"scheme_id"`
 	SchemeName     string  `json:"scheme_name"`
+	AMCName        string  `json:"amc_name"`
 	CurrentHolding float64 `json:"current_holding"`
 }
 
@@ -1123,7 +1125,9 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		const holdingsSQL = `
+		
+		// Build query with optional AMC filter
+		holdingsSQL := `
 WITH snapshot_agg AS (
 	SELECT 
 		scheme_id,
@@ -1133,33 +1137,63 @@ WITH snapshot_agg AS (
 	WHERE entity_name = $1
 	GROUP BY scheme_id, scheme_name
 ),
+latest_scheme_audit AS (
+	SELECT DISTINCT ON (scheme_id)
+		scheme_id,
+		processing_status
+	FROM investment.auditactionscheme
+	ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
+),
+latest_amc_audit AS (
+	SELECT DISTINCT ON (amc_id)
+		amc_id,
+		processing_status
+	FROM investment.auditactionamc
+	ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
+),
 all_schemes AS (
 	SELECT DISTINCT
 		COALESCE(s.scheme_id, ms.scheme_id::text) AS scheme_id,
 		COALESCE(NULLIF(s.scheme_name,''), ms.scheme_name) AS scheme_name,
+		COALESCE(ms.amc_name, '') AS amc_name,
 		COALESCE(s.current_holding, 0) AS current_holding
 	FROM snapshot_agg s
 	FULL OUTER JOIN investment.masterscheme ms
 		ON ms.scheme_id::text = s.scheme_id OR ms.scheme_name = s.scheme_name
-	WHERE ms.status = 'Active'
-		AND EXISTS (
-			SELECT 1 FROM investment.auditactionscheme a
-			WHERE a.scheme_id = ms.scheme_id::text
-				AND a.processing_status = 'APPROVED'
-			ORDER BY a.requested_at DESC
-			LIMIT 1
-		)
+	JOIN latest_scheme_audit lsa ON lsa.scheme_id = ms.scheme_id::text
+	LEFT JOIN investment.masteramc ma ON ma.amc_name = ms.amc_name
+	LEFT JOIN latest_amc_audit laa ON laa.amc_id = ma.amc_id::text
+	WHERE UPPER(ms.status) = 'ACTIVE'
+		AND COALESCE(ms.is_deleted, false) = false
+		AND UPPER(lsa.processing_status) = 'APPROVED'
+		AND (ma.amc_id IS NULL OR (
+			UPPER(ma.status) = 'ACTIVE'
+			AND COALESCE(ma.is_deleted, false) = false
+			AND UPPER(laa.processing_status) = 'APPROVED'
+		))`
+		
+		args := []interface{}{entityName}
+		
+		// Add AMC filter if provided
+		if len(req.AMCNames) > 0 {
+			holdingsSQL += `
+		AND ms.amc_name = ANY($2)`
+			args = append(args, req.AMCNames)
+		}
+		
+		holdingsSQL += `
 )
 SELECT 
 	COALESCE(scheme_id, '') AS scheme_id,
 	COALESCE(scheme_name, '') AS scheme_name,
+	COALESCE(amc_name, '') AS amc_name,
 	COALESCE(current_holding, 0) AS current_holding
 FROM all_schemes
 WHERE scheme_name IS NOT NULL AND scheme_name != ''
-ORDER BY scheme_name
+ORDER BY amc_name, scheme_name
 `
 
-		rows, err := pool.Query(ctx, holdingsSQL, entityName)
+		rows, err := pool.Query(ctx, holdingsSQL, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch holdings: "+err.Error())
 			return
@@ -1169,7 +1203,7 @@ ORDER BY scheme_name
 		holdings := make([]EntitySchemeHolding, 0, 16)
 		for rows.Next() {
 			var rec EntitySchemeHolding
-			if err := rows.Scan(&rec.SchemeID, &rec.SchemeName, &rec.CurrentHolding); err != nil {
+			if err := rows.Scan(&rec.SchemeID, &rec.SchemeName, &rec.AMCName, &rec.CurrentHolding); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read holdings rows")
 				return
 			}

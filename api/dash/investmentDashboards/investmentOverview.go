@@ -146,15 +146,16 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// also fetch top 5 sellable holdings for breakdown (scheme_name, current_value)
 		topHoldings := make([]map[string]interface{}, 0)
 		thRows, thErr := pgxPool.Query(ctx, `
-			SELECT scheme_name, current_value
-			FROM investment.portfolio_snapshot
-			WHERE ($1::text IS NULL OR entity_name = $1)
-			  AND COALESCE(total_units,0) > 0
-			  AND COALESCE(current_value,0) > 0
-			ORDER BY current_value DESC
-			LIMIT 5
-		`, nullIfEmpty(req.EntityName))
+		SELECT scheme_name, current_value
+		FROM investment.portfolio_snapshot
+		WHERE ($1::text IS NULL OR entity_name = $1)
+		  AND COALESCE(total_units,0) > 0
+		  AND COALESCE(current_value,0) > 0
+		ORDER BY current_value DESC
+		LIMIT 5
+	`, nullIfEmpty(req.EntityName))
 		if thErr == nil {
+			defer thRows.Close()
 			for thRows.Next() {
 				var sname string
 				var val float64
@@ -162,10 +163,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					topHoldings = append(topHoldings, map[string]interface{}{"scheme_name": sname, "current_value": val})
 				}
 			}
-			thRows.Close()
-		}
-
-		// Keep previous text-match near-term assets as diagnostic (optional)
+		} // Keep previous text-match near-term assets as diagnostic (optional)
 		var nearTermAssets float64
 		_ = pgxPool.QueryRow(ctx, `
 			SELECT COALESCE(SUM(current_value),0)::float8
@@ -805,16 +803,14 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		defer amcRows.Close()
 		amcNames := make([]string, 0)
 		for amcRows.Next() {
 			var amc string
 			if err := amcRows.Scan(&amc); err == nil && amc != "" {
 				amcNames = append(amcNames, amc)
 			}
-		}
-		amcRows.Close()
-
-		// Step 2: Generate 12 months for FY (April to March)
+		} // Step 2: Generate 12 months for FY (April to March)
 		type monthInfo struct {
 			Label     string
 			EndDate   time.Time
@@ -958,7 +954,6 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			outRows = append(outRows, row)
 		}
-
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rows":         outRows,
 			"amc_names":    amcNames,
@@ -1391,6 +1386,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		defer txnRows.Close()
 
 		var flows []CashFlow
 		for txnRows.Next() {
@@ -1400,10 +1396,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			flows = append(flows, CashFlow{Date: dt, Amount: amt})
-		}
-		txnRows.Close()
-
-		// Add terminal value (current portfolio value)
+		} // Add terminal value (current portfolio value)
 		var terminalValue float64
 		tvQuery := `
 			SELECT COALESCE(SUM(current_value), 0)
@@ -1463,6 +1456,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		defer catRows.Close()
 
 		type CategoryData struct {
 			Category       string
@@ -1479,10 +1473,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			categories = append(categories, cd)
-		}
-		catRows.Close()
-
-		// 3) Calculate Benchmark Return
+		} // 3) Calculate Benchmark Return
 		// Use a proxy based on broad market return or stored benchmark data
 		// For now, we'll estimate using the weighted average of category benchmark returns
 		// In production, this should fetch actual NSE index data for the period
