@@ -3,6 +3,7 @@ package dash
 import (
 	"CimplrCorpSaas/api"
 	bankbalance "CimplrCorpSaas/api/dash/bank-balance"
+	benchmarks "CimplrCorpSaas/api/dash/benchmarks"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
 	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
 	"CimplrCorpSaas/api/dash/cfo"
@@ -109,6 +110,20 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/investment/overview/waterfall", api.BusinessUnitMiddleware(db)(investmentdashboards.GetAMCWaterfall(pgxPool)))
 	// Investment: Top performing assets (YTD)
 	mux.Handle("/dash/investment/overview/top-performing", api.BusinessUnitMiddleware(db)(investmentdashboards.GetTopPerformingAssets(pgxPool)))
+	// Investment: AUM Composition & Trend (stacked area by AMC)
+	mux.Handle("/dash/investment/overview/aum-composition", api.BusinessUnitMiddleware(db)(investmentdashboards.GetAUMCompositionTrend(pgxPool)))
+	// Benchmarks: NSE live data feeds (index list, graph series, market data)
+	mux.Handle("/dash/benchmarks/index-list", api.BusinessUnitMiddleware(db)(benchmarks.GetIndexList()))
+	mux.Handle("/dash/benchmarks/index-series", api.BusinessUnitMiddleware(db)(benchmarks.GetIndexSeries()))
+	mux.Handle("/dash/benchmarks/index-snapshot", api.BusinessUnitMiddleware(db)(benchmarks.GetIndexSnapshot()))
+	mux.Handle("/dash/benchmarks/index-constituents", api.BusinessUnitMiddleware(db)(benchmarks.GetIndexConstituents()))
+	mux.Handle("/dash/benchmarks/market-movers", api.BusinessUnitMiddleware(db)(benchmarks.GetMarketMovers()))
+	mux.Handle("/dash/benchmarks/market-status", api.BusinessUnitMiddleware(db)(benchmarks.GetMarketStatus()))
+	mux.Handle("/dash/benchmarks/market-heatmap", api.BusinessUnitMiddleware(db)(benchmarks.GetMarketHeatmap()))
+	mux.Handle("/dash/benchmarks/advance-declines", api.BusinessUnitMiddleware(db)(benchmarks.GetAdvanceDeclines()))
+	mux.Handle("/dash/benchmarks/marquee", api.BusinessUnitMiddleware(db)(benchmarks.GetMarqueeData()))
+	mux.Handle("/dash/benchmarks/52-week-hl", api.BusinessUnitMiddleware(db)(benchmarks.Get52WeekHighLow()))
+	mux.Handle("/dash/benchmarks/market-turnover", api.BusinessUnitMiddleware(db)(benchmarks.GetMarketTurnover()))
 	// Investment: Consolidated Risk Gauge (entity-level)
 	mux.Handle("/dash/investment/overview/consolidated", api.BusinessUnitMiddleware(db)(investmentdashboards.GetConsolidatedRisk(pgxPool)))
 	// Cashflow Forecast (monthly aggregated projections + KPIs)
