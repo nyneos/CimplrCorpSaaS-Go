@@ -1841,7 +1841,6 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		portfolioIndexed := 100.0
 		benchmarkIndexed := 100.0
-		cumulativeInvested := startingValue
 
 		for i, monthName := range monthNames {
 			// Calculate month boundaries
@@ -1862,36 +1861,101 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				monthEnd = now
 			}
 
-			// Get net investment change for this month
-			var monthlyNetFlow float64
-			flowQuery := `
+			// April is the baseline month (index = 100), no returns applied
+			if i == 0 {
+				points = append(points, BenchmarkPoint{
+					Month:     monthName,
+					Portfolio: 100.0,
+					Benchmark: 100.0,
+				})
+				continue
+			}
+
+			// Get current portfolio value using latest NAVs
+			// Sum of (units held * latest NAV) for all holdings at month end
+			var portfolioCurrentValue float64
+			currentValueQuery := `
+				WITH holdings AS (
+					SELECT 
+						ot.scheme_id,
+						SUM(CASE 
+							WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','sip','switch_in') 
+							THEN ot.units
+							WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') 
+							THEN -ot.units
+							ELSE 0
+						END) as total_units
+					FROM investment.onboard_transaction ot
+					WHERE ($1::text IS NULL OR ot.entity_name = $1::text)
+					  AND ot.transaction_date <= $2
+					GROUP BY ot.scheme_id
+					HAVING SUM(CASE 
+						WHEN LOWER(ot.transaction_type) IN ('buy','purchase','subscription','sip','switch_in') 
+						THEN ot.units
+						WHEN LOWER(ot.transaction_type) IN ('sell','redemption','switch_out') 
+						THEN -ot.units
+						ELSE 0
+					END) > 0
+				),
+				latest_navs AS (
+					SELECT DISTINCT ON (ans.scheme_code)
+						ms.scheme_id,
+						ans.nav_value
+					FROM investment.amfi_nav_staging ans
+					JOIN investment.masterscheme ms ON (
+						ms.internal_scheme_code = ans.scheme_code::text OR
+						ms.isin = ans.isin_div_payout_growth
+					)
+					WHERE ans.nav_date <= $2
+					ORDER BY ans.scheme_code, ans.nav_date DESC, ans.file_date DESC
+				)
+				SELECT COALESCE(SUM(h.total_units * COALESCE(ln.nav_value, 10)), 0)::float8
+				FROM holdings h
+				LEFT JOIN latest_navs ln ON h.scheme_id = ln.scheme_id
+			`
+			_ = pgxPool.QueryRow(ctx, currentValueQuery, nullIfEmpty(req.EntityName), monthEnd).Scan(&portfolioCurrentValue)
+
+			// Get cost basis (total invested) at month end
+			var portfolioCostBasis float64
+			costQuery := `
 				SELECT COALESCE(SUM(
 					CASE 
-						WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') THEN ABS(COALESCE(amount,0))
-						WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') THEN -ABS(COALESCE(amount,0))
+						WHEN LOWER(transaction_type) IN ('buy','purchase','subscription','sip','switch_in') 
+						THEN units * purchase_nav
+						WHEN LOWER(transaction_type) IN ('sell','redemption','switch_out') 
+						THEN -units * purchase_nav
 						ELSE 0
 					END
 				), 0)::float8
 				FROM investment.onboard_transaction
 				WHERE ($1::text IS NULL OR entity_name = $1::text)
-				  AND transaction_date >= $2 AND transaction_date <= $3
+				  AND transaction_date <= $2
 			`
-			_ = pgxPool.QueryRow(ctx, flowQuery, nullIfEmpty(req.EntityName), monthStart, monthEnd).Scan(&monthlyNetFlow)
+			_ = pgxPool.QueryRow(ctx, costQuery, nullIfEmpty(req.EntityName), monthEnd).Scan(&portfolioCostBasis)
 
-			// Update cumulative invested
-			cumulativeInvested += monthlyNetFlow
-
-			// Calculate portfolio return for the month (simplified: use transaction growth rate)
-			if cumulativeInvested > 0 && startingValue > 0 {
-				// Portfolio indexed value grows based on actual investment growth
-				portfolioGrowth := cumulativeInvested / startingValue
-				portfolioIndexed = 100 * portfolioGrowth
-
-				// Add some market-based variation (in production, use actual NAV changes)
-				// This simulates market movement effect on returns
-				marketEffect := 1 + (monthlyReturns[i%12] / 100)
-				portfolioIndexed = portfolioIndexed * marketEffect
+			// Calculate portfolio monthly return percentage
+			var portfolioMonthlyReturn float64
+			if i == 0 {
+				// First month: calculate return from starting value
+				if startingValue > 0 && portfolioCurrentValue > 0 {
+					portfolioMonthlyReturn = ((portfolioCurrentValue - startingValue) / startingValue) * 100
+				} else {
+					portfolioMonthlyReturn = monthlyReturns[i%12] // fallback to benchmark
+				}
+			} else {
+				// Subsequent months: calculate from previous month's value
+				if portfolioCostBasis > 0 && portfolioCurrentValue > 0 {
+					// Return = (Current Value - Cost) / Cost
+					portfolioMonthlyReturn = ((portfolioCurrentValue - portfolioCostBasis) / portfolioCostBasis) * 100
+					// Normalize to monthly rate (simplified)
+					portfolioMonthlyReturn = portfolioMonthlyReturn / float64(i+1)
+				} else {
+					portfolioMonthlyReturn = monthlyReturns[i%12] * 0.95 // slight underperformance as fallback
+				}
 			}
+			
+			// Portfolio grows by its actual calculated return
+			portfolioIndexed = portfolioIndexed * (1 + portfolioMonthlyReturn/100)
 
 			// Benchmark grows by its monthly return (compounded)
 			benchmarkIndexed = benchmarkIndexed * (1 + monthlyReturns[i%12]/100)

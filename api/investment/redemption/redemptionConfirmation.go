@@ -60,9 +60,17 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, "redemption_id is required")
 			return
 		}
-		if req.ActualNAV <= 0 || req.ActualUnits <= 0 || req.GrossProceeds <= 0 || req.NetCredited <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "actual_nav, actual_units, gross_proceeds, and net_credited must be greater than 0")
+		if req.ActualNAV <= 0 || req.ActualUnits <= 0 || req.GrossProceeds <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "actual_nav, actual_units, and gross_proceeds must be greater than 0")
 			return
+		}
+
+		// Calculate net_credited if not provided
+		if req.NetCredited <= 0 {
+			req.NetCredited = req.GrossProceeds - req.ExitLoad - req.TDS - req.STTCharges
+			if req.NetCredited < 0 {
+				req.NetCredited = 0
+			}
 		}
 
 		userEmail := ""
@@ -218,9 +226,17 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "redemption_id is required"})
 				continue
 			}
-			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 || row.NetCredited <= 0 {
-				results = append(results, map[string]interface{}{"success": false, "error": "actual_nav, actual_units, gross_proceeds, net_credited must be > 0"})
+			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 {
+				results = append(results, map[string]interface{}{"success": false, "error": "actual_nav, actual_units, and gross_proceeds must be > 0"})
 				continue
+			}
+
+			// Calculate net_credited if not provided
+			if row.NetCredited <= 0 {
+				row.NetCredited = row.GrossProceeds - row.ExitLoad - row.TDS - row.STTCharges
+				if row.NetCredited < 0 {
+					row.NetCredited = 0
+				}
 			}
 
 			tx, err := pgxPool.Begin(ctx)
@@ -985,6 +1001,31 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.auditactionredemptionconfirmation
 				GROUP BY redemption_confirm_id
+			),
+			resolved_folio AS (
+				SELECT DISTINCT ON (i.redemption_id)
+					i.redemption_id,
+					f.folio_number,
+					f.folio_id::text AS folio_id_text
+				FROM investment.redemption_initiation i
+				LEFT JOIN investment.masterfolio f ON (
+					(f.folio_id::text = i.folio_id) OR 
+					(i.folio_id IS NOT NULL AND f.folio_number = i.folio_id)
+				)
+				ORDER BY i.redemption_id, f.folio_id
+			),
+			resolved_demat AS (
+				SELECT DISTINCT ON (i.redemption_id)
+					i.redemption_id,
+					d.demat_account_number,
+					d.demat_id::text AS demat_id_text
+				FROM investment.redemption_initiation i
+				LEFT JOIN investment.masterdemataccount d ON (
+					(d.demat_id::text = i.demat_id) OR 
+					(i.demat_id IS NOT NULL AND d.default_settlement_account = i.demat_id) OR 
+					(i.demat_id IS NOT NULL AND d.demat_account_number = i.demat_id)
+				)
+				ORDER BY i.redemption_id, d.demat_id
 			)
 			SELECT
 				m.redemption_confirm_id,
@@ -1027,10 +1068,10 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 				COALESCE(s.internal_scheme_code,'') AS initiation_scheme_code,
 				COALESCE(s.isin,'') AS initiation_isin,
 				COALESCE(s.amc_name,'') AS initiation_amc_name,
-				COALESCE(f.folio_number,'') AS initiation_folio_number,
-				COALESCE(f.folio_id::text,'') AS initiation_folio_id,
-				COALESCE(d.demat_account_number,'') AS initiation_demat_number,
-				COALESCE(d.demat_id::text,'') AS initiation_demat_id,
+				COALESCE(rf.folio_number,'') AS initiation_folio_number,
+				COALESCE(rf.folio_id_text,'') AS initiation_folio_id,
+				COALESCE(rd.demat_account_number,'') AS initiation_demat_number,
+				COALESCE(rd.demat_id_text,'') AS initiation_demat_id,
 				COALESCE(i.by_amount,0) AS initiation_by_amount,
 				COALESCE(i.by_units,0) AS initiation_by_units,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -1059,12 +1100,10 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 			 OR s.internal_scheme_code = i.scheme_id
 			 OR s.isin = i.scheme_id
 			)
-			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
-			LEFT JOIN investment.masterdemataccount d ON (
-				d.demat_id::text = i.demat_id OR d.default_settlement_account = i.demat_id OR d.demat_account_number = i.demat_id
-			)
+			LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
+			LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
 			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY m.updated_at DESC, m.redemption_confirm_id;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1434,7 +1473,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			FROM unblocking_allocation ua
 			WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
 		`
-		
+
 		if _, err := tx.Exec(ctx, unblockQuery,
 			cd.SchemeIdentifier,
 			cd.FolioIdentifier,

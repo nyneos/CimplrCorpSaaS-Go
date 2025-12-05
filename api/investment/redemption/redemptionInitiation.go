@@ -178,7 +178,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM blocking_allocation ba
 				WHERE ot.id = ba.id AND ba.units_to_block_here > 0
 			`
-			if _, err := tx.Exec(ctx, updateBlockedUnitsQuery, 
+			if _, err := tx.Exec(ctx, updateBlockedUnitsQuery,
 				req.SchemeID,
 				nullIfEmptyString(req.FolioID),
 				nullIfEmptyString(req.DematID),
@@ -1301,11 +1301,13 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-	q := `
+		q := `
 		WITH latest AS (
 			SELECT DISTINCT ON (redemption_id)
 				redemption_id,
-				processing_status
+				processing_status,
+				requested_at,
+				checker_at
 			FROM investment.auditactionredemption
 			ORDER BY redemption_id, requested_at DESC
 		),
@@ -1370,7 +1372,7 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			AND m.redemption_id NOT IN (
 				SELECT redemption_id FROM investment.redemption_confirmation
 			)
-		ORDER BY m.requested_date DESC;
+		ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 	`
 
 		rows, err := pgxPool.Query(ctx, q)
