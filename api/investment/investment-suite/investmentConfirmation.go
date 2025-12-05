@@ -338,7 +338,7 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"variance_nav":          8,
 			"variance_units":        9,
 			"status":                10,
-			"resolution_comment":   11,
+			"resolution_comment":    11,
 			"resolution_variance":   12,
 		}
 
@@ -462,7 +462,7 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"variance_nav":          8,
 				"variance_units":        9,
 				"status":                10,
-				"resolution_comment":   11,
+				"resolution_comment":    11,
 				"resolution_variance":   12,
 			}
 
@@ -881,6 +881,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_stamp_duty,
 				m.net_amount,
 				m.old_net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+				(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
 				m.actual_nav,
 				m.old_actual_nav,
 				m.actual_allotted_units,
@@ -945,7 +947,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				d.demat_account_number = i.demat_id
 			)
 			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY m.nav_date DESC, m.initiation_id;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -963,6 +965,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"allotted_units": true, "old_allotted_units": true,
 			"stamp_duty": true, "old_stamp_duty": true,
 			"net_amount": true, "old_net_amount": true,
+			"gross_amount": true, "old_gross_amount": true,
 			"actual_nav": true, "old_actual_nav": true,
 			"actual_allotted_units": true, "old_actual_allotted_units": true,
 			"variance_nav": true, "old_variance_nav": true,
@@ -1063,6 +1066,8 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_stamp_duty,
 				m.net_amount,
 				m.old_net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+				(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
 				m.actual_nav,
 				m.old_actual_nav,
 				m.actual_allotted_units,
@@ -1216,6 +1221,7 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.allotted_units,
 				m.stamp_duty,
 				m.net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
 				m.actual_nav,
 				m.actual_allotted_units,
 				m.variance_nav,
@@ -1369,32 +1375,32 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	defer rows.Close()
 
 	type ConfirmationData struct {
-		ConfirmationID       string
-		InitiationID         string
-		NAVDate              time.Time
-		NAV                  float64
-		AllottedUnits        float64
-		ActualNAV            float64
-		ActualAllottedUnits  float64
-		StampDuty            float64
-		NetAmount            float64
-		Status               string
-		TransactionDate      time.Time
-		EntityName           string
-		SchemeIdentifier     string  // String from initiation (could be name, code, isin, etc)
-		FolioIdentifier      *string // String from initiation (could be folio_number or folio_id)
-		DematIdentifier      *string // String from initiation (could be demat_account_number or demat_id)
-		InitiationAmount     float64
-		ResolvedSchemeID     *string // Actual scheme_id from masterscheme (string/varchar)
-		SchemeName           *string
-		ISIN                 *string
-		InternalSchemeCode   *string
-		ResolvedFolioID      *string // Actual folio_id from masterfolio (string/varchar)
-		FolioNumber          *string
-		FolioEntityName      *string
-		ResolvedDematID      *string // Actual demat_id from masterdemataccount (string/varchar)
-		DematAccountNumber   *string
-		DematEntityName      *string
+		ConfirmationID      string
+		InitiationID        string
+		NAVDate             time.Time
+		NAV                 float64
+		AllottedUnits       float64
+		ActualNAV           float64
+		ActualAllottedUnits float64
+		StampDuty           float64
+		NetAmount           float64
+		Status              string
+		TransactionDate     time.Time
+		EntityName          string
+		SchemeIdentifier    string  // String from initiation (could be name, code, isin, etc)
+		FolioIdentifier     *string // String from initiation (could be folio_number or folio_id)
+		DematIdentifier     *string // String from initiation (could be demat_account_number or demat_id)
+		InitiationAmount    float64
+		ResolvedSchemeID    *string // Actual scheme_id from masterscheme (string/varchar)
+		SchemeName          *string
+		ISIN                *string
+		InternalSchemeCode  *string
+		ResolvedFolioID     *string // Actual folio_id from masterfolio (string/varchar)
+		FolioNumber         *string
+		FolioEntityName     *string
+		ResolvedDematID     *string // Actual demat_id from masterdemataccount (string/varchar)
+		DematAccountNumber  *string
+		DematEntityName     *string
 	}
 
 	confirmations := []ConfirmationData{}
@@ -1448,7 +1454,7 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 
 		// Validate actual values are present - do not fall back to expected values
 		if cd.ActualAllottedUnits <= 0 || cd.ActualNAV <= 0 {
-			return nil, fmt.Errorf("confirmation %s missing actual values: actual_allotted_units=%f, actual_nav=%f", 
+			return nil, fmt.Errorf("confirmation %s missing actual values: actual_allotted_units=%f, actual_nav=%f",
 				cd.ConfirmationID, cd.ActualAllottedUnits, cd.ActualNAV)
 		}
 
@@ -1472,7 +1478,7 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			cd.ResolvedFolioID,     // Use actual folio_id (string)
 			cd.ResolvedDematID,     // Use actual demat_id (string)
 			cd.InternalSchemeCode,
-			entityName,             // Entity from folio/demat or initiation
+			entityName, // Entity from folio/demat or initiation
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
