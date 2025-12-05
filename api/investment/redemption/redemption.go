@@ -133,7 +133,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Aggregate holdings by entity -> scheme (resolved by scheme_id/internal code/isin) and folio/demat
 		// We compute net units = sum(buys) - sum(sells) but compute avg_nav and invested amount from buys only.
-		// blocked_units: Sum units from redemption_initiation with PENDING_APPROVAL/APPROVED status
+		// blocked_units: Sum directly from onboard_transaction.blocked_units field
 		aggQuery := `
 			WITH latest_snapshots AS (
 				SELECT DISTINCT ON (entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number))
@@ -147,6 +147,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					t.id, t.batch_id, t.transaction_date, t.transaction_type, t.scheme_internal_code,
 					t.folio_number, t.demat_acc_number, t.amount, t.units, t.nav,
 					t.scheme_id, t.folio_id, t.demat_id, t.created_at,
+					COALESCE(t.blocked_units, 0) AS blocked_units,
 					COALESCE(t.entity_name, ls.entity_name) AS entity_name,
 					ms.scheme_name AS ms_scheme_name, ms.isin AS ms_isin, ms.scheme_id AS ms_scheme_id, ms.internal_scheme_code AS ms_internal_code
 				FROM investment.onboard_transaction t
@@ -163,31 +164,6 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				-- filter by entity from either transaction or snapshot
 				WHERE (t.entity_name = $1 OR ls.entity_name = $1)
 					AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
-			),
-			-- Calculate blocked units from pending/approved redemption initiations
-			blocked_units_cte AS (
-				SELECT
-					ri.entity_name,
-					ri.scheme_id AS ri_scheme_id,
-					ri.folio_id AS ri_folio_id,
-					ri.demat_id AS ri_demat_id,
-					COALESCE(SUM(ri.by_units), 0) AS blocked_units
-				FROM investment.redemption_initiation ri
-				WHERE ri.entity_name = $1
-					AND ri.is_deleted = false
-					AND ri.by_units IS NOT NULL
-					AND EXISTS (
-						-- Check latest audit status is PENDING_APPROVAL or APPROVED
-						SELECT 1 FROM investment.auditactionredemption aar
-						WHERE aar.redemption_id = ri.redemption_id
-							AND aar.processing_status IN ('PENDING_APPROVAL', 'APPROVED')
-							AND aar.action_id = (
-								SELECT action_id FROM investment.auditactionredemption
-								WHERE redemption_id = ri.redemption_id
-								ORDER BY requested_at DESC LIMIT 1
-							)
-					)
-				GROUP BY ri.entity_name, ri.scheme_id, ri.folio_id, ri.demat_id
 			)
 			SELECT
 				ot.entity_name,
@@ -198,11 +174,10 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.ms_isin,'') AS isin,
 				COALESCE(ot.folio_id, '') AS folio_id,
 				COALESCE(ot.demat_id, '') AS demat_id,
-				-- net units: buys (positive) minus sells (absolute)
-				SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
-					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END) AS total_units,
-				-- blocked units from matching redemption initiations
-				COALESCE(bu.blocked_units, 0) AS blocked_units,
+				-- available units: (buys - sells) minus blocked units
+				(SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.blocked_units,0) ELSE 0 END)) AS units,
 				-- avg_nav based only on buy transactions
 				CASE WHEN SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)=0 THEN 0
 					ELSE SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.nav,0)*COALESCE(ot.units,0) ELSE 0 END)
@@ -211,33 +186,12 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			-- invested amount based only on buy transactions
 			SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.amount,0) ELSE 0 END) AS total_invested_amount
 			FROM ot
-			LEFT JOIN blocked_units_cte bu ON (
-				bu.entity_name = ot.entity_name
-				-- Match scheme: try scheme_id, internal_code, or scheme_name
-				AND (
-					bu.ri_scheme_id = ot.scheme_id
-					OR bu.ri_scheme_id = ot.scheme_internal_code
-					OR bu.ri_scheme_id = ot.ms_scheme_id
-					OR bu.ri_scheme_id = ot.ms_internal_code
-					OR bu.ri_scheme_id = ot.ms_scheme_name
-				)
-				-- Match folio/demat: folio_id stores folio_number values
-				AND (
-					(bu.ri_folio_id IS NOT NULL AND (
-						bu.ri_folio_id = ot.folio_number OR bu.ri_folio_id = ot.folio_id::text
-					))
-					OR (bu.ri_demat_id IS NOT NULL AND (
-						bu.ri_demat_id = ot.demat_acc_number OR bu.ri_demat_id = ot.demat_id::text
-					))
-				)
-			)
 			GROUP BY ot.entity_name, COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''),
 				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id), 
 				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code), 
 				COALESCE(ot.ms_isin,''),
 				COALESCE(ot.folio_id, ''),
-				COALESCE(ot.demat_id, ''),
-				bu.blocked_units
+				COALESCE(ot.demat_id, '')
 			HAVING (SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
 					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)) > 0
 			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
@@ -253,16 +207,15 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		holdings := []PortfolioHolding{}
 		for rows.Next() {
 			var entityName, folioNumber, dematAcc, schemeID, schemeName, isin, folioIDStr, dematIDStr string
-			var totalUnits, blockedUnits, avgNav, totalInvested float64
-			if err := rows.Scan(&entityName, &folioNumber, &dematAcc, &schemeID, &schemeName, &isin, &folioIDStr, &dematIDStr, &totalUnits, &blockedUnits, &avgNav, &totalInvested); err != nil {
+			var units, avgNav, totalInvested float64
+			if err := rows.Scan(&entityName, &folioNumber, &dematAcc, &schemeID, &schemeName, &isin, &folioIDStr, &dematIDStr, &units, &avgNav, &totalInvested); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
 				return
 			}
 
-			// Calculate available units
-			availableUnits := totalUnits - blockedUnits
-			if availableUnits < 0 {
-				availableUnits = 0
+			// Ensure units are not negative
+			if units < 0 {
+				units = 0
 			}
 
 			// Fetch latest snapshot for current_nav if available
@@ -315,14 +268,14 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SchemeID:            schemeID,
 				SchemeName:          schemeName,
 				ISIN:                nil,
-				TotalUnits:          totalUnits,
-				BlockedUnits:        blockedUnits,
-				AvailableUnits:      availableUnits,
+				TotalUnits:          units,
+				BlockedUnits:        0,
+				AvailableUnits:      units,
 				AvgNAV:              avgNav,
 				CurrentNAV:          currentNav,
-				CurrentValue:        totalUnits * currentNav,
+				CurrentValue:        units * currentNav,
 				TotalInvestedAmount: totalInvested,
-				GainLoss:            (totalUnits * currentNav) - totalInvested,
+				GainLoss:            (units * currentNav) - totalInvested,
 				GainLossPercent:     0,
 				CreatedAt:           "",
 				Transactions:        []TransactionDetail{},
