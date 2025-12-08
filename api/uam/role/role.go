@@ -55,23 +55,16 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
-		// Insert role (no business_unit_name)
-		_, err := db.Exec(
-			`INSERT INTO roles (name, rolecode, description, office_start_time_ist, office_end_time_ist, status, created_by) VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
+		// Insert role and return the inserted row
+		rows, err := db.Query(
+			`INSERT INTO roles (name, rolecode, description, office_start_time_ist, office_end_time_ist, status, created_by)
+			 VALUES ($1, $2, $3, $4, $5, 'pending', $6) RETURNING *`,
 			req.Name,
 			req.RoleCode,
 			req.Description,
 			req.OfficeStartTimeIST,
 			req.OfficeEndTimeIST,
 			createdBy,
-		)
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		// Use sql.Rows to get columns and scan
-		rows, err := db.Query(
-			`SELECT * FROM roles WHERE id = (SELECT currval(pg_get_serial_sequence('roles','id')))`,
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -192,18 +185,18 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			}
 			// Map fields as needed
 			role := map[string]interface{}{
-				"id":           rMap["id"],
-				"name":         rMap["name"],
-				"role_code":    rMap["role_code"],
-				"description":  rMap["description"],
-				"startTime":    rMap["office_start_time_ist"],
-				"endTime":      rMap["office_end_time_ist"],
-				"createdAt":    rMap["created_at"],
-				"status":       rMap["status"],
-				"createdBy":    rMap["created_by"],
+				"id":                      rMap["id"],
+				"name":                    rMap["name"],
+				"role_code":               rMap["role_code"],
+				"description":             rMap["description"],
+				"startTime":               rMap["office_start_time_ist"],
+				"endTime":                 rMap["office_end_time_ist"],
+				"createdAt":               rMap["created_at"],
+				"status":                  rMap["status"],
+				"createdBy":               rMap["created_by"],
 				"roles_permission_status": rMap["roles_permission_status"],
-				"approvedBy":   rMap["approved_by"],
-				"approveddate": rMap["approved_at"],
+				"approvedBy":              rMap["approved_by"],
+				"approveddate":            rMap["approved_at"],
 			}
 			roleData = append(roleData, role)
 		}
@@ -554,18 +547,18 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 				rMap[col] = vals[i]
 			}
 			role := map[string]interface{}{
-				"id":           rMap["id"],
-				"name":         rMap["name"],
-				"role_code":    rMap["role_code"],
-				"description":  rMap["description"],
-				"startTime":    rMap["office_start_time_ist"],
-				"endTime":      rMap["office_end_time_ist"],
-				"createdAt":    rMap["created_at"],
-				"status":       rMap["status"],
-				"createdBy":    rMap["created_by"],
+				"id":                      rMap["id"],
+				"name":                    rMap["name"],
+				"role_code":               rMap["role_code"],
+				"description":             rMap["description"],
+				"startTime":               rMap["office_start_time_ist"],
+				"endTime":                 rMap["office_end_time_ist"],
+				"createdAt":               rMap["created_at"],
+				"status":                  rMap["status"],
+				"createdBy":               rMap["created_by"],
 				"roles_permission_status": rMap["roles_permission_status"],
-				"approvedBy":   rMap["approved_by"],
-				"approveddate": rMap["approved_at"],
+				"approvedBy":              rMap["approved_by"],
+				"approveddate":            rMap["approved_at"],
 			}
 			roleData = append(roleData, role)
 		}
@@ -670,4 +663,3 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
-
