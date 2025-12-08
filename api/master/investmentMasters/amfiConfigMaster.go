@@ -106,19 +106,26 @@ func GetDistinctAMCNamesFromAMFI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Exclude AMCs that exist in masteramc and are deleted
 		query := `
 			WITH amfi_amcs AS (
-				SELECT DISTINCT amc_name
-				FROM investment.amfi_scheme_master_staging
-				WHERE amc_name IS NOT NULL AND amc_name <> ''
-				UNION
-				SELECT DISTINCT amc_name
-				FROM investment.amfi_nav_staging
-				WHERE amc_name IS NOT NULL AND amc_name <> ''
-			)
-			SELECT a.amc_name
-			FROM amfi_amcs a
-			LEFT JOIN investment.masteramc m ON m.amc_name = a.amc_name
-			WHERE m.amc_id IS NULL OR COALESCE(m.is_deleted, false) = true
-			ORDER BY a.amc_name;
+    SELECT DISTINCT amc_name
+    FROM investment.amfi_scheme_master_staging
+    WHERE amc_name IS NOT NULL AND amc_name <> ''
+
+    UNION
+
+    SELECT DISTINCT amc_name
+    FROM investment.amfi_nav_staging
+    WHERE amc_name IS NOT NULL AND amc_name <> ''
+)
+SELECT a.amc_name
+FROM amfi_amcs a
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM investment.masteramc m
+    WHERE m.amc_name = a.amc_name
+      AND COALESCE(m.is_deleted, false) = false
+)
+ORDER BY a.amc_name;
+
 		`
 
 		rows, err := pgxPool.Query(ctx, query)
