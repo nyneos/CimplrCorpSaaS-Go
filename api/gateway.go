@@ -310,7 +310,7 @@ func StartGateway() {
 	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/cimplrapigateway/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("API Gateway is active"))
 	})
