@@ -13,9 +13,37 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
+
+// CORS and common header constants
+const (
+	headerAccessControlAllowOrigin  = "Access-Control-Allow-Origin"
+	headerAccessControlAllowMethods = "Access-Control-Allow-Methods"
+	headerAccessControlAllowHeaders = "Access-Control-Allow-Headers"
+	headerContentType               = "Content-Type"
+	contentTypeJSON                 = "application/json"
+	allowOriginAll                  = "*"
+	allowMethodsAll                 = "GET, POST, PUT, DELETE, OPTIONS"
+	allowHeadersAll                 = "Content-Type, Authorization"
+	errAuthServiceUnavailable       = "Auth service unavailable"
+	errMethodNotAllowed             = "Method Not Allowed"
+)
+
+// stripPathPrefix removes /cimplrapigateway from the request path before routing
+func stripPathPrefix(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/cimplrapigateway/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/cimplrapigateway")
+			if !strings.HasPrefix(r.URL.Path, "/") {
+				r.URL.Path = "/" + r.URL.Path
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // Global reference to AuthService (set from main or manager)
 var (
@@ -39,9 +67,9 @@ func extractClientIP(r *http.Request) string {
 
 func withCORS(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+		w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
+		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -52,18 +80,18 @@ func withCORS(h http.HandlerFunc) http.HandlerFunc {
 
 func GetSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	if authService == nil {
-		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
+		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
 	sessions := authService.GetActiveSessions()
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	json.NewEncoder(w).Encode(sessions)
 }
 
 // GetSessionByUserIDHandler returns session info for a specific user_id
 func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
@@ -75,7 +103,7 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if authService == nil {
-		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
+		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
 	sessions := authService.GetActiveSessions()
@@ -85,14 +113,14 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 			found = append(found, s)
 		}
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "sessions": found})
 }
 
 // LoginHandler handles POST /auth/login
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
@@ -104,7 +132,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if authService == nil {
-		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
+		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
 	clientIP := extractClientIP(r)
@@ -112,12 +140,12 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Log and return JSON error to aid debugging (temporary)
 		log.Printf("Login failed for %s from %s: %v", req.Username, clientIP, err)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	json.NewEncoder(w).Encode(session)
 }
 
@@ -125,7 +153,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 // LogoutHandler handles POST /auth/logout
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
 	var raw map[string]interface{}
@@ -149,7 +177,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if authService == nil {
-		http.Error(w, "Auth service unavailable", http.StatusInternalServerError)
+		http.Error(w, errAuthServiceUnavailable, http.StatusInternalServerError)
 		return
 	}
 	err := authService.Logout(userID)
@@ -166,9 +194,9 @@ func createReverseProxy(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Handle preflight OPTIONS at the gateway
 		if r.Method == "OPTIONS" {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+			w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
+			w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -182,9 +210,9 @@ func createReverseProxy(target string) http.HandlerFunc {
 
 		// Set CORS headers ONLY in ModifyResponse for proxied requests
 		proxy.ModifyResponse = func(resp *http.Response) error {
-			resp.Header.Set("Access-Control-Allow-Origin", "*")
-			resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			resp.Header.Set(headerAccessControlAllowOrigin, allowOriginAll)
+			resp.Header.Set(headerAccessControlAllowMethods, allowMethodsAll)
+			resp.Header.Set(headerAccessControlAllowHeaders, allowHeadersAll)
 			return nil
 		}
 
@@ -284,7 +312,7 @@ func StartGateway() {
 			return
 		}
 		dashboard.SendForceLogout(req.UserID, req.Reason, req.NewIP)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		w.Write([]byte(`{"ok":true}`))
 	}))
 
@@ -310,7 +338,7 @@ func StartGateway() {
 	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 
-	mux.HandleFunc("/cimplrapigateway/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("API Gateway is active"))
 	})
@@ -334,7 +362,8 @@ func StartGateway() {
 	}
 	log.Printf("API Gateway started on :%s", port)
 	// err := http.ListenAndServe(":"+port, mux)
-	err := http.ListenAndServe(":"+port, LoggingMiddleware(mux))
+	handler := stripPathPrefix(LoggingMiddleware(mux))
+	err := http.ListenAndServe(":"+port, handler)
 
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)

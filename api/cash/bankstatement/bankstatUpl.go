@@ -66,7 +66,6 @@ func ifaceToTimeString(v interface{}) string {
 	}
 }
 
-
 func getFileExt(filename string) string {
 	return strings.ToLower(filepath.Ext(filename))
 }
@@ -91,11 +90,70 @@ func parseBankStatementFile(file multipart.File, ext string) ([][]string, error)
 	return nil, errors.New("unsupported file type")
 }
 
-
 func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// Helper to normalize date strings to YYYY-MM-DD
+	normalizeDate := func(dateStr string) string {
+		dateStr = strings.TrimSpace(dateStr)
+		if dateStr == "" {
+			return ""
+		}
+		layouts := []string{
+			"2006-01-02",
+			"02/01/06",
+			"02/01/2006",
+			"02-01-2006",
+			"01/02/2006",
+			"01-02-2006",
+			"2006/01/02",
+			"2006.01.02",
+			"02.01.2006",
+			"01.02.2006",
+			"02-Jan-2006",
+			"02-Jan-06",
+			"2006/1/2",
+			"2/1/2006",
+			"2-1-2006",
+			"1/2/2006",
+			"1-2-2006",
+		}
+		for _, layout := range layouts {
+			if t, err := time.Parse(layout, dateStr); err == nil {
+				return t.Format("2006-01-02")
+			}
+		}
+		// Try to handle 2-digit year (e.g., 10/12/25, 10-12-25, 10.12.25)
+		var day, month, year string
+		var sep string
+		if strings.Count(dateStr, "/") == 2 {
+			sep = "/"
+		} else if strings.Count(dateStr, "-") == 2 {
+			sep = "-"
+		} else if strings.Count(dateStr, ".") == 2 {
+			sep = "."
+		}
+		if sep != "" {
+			parts := strings.Split(dateStr, sep)
+			if len(parts) == 3 {
+				day, month, year = parts[0], parts[1], parts[2]
+				if len(year) == 2 {
+					// Assume 20xx for years 00-49, 19xx for 50-99
+					if year >= "00" && year <= "49" {
+						year = "20" + year
+					} else {
+						year = "19" + year
+					}
+				}
+				try := year + "-" + month + "-" + day
+				if t, err := time.Parse("2006-01-02", try); err == nil {
+					return t.Format("2006-01-02")
+				}
+			}
+		}
+		return "" // fallback: return empty string for invalid date
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		
+
 		userID := ""
 		if r.Header.Get("Content-Type") == "application/json" {
 			var req struct {
@@ -155,15 +213,27 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			batchID := uuid.New().String()
 			batchIDs = append(batchIDs, batchID)
 			colCount := len(headerRow)
+			// Identify date columns
+			dateCols := map[string]bool{
+				"transactiondate":     true,
+				"statementdate":       true,
+				"old_statementdate":   true,
+				"old_transactiondate": true,
+			}
 			copyRows := make([][]interface{}, len(dataRows))
 			for i, row := range dataRows {
 				vals := make([]interface{}, colCount+1)
 				vals[0] = batchID
 				for j := 0; j < colCount; j++ {
+					val := ""
 					if j < len(row) {
-						vals[j+1] = row[j]
+						val = row[j]
+					}
+					colName := strings.ToLower(headerRow[j])
+					if dateCols[colName] {
+						vals[j+1] = normalizeDate(val)
 					} else {
-						vals[j+1] = nil
+						vals[j+1] = val
 					}
 				}
 				copyRows[i] = vals
@@ -229,6 +299,71 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					fmt.Println("audit insert error:", aerr)
 				}
 			}
+			// --- Begin: Insert transactions and update balances ---
+			// Build header index for easy lookup
+			headerIndex := make(map[string]int)
+			for idx, col := range headerRow {
+				headerIndex[strings.ToLower(col)] = idx
+			}
+			var latestClosingBalance string
+			var accountNo string
+			for i, row := range dataRows {
+				// Defensive: check length
+				if len(row) < colCount {
+					continue
+				}
+				txnDate := ""
+				if idx, ok := headerIndex["transactiondate"]; ok && idx < len(row) {
+					txnDate = row[idx]
+				}
+				desc := ""
+				if idx, ok := headerIndex["description"]; ok && idx < len(row) {
+					desc = row[idx]
+				}
+				debit := ""
+				if idx, ok := headerIndex["debitamount"]; ok && idx < len(row) {
+					debit = row[idx]
+				}
+				credit := ""
+				if idx, ok := headerIndex["creditamount"]; ok && idx < len(row) {
+					credit = row[idx]
+				}
+				bal := ""
+				if idx, ok := headerIndex["balanceaftertxn"]; ok && idx < len(row) {
+					bal = row[idx]
+				}
+				accNo := ""
+				if idx, ok := headerIndex["account_number"]; ok && idx < len(row) {
+					accNo = row[idx]
+				}
+				// Save last closing balance and account number for update
+				if i == len(dataRows)-1 {
+					latestClosingBalance = bal
+					accountNo = accNo
+				}
+				// Insert transaction with idempotency
+				_, err := pgxPool.Exec(ctx, `
+                    INSERT INTO bank_statement_transaction (
+                        bankstatementid, account_number, transactiondate, description, debitamount, creditamount, balanceaftertxn
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (account_number, transactiondate, description, debitamount, creditamount) DO NOTHING
+                `, batchID, accNo, txnDate, desc, debit, credit, bal)
+				if err != nil {
+					fmt.Println("transaction insert error:", err)
+				}
+			}
+			// Update bank balance for the account
+			if accountNo != "" && latestClosingBalance != "" {
+				_, err := pgxPool.Exec(ctx, `
+                    UPDATE bank_balances_manual
+                    SET closing_balance = $1
+                    WHERE account_no = $2
+                `, latestClosingBalance, accountNo)
+				if err != nil {
+					fmt.Println("bank balance update error:", err)
+				}
+			}
+			// --- End: Insert transactions and update balances ---
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"batch_ids": batchIDs, "message": "All bank statements uploaded and processed"})
 	}
@@ -291,24 +426,24 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		type Item struct {
-			BankStatementID string    `json:"bankstatementid"`
-			EntityID        string    `json:"entityid"`
-			AccountNumber   string    `json:"account_number"`
-			StatementDate   time.Time `json:"statementdate"`
-			OpeningBalance  *float64  `json:"openingbalance"`
-			ClosingBalance  *float64  `json:"closingbalance"`
-			CurrencyCode    string    `json:"currencycode"`
-			TransactionDate time.Time `json:"transactiondate"`
-			Description     string    `json:"description"`
-			DebitAmount     *float64  `json:"debitamount"`
-			CreditAmount    *float64  `json:"creditamount"`
-			BalanceAfterTxn *float64  `json:"balanceaftertxn"`
-			CreatedBy       string    `json:"createdby"`
-			CreatedAt       time.Time `json:"createdat"`
-			Status          string    `json:"status"`
-			IsDeleted       bool      `json:"is_deleted"`
-			EntityName      string    `json:"entity_name"`
-			BankName        string    `json:"bank_name"`
+			BankStatementID       string     `json:"bankstatementid"`
+			EntityID              string     `json:"entityid"`
+			AccountNumber         string     `json:"account_number"`
+			StatementDate         time.Time  `json:"statementdate"`
+			OpeningBalance        *float64   `json:"openingbalance"`
+			ClosingBalance        *float64   `json:"closingbalance"`
+			CurrencyCode          string     `json:"currencycode"`
+			TransactionDate       time.Time  `json:"transactiondate"`
+			Description           string     `json:"description"`
+			DebitAmount           *float64   `json:"debitamount"`
+			CreditAmount          *float64   `json:"creditamount"`
+			BalanceAfterTxn       *float64   `json:"balanceaftertxn"`
+			CreatedBy             string     `json:"createdby"`
+			CreatedAt             time.Time  `json:"createdat"`
+			Status                string     `json:"status"`
+			IsDeleted             bool       `json:"is_deleted"`
+			EntityName            string     `json:"entity_name"`
+			BankName              string     `json:"bank_name"`
 			OldEntityIDDB         string     `json:"old_entityid_db"`
 			OldAccountNoDB        string     `json:"old_account_number_db"`
 			OldStatementDateDB    *time.Time `json:"old_statementdate_db"`
@@ -325,15 +460,15 @@ func GetBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			OldWithdrawalAmountDB *float64   `json:"old_withdrawalamount_db"`
 			OldDepositAmountDB    *float64   `json:"old_depositamount_db"`
 			OldModeOfTxnDB        string     `json:"old_modeoftransaction_db"`
-			OldEntityID    string `json:"old_entityid"`
-			OldAccountNo   string `json:"old_account_number"`
-			OldDescription string `json:"old_description"`
-			CreatedByAudit string `json:"created_by"`
-			CreatedAtAudit string `json:"created_at"`
-			EditedByAudit  string `json:"edited_by"`
-			EditedAtAudit  string `json:"edited_at"`
-			DeletedByAudit string `json:"deleted_by"`
-			DeletedAtAudit string `json:"deleted_at"`
+			OldEntityID           string     `json:"old_entityid"`
+			OldAccountNo          string     `json:"old_account_number"`
+			OldDescription        string     `json:"old_description"`
+			CreatedByAudit        string     `json:"created_by"`
+			CreatedAtAudit        string     `json:"created_at"`
+			EditedByAudit         string     `json:"edited_by"`
+			EditedAtAudit         string     `json:"edited_at"`
+			DeletedByAudit        string     `json:"deleted_by"`
+			DeletedAtAudit        string     `json:"deleted_at"`
 		}
 
 		var stmtIDs []string
