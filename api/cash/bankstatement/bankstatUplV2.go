@@ -25,7 +25,9 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var body struct { UserID string `json:"user_id"` }
+		var body struct {
+			UserID string `json:"user_id"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
 			http.Error(w, "Missing or invalid user_id in body", http.StatusBadRequest)
 			return
@@ -46,22 +48,24 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			var id, entityName, acc string
 			var start, end, uploaded time.Time
 			var open, close float64
-			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded); err != nil { continue }
+			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded); err != nil {
+				continue
+			}
 			resp = append(resp, map[string]interface{}{
-				"bank_statement_id": id,
-				"entity_name": entityName,
-				"account_number": acc,
+				"bank_statement_id":      id,
+				"entity_name":            entityName,
+				"account_number":         acc,
 				"statement_period_start": start,
-				"statement_period_end": end,
-				"opening_balance": open,
-				"closing_balance": close,
-				"uploaded_at": uploaded,
+				"statement_period_end":   end,
+				"opening_balance":        open,
+				"closing_balance":        close,
+				"uploaded_at":            uploaded,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data": resp,
+			"data":    resp,
 		})
 	})
 }
@@ -96,24 +100,29 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 		defer rows.Close()
 		resp := []map[string]interface{}{}
 		for rows.Next() {
-			var tid int64; var entityName, tranID, desc string; var vdate, tdate time.Time; var withdrawal, deposit, balance sql.NullFloat64
-			if err := rows.Scan(&tid, &entityName, &tranID, &vdate, &tdate, &desc, &withdrawal, &deposit, &balance); err != nil { continue }
+			var tid int64
+			var entityName, tranID, desc string
+			var vdate, tdate time.Time
+			var withdrawal, deposit, balance sql.NullFloat64
+			if err := rows.Scan(&tid, &entityName, &tranID, &vdate, &tdate, &desc, &withdrawal, &deposit, &balance); err != nil {
+				continue
+			}
 			resp = append(resp, map[string]interface{}{
-				"transaction_id": tid,
-				"entity_name": entityName,
-				"tran_id": tranID,
-				"value_date": vdate,
-				"transaction_date": tdate,
-				"description": desc,
+				"transaction_id":    tid,
+				"entity_name":       entityName,
+				"tran_id":           tranID,
+				"value_date":        vdate,
+				"transaction_date":  tdate,
+				"description":       desc,
 				"withdrawal_amount": withdrawal.Float64,
-				"deposit_amount": deposit.Float64,
-				"balance": balance.Float64,
+				"deposit_amount":    deposit.Float64,
+				"balance":           balance.Float64,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data": resp,
+			"data":    resp,
 		})
 	})
 }
@@ -133,16 +142,69 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
 			return
 		}
-		_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5)`, body.BankStatementID, "APPROVE", "APPROVED", body.UserID, time.Now())
+		// Check if the latest audit action is DELETE_PENDING_APPROVAL
+		var actionType, processingStatus string
+		err := db.QueryRow(`
+			SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
+			WHERE bankstatementid = $1
+			ORDER BY requested_at DESC LIMIT 1
+		`, body.BankStatementID).Scan(&actionType, &processingStatus)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Bank statement approved",
-		})
+		if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
+			// Perform actual deletion
+			tx, err := db.Begin()
+			if err != nil {
+				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer tx.Rollback()
+			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, body.BankStatementID)
+			if err != nil {
+				http.Error(w, "Failed to delete transactions: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, body.BankStatementID)
+			if err != nil {
+				http.Error(w, "Failed to delete manual balance: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, body.BankStatementID)
+			if err != nil {
+				http.Error(w, "Failed to delete bank statement: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// Insert audit action for delete approval
+			_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5)`, body.BankStatementID, "DELETE", "DELETED", body.UserID, time.Now())
+			if err != nil {
+				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := tx.Commit(); err != nil {
+				http.Error(w, "Failed to commit: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "Bank statement and related data deleted after approval",
+			})
+			return
+		} else {
+			// Normal approval
+			_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5)`, body.BankStatementID, "APPROVE", "APPROVED", body.UserID, time.Now())
+			if err != nil {
+				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "Bank statement approved",
+			})
+		}
 	})
 }
 
@@ -206,6 +268,7 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 		})
 	})
 }
+
 // UploadBankStatementV2Handler returns an HTTP handler for uploading bank statements using V2 logic.
 func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
