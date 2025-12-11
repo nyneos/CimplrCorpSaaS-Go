@@ -471,28 +471,22 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			return
 		}
 		rows, err := db.Query(`
-			       WITH latest_audit AS (
-				       SELECT DISTINCT ON (a.bankstatementid)
-					       a.bankstatementid,
-					       a.actiontype,
-					       a.processing_status,
-					       a.action_id,
-					       a.requested_by,
-					       a.requested_at,
-					       a.checker_by,
-					       a.checker_at,
-					       a.checker_comment,
-					       a.reason
-				       FROM cimplrcorpsaas.auditactionbankstatement a
-				       ORDER BY a.bankstatementid, a.requested_at DESC
-			       )
-			       SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
-				      la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason
-			       FROM cimplrcorpsaas.bank_statements s
-			       JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-			       LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
-			       ORDER BY s.uploaded_at DESC
-		       `)
+										WITH latest_audit AS (
+											SELECT a.*
+											FROM cimplrcorpsaas.auditactionbankstatement a
+											INNER JOIN (
+												SELECT bankstatementid, MAX(action_id) AS max_action_id
+												FROM cimplrcorpsaas.auditactionbankstatement
+												GROUP BY bankstatementid
+											) b ON a.bankstatementid = b.bankstatementid AND a.action_id = b.max_action_id
+										)
+										SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
+													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason
+										FROM cimplrcorpsaas.bank_statements s
+										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
+										ORDER BY s.uploaded_at DESC
+						`)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -509,24 +503,30 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
 				continue
 			}
+			// Add computed field for delete pending approval
+			isDeletePending := false
+			if actionType.String == "DELETE" && processingStatus.String == "DELETE_PENDING_APPROVAL" {
+				isDeletePending = true
+			}
 			resp = append(resp, map[string]interface{}{
-				"bank_statement_id":      id,
-				"entity_name":            entityName,
-				"account_number":         acc,
-				"statement_period_start": start,
-				"statement_period_end":   end,
-				"opening_balance":        open,
-				"closing_balance":        close,
-				"uploaded_at":            uploaded,
-				"action_type":            actionType.String,
-				"processing_status":      processingStatus.String,
-				"action_id":              actionID.String,
-				"requested_by":           requestedBy.String,
-				"requested_at":           requestedAt.Time,
-				"checker_by":             checkerBy.String,
-				"checker_at":             checkerAt.Time,
-				"checker_comment":        checkerComment.String,
-				"reason":                 reason.String,
+				"bank_statement_id":          id,
+				"entity_name":                entityName,
+				"account_number":             acc,
+				"statement_period_start":     start,
+				"statement_period_end":       end,
+				"opening_balance":            open,
+				"closing_balance":            close,
+				"uploaded_at":                uploaded,
+				"action_type":                actionType.String,
+				"processing_status":          processingStatus.String,
+				"action_id":                  actionID.String,
+				"requested_by":               requestedBy.String,
+				"requested_at":               requestedAt.Time,
+				"checker_by":                 checkerBy.String,
+				"checker_at":                 checkerAt.Time,
+				"checker_comment":            checkerComment.String,
+				"reason":                     reason.String,
+				"is_delete_pending_approval": isDeletePending,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -602,76 +602,113 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			UserID          string `json:"user_id"`
-			BankStatementID string `json:"bank_statement_id"`
+			UserID           string   `json:"user_id"`
+			BankStatementIDs []string `json:"bank_statement_ids"`
+			Comment          string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || body.BankStatementID == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
+			http.Error(w, "Missing user_id or bank_statement_ids", http.StatusBadRequest)
 			return
 		}
-		// Check if the latest audit action is DELETE_PENDING_APPROVAL
-		var actionType, processingStatus string
-		err := db.QueryRow(`
-			SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
-			WHERE bankstatementid = $1
-			ORDER BY requested_at DESC LIMIT 1
-		`, body.BankStatementID).Scan(&actionType, &processingStatus)
-		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-			return
+		results := make([]map[string]interface{}, 0)
+		for _, bsid := range body.BankStatementIDs {
+			// Check if the latest audit action is DELETE_PENDING_APPROVAL
+			var actionType, processingStatus string
+			err := db.QueryRow(`
+				       SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
+				       WHERE bankstatementid = $1
+				       ORDER BY action_id DESC LIMIT 1
+			       `, bsid).Scan(&actionType, &processingStatus)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
+				tx, err := db.Begin()
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				defer tx.Rollback()
+				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				_, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "DELETE", "DELETED", body.UserID, time.Now(), body.Comment)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				if err := tx.Commit(); err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           true,
+					"message":           "Bank statement and related data deleted after approval",
+				})
+			} else {
+				_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           true,
+					"message":           "Bank statement approved",
+				})
+			}
 		}
-		if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
-			// Perform actual deletion
-			tx, err := db.Begin()
-			if err != nil {
-				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			defer tx.Rollback()
-			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, body.BankStatementID)
-			if err != nil {
-				http.Error(w, "Failed to delete transactions: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			_, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, body.BankStatementID)
-			if err != nil {
-				http.Error(w, "Failed to delete manual balance: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, body.BankStatementID)
-			if err != nil {
-				http.Error(w, "Failed to delete bank statement: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			// Insert audit action for delete approval
-			_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5)`, body.BankStatementID, "DELETE", "DELETED", body.UserID, time.Now())
-			if err != nil {
-				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if err := tx.Commit(); err != nil {
-				http.Error(w, "Failed to commit: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"message": "Bank statement and related data deleted after approval",
-			})
-			return
-		} else {
-			// Normal approval
-			_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5)`, body.BankStatementID, "APPROVE", "APPROVED", body.UserID, time.Now())
-			if err != nil {
-				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"message": "Bank statement approved",
-			})
-		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"results": results,
+		})
 	})
 }
 
@@ -683,22 +720,35 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			UserID          string `json:"user_id"`
-			BankStatementID string `json:"bank_statement_id"`
+			UserID           string   `json:"user_id"`
+			BankStatementIDs []string `json:"bank_statement_ids"`
+			Comment          string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || body.BankStatementID == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
+			http.Error(w, "Missing user_id or bank_statement_ids", http.StatusBadRequest)
 			return
 		}
-		_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, $2, $3, $4, $5)`, body.BankStatementID, "REJECT", "REJECTED", body.UserID, time.Now())
-		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-			return
+		results := make([]map[string]interface{}, 0)
+		for _, bsid := range body.BankStatementIDs {
+			_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			results = append(results, map[string]interface{}{
+				"bank_statement_id": bsid,
+				"success":           true,
+				"message":           "Bank statement rejected",
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"message": "Bank statement rejected",
+			"results": results,
 		})
 	})
 }
@@ -711,27 +761,39 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			UserID          string `json:"user_id"`
-			BankStatementID string `json:"bank_statement_id"`
+			UserID           string   `json:"user_id"`
+			BankStatementIDs []string `json:"bank_statement_ids"`
+			Comment          string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || body.BankStatementID == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
+			http.Error(w, "Missing user_id or bank_statement_ids", http.StatusBadRequest)
 			return
 		}
-		// Instead of direct delete, insert audit action for delete approval
-		_, err := db.Exec(`
-			INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-				bankstatementid, actiontype, processing_status, requested_by, requested_at
-			) VALUES ($1, $2, $3, $4, $5)
-		`, body.BankStatementID, "DELETE", "DELETE_PENDING_APPROVAL", body.UserID, time.Now())
-		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-			return
+		results := make([]map[string]interface{}, 0)
+		for _, bsid := range body.BankStatementIDs {
+			_, err := db.Exec(`
+				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
+					       bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment
+				       ) VALUES ($1, $2, $3, $4, $5, $6)
+			       `, bsid, "DELETE", "DELETE_PENDING_APPROVAL", body.UserID, time.Now(), body.Comment)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"bank_statement_id": bsid,
+					"success":           false,
+					"error":             err.Error(),
+				})
+				continue
+			}
+			results = append(results, map[string]interface{}{
+				"bank_statement_id": bsid,
+				"success":           true,
+				"message":           "Delete request submitted for approval",
+			})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"message": "Delete request submitted for approval",
+			"results": results,
 		})
 	})
 
