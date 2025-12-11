@@ -470,7 +470,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			http.Error(w, "Missing or invalid user_id in body", http.StatusBadRequest)
 			return
 		}
-		       rows, err := db.Query(`
+		rows, err := db.Query(`
 			       WITH latest_audit AS (
 				       SELECT DISTINCT ON (a.bankstatementid)
 					       a.bankstatementid,
@@ -498,37 +498,37 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			return
 		}
 		defer rows.Close()
-		       resp := []map[string]interface{}{}
-		       for rows.Next() {
-			       var id, entityName, acc string
-			       var start, end, uploaded time.Time
-			       var open, close float64
-			       var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
-			       var requestedAt, checkerAt sql.NullTime
-			       if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-				       &actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
-				       continue
-			       }
-				       resp = append(resp, map[string]interface{}{
-					       "bank_statement_id":      id,
-					       "entity_name":            entityName,
-					       "account_number":         acc,
-					       "statement_period_start": start,
-					       "statement_period_end":   end,
-					       "opening_balance":        open,
-					       "closing_balance":        close,
-					       "uploaded_at":            uploaded,
-					       "action_type":            actionType.String,
-					       "processing_status":      processingStatus.String,
-					       "action_id":              actionID.String,
-					       "requested_by":           requestedBy.String,
-					       "requested_at":           requestedAt.Time,
-					       "checker_by":             checkerBy.String,
-					       "checker_at":             checkerAt.Time,
-					       "checker_comment":        checkerComment.String,
-					       "reason":                 reason.String,
-				       })
-		       }
+		resp := []map[string]interface{}{}
+		for rows.Next() {
+			var id, entityName, acc string
+			var start, end, uploaded time.Time
+			var open, close float64
+			var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
+			var requestedAt, checkerAt sql.NullTime
+			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
+				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+				continue
+			}
+			resp = append(resp, map[string]interface{}{
+				"bank_statement_id":      id,
+				"entity_name":            entityName,
+				"account_number":         acc,
+				"statement_period_start": start,
+				"statement_period_end":   end,
+				"opening_balance":        open,
+				"closing_balance":        close,
+				"uploaded_at":            uploaded,
+				"action_type":            actionType.String,
+				"processing_status":      processingStatus.String,
+				"action_id":              actionID.String,
+				"requested_by":           requestedBy.String,
+				"requested_at":           requestedAt.Time,
+				"checker_by":             checkerBy.String,
+				"checker_at":             checkerAt.Time,
+				"checker_comment":        checkerComment.String,
+				"reason":                 reason.String,
+			})
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
