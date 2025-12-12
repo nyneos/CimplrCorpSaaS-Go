@@ -6,6 +6,7 @@ import (
 	benchmarks "CimplrCorpSaas/api/dash/benchmarks"
 	"CimplrCorpSaas/api/dash/buCurrExpDash"
 	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
+	categorywisedata "CimplrCorpSaas/api/dash/categorywiseData"
 	"CimplrCorpSaas/api/dash/cfo"
 	forecastVsActual "CimplrCorpSaas/api/dash/forecastVsActual"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
@@ -17,7 +18,7 @@ import (
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	realtimebalances "CimplrCorpSaas/api/dash/real-time-balances"
 	reports "CimplrCorpSaas/api/dash/reports"
-	categorywisedata "CimplrCorpSaas/api/dash/categorywiseData"
+	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
 	"context"
 	"database/sql"
 	"fmt"
@@ -36,11 +37,12 @@ func StartDashService(db *sql.DB) {
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
-
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
+	// Statement Status Dashboard
+	mux.Handle("/dash/statement-status", api.BusinessUnitMiddleware(db)(statementstatus.GetStatementStatusHandler(pgxPool)))
 	// Categorywise Breakdown Dashboard
 	mux.Handle("/dash/categorywise-breakdown", api.BusinessUnitMiddleware(db)(categorywisedata.GetCategorywiseBreakdownHandler(pgxPool)))
 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
