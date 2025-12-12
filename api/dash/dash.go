@@ -8,6 +8,7 @@ import (
 	cashflowforecast "CimplrCorpSaas/api/dash/cashflowforecast"
 	categorywisedata "CimplrCorpSaas/api/dash/categorywiseData"
 	"CimplrCorpSaas/api/dash/cfo"
+	commonpool "CimplrCorpSaas/api/dash/commonpool"
 	forecastVsActual "CimplrCorpSaas/api/dash/forecastVsActual"
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
@@ -43,6 +44,7 @@ func StartDashService(db *sql.DB) {
 	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", api.BusinessUnitMiddleware(db)(statementstatus.GetStatementStatusHandler(pgxPool)))
+	mux.Handle("/dash/transaction-pool", api.BusinessUnitMiddleware(db)(commonpool.GetTransactionPoolHandler(db)))
 	// Categorywise Breakdown Dashboard
 	mux.Handle("/dash/categorywise-breakdown", api.BusinessUnitMiddleware(db)(categorywisedata.GetCategorywiseBreakdownHandler(pgxPool)))
 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
