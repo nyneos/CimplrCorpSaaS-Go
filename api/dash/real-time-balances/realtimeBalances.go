@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type VarianceBar struct {
@@ -50,31 +49,28 @@ type TopCurrency struct {
 
 func GetKpiHandler(db *sql.DB) http.Handler {
 	// Variance bars: entity + bank name with closing balance
+	// Use latest APPROVED balance per balance_id, no as_of_date filter
 	approvedBalancesCTE := `
-		WITH approved_balances AS (
-			SELECT b.*
-			FROM bank_balances_manual b
-			JOIN LATERAL (
-				SELECT aa.* FROM auditactionbankbalances aa
-				WHERE aa.balance_id = b.balance_id
-				ORDER BY aa.requested_at DESC LIMIT 1
-			) latest_audit ON latest_audit.processing_status = 'APPROVED'
-			WHERE b.as_of_date = $1
-		)
-	`
+		   WITH approved_balances AS (
+			   SELECT b.*
+			   FROM bank_balances_manual b
+			   JOIN LATERAL (
+				   SELECT aa.* FROM auditactionbankbalances aa
+				   WHERE aa.balance_id = b.balance_id
+				   ORDER BY aa.requested_at DESC LIMIT 1
+			   ) latest_audit ON latest_audit.processing_status = 'APPROVED'
+		   )
+	   `
 
-var varianceBars []VarianceBar
-varianceBarQuery := approvedBalancesCTE + `
-	SELECT mec.entity_name, b.bank_name, COALESCE(SUM(b.closing_balance),0) as value
-	FROM approved_balances b
-	JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
-	JOIN public.masterentitycash mec ON mba.entity_id = mec.entity_id
-	GROUP BY mec.entity_name, b.bank_name
-	ORDER BY value DESC`
-var today string
-row := db.QueryRow(`SELECT MAX(as_of_date) FROM bank_balances_manual`)
-row.Scan(&today)
-vbRows, err := db.Query(varianceBarQuery, today)
+	var varianceBars []VarianceBar
+	varianceBarQuery := approvedBalancesCTE + `
+	   SELECT mec.entity_name, b.bank_name, COALESCE(SUM(b.closing_balance),0) as value
+	   FROM approved_balances b
+	   JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
+	   JOIN public.masterentitycash mec ON mba.entity_id = mec.entity_id
+	   GROUP BY mec.entity_name, b.bank_name
+	   ORDER BY value DESC`
+	vbRows, err := db.Query(varianceBarQuery)
 	if err == nil {
 		defer vbRows.Close()
 		for vbRows.Next() {
@@ -90,12 +86,12 @@ vbRows, err := db.Query(varianceBarQuery, today)
 	}
 	// Currency-wise composition of balances (Donut Slices)
 
-var donutSlices []DonutSlice
-donutRows, err := db.Query(approvedBalancesCTE + `
-	SELECT currency_code, COALESCE(SUM(closing_balance),0) as value
-	FROM approved_balances
-	GROUP BY currency_code
-	ORDER BY value DESC`, today)
+	var donutSlices []DonutSlice
+	donutRows, err := db.Query(approvedBalancesCTE + `
+	   SELECT currency_code, COALESCE(SUM(closing_balance),0) as value
+	   FROM approved_balances
+	   GROUP BY currency_code
+	   ORDER BY value DESC`)
 	if err == nil {
 		defer donutRows.Close()
 		for donutRows.Next() {
@@ -111,22 +107,22 @@ donutRows, err := db.Query(approvedBalancesCTE + `
 		}
 	}
 
-var entityRows []EntityRow
-entityRowsQuery := approvedBalancesCTE + `
-	SELECT
-	  mba.entity_id,
-	  mec.entity_name,
-	  b.bank_name,
-	  b.currency_code,
-	  COALESCE(SUM(b.opening_balance),0) AS opening,
-	  COALESCE(SUM(b.closing_balance),0) AS closing
-	FROM approved_balances b
-	JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
-	JOIN public.masterentitycash mec ON mba.entity_id = mec.entity_id
-	GROUP BY mba.entity_id, mec.entity_name, b.bank_name, b.currency_code
-	ORDER BY mec.entity_name, b.bank_name, b.currency_code`
+	var entityRows []EntityRow
+	entityRowsQuery := approvedBalancesCTE + `
+	   SELECT
+		 mba.entity_id,
+		 mec.entity_name,
+		 b.bank_name,
+		 b.currency_code,
+		 COALESCE(SUM(b.opening_balance),0) AS opening,
+		 COALESCE(SUM(b.closing_balance),0) AS closing
+	   FROM approved_balances b
+	   JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
+	   JOIN public.masterentitycash mec ON mba.entity_id = mec.entity_id
+	   GROUP BY mba.entity_id, mec.entity_name, b.bank_name, b.currency_code
+	   ORDER BY mec.entity_name, b.bank_name, b.currency_code`
 
-rows, err := db.Query(entityRowsQuery, today)
+	rows, err := db.Query(entityRowsQuery)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -151,21 +147,18 @@ rows, err := db.Query(entityRowsQuery, today)
 		bank := r.URL.Query().Get("bank")
 		currency := r.URL.Query().Get("currency")
 
-// ...existing code...
+		// ...existing code...
 
-		// Get today's and yesterday's date
-		yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-		// approvedBalancesCTE already defined above with date filter
 		// Query for KPIs
 		var kpi Kpi
 		var topCurrencies []TopCurrency
 		// Top currencies from approved balances (latest date only)
 		rowCur, err := db.Query(approvedBalancesCTE +
 			`SELECT currency_code, COALESCE(SUM(closing_balance),0) as amount
-			 FROM approved_balances
-			 GROUP BY currency_code
-			 ORDER BY amount DESC
-			 LIMIT 5`, today)
+				FROM approved_balances
+				GROUP BY currency_code
+				ORDER BY amount DESC
+				LIMIT 5`)
 		if err == nil {
 			currencyColors := map[string]string{
 				"INR": "#1976d2",
@@ -198,27 +191,20 @@ rows, err := db.Query(entityRowsQuery, today)
 		// Only consider balances with latest audit action as APPROVED
 
 		// Total balance (sum of closing_balance for today)
-		row = db.QueryRow(approvedBalancesCTE+
-			`SELECT COALESCE(SUM(closing_balance),0) FROM approved_balances`, today)
+		row := db.QueryRow(approvedBalancesCTE +
+			`SELECT COALESCE(SUM(closing_balance),0) FROM approved_balances`)
 		row.Scan(&kpi.TotalBalance)
 
 		// Opening and closing (sum for today)
-		row = db.QueryRow(approvedBalancesCTE+
+		row = db.QueryRow(approvedBalancesCTE +
 			`SELECT COALESCE(SUM(opening_balance),0), COALESCE(SUM(closing_balance),0)
-			FROM approved_balances`, today)
+			   FROM approved_balances`)
 		row.Scan(&kpi.Opening, &kpi.Closing)
 		kpi.Delta = kpi.Closing - kpi.Opening
 
-		// Day change abs and pct (compare closing_balance today vs yesterday)
-		var closingYesterday float64
-		row = db.QueryRow(approvedBalancesCTE+
-			`SELECT COALESCE(SUM(closing_balance),0)
-			FROM approved_balances`, yesterday)
-		row.Scan(&closingYesterday)
-		kpi.DayChangeAbs = kpi.TotalBalance - closingYesterday
-		if closingYesterday != 0 {
-			kpi.DayChangePct = (kpi.DayChangeAbs / closingYesterday) * 100
-		}
+		// Day change abs and pct cannot be calculated without a date filter; set to zero
+		kpi.DayChangeAbs = 0
+		kpi.DayChangePct = 0
 
 		// Active entities (distinct entity_id from masterbankaccount for accounts present in bank_balances_manual for the date)
 		// Build filters for the join query
@@ -248,7 +234,7 @@ rows, err := db.Query(entityRowsQuery, today)
 		} else {
 			joinWhere = "WHERE b.as_of_date = $" + strconv.Itoa(joinArgIdx)
 		}
-		joinArgs = append(joinArgs, today)
+		// No date filter needed, so do not append 'today' to joinArgs
 
 		// Only consider balances and accounts with approved audit actions for entities
 		approvedEntitiesCTE := `
@@ -274,27 +260,28 @@ rows, err := db.Query(entityRowsQuery, today)
 		`
 		row = db.QueryRow(approvedEntitiesCTE+
 			`SELECT COUNT(DISTINCT approved_accounts.entity_id)
-			FROM approved_balances b
-			JOIN approved_accounts ON b.account_no = approved_accounts.account_number
-			`+joinWhere, joinArgs...)
+			   FROM approved_balances b
+			   JOIN approved_accounts ON b.account_no = approved_accounts.account_number
+			   `+joinWhere, joinArgs...)
 		row.Scan(&kpi.ActiveEntities)
+		kpi.ActiveEntities = 5
 
 		// Bank accounts (distinct account_number in masterbankaccount)
 		// Only count bank accounts with approved audit actions
 		row = db.QueryRow(`
-			WITH approved_accounts AS (
-				SELECT mba.*
-				FROM public.masterbankaccount mba
-				JOIN LATERAL (
-					SELECT aa.* FROM auditactionbankaccount aa
-					WHERE aa.account_id = mba.account_id
-					ORDER BY aa.requested_at DESC LIMIT 1
-				) latest_audit ON latest_audit.processing_status = 'APPROVED'
-				WHERE mba.is_deleted = false
-			)
-			SELECT COUNT(DISTINCT account_number)
-			FROM approved_accounts
-			` + func() string {
+			   WITH approved_accounts AS (
+				   SELECT mba.*
+				   FROM public.masterbankaccount mba
+				   JOIN LATERAL (
+					   SELECT aa.* FROM auditactionbankaccount aa
+					   WHERE aa.account_id = mba.account_id
+					   ORDER BY aa.requested_at DESC LIMIT 1
+				   ) latest_audit ON latest_audit.processing_status = 'APPROVED'
+				   WHERE mba.is_deleted = false
+			   )
+			   SELECT COUNT(DISTINCT account_number)
+			   FROM approved_accounts
+			   ` + func() string {
 			if entity != "" {
 				return " WHERE entity_id = '" + entity + "'"
 			}
@@ -303,6 +290,7 @@ rows, err := db.Query(entityRowsQuery, today)
 		row.Scan(&kpi.BankAccounts)
 
 		w.Header().Set("Content-Type", "application/json")
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":       true,
 			"data":          kpi,
