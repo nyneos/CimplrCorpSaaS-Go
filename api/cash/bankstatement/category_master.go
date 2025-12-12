@@ -88,24 +88,87 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		rows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
+
+		// Fetch all categories
+		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer rows.Close()
-		var cats []TransactionCategory
-		for rows.Next() {
+		defer catRows.Close()
+
+		type RuleWithDetails struct {
+			CategoryRule
+			Scope      *RuleScope              `json:"scope,omitempty"`
+			Components []CategoryRuleComponent `json:"components"`
+		}
+
+		type CategoryWithRules struct {
+			TransactionCategory
+			Rules []RuleWithDetails `json:"rules"`
+		}
+
+		var categories []CategoryWithRules
+
+		for catRows.Next() {
 			var c TransactionCategory
-			if err := rows.Scan(&c.CategoryID, &c.CategoryName, &c.CategoryType, &c.Description); err != nil {
+			if err := catRows.Scan(&c.CategoryID, &c.CategoryName, &c.CategoryType, &c.Description); err != nil {
 				continue
 			}
-			cats = append(cats, c)
+
+			// Fetch rules for this category
+			ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, c.CategoryID)
+			if err != nil {
+				categories = append(categories, CategoryWithRules{TransactionCategory: c})
+				continue
+			}
+			var rules []RuleWithDetails
+			for ruleRows.Next() {
+				var rule CategoryRule
+				if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt); err != nil {
+					continue
+				}
+
+				// Fetch scope for this rule
+				var scope RuleScope
+				errScope := db.QueryRow(`SELECT scope_id, scope_type, entity_id, bank_code, account_number FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, rule.ScopeID).Scan(&scope.ScopeID, &scope.ScopeType, &scope.EntityID, &scope.BankCode, &scope.AccountNumber)
+				var scopePtr *RuleScope
+				if errScope == nil {
+					scopePtr = &scope
+				}
+
+				// Fetch components for this rule
+				compRows, err := db.Query(`SELECT component_id, rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active FROM cimplrcorpsaas.category_rule_components WHERE rule_id = $1`, rule.RuleID)
+				var components []CategoryRuleComponent
+				if err == nil {
+					for compRows.Next() {
+						var comp CategoryRuleComponent
+						if err := compRows.Scan(&comp.ComponentID, &comp.RuleID, &comp.ComponentType, &comp.MatchType, &comp.MatchValue, &comp.AmountOperator, &comp.AmountValue, &comp.TxnFlow, &comp.CurrencyCode, &comp.IsActive); err != nil {
+							continue
+						}
+						components = append(components, comp)
+					}
+					compRows.Close()
+				}
+
+				rules = append(rules, RuleWithDetails{
+					CategoryRule: rule,
+					Scope:        scopePtr,
+					Components:   components,
+				})
+			}
+			ruleRows.Close()
+
+			categories = append(categories, CategoryWithRules{
+				TransactionCategory: c,
+				Rules:               rules,
+			})
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data":    cats,
+			"data":    categories,
 		})
 	})
 }
