@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // TransactionCategory represents a category master
@@ -47,6 +49,99 @@ type CategoryRuleComponent struct {
 	TxnFlow        *string  `json:"txn_flow,omitempty"`
 	CurrencyCode   *string  `json:"currency_code,omitempty"`
 	IsActive       bool     `json:"is_active"`
+}
+
+// DeleteMultipleTransactionCategoriesHandler deletes multiple categories and cascades deletes for rules, rule scopes, and rule components
+func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			CategoryIDs []int64 `json:"category_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.CategoryIDs) == 0 {
+			http.Error(w, "Missing or invalid category_ids", http.StatusBadRequest)
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+
+		// 1. Get all rules and scope_ids for these categories
+		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var ruleIDs []int64
+		var scopeIDs []int64
+		for ruleRows.Next() {
+			var ruleID, scopeID int64
+			if err := ruleRows.Scan(&ruleID, &scopeID); err == nil {
+				ruleIDs = append(ruleIDs, ruleID)
+				scopeIDs = append(scopeIDs, scopeID)
+			}
+		}
+		ruleRows.Close()
+
+		// 2. Delete all rule components for these rules
+		if len(ruleIDs) > 0 {
+			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// 3. Delete all rules for these categories
+		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// 4. Delete all rule scopes for these rules (if not used elsewhere)
+		for _, scopeID := range scopeIDs {
+			var count int
+			err = tx.QueryRow(`SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
+			if err == nil && count == 0 {
+				_, _ = tx.Exec(`DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
+			}
+		}
+
+		// 5. Delete the categories themselves
+		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Categories deleted successfully",
+		})
+	})
 }
 
 // --- Category CRUD ---
@@ -257,6 +352,98 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    map[string]interface{}{"component_id": id},
+		})
+	})
+}
+
+// DeleteTransactionCategoryHandler deletes a category and cascades deletes for rules, rule scopes, and rule components
+func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			CategoryID int64 `json:"category_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CategoryID == 0 {
+			http.Error(w, "Missing or invalid category_id", http.StatusBadRequest)
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+
+		// 1. Get all rules for this category
+		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var ruleIDs []int64
+		var scopeIDs []int64
+		for ruleRows.Next() {
+			var ruleID, scopeID int64
+			if err := ruleRows.Scan(&ruleID, &scopeID); err == nil {
+				ruleIDs = append(ruleIDs, ruleID)
+				scopeIDs = append(scopeIDs, scopeID)
+			}
+		}
+		ruleRows.Close()
+
+		// 2. Delete all rule components for these rules
+		if len(ruleIDs) > 0 {
+			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// 3. Delete all rules for this category
+		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// 4. Delete all rule scopes for these rules (if not used elsewhere)
+		for _, scopeID := range scopeIDs {
+			var count int
+			err = tx.QueryRow(`SELECT COUNT(*) FROM cimplrcorpsaas.category_rules WHERE scope_id = $1`, scopeID).Scan(&count)
+			if err == nil && count == 0 {
+				_, _ = tx.Exec(`DELETE FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, scopeID)
+			}
+		}
+
+		// 5. Delete the category itself
+		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = $1`, body.CategoryID)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
 		})
 	})
 }

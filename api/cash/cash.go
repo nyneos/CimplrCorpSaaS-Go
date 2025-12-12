@@ -37,6 +37,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/category/scope/create", bankstatement.CreateRuleScopeHandler(db))
 	mux.Handle("/cash/category/rule/create", bankstatement.CreateCategoryRuleHandler(db))
 	mux.Handle("/cash/category/rule-component/create", bankstatement.CreateCategoryRuleComponentHandler(db))
+	mux.Handle("/cash/category/delete", bankstatement.DeleteMultipleTransactionCategoriesHandler(db))
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", bankstatement.GetAllBankStatementsHandler(db))
 	mux.Handle("/cash/bank-statements/v2/transactions", bankstatement.GetBankStatementTransactionsHandler(db))
