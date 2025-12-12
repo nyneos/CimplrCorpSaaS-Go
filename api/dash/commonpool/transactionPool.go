@@ -39,7 +39,7 @@ func nullToString(ns sql.NullString) string {
 	if ns.Valid {
 		return ns.String
 	}
-	return ""
+	return "Uncatogerized"
 }
 
 func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
