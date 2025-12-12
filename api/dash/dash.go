@@ -16,6 +16,7 @@ import (
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
 	reports "CimplrCorpSaas/api/dash/reports"
+	realtimebalances "CimplrCorpSaas/api/dash/real-time-balances"
 	"context"
 	"database/sql"
 	"fmt"
@@ -39,9 +40,12 @@ func StartDashService(db *sql.DB) {
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
-	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Dashboard Service is active"))
-	})
+ 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
+ 		w.Write([]byte("Dashboard Service is active"))
+ 	})
+
+	// Real-time Balances KPI Route
+	mux.Handle("/dash/realtime-balances/kpi", api.BusinessUnitMiddleware(db)(realtimebalances.GetKpiHandler(db)))
 	// mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
 	// mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
 	mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
