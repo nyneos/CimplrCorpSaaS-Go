@@ -440,7 +440,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// --- CATEGORY MATCHING ---
 		matchedCategoryID := sql.NullInt64{Valid: false}
 		for _, rule := range rules {
-			// Only NARRATION_LOGIC for now, can expand
+			// NARRATION LOGIC
 			if rule.ComponentType == "NARRATION_LOGIC" && rule.MatchType.Valid && rule.MatchValue.Valid {
 				desc := strings.ToLower(description)
 				val := strings.ToLower(rule.MatchValue.String)
@@ -448,26 +448,77 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				case "CONTAINS":
 					if strings.Contains(desc, val) {
 						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						break
 					}
 				case "EQUALS":
 					if desc == val {
 						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						break
 					}
 				case "STARTS_WITH":
 					if strings.HasPrefix(desc, val) {
 						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						break
 					}
 				case "ENDS_WITH":
 					if strings.HasSuffix(desc, val) {
 						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						break
+					}
+				case "ILIKE":
+					if strings.Contains(desc, val) {
+						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					}
+				case "REGEX":
+					// Optionally implement regex matching if needed
+				}
+			}
+			// AMOUNT LOGIC (applies to both withdrawal and deposit)
+			if !matchedCategoryID.Valid && rule.ComponentType == "AMOUNT_LOGIC" && rule.AmountOperator.Valid && rule.AmountValue.Valid {
+				// Check both withdrawal and deposit
+				amounts := []float64{}
+				if withdrawal.Valid {
+					amounts = append(amounts, withdrawal.Float64)
+				}
+				if deposit.Valid {
+					amounts = append(amounts, deposit.Float64)
+				}
+				for _, amt := range amounts {
+					switch rule.AmountOperator.String {
+					case ">":
+						if amt > rule.AmountValue.Float64 {
+							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						}
+					case ">=":
+						if amt >= rule.AmountValue.Float64 {
+							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						}
+					case "=":
+						if amt == rule.AmountValue.Float64 {
+							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						}
+					case "<=":
+						if amt <= rule.AmountValue.Float64 {
+							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						}
+					case "<":
+						if amt < rule.AmountValue.Float64 {
+							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						}
 					}
 				}
 			}
-			// TODO: Add more logic for AMOUNT, TXN_FLOW, etc.
+			// TRANSACTION LOGIC (DEBIT/CREDIT)
+			if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
+				if rule.TxnFlow.String == "DEBIT" && withdrawal.Valid && withdrawal.Float64 > 0 {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+				if rule.TxnFlow.String == "CREDIT" && deposit.Valid && deposit.Float64 > 0 {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+			}
+			// CURRENCY CONDITION
+			if !matchedCategoryID.Valid && rule.ComponentType == "CURRENCY_CONDITION" && rule.CurrencyCode.Valid {
+				// If you have currency info in the row, compare here (pseudo: if rowCurrency == rule.CurrencyCode.String)
+				// Not implemented: add logic if currency is available in transaction row
+			}
+			// CATEGORY_MAPPING, UNIQUE_ID: add as needed
 			if matchedCategoryID.Valid {
 				break
 			}
