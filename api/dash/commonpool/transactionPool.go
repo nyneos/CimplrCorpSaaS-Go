@@ -39,7 +39,7 @@ func nullToString(ns sql.NullString) string {
 	if ns.Valid {
 		return ns.String
 	}
-	return "Uncatogerized"
+	return "Uncategorized"
 }
 
 func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
@@ -61,7 +61,7 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 	query := `
 		SELECT 
 			t.value_date, 
-			s.entity_id, 
+			me.entity_name, 
 			s.account_number, 
 			mb.bank_name, 
 			mba.currency, 
@@ -75,6 +75,7 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 		LEFT JOIN public.masterbankaccount mba ON t.account_number = mba.account_number
 		LEFT JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 		LEFT JOIN cimplrcorpsaas.transaction_categories c ON t.category_id = c.category_id
+		LEFT JOIN public.masterentitycash me ON s.entity_id = me.entity_id
 		ORDER BY t.value_date DESC
 	`
 	rows, err := db.QueryContext(ctx, query)
