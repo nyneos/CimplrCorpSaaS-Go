@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,9 +60,17 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, "redemption_id is required")
 			return
 		}
-		if req.ActualNAV <= 0 || req.ActualUnits <= 0 || req.GrossProceeds <= 0 || req.NetCredited <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "actual_nav, actual_units, gross_proceeds, and net_credited must be greater than 0")
+		if req.ActualNAV <= 0 || req.ActualUnits <= 0 || req.GrossProceeds <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "actual_nav, actual_units, and gross_proceeds must be greater than 0")
 			return
+		}
+
+		// Calculate net_credited if not provided
+		if req.NetCredited <= 0 {
+			req.NetCredited = req.GrossProceeds - req.ExitLoad - req.TDS - req.STTCharges
+			if req.NetCredited < 0 {
+				req.NetCredited = 0
+			}
 		}
 
 		userEmail := ""
@@ -83,6 +92,29 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		// Validate: sum of confirmed units for this redemption_id shouldn't exceed initiation units
+		var initiationUnits float64
+		var existingConfirmedUnits float64
+		if err := tx.QueryRow(ctx, `
+			SELECT 
+				COALESCE(ri.by_units, 0) AS initiation_units,
+				COALESCE(SUM(rc.actual_units), 0) AS existing_confirmed_units
+			FROM investment.redemption_initiation ri
+			LEFT JOIN investment.redemption_confirmation rc ON rc.redemption_id = ri.redemption_id
+				AND COALESCE(rc.is_deleted, false) = false
+			WHERE ri.redemption_id = $1
+			GROUP BY ri.redemption_id, ri.by_units
+		`, req.RedemptionID).Scan(&initiationUnits, &existingConfirmedUnits); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to validate redemption: "+err.Error())
+			return
+		}
+
+		if existingConfirmedUnits+req.ActualUnits > initiationUnits {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units. Only %.2f units available.",
+				req.ActualUnits, initiationUnits, existingConfirmedUnits, initiationUnits-existingConfirmedUnits))
+			return
+		}
 
 		status := "PENDING_CONFIRMATION"
 		if strings.TrimSpace(req.Status) != "" {
@@ -194,9 +226,17 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"success": false, "error": "redemption_id is required"})
 				continue
 			}
-			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 || row.NetCredited <= 0 {
-				results = append(results, map[string]interface{}{"success": false, "error": "actual_nav, actual_units, gross_proceeds, net_credited must be > 0"})
+			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 {
+				results = append(results, map[string]interface{}{"success": false, "error": "actual_nav, actual_units, and gross_proceeds must be > 0"})
 				continue
+			}
+
+			// Calculate net_credited if not provided
+			if row.NetCredited <= 0 {
+				row.NetCredited = row.GrossProceeds - row.ExitLoad - row.TDS - row.STTCharges
+				if row.NetCredited < 0 {
+					row.NetCredited = 0
+				}
 			}
 
 			tx, err := pgxPool.Begin(ctx)
@@ -205,6 +245,29 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			defer tx.Rollback(ctx)
+
+			// Validate: sum of confirmed units for this redemption_id shouldn't exceed initiation units
+			var initiationUnits float64
+			var existingConfirmedUnits float64
+			if err := tx.QueryRow(ctx, `
+				SELECT 
+					COALESCE(ri.by_units, 0) AS initiation_units,
+					COALESCE(SUM(rc.actual_units), 0) AS existing_confirmed_units
+				FROM investment.redemption_initiation ri
+				LEFT JOIN investment.redemption_confirmation rc ON rc.redemption_id = ri.redemption_id
+					AND COALESCE(rc.is_deleted, false) = false
+				WHERE ri.redemption_id = $1
+				GROUP BY ri.redemption_id, ri.by_units
+			`, row.RedemptionID).Scan(&initiationUnits, &existingConfirmedUnits); err != nil {
+				results = append(results, map[string]interface{}{"success": false, "error": "Failed to validate redemption: " + err.Error()})
+				continue
+			}
+
+			if existingConfirmedUnits+row.ActualUnits > initiationUnits {
+				results = append(results, map[string]interface{}{"success": false, "error": fmt.Sprintf("Cannot confirm %.2f units. Initiation has %.2f units, already confirmed %.2f units.",
+					row.ActualUnits, initiationUnits, existingConfirmedUnits)})
+				continue
+			}
 
 			status := "PENDING_CONFIRMATION"
 			if strings.TrimSpace(row.Status) != "" {
@@ -663,6 +726,105 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 				api.RespondWithError(w, http.StatusInternalServerError, "delete action update failed: "+err.Error())
 				return
 			}
+
+			// Release blocked units for deleted confirmations
+			for _, confirmID := range deleteMasterIDs {
+				// Fetch confirmation and initiation details
+				var redemptionID string
+				var actualUnits float64
+				if err := tx.QueryRow(ctx, `
+					SELECT redemption_id, actual_units
+					FROM investment.redemption_confirmation
+					WHERE redemption_confirm_id = $1
+				`, confirmID).Scan(&redemptionID, &actualUnits); err != nil {
+					continue
+				}
+
+				if actualUnits <= 0 {
+					continue
+				}
+
+				// Get initiation details for unblocking
+				var folioID, dematID, schemeID sql.NullString
+				var method string
+				if err := tx.QueryRow(ctx, `
+					SELECT folio_id, demat_id, scheme_id, method
+					FROM investment.redemption_initiation
+					WHERE redemption_id = $1
+				`, redemptionID).Scan(&folioID, &dematID, &schemeID, &method); err != nil {
+					continue
+				}
+
+				// Release blocked units
+				unblockQuery := `
+					WITH target_transactions AS (
+						SELECT 
+							ot.id,
+							COALESCE(ot.blocked_units, 0) AS current_blocked,
+							ot.transaction_date
+						FROM investment.onboard_transaction ot
+						LEFT JOIN investment.masterscheme ms ON (
+							ms.scheme_id = ot.scheme_id OR
+							ms.internal_scheme_code = ot.scheme_internal_code OR
+							ms.isin = ot.scheme_id
+						)
+						WHERE 
+							LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
+							AND (
+								ms.scheme_id = $1 OR
+								ms.scheme_name = $1 OR
+								ms.internal_scheme_code = $1 OR
+								ms.isin = $1 OR
+								ot.scheme_id = $1 OR
+								ot.scheme_internal_code = $1
+							)
+							AND (
+								($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
+								($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+							)
+							AND COALESCE(ot.blocked_units, 0) > 0
+						ORDER BY 
+							CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+							CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
+					),
+					unblocking_allocation AS (
+						SELECT 
+							id,
+							current_blocked,
+							LEAST(
+								current_blocked,
+								$5 - COALESCE(SUM(LEAST(current_blocked, $5)) OVER (
+									ORDER BY transaction_date
+									ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+								), 0)
+							) AS units_to_unblock_here
+						FROM target_transactions
+					)
+					UPDATE investment.onboard_transaction ot
+					SET blocked_units = GREATEST(0, COALESCE(ot.blocked_units, 0) - ua.units_to_unblock_here)
+					FROM unblocking_allocation ua
+					WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
+				`
+
+				var folioIDStr, dematIDStr *string
+				if folioID.Valid {
+					folioIDStr = &folioID.String
+				}
+				if dematID.Valid {
+					dematIDStr = &dematID.String
+				}
+
+				if _, err := tx.Exec(ctx, unblockQuery,
+					schemeID.String,
+					nullIfEmptyStringPtr(folioIDStr),
+					nullIfEmptyStringPtr(dematIDStr),
+					method,
+					actualUnits,
+				); err != nil {
+					// Log error but continue
+				}
+			}
+
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.redemption_confirmation
 				SET is_deleted=true, status='DELETED', updated_at=now()
@@ -839,6 +1001,31 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM investment.auditactionredemptionconfirmation
 				GROUP BY redemption_confirm_id
+			),
+			resolved_folio AS (
+				SELECT DISTINCT ON (i.redemption_id)
+					i.redemption_id,
+					f.folio_number,
+					f.folio_id::text AS folio_id_text
+				FROM investment.redemption_initiation i
+				LEFT JOIN investment.masterfolio f ON (
+					(f.folio_id::text = i.folio_id) OR 
+					(i.folio_id IS NOT NULL AND f.folio_number = i.folio_id)
+				)
+				ORDER BY i.redemption_id, f.folio_id
+			),
+			resolved_demat AS (
+				SELECT DISTINCT ON (i.redemption_id)
+					i.redemption_id,
+					d.demat_account_number,
+					d.demat_id::text AS demat_id_text
+				FROM investment.redemption_initiation i
+				LEFT JOIN investment.masterdemataccount d ON (
+					(d.demat_id::text = i.demat_id) OR 
+					(i.demat_id IS NOT NULL AND d.default_settlement_account = i.demat_id) OR 
+					(i.demat_id IS NOT NULL AND d.demat_account_number = i.demat_id)
+				)
+				ORDER BY i.redemption_id, d.demat_id
 			)
 			SELECT
 				m.redemption_confirm_id,
@@ -881,10 +1068,10 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 				COALESCE(s.internal_scheme_code,'') AS initiation_scheme_code,
 				COALESCE(s.isin,'') AS initiation_isin,
 				COALESCE(s.amc_name,'') AS initiation_amc_name,
-				COALESCE(f.folio_number,'') AS initiation_folio_number,
-				COALESCE(f.folio_id::text,'') AS initiation_folio_id,
-				COALESCE(d.demat_account_number,'') AS initiation_demat_number,
-				COALESCE(d.demat_id::text,'') AS initiation_demat_id,
+				COALESCE(rf.folio_number,'') AS initiation_folio_number,
+				COALESCE(rf.folio_id_text,'') AS initiation_folio_id,
+				COALESCE(rd.demat_account_number,'') AS initiation_demat_number,
+				COALESCE(rd.demat_id_text,'') AS initiation_demat_id,
 				COALESCE(i.by_amount,0) AS initiation_by_amount,
 				COALESCE(i.by_units,0) AS initiation_by_units,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -913,12 +1100,10 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 			 OR s.internal_scheme_code = i.scheme_id
 			 OR s.isin = i.scheme_id
 			)
-			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
-			LEFT JOIN investment.masterdemataccount d ON (
-				d.demat_id::text = i.demat_id OR d.default_settlement_account = i.demat_id OR d.demat_account_number = i.demat_id
-			)
+			LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
+			LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
 			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY m.updated_at DESC, m.redemption_confirm_id;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1107,33 +1292,33 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	defer rows.Close()
 
 	type confirmationData struct {
-		RedemptionConfirmID  string
-		RedemptionID         string
-		ActualNAV            float64
-		ActualUnits          float64
-		GrossProceeds        float64
-		ExitLoad             float64
-		TDS                  float64
-		NetCredited          float64
-		FolioIdentifier      *string  // String from initiation
-		DematIdentifier      *string  // String from initiation
-		SchemeIdentifier     string   // String from initiation
-		RequestedBy          string
-		RequestedDate        time.Time
-		ByAmount             *float64
-		ByUnits              *float64
-		Method               string
-		EntityName           *string
-		ResolvedSchemeID     *string  // Actual scheme_id from masterscheme (string/varchar)
-		SchemeName           *string
-		ISIN                 *string
-		InternalSchemeCode   *string
-		ResolvedFolioID      *string  // Actual folio_id from masterfolio (string/varchar)
-		FolioNumber          *string
-		FolioEntityName      *string
-		ResolvedDematID      *string  // Actual demat_id from masterdemataccount (string/varchar)
-		DematAccountNumber   *string
-		DematEntityName      *string
+		RedemptionConfirmID string
+		RedemptionID        string
+		ActualNAV           float64
+		ActualUnits         float64
+		GrossProceeds       float64
+		ExitLoad            float64
+		TDS                 float64
+		NetCredited         float64
+		FolioIdentifier     *string // String from initiation
+		DematIdentifier     *string // String from initiation
+		SchemeIdentifier    string  // String from initiation
+		RequestedBy         string
+		RequestedDate       time.Time
+		ByAmount            *float64
+		ByUnits             *float64
+		Method              string
+		EntityName          *string
+		ResolvedSchemeID    *string // Actual scheme_id from masterscheme (string/varchar)
+		SchemeName          *string
+		ISIN                *string
+		InternalSchemeCode  *string
+		ResolvedFolioID     *string // Actual folio_id from masterfolio (string/varchar)
+		FolioNumber         *string
+		FolioEntityName     *string
+		ResolvedDematID     *string // Actual demat_id from masterdemataccount (string/varchar)
+		DematAccountNumber  *string
+		DematEntityName     *string
 	}
 
 	confirmations := []confirmationData{}
@@ -1200,29 +1385,104 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 
 		// Create SELL transaction
+		// Resolve entity_name: prefer folio/demat entity, fallback to initiation entity
+		var entityName *string
+		if cd.FolioEntityName != nil && *cd.FolioEntityName != "" {
+			entityName = cd.FolioEntityName
+		} else if cd.DematEntityName != nil && *cd.DematEntityName != "" {
+			entityName = cd.DematEntityName
+		} else if cd.EntityName != nil && *cd.EntityName != "" {
+			entityName = cd.EntityName
+		}
+
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		`
 
-		// Insert SELL transaction with negative units
+		// Insert SELL transaction with POSITIVE values
+		// Transaction type 'SELL' indicates this reduces holdings
 		if _, err := tx.Exec(ctx, txInsert,
 			batchID,
 			cd.RequestedDate,
 			"SELL",
 			folioNumber,
 			dematAccNumber,
-			-cd.GrossProceeds,      // negative amount for redemption
-			-cd.ActualUnits,        // negative units for redemption
+			cd.GrossProceeds, // positive amount (proceeds received)
+			cd.ActualUnits,   // positive units (quantity redeemed)
 			cd.ActualNAV,
-			cd.ResolvedSchemeID,    // Use actual scheme_id (string)
-			cd.ResolvedFolioID,     // Use actual folio_id (string)
-			cd.ResolvedDematID,     // Use actual demat_id (string)
+			cd.ResolvedSchemeID, // Use actual scheme_id (string)
+			cd.ResolvedFolioID,  // Use actual folio_id (string)
+			cd.ResolvedDematID,  // Use actual demat_id (string)
 			cd.InternalSchemeCode,
+			entityName, // Entity from folio/demat or initiation
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
+		}
+
+		// Release blocked units since SELL transaction is now created
+		// The SELL transaction will subtract from total units, so we need to remove from blocked_units too
+		unblockQuery := `
+			WITH target_transactions AS (
+				SELECT 
+					ot.id,
+					COALESCE(ot.blocked_units, 0) AS current_blocked,
+					ot.transaction_date
+				FROM investment.onboard_transaction ot
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = ot.scheme_id OR
+					ms.internal_scheme_code = ot.scheme_internal_code OR
+					ms.isin = ot.scheme_id
+				)
+				WHERE 
+					LOWER(COALESCE(ot.transaction_type, '')) IN ('buy', 'purchase', 'subscription')
+					AND (
+						ms.scheme_id = $1 OR
+						ms.scheme_name = $1 OR
+						ms.internal_scheme_code = $1 OR
+						ms.isin = $1 OR
+						ot.scheme_id = $1 OR
+						ot.scheme_internal_code = $1
+					)
+					AND (
+						($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
+						($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+					)
+					AND COALESCE(ot.blocked_units, 0) > 0
+				ORDER BY 
+					CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+					CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
+			),
+			unblocking_allocation AS (
+				SELECT 
+					id,
+					current_blocked,
+					LEAST(
+						current_blocked,
+						$5 - COALESCE(SUM(LEAST(current_blocked, $5)) OVER (
+							ORDER BY transaction_date
+							ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+						), 0)
+					) AS units_to_unblock_here
+				FROM target_transactions
+			)
+			UPDATE investment.onboard_transaction ot
+			SET blocked_units = GREATEST(0, COALESCE(ot.blocked_units, 0) - ua.units_to_unblock_here)
+			FROM unblocking_allocation ua
+			WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
+		`
+
+		if _, err := tx.Exec(ctx, unblockQuery,
+			cd.SchemeIdentifier,
+			cd.FolioIdentifier,
+			cd.DematIdentifier,
+			cd.Method,
+			cd.ActualUnits,
+		); err != nil {
+			// Log error but don't fail the transaction - SELL is already created
+			// This prevents double subtraction from portfolio
 		}
 
 		totalTransactions++
@@ -1238,30 +1498,35 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		}
 	}
 
-	// Refresh portfolio snapshot based on ALL transactions for affected entities
-	// Delete existing snapshots for entities involved in this batch
+	// Refresh portfolio snapshot based on ALL transactions for affected folio_id/demat_id
+	// Group by folio_id and demat_id (unique identifiers) instead of non-unique folio_number/demat_acc_number
+	// Delete existing snapshots for affected folio_id/demat_id combinations
 	deleteSnap := `
 		DELETE FROM investment.portfolio_snapshot
-		WHERE entity_name IN (
-			SELECT DISTINCT COALESCE(mf.entity_name, md.entity_name)
+		WHERE (folio_id IS NOT NULL AND folio_id IN (
+			SELECT DISTINCT ot.folio_id
 			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-			LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
-			WHERE ot.batch_id = $1
-		)
+			WHERE ot.batch_id = $1 AND ot.folio_id IS NOT NULL
+		))
+		OR (demat_id IS NOT NULL AND demat_id IN (
+			SELECT DISTINCT ot.demat_id
+			FROM investment.onboard_transaction ot
+			WHERE ot.batch_id = $1 AND ot.demat_id IS NOT NULL
+		))
 	`
 	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
 		return nil, fmt.Errorf("delete snapshot failed: %w", err)
 	}
 
-	// Rebuild snapshots for affected entities using ALL their transactions (not just current batch)
+	// Rebuild snapshots for affected folio_id/demat_id using ALL their transactions (not just current batch)
 	snapshotQ := `
-WITH affected_entities AS (
-    SELECT DISTINCT COALESCE(mf.entity_name, md.entity_name) AS entity_name
+WITH affected_folios_demats AS (
+    SELECT DISTINCT 
+        ot.folio_id,
+        ot.demat_id
     FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-    LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
     WHERE ot.batch_id = $1
+        AND (ot.folio_id IS NOT NULL OR ot.demat_id IS NOT NULL)
 ),
 scheme_resolved AS (
     SELECT
@@ -1274,22 +1539,27 @@ scheme_resolved AS (
         COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
         ot.demat_acc_number,
-        COALESCE(fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
-        COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
-        COALESCE(ms.isin, ms2.isin) AS isin
+        ot.folio_id,
+        ot.demat_id,
+        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
+        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
+        COALESCE(ms2.isin, ms.isin) AS isin
     FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf ON mf.folio_number = ot.folio_number
-    LEFT JOIN investment.masterdemataccount md ON md.demat_account_number = ot.demat_acc_number
-    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = mf.folio_id
+    LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
+    LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
+    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
     LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
     LEFT JOIN investment.masterscheme ms2 ON ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code
-    WHERE COALESCE(mf.entity_name, md.entity_name) IN (SELECT entity_name FROM affected_entities)
+    WHERE (ot.folio_id IN (SELECT folio_id FROM affected_folios_demats WHERE folio_id IS NOT NULL)
+        OR ot.demat_id IN (SELECT demat_id FROM affected_folios_demats WHERE demat_id IS NOT NULL))
 ),
 transaction_summary AS (
     SELECT
         entity_name,
         folio_number,
         demat_acc_number,
+        folio_id,
+        demat_id,
         scheme_id,
         scheme_name,
         isin,
@@ -1319,7 +1589,7 @@ transaction_summary AS (
             END)
         END AS avg_nav
     FROM scheme_resolved
-    GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
 ),
 latest_nav AS (
     SELECT DISTINCT ON (scheme_name)
@@ -1335,6 +1605,8 @@ INSERT INTO investment.portfolio_snapshot (
   entity_name,
   folio_number,
   demat_acc_number,
+  folio_id,
+  demat_id,
   scheme_id,
   scheme_name,
   isin,
@@ -1352,6 +1624,8 @@ SELECT
   ts.entity_name,
   ts.folio_number,
   ts.demat_acc_number,
+  ts.folio_id,
+  ts.demat_id,
   ts.scheme_id,
   ts.scheme_name,
   ts.isin,

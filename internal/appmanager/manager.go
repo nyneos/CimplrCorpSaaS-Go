@@ -14,8 +14,7 @@ import (
 	"CimplrCorpSaas/api/investment"
 	"CimplrCorpSaas/api/master"
 	"CimplrCorpSaas/api/uam"
-
-	// "CimplrCorpSaas/internal/jobs"
+	"CimplrCorpSaas/internal/jobs"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/resource"
 	"CimplrCorpSaas/internal/serviceiface"
@@ -120,6 +119,9 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 			}
 		}
 		return auth.NewAuthService(AuthDB, maxUsers, sessionTimeout, maxLoginAttempts, accountLockDuration, sessionCleanerPeriod)
+	},
+	"cron": func(cfg map[string]interface{}) serviceiface.Service {
+		return jobs.NewCronService(cfg, pgxPool)
 	},
 }
 

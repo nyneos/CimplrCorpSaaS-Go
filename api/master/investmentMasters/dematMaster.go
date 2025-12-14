@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-
 type CreateDematRequestSingle struct {
 	UserID                   string `json:"user_id"`
 	EntityName               string `json:"entity_name"`
@@ -991,7 +990,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
 			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.entity_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)

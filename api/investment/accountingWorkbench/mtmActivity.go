@@ -155,7 +155,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID           string `json:"user_id"`
-			ActivityType     string `json:"activity_type"` // "MTM"
+			ActivityType     string `json:"activity_type"`     // "MTM"
 			EffectiveDate    string `json:"effective_date"`    // YYYY-MM-DD
 			AccountingPeriod string `json:"accounting_period"` // Text format: "JAN 2025", "FEB 2025", etc.
 			DataSource       string `json:"data_source"`
@@ -180,7 +180,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 2. "2025-12" (YYYY-MM format)
 		var monthNum, year string
 		accountingPeriod := strings.TrimSpace(req.AccountingPeriod)
-		
+
 		// Check if it's in YYYY-MM format
 		if strings.Contains(accountingPeriod, "-") && len(accountingPeriod) == 7 {
 			// Format: "2025-12"
@@ -191,7 +191,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			year = parts[0]
 			monthNum = parts[1]
-			
+
 			// Validate month is between 01-12
 			monthInt := 0
 			fmt.Sscanf(monthNum, "%d", &monthInt)
@@ -202,18 +202,18 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			// Text format: "JAN 2025" or "JANUARY 2025"
 			monthMap := map[string]string{
-				"JAN": "01", "JANUARY":   "01",
-				"FEB": "02", "FEBRUARY":  "02",
-				"MAR": "03", "MARCH":     "03",
-				"APR": "04", "APRIL":     "04",
+				"JAN": "01", "JANUARY": "01",
+				"FEB": "02", "FEBRUARY": "02",
+				"MAR": "03", "MARCH": "03",
+				"APR": "04", "APRIL": "04",
 				"MAY": "05",
-				"JUN": "06", "JUNE":      "06",
-				"JUL": "07", "JULY":      "07",
-				"AUG": "08", "AUGUST":    "08",
+				"JUN": "06", "JUNE": "06",
+				"JUL": "07", "JULY": "07",
+				"AUG": "08", "AUGUST": "08",
 				"SEP": "09", "SEPTEMBER": "09",
-				"OCT": "10", "OCTOBER":   "10",
-				"NOV": "11", "NOVEMBER":  "11",
-				"DEC": "12", "DECEMBER":  "12",
+				"OCT": "10", "OCTOBER": "10",
+				"NOV": "11", "NOVEMBER": "11",
+				"DEC": "12", "DECEMBER": "12",
 			}
 
 			parts := strings.Fields(strings.ToUpper(accountingPeriod))
@@ -233,7 +233,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Construct start and end dates for the month
 		startDate := fmt.Sprintf("%s-%s-01", year, monthNum)
-		
+
 		// Calculate last day of month
 		var endDate string
 		switch monthNum {
@@ -366,14 +366,14 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Collect holdings
 		type HoldingData struct {
-			FolioNumber     string
-			DematAccNumber  string
-			SchemeID        string
-			SchemeName      string
-			ISIN            string
-			InternalCode    string
-			Units           float64
-			AvgNAV          float64  // Weighted average cost basis from buy transactions
+			FolioNumber    string
+			DematAccNumber string
+			SchemeID       string
+			SchemeName     string
+			ISIN           string
+			InternalCode   string
+			Units          float64
+			AvgNAV         float64 // Weighted average cost basis from buy transactions
 		}
 
 		holdings := []HoldingData{}
@@ -390,7 +390,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Check if onboard_transaction table has any data at all
 			var txCount int
 			tx.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount)
-			
+
 			if txCount == 0 {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No investment transactions found. Please upload transaction data before running MTM for %s", req.AccountingPeriod))
 			} else {
@@ -458,12 +458,12 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Call MFapi.in to get historical NAV
 				// Format: https://api.mfapi.in/mf/{scheme_code}?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 				apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startDate, endDate)
-				
+
 				resp, err := http.Get(apiURL)
 				if err == nil && resp.StatusCode == 200 {
 					defer resp.Body.Close()
 					body, _ := io.ReadAll(resp.Body)
-					
+
 					var apiResp struct {
 						Meta struct {
 							SchemeName string `json:"scheme_name"`
@@ -474,7 +474,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						} `json:"data"`
 						Status string `json:"status"`
 					}
-					
+
 					if err := json.Unmarshal(body, &apiResp); err == nil && len(apiResp.Data) > 0 {
 						// Get the latest NAV from the period (last entry)
 						lastEntry := apiResp.Data[len(apiResp.Data)-1]
@@ -568,15 +568,15 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			results = append(results, map[string]interface{}{
-				"success":               true,
-				"mtm_id":                mtmID,
-				"scheme_id":             h.SchemeID,
-				"scheme_name":           h.SchemeName,
-				"units":                 h.Units,
-				"prev_nav":              prevNAV,
-				"curr_nav":              endNAV,
-				"nav_date":              actualEndDate,
-				"unrealized_gain_loss": unrealizedGL,
+				"success":                  true,
+				"mtm_id":                   mtmID,
+				"scheme_id":                h.SchemeID,
+				"scheme_name":              h.SchemeName,
+				"units":                    h.Units,
+				"prev_nav":                 prevNAV,
+				"curr_nav":                 endNAV,
+				"nav_date":                 actualEndDate,
+				"unrealized_gain_loss":     unrealizedGL,
 				"unrealized_gain_loss_pct": unrealizedGLPct,
 			})
 		}
@@ -829,5 +829,642 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// ---------------------------
+// NEW TWO-PHASE MTM ENDPOINTS
+// ---------------------------
+
+// MTMPreviewRecord represents a single MTM calculation preview
+type MTMPreviewRecord struct {
+	SchemeID        string          `json:"scheme_id"`
+	SchemeName      string          `json:"scheme_name"`
+	ISIN            string          `json:"isin"`
+	InternalCode    string          `json:"internal_code"`
+	FolioNumber     string          `json:"folio_number"`
+	DematAccNumber  string          `json:"demat_acc_number"`
+	Units           float64         `json:"units"`
+	AvgNAV          float64         `json:"avg_nav"`
+	PrevNAV         float64         `json:"prev_nav"`
+	CurrNAV         float64         `json:"curr_nav"`
+	NAVDate         string          `json:"nav_date"`
+	PrevValue       float64         `json:"prev_value"`
+	CurrValue       float64         `json:"curr_value"`
+	UnrealizedGL    float64         `json:"unrealized_gain_loss"`
+	UnrealizedGLPct float64         `json:"unrealized_gain_loss_pct"`
+	NAVSource       string          `json:"nav_source"` // "MFapi" or "Local"
+	Success         bool            `json:"success"`
+	Error           string          `json:"error,omitempty"`
+	HistoricalNAVs  []HistoricalNAV `json:"historical_navs,omitempty"`
+}
+
+// HistoricalNAV represents historical NAV data point
+type HistoricalNAV struct {
+	Date string  `json:"date"`
+	NAV  float64 `json:"nav"`
+}
+
+// MTMCommitRecord represents the payload for committing MTM records
+type MTMCommitRecord struct {
+	SchemeID        string  `json:"scheme_id"`
+	FolioNumber     string  `json:"folio_number,omitempty"`
+	DematAccNumber  string  `json:"demat_acc_number,omitempty"`
+	Units           float64 `json:"units"`
+	PrevNAV         float64 `json:"prev_nav"`
+	CurrNAV         float64 `json:"curr_nav"`
+	NAVDate         string  `json:"nav_date"`
+	PrevValue       float64 `json:"prev_value"`
+	CurrValue       float64 `json:"curr_value"`
+	UnrealizedGL    float64 `json:"unrealized_gain_loss"`
+	UnrealizedGLPct float64 `json:"unrealized_gain_loss_pct"`
+}
+
+// ---------------------------
+// PreviewMTMBulk - Phase 1: Calculate and preview MTM data
+// ---------------------------
+func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID           string `json:"user_id"`
+			AccountingPeriod string `json:"accounting_period"` // Text format: "JAN 2025", "FEB 2025", etc. or "YYYY-MM"
+			IncludeHistory   bool   `json:"include_history"`   // Whether to fetch historical NAV data
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			return
+		}
+
+		// Validate required fields
+		if strings.TrimSpace(req.AccountingPeriod) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "accounting_period is required (e.g., 'JAN 2025' or '2025-01')")
+			return
+		}
+
+		// Parse accounting period - supports two formats:
+		// 1. "JAN 2025" or "JANUARY 2025" (text format)
+		// 2. "2025-01" (YYYY-MM format)
+		var monthNum, year string
+		accountingPeriod := strings.TrimSpace(req.AccountingPeriod)
+
+		// Check if it's in YYYY-MM format
+		if strings.Contains(accountingPeriod, "-") && len(accountingPeriod) == 7 {
+			// Format: "2025-01"
+			parts := strings.Split(accountingPeriod, "-")
+			if len(parts) != 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "accounting_period format should be 'YYYY-MM' or 'MONTH YYYY' (e.g., '2025-01' or 'JAN 2025')")
+				return
+			}
+			year = parts[0]
+			monthNum = parts[1]
+
+			// Validate month is between 01-12
+			monthInt := 0
+			fmt.Sscanf(monthNum, "%d", &monthInt)
+			if monthInt < 1 || monthInt > 12 {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid month in accounting_period (must be 01-12)")
+				return
+			}
+		} else {
+			// Text format: "JAN 2025" or "JANUARY 2025"
+			monthMap := map[string]string{
+				"JAN": "01", "JANUARY": "01",
+				"FEB": "02", "FEBRUARY": "02",
+				"MAR": "03", "MARCH": "03",
+				"APR": "04", "APRIL": "04",
+				"MAY": "05",
+				"JUN": "06", "JUNE": "06",
+				"JUL": "07", "JULY": "07",
+				"AUG": "08", "AUGUST": "08",
+				"SEP": "09", "SEPTEMBER": "09",
+				"OCT": "10", "OCTOBER": "10",
+				"NOV": "11", "NOVEMBER": "11",
+				"DEC": "12", "DECEMBER": "12",
+			}
+
+			parts := strings.Fields(strings.ToUpper(accountingPeriod))
+			if len(parts) != 2 {
+				api.RespondWithError(w, http.StatusBadRequest, "accounting_period format should be 'MONTH YYYY' or 'YYYY-MM' (e.g., 'JAN 2025' or '2025-01')")
+				return
+			}
+
+			var ok bool
+			monthNum, ok = monthMap[parts[0]]
+			if !ok {
+				api.RespondWithError(w, http.StatusBadRequest, "Invalid month name in accounting_period")
+				return
+			}
+			year = parts[1]
+		}
+
+		// Construct start and end dates for the month
+		startDate := fmt.Sprintf("%s-%s-01", year, monthNum)
+
+		// Calculate last day of month
+		var endDate string
+		switch monthNum {
+		case "01", "03", "05", "07", "08", "10", "12":
+			endDate = fmt.Sprintf("%s-%s-31", year, monthNum)
+		case "04", "06", "09", "11":
+			endDate = fmt.Sprintf("%s-%s-30", year, monthNum)
+		case "02":
+			// Leap year check
+			yearInt := 0
+			fmt.Sscanf(year, "%d", &yearInt)
+			if yearInt%4 == 0 && (yearInt%100 != 0 || yearInt%400 == 0) {
+				endDate = fmt.Sprintf("%s-02-29", year)
+			} else {
+				endDate = fmt.Sprintf("%s-02-28", year)
+			}
+		}
+
+		// Validate not future month
+		currentTime := time.Now()
+		requestMonth, _ := time.Parse("2006-01", fmt.Sprintf("%s-%s", year, monthNum))
+		if requestMonth.After(currentTime) {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format("2006-01")))
+			return
+		}
+
+		ctx := r.Context()
+
+		// Fetch holdings from transaction history (read-only, no transaction needed)
+		holdingsQuery := `
+			WITH ot AS (
+				SELECT
+					t.*,
+					ms.scheme_name AS ms_scheme_name, 
+					ms.isin AS ms_isin, 
+					ms.scheme_id AS ms_scheme_id, 
+					ms.internal_scheme_code AS ms_internal_code
+				FROM investment.onboard_transaction t
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = t.scheme_id 
+					OR ms.internal_scheme_code = t.scheme_internal_code 
+					OR ms.isin = t.scheme_id
+				)
+				WHERE t.transaction_date <= $1::date
+				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
+			)
+			SELECT
+				COALESCE(ot.folio_number,'') AS folio_number,
+				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
+				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id) AS scheme_id,
+				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code) AS scheme_name,
+				COALESCE(ot.ms_isin,'') AS isin,
+				COALESCE(ot.ms_internal_code,'') AS internal_code,
+				SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+					THEN COALESCE(ot.units,0) 
+					ELSE 0 
+				END) - SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') 
+					THEN ABS(COALESCE(ot.units,0)) 
+					ELSE 0 
+				END) AS total_units,
+				CASE 
+					WHEN SUM(CASE 
+						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+						THEN COALESCE(ot.units,0) 
+						ELSE 0 
+					END) = 0 THEN 0
+					ELSE SUM(CASE 
+						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+						THEN COALESCE(ot.nav,0) * COALESCE(ot.units,0) 
+						ELSE 0 
+					END) / SUM(CASE 
+						WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+						THEN COALESCE(ot.units,0) 
+						ELSE 0 
+					END)
+				END AS avg_nav
+			FROM ot
+			GROUP BY 
+				COALESCE(ot.folio_number,''), 
+				COALESCE(ot.demat_acc_number,''), 
+				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id), 
+				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code), 
+				COALESCE(ot.ms_isin,''),
+				COALESCE(ot.ms_internal_code,'')
+			HAVING (
+				SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') 
+					THEN COALESCE(ot.units,0) 
+					ELSE 0 
+				END) - SUM(CASE 
+					WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') 
+					THEN ABS(COALESCE(ot.units,0)) 
+					ELSE 0 
+				END)
+			) > 0
+			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
+		`
+
+		holdingsRows, err := pgxPool.Query(ctx, holdingsQuery, startDate)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
+			return
+		}
+		defer holdingsRows.Close()
+
+		// Collect holdings
+		type HoldingData struct {
+			FolioNumber    string
+			DematAccNumber string
+			SchemeID       string
+			SchemeName     string
+			ISIN           string
+			InternalCode   string
+			Units          float64
+			AvgNAV         float64
+		}
+
+		holdings := []HoldingData{}
+		for holdingsRows.Next() {
+			var h HoldingData
+			if err := holdingsRows.Scan(&h.FolioNumber, &h.DematAccNumber, &h.SchemeID, &h.SchemeName, &h.ISIN, &h.InternalCode, &h.Units, &h.AvgNAV); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Holdings scan failed: "+err.Error())
+				return
+			}
+			holdings = append(holdings, h)
+		}
+
+		if len(holdings) == 0 {
+			// Check if onboard_transaction table has any data at all
+			var txCount int
+			pgxPool.QueryRow(ctx, "SELECT COUNT(*) FROM investment.onboard_transaction WHERE LOWER(COALESCE(transaction_type,'')) IN ('buy','purchase','subscription')").Scan(&txCount)
+
+			if txCount == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No investment transactions found. Please upload transaction data before running MTM for %s", req.AccountingPeriod))
+			} else {
+				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No active holdings found for accounting period %s (start date: %s). Found %d total buy transactions but all were after this date or fully redeemed.", req.AccountingPeriod, startDate, txCount))
+			}
+			return
+		}
+
+		previews := make([]MTMPreviewRecord, 0, len(holdings))
+
+		// Calculate MTM for each holding
+		for _, h := range holdings {
+			preview := MTMPreviewRecord{
+				SchemeID:       h.SchemeID,
+				SchemeName:     h.SchemeName,
+				ISIN:           h.ISIN,
+				InternalCode:   h.InternalCode,
+				FolioNumber:    h.FolioNumber,
+				DematAccNumber: h.DematAccNumber,
+				Units:          h.Units,
+				AvgNAV:         h.AvgNAV,
+				PrevNAV:        h.AvgNAV, // Cost basis
+				Success:        false,
+			}
+
+			// Validate prev_nav
+			if preview.PrevNAV <= 0 {
+				preview.Error = "Invalid avg_nav (prev_nav <= 0)"
+				previews = append(previews, preview)
+				continue
+			}
+
+			// Try to fetch current NAV and optionally historical NAVs
+			var amfiCode string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(amfi_scheme_code, '') FROM investment.masterscheme 
+				WHERE scheme_id = $1 OR isin = $2 OR internal_scheme_code = $3 
+				LIMIT 1
+			`, h.SchemeID, h.ISIN, h.InternalCode).Scan(&amfiCode); err != nil || amfiCode == "" {
+				amfiCode = h.InternalCode
+			}
+
+			var endNAV float64
+			var actualEndDate string
+			var navSource string
+			var historicalNAVs []HistoricalNAV
+
+			if amfiCode != "" {
+				// Call MFapi.in to get NAV data
+				apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", amfiCode)
+
+				resp, err := http.Get(apiURL)
+				if err == nil && resp.StatusCode == 200 {
+					defer resp.Body.Close()
+					body, _ := io.ReadAll(resp.Body)
+
+					var apiResp struct {
+						Meta struct {
+							SchemeName string `json:"scheme_name"`
+						} `json:"meta"`
+						Data []struct {
+							Date string `json:"date"`
+							NAV  string `json:"nav"`
+						} `json:"data"`
+						Status string `json:"status"`
+					}
+
+					if err := json.Unmarshal(body, &apiResp); err == nil && len(apiResp.Data) > 0 {
+						navSource = "MFapi"
+
+						// Get the latest NAV from the response (first entry is latest)
+						latestEntry := apiResp.Data[0]
+						actualEndDate = latestEntry.Date
+						if navVal, err := strconv.ParseFloat(latestEntry.NAV, 64); err == nil {
+							endNAV = navVal
+						}
+
+						// If include_history is true, collect historical NAV data for the accounting period
+						if req.IncludeHistory {
+							historicalNAVs = make([]HistoricalNAV, 0)
+							startParsed, _ := time.Parse("2006-01-02", startDate)
+							endParsed, _ := time.Parse("2006-01-02", endDate)
+
+							for _, entry := range apiResp.Data {
+								entryDate, err := time.Parse("02-01-2006", entry.Date) // MFapi format: DD-MM-YYYY
+								if err != nil {
+									continue
+								}
+
+								// Include NAVs within the accounting period
+								if (entryDate.Equal(startParsed) || entryDate.After(startParsed)) &&
+									(entryDate.Equal(endParsed) || entryDate.Before(endParsed)) {
+									if navVal, err := strconv.ParseFloat(entry.NAV, 64); err == nil {
+										historicalNAVs = append(historicalNAVs, HistoricalNAV{
+											Date: entryDate.Format("2006-01-02"),
+											NAV:  navVal,
+										})
+									}
+								}
+							}
+						}
+					} else {
+						preview.Error = "No NAV data found in MFapi response"
+					}
+				} else if resp != nil {
+					preview.Error = fmt.Sprintf("MFapi returned status %d", resp.StatusCode)
+				} else {
+					preview.Error = "Failed to fetch from MFapi: " + err.Error()
+				}
+			} else {
+				preview.Error = "No AMFI code found for scheme"
+			}
+
+			// If MFapi failed, try local amfi_nav_staging as fallback
+			if endNAV == 0 {
+				var localNAV float64
+				if err := pgxPool.QueryRow(ctx, `
+					SELECT COALESCE(nav_value, 0) 
+					FROM investment.amfi_nav_staging 
+					WHERE scheme_code = $1 
+						AND nav_date BETWEEN $2::date AND $3::date
+					ORDER BY nav_date DESC 
+					LIMIT 1
+				`, h.SchemeID, startDate, endDate).Scan(&localNAV); err == nil && localNAV > 0 {
+					endNAV = localNAV
+					actualEndDate = endDate
+					navSource = "Local"
+					preview.Error = "" // Clear previous error
+
+					// Fetch historical NAVs from local if requested
+					if req.IncludeHistory {
+						localHistRows, err := pgxPool.Query(ctx, `
+							SELECT nav_date, nav_value
+							FROM investment.amfi_nav_staging
+							WHERE scheme_code = $1
+								AND nav_date BETWEEN $2::date AND $3::date
+							ORDER BY nav_date DESC
+						`, h.SchemeID, startDate, endDate)
+						if err == nil {
+							defer localHistRows.Close()
+							historicalNAVs = make([]HistoricalNAV, 0)
+							for localHistRows.Next() {
+								var navDate time.Time
+								var navValue float64
+								if err := localHistRows.Scan(&navDate, &navValue); err == nil {
+									historicalNAVs = append(historicalNAVs, HistoricalNAV{
+										Date: navDate.Format("2006-01-02"),
+										NAV:  navValue,
+									})
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// If still no end NAV, record error and skip
+			if endNAV == 0 {
+				if preview.Error == "" {
+					preview.Error = "Unable to fetch end NAV from any source"
+				}
+				previews = append(previews, preview)
+				continue
+			}
+
+			// Calculate MTM values
+			preview.CurrNAV = endNAV
+			preview.NAVDate = actualEndDate
+			preview.NAVSource = navSource
+			preview.PrevValue = h.Units * preview.PrevNAV
+			preview.CurrValue = h.Units * preview.CurrNAV
+			preview.UnrealizedGL = preview.CurrValue - preview.PrevValue
+			if preview.PrevValue > 0 {
+				preview.UnrealizedGLPct = (preview.UnrealizedGL / preview.PrevValue) * 100
+			}
+			preview.Success = true
+			preview.HistoricalNAVs = historicalNAVs
+
+			previews = append(previews, preview)
+		}
+
+		// Calculate summary statistics
+		successCount := 0
+		failureCount := 0
+		totalUnrealizedGL := 0.0
+		for _, p := range previews {
+			if p.Success {
+				successCount++
+				totalUnrealizedGL += p.UnrealizedGL
+			} else {
+				failureCount++
+			}
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]any{
+			"accounting_period":   req.AccountingPeriod,
+			"start_date":          startDate,
+			"end_date":            endDate,
+			"holdings_found":      len(holdings),
+			"success_count":       successCount,
+			"failure_count":       failureCount,
+			"total_unrealized_gl": totalUnrealizedGL,
+			"include_history":     req.IncludeHistory,
+			"mtm_preview_records": previews,
+		})
+	}
+}
+
+// ---------------------------
+// CommitMTMBulk - Phase 2: Commit the MTM records to database
+// ---------------------------
+func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID           string            `json:"user_id"`
+			ActivityType     string            `json:"activity_type"`     // "MTM"
+			EffectiveDate    string            `json:"effective_date"`    // YYYY-MM-DD
+			AccountingPeriod string            `json:"accounting_period"` // Text format: "JAN 2025", "FEB 2025", etc.
+			DataSource       string            `json:"data_source"`       // "Auto" or "Manual"
+			Records          []MTMCommitRecord `json:"records"`           // Pre-calculated MTM records from preview
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			return
+		}
+
+		// Validate required fields
+		if strings.TrimSpace(req.AccountingPeriod) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "accounting_period is required")
+			return
+		}
+		if strings.TrimSpace(req.EffectiveDate) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "effective_date is required (YYYY-MM-DD)")
+			return
+		}
+		if len(req.Records) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "records array is required and cannot be empty")
+			return
+		}
+
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Name
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
+			return
+		}
+
+		ctx := r.Context()
+
+		// Single transaction for entire batch
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		// Create main activity
+		activityType := "MTM"
+		if strings.TrimSpace(req.ActivityType) != "" {
+			activityType = req.ActivityType
+		}
+
+		dataSource := "Auto"
+		if strings.TrimSpace(req.DataSource) != "" {
+			dataSource = req.DataSource
+		}
+
+		var activityID string
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO investment.accounting_activity (
+				activity_type, effective_date, accounting_period, data_source, status
+			) VALUES ($1, $2, $3, $4, 'DRAFT')
+			RETURNING activity_id
+		`, activityType, req.EffectiveDate, req.AccountingPeriod, dataSource).Scan(&activityID); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Activity insert failed: "+err.Error())
+			return
+		}
+
+		results := make([]map[string]interface{}, 0, len(req.Records))
+
+		// Insert each MTM record
+		for _, record := range req.Records {
+			// Validate record
+			if record.Units <= 0 || record.PrevNAV <= 0 || record.CurrNAV <= 0 {
+				results = append(results, map[string]interface{}{
+					"success":   false,
+					"scheme_id": record.SchemeID,
+					"error":     "Invalid record: units, prev_nav, and curr_nav must be greater than 0",
+				})
+				continue
+			}
+
+			// Lookup folio_id and demat_id from master tables
+			var folioID, dematID *string
+			if record.FolioNumber != "" {
+				var fid string
+				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 LIMIT 1`, record.FolioNumber).Scan(&fid); err == nil {
+					folioID = &fid
+				}
+			}
+			if record.DematAccNumber != "" {
+				var did string
+				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number = $1 LIMIT 1`, record.DematAccNumber).Scan(&did); err == nil {
+					dematID = &did
+				}
+			}
+
+			var mtmID int64
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO investment.accounting_mtm (
+					activity_id, scheme_id, folio_id, demat_id, units, prev_nav, curr_nav, nav_date,
+					prev_value, curr_value, unrealized_gain_loss, unrealized_gain_loss_pct
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				RETURNING mtm_id
+			`, activityID, record.SchemeID, folioID, dematID,
+				record.Units, record.PrevNAV, record.CurrNAV, record.NAVDate,
+				record.PrevValue, record.CurrValue, record.UnrealizedGL, record.UnrealizedGLPct).Scan(&mtmID); err != nil {
+				results = append(results, map[string]interface{}{
+					"success":   false,
+					"scheme_id": record.SchemeID,
+					"error":     "MTM insert failed: " + err.Error(),
+				})
+				continue
+			}
+
+			results = append(results, map[string]interface{}{
+				"success":              true,
+				"mtm_id":               mtmID,
+				"scheme_id":            record.SchemeID,
+				"units":                record.Units,
+				"prev_nav":             record.PrevNAV,
+				"curr_nav":             record.CurrNAV,
+				"unrealized_gain_loss": record.UnrealizedGL,
+			})
+		}
+
+		// Create single audit trail for batch
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
+			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
+		`, activityID, userEmail); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			return
+		}
+
+		// Calculate summary
+		successCount := 0
+		for _, r := range results {
+			if success, ok := r["success"].(bool); ok && success {
+				successCount++
+			}
+		}
+
+		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", map[string]any{
+			"activity_id":       activityID,
+			"accounting_period": req.AccountingPeriod,
+			"records_submitted": len(req.Records),
+			"records_inserted":  successCount,
+			"records_failed":    len(req.Records) - successCount,
+			"mtm_records":       results,
+		})
 	}
 }

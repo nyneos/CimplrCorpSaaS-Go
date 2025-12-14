@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-
 type CreateDPRequestSingle struct {
 	UserID     string `json:"user_id"`
 	DPName     string `json:"dp_name"`
@@ -908,7 +907,7 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.dp_id = m.dp_id
 			LEFT JOIN history h ON h.dp_id = m.dp_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.dp_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)

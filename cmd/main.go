@@ -64,7 +64,7 @@ func main() {
 		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		user, pass, host, port, name,
 	)
-	
+
 	ctx := context.Background()
 	pgxPool, err := pgxpool.New(ctx, pgxConnStr)
 	if err != nil {

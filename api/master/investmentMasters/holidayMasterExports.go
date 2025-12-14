@@ -220,8 +220,6 @@ ORDER BY h.holiday_date, h.holiday_name;`
 	return out, rows.Err()
 }
 
-
-
 func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 

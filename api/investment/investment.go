@@ -11,6 +11,7 @@ import (
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	redemption "CimplrCorpSaas/api/investment/redemption"
+	portfolio "CimplrCorpSaas/api/investment/portfolio"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -79,6 +80,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 
 	// Investment redemption/portfolio endpoints
 	mux.Handle("/investment/portfolio/get", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetPortfolioWithTransactions(pool))))
+	mux.Handle("/investment/portfolio/refresh", api.BusinessUnitMiddleware(db)(http.HandlerFunc(portfolio.RefreshPortfolioSnapshots(pool))))
 	mux.Handle("/investment/redemption/calculate-fifo", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.CalculateRedemptionFIFO(pool))))
 
 	// Redemption initiation endpoints
@@ -120,6 +122,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	// Accounting Workbench - MTM endpoints
 	mux.Handle("/investment/accounting/mtm/create", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateMTMSingle(pool))))
 	mux.Handle("/investment/accounting/mtm/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateMTMBulk(pool))))
+	mux.Handle("/investment/accounting/mtm/preview", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.PreviewMTMBulk(pool))))
+	mux.Handle("/investment/accounting/mtm/commit", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CommitMTMBulk(pool))))
 	mux.Handle("/investment/accounting/mtm/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateMTM(pool))))
 	mux.Handle("/investment/accounting/mtm/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetMTMWithAudit(pool))))
 

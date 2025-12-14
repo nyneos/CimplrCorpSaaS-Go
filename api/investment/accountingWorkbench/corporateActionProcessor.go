@@ -124,15 +124,9 @@ func processMerger(ctx context.Context, tx DBExecutor, sourceSchemeID string, ta
 		return fmt.Errorf("source scheme not found: %w", err)
 	}
 
-	// Update the source scheme to point to target (mark as merged)
-	_, err = tx.Exec(ctx, `
-		UPDATE investment.masterscheme 
-		SET scheme_name = $1 || ' (Merged into ' || $2 || ')'
-		WHERE scheme_id = $3
-	`, sourceSchemeName, *targetSchemeID, sourceSchemeID)
-	if err != nil {
-		return fmt.Errorf("failed to update source scheme: %w", err)
-	}
+	// Note: Do not modify master scheme name here. Name changes are handled
+	// only via the SCHEME_NAME_CHANGE action. Merger should update holdings
+	// and scheme_id references (done below) but not overwrite master names.
 
 	// Update portfolio holdings: merge source into target with conversion ratio
 	// This affects portfolio tracking tables
@@ -189,15 +183,11 @@ func processSplit(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 		return fmt.Errorf("failed to process split: %w", err)
 	}
 
-	// Log split in scheme master (optional)
-	_, err = tx.Exec(ctx, `
-		UPDATE investment.masterscheme 
-		SET scheme_name = scheme_name || ' (Split ' || $1 || ':' || $2 || ')'
-		WHERE scheme_id = $3 
-		  AND scheme_name NOT LIKE '%Split%'
-	`, fmt.Sprintf("%.0f", *ratioNew), fmt.Sprintf("%.0f", *ratioOld), sourceSchemeID)
+		// Do not change master scheme name for split actions. Only update
+		// portfolio snapshot totals and avg_nav above. Name metadata should be
+		// changed only via explicit SCHEME_NAME_CHANGE actions.
 
-	return err
+		return nil
 }
 
 // processBonus: Bonus (x for y): Bonus Units = floor_to_precision(Old Units * x / y)
@@ -273,15 +263,11 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 		}
 	}
 
-	// Log bonus in scheme master (optional)
-	_, err = tx.Exec(ctx, `
-		UPDATE investment.masterscheme 
-		SET scheme_name = scheme_name || ' (Bonus ' || $1::text || ':' || $2::text || ')'
-		WHERE scheme_id = $3
-		  AND scheme_name NOT LIKE '%Bonus%'
-	`, fmt.Sprintf("%.0f", *ratioNew), fmt.Sprintf("%.0f", *ratioOld), sourceSchemeID)
+		// Do not modify master scheme name for bonus actions. Bonus adjustments
+		// are applied to holdings only; master scheme name changes belong to
+		// explicit SCHEME_NAME_CHANGE actions.
 
-	return err
+		return nil
 }
 
 // ProcessFVONavOverride validates FVO records during approval

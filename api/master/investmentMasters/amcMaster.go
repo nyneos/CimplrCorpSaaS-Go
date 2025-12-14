@@ -1097,7 +1097,7 @@ func BulkApproveAMCActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": actionIDs,
-			"deleted_amcs": deleteIDs,
+			"deleted_amcs":        deleteIDs,
 		})
 	}
 }
@@ -1108,9 +1108,9 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		q := `
 			WITH latest AS (
-				SELECT DISTINCT ON (amc_id) amc_id, processing_status
+				SELECT DISTINCT ON (amc_id) amc_id, processing_status,requested_at,checker_at
 				FROM investment.auditactionamc
-				ORDER BY amc_id, requested_at DESC
+				ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 			)
 			SELECT m.amc_id, m.amc_name, m.internal_amc_code
 			FROM investment.masteramc m
@@ -1118,7 +1118,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE UPPER(l.processing_status)='APPROVED'
 			  AND UPPER(m.status)='ACTIVE'
 			  AND COALESCE(m.is_deleted,false)=false
-			ORDER BY m.amc_name;
+			ORDER BY amc_id, GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1159,8 +1159,8 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_at,
 					a.checker_comment,
 					a.reason
-				FROM investment.auditactionamc a
-				ORDER BY a.amc_id, a.requested_at DESC
+					FROM investment.auditactionamc a
+					ORDER BY a.amc_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
 				SELECT 
@@ -1227,7 +1227,8 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.amc_id = m.amc_id
 			LEFT JOIN history h ON h.amc_id = m.amc_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.amc_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
+	
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1261,7 +1262,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"success": true,
-			"rows": out,
+			"rows":    out,
 		})
 	}
 }

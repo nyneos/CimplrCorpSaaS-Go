@@ -13,6 +13,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -864,7 +865,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(f.folio_id::text,'') AS folio_id,
 				COALESCE(d.default_settlement_account,'') AS demat_number,
 				COALESCE(d.demat_id::text,'') AS demat_id,
-				DATE_PART('day', now()::timestamp - m.transaction_date::timestamp)::int AS age_days,
+				DATE_PART('day',  m.transaction_date::timestamp-now()::timestamp)::int AS age_days,
 				COALESCE(m.amount,0) AS gross_investment_amount,
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -917,7 +918,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					AND m.initiation_id NOT IN (
 						SELECT initiation_id FROM investment.investment_confirmation 
 					)
-			ORDER BY m.transaction_date DESC, m.entity_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
@@ -942,6 +943,84 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}
+			
+			// Fetch NAV from MFapi if not available in local database
+			navValue, _ := rec["nav"].(float64)
+			if navValue == 0 {
+				// Try to get AMFI scheme code to fetch from MFapi
+				var amfiSchemeCode, internalCode, isin string
+				
+				// Get scheme_id and all possible identifiers to query for AMFI code
+				schemeID, _ := rec["scheme_id"].(string)
+				if schemeID != "" {
+					err := pgxPool.QueryRow(ctx, `
+						SELECT 
+							COALESCE(amfi_scheme_code, ''),
+							COALESCE(internal_scheme_code, ''),
+							COALESCE(isin, '')
+						FROM investment.masterscheme
+						WHERE scheme_id = $1 OR internal_scheme_code = $1 OR isin = $1 OR scheme_name = $1
+						LIMIT 1
+					`, schemeID).Scan(&amfiSchemeCode, &internalCode, &isin)
+					
+					// Try multiple codes in order of preference
+					codesToTry := []string{}
+					if err == nil {
+						if amfiSchemeCode != "" {
+							codesToTry = append(codesToTry, amfiSchemeCode)
+						}
+						if internalCode != "" && internalCode != amfiSchemeCode {
+							codesToTry = append(codesToTry, internalCode)
+						}
+					}
+					
+					// Try each code until we get a valid NAV
+					navFetched := false
+					for _, code := range codesToTry {
+						apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", code)
+						resp, err := http.Get(apiURL)
+						if err == nil && resp.StatusCode == 200 {
+							body, _ := io.ReadAll(resp.Body)
+							resp.Body.Close()
+							
+							var apiResp struct {
+								Meta struct {
+									SchemeCode string `json:"scheme_code"`
+								} `json:"meta"`
+								Data []struct {
+									Date string `json:"date"`
+									NAV  string `json:"nav"`
+								} `json:"data"`
+								Status string `json:"status"`
+							}
+							
+							if json.Unmarshal(body, &apiResp) == nil && len(apiResp.Data) > 0 {
+								// Get the latest NAV (first entry)
+								latestEntry := apiResp.Data[0]
+								if navVal, err := strconv.ParseFloat(latestEntry.NAV, 64); err == nil && navVal > 0 {
+									rec["nav"] = navVal
+									rec["applicable_nav_date"] = latestEntry.Date
+									rec["nav_source"] = "MFapi"
+									navFetched = true
+									break // Found valid NAV, stop trying
+								}
+							}
+						} else if resp != nil {
+							resp.Body.Close()
+						}
+					}
+					
+					// If still no NAV after trying all codes, mark as unavailable
+					if !navFetched {
+						rec["nav_source"] = "Unavailable"
+					}
+				} else {
+					rec["nav_source"] = "Unavailable"
+				}
+			} else {
+				rec["nav_source"] = "Local"
+			}
+			
 			out = append(out, rec)
 		}
 
@@ -1037,8 +1116,8 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY ans.nav_date DESC, ans.file_date DESC
 				LIMIT 1
 			) nav ON true
-			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY m.transaction_date DESC, m.entity_name;
+			WHERE COALESCE(m.is_deleted, false) = false 
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
