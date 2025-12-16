@@ -845,6 +845,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"category_kpis":                   kpiCats,
 		"categories_found":                foundCategories,
 		"uncategorized":                   uncategorized,
+		"bank_statement_id":               bankStatementID,
 		"transactions_uploaded_count":     uploadedCount,
 		"transactions_under_review_count": len(reviewTransactions),
 		"transactions_under_review":       reviewTransactions,
@@ -986,6 +987,177 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    resp,
+		})
+	})
+}
+
+// 2b. Recompute KPIs and uncategorized data for an existing bank statement
+// (POST, req: user_id, bank_statement_id). This endpoint returns a response
+// shaped like the upload endpoint so that the frontend can refresh KPIs and
+// the list of uncategorized transactions without re-uploading the file.
+func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			UserID          string `json:"user_id"`
+			BankStatementID string `json:"bank_statement_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.BankStatementID == "" {
+			http.Error(w, "Missing bank_statement_id in body", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+
+		// Fetch statement meta to know entity/account and period
+		var entityID, accountNumber string
+		var statementPeriodStart, statementPeriodEnd time.Time
+		err := db.QueryRowContext(ctx, `
+				SELECT entity_id, account_number, statement_period_start, statement_period_end
+				FROM cimplrcorpsaas.bank_statements
+				WHERE bank_statement_id = $1
+			`, body.BankStatementID).Scan(&entityID, &accountNumber, &statementPeriodStart, &statementPeriodEnd)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "bank_statement_id not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Load all rules/components for this account/entity/bank/global so we can
+		// attach category metadata (names/types) to the KPI response, mirroring
+		// the upload behaviour.
+		type ruleComponent struct {
+			RuleID       int64
+			Priority     int
+			CategoryID   int64
+			CategoryName string
+			CategoryType string
+		}
+		rules := []ruleComponent{}
+		qRules := `
+		       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type
+		       FROM cimplrcorpsaas.category_rules r
+		       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
+		       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
+		       WHERE r.is_active = true
+			 AND (
+			       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
+			       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
+			       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
+			       OR (s.scope_type = 'GLOBAL')
+			 )
+		       ORDER BY r.priority ASC, r.rule_id ASC
+	       `
+		rowsRules, err := db.QueryContext(ctx, qRules, accountNumber, entityID)
+		if err != nil {
+			http.Error(w, "failed to fetch category rules: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for rowsRules.Next() {
+			var rc ruleComponent
+			if err := rowsRules.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType); err == nil {
+				rules = append(rules, rc)
+			}
+		}
+		rowsRules.Close()
+
+		// Load all transactions for this bank statement
+		rows, err := db.QueryContext(ctx, `
+			SELECT tran_id, value_date, transaction_date, description,
+			       withdrawal_amount, deposit_amount, balance, raw_json, category_id
+			FROM cimplrcorpsaas.bank_statement_transactions
+			WHERE bank_statement_id = $1
+			ORDER BY value_date, transaction_date, transaction_id
+		`, body.BankStatementID)
+		if err != nil {
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		categoryCount := map[int64]int{}
+		debitSum := map[int64]float64{}
+		creditSum := map[int64]float64{}
+		uncategorized := []map[string]interface{}{}
+		transactionsCount := 0
+		for rows.Next() {
+			var tranID sql.NullString
+			var valueDate, transactionDate time.Time
+			var description string
+			var withdrawal, deposit, balance sql.NullFloat64
+			var rawJSON json.RawMessage
+			var categoryID sql.NullInt64
+			if err := rows.Scan(&tranID, &valueDate, &transactionDate, &description,
+				&withdrawal, &deposit, &balance, &rawJSON, &categoryID); err != nil {
+				continue
+			}
+			transactionsCount++
+			if categoryID.Valid {
+				categoryCount[categoryID.Int64]++
+				if withdrawal.Valid {
+					debitSum[categoryID.Int64] += withdrawal.Float64
+				}
+				if deposit.Valid {
+					creditSum[categoryID.Int64] += deposit.Float64
+				}
+			} else {
+				uncategorized = append(uncategorized, map[string]interface{}{
+					"tran_id":     tranID.String,
+					"description": description,
+					"value_date":  valueDate,
+					"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				})
+			}
+		}
+
+		// Build KPI and category metadata, mirroring the upload response
+		kpiCats := []map[string]interface{}{}
+		foundCategories := []map[string]interface{}{}
+		foundCategoryIDs := map[int64]bool{}
+		for catID, count := range categoryCount {
+			kpiCats = append(kpiCats, map[string]interface{}{
+				"category_id": catID,
+				"count":       count,
+				"debit_sum":   debitSum[catID],
+				"credit_sum":  creditSum[catID],
+			})
+			foundCategoryIDs[catID] = true
+		}
+		for _, rule := range rules {
+			if foundCategoryIDs[rule.CategoryID] {
+				foundCategories = append(foundCategories, map[string]interface{}{
+					"category_id":   rule.CategoryID,
+					"category_name": rule.CategoryName,
+					"category_type": rule.CategoryType,
+				})
+				delete(foundCategoryIDs, rule.CategoryID)
+			}
+		}
+
+		result := map[string]interface{}{
+			"pages_processed":                 1,
+			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
+			"statement_date_coverage":         map[string]interface{}{"start": statementPeriodStart, "end": statementPeriodEnd},
+			"category_kpis":                   kpiCats,
+			"categories_found":                foundCategories,
+			"uncategorized":                   uncategorized,
+			"bank_statement_id":               body.BankStatementID,
+			"transactions_uploaded_count":     transactionsCount,
+			"transactions_under_review_count": 0,
+			"transactions_under_review":       []map[string]interface{}{},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Bank statement summary recomputed successfully",
+			"data":    result,
 		})
 	})
 }
