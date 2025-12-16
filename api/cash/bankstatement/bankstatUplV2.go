@@ -666,88 +666,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		return nil, fmt.Errorf("failed to insert bank statement: %w", err)
 	}
 
-	// Upsert into public.bank_balances_manual for dashboard matching
-	var bankName, currencyCode, nickname, country string
-	err = tx.QueryRowContext(ctx, `
-			       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
-			       FROM public.masterbankaccount mba
-			       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-			       WHERE mba.account_number = $1 AND mba.is_deleted = false
-		       `, accountNumber).Scan(&bankName, &currencyCode, &nickname, &country)
-	if err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to lookup account info for balances_manual: %w", err)
-	}
-	// Calculate total credits and debits from transactions
-	var totalCredits, totalDebits float64
-	for _, t := range transactions {
-		if t.DepositAmount.Valid {
-			totalCredits += t.DepositAmount.Float64
-		}
-		if t.WithdrawalAmount.Valid {
-			totalDebits += t.WithdrawalAmount.Float64
-		}
-	}
-	_, err = tx.ExecContext(ctx, `
-			       INSERT INTO public.bank_balances_manual (
-				       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel
-			       ) VALUES (
-				       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-			       )
-			       ON CONFLICT (balance_id) DO UPDATE SET
-				       bank_name = EXCLUDED.bank_name,
-				       account_no = EXCLUDED.account_no,
-				       currency_code = EXCLUDED.currency_code,
-				       nickname = EXCLUDED.nickname,
-				       country = EXCLUDED.country,
-				       as_of_date = EXCLUDED.as_of_date,
-				       balance_type = EXCLUDED.balance_type,
-				       balance_amount = EXCLUDED.balance_amount,
-				       opening_balance = EXCLUDED.opening_balance,
-				       total_credits = EXCLUDED.total_credits,
-				       total_debits = EXCLUDED.total_debits,
-				       closing_balance = EXCLUDED.closing_balance,
-				       statement_type = EXCLUDED.statement_type,
-				       source_channel = EXCLUDED.source_channel
-		       `,
-		bankStatementID,
-		bankName,
-		accountNumber,
-		currencyCode,
-		nickname,
-		country,
-		statementPeriodEnd,
-		"CLOSING",
-		closingBalance,
-		openingBalance,
-		totalCredits,
-		totalDebits,
-		closingBalance,
-		"BANK_STATEMENT_V2",
-		"UPLOAD_V2",
-	)
-	if err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to upsert bank_balances_manual: %w", err)
-	}
-
-	// Insert audit action for bank_balances_manual after upsert
-	_, err = tx.ExecContext(ctx, `
-				       INSERT INTO auditactionbankbalances (
-					       balance_id, actiontype, processing_status, requested_by, requested_at
-				       ) VALUES ($1, $2, $3, $4, $5)
-			       `,
-		bankStatementID,
-		"CREATE",
-		"PENDING_APPROVAL",
-		"system",
-		time.Now(),
-	)
-	if err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("failed to insert audit action for bank_balances_manual: %w", err)
-	}
-
 	// Bulk insert transactions for speed, skip duplicates
 	if len(transactions) > 0 {
 		// Classify transactions into new vs already existing using DATABASE state
@@ -1261,7 +1179,10 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 					"message":           "Bank statement and related data deleted after approval",
 				})
 			} else {
-				_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
+				// On normal approval, create/update the corresponding bank balance
+				// entry and its audit record, based on the already-stored statement
+				// and transactions.
+				tx, err := db.Begin()
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1270,10 +1191,151 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 					})
 					continue
 				}
+				defer tx.Rollback()
+
+				var accountNumber string
+				var statementPeriodEnd time.Time
+				var openingBalance, closingBalance float64
+				err = tx.QueryRow(`
+				       SELECT account_number, statement_period_end, opening_balance, closing_balance
+				       FROM cimplrcorpsaas.bank_statements
+				       WHERE bank_statement_id = $1
+			       `, bsid).Scan(&accountNumber, &statementPeriodEnd, &openingBalance, &closingBalance)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				// Lookup account/bank details for balances_manual
+				var bankName, currencyCode, nickname, country string
+				err = tx.QueryRow(`
+				       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
+				       FROM public.masterbankaccount mba
+				       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
+				       WHERE mba.account_number = $1 AND mba.is_deleted = false
+			       `, accountNumber).Scan(&bankName, &currencyCode, &nickname, &country)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				// Calculate total credits and debits from stored transactions
+				var totalCredits, totalDebits float64
+				err = tx.QueryRow(`
+				       SELECT COALESCE(SUM(deposit_amount), 0), COALESCE(SUM(withdrawal_amount), 0)
+				       FROM cimplrcorpsaas.bank_statement_transactions
+				       WHERE bank_statement_id = $1
+			       `, bsid).Scan(&totalCredits, &totalDebits)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				// Upsert into public.bank_balances_manual for dashboard matching
+				_, err = tx.Exec(`
+				       INSERT INTO public.bank_balances_manual (
+					       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel
+				       ) VALUES (
+					       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+				       )
+				       ON CONFLICT (balance_id) DO UPDATE SET
+					       bank_name = EXCLUDED.bank_name,
+					       account_no = EXCLUDED.account_no,
+					       currency_code = EXCLUDED.currency_code,
+					       nickname = EXCLUDED.nickname,
+					       country = EXCLUDED.country,
+					       as_of_date = EXCLUDED.as_of_date,
+					       balance_type = EXCLUDED.balance_type,
+					       balance_amount = EXCLUDED.balance_amount,
+					       opening_balance = EXCLUDED.opening_balance,
+					       total_credits = EXCLUDED.total_credits,
+					       total_debits = EXCLUDED.total_debits,
+					       closing_balance = EXCLUDED.closing_balance,
+					       statement_type = EXCLUDED.statement_type,
+					       source_channel = EXCLUDED.source_channel
+			       `,
+					bsid,
+					bankName,
+					accountNumber,
+					currencyCode,
+					nickname,
+					country,
+					statementPeriodEnd,
+					"CLOSING",
+					closingBalance,
+					openingBalance,
+					totalCredits,
+					totalDebits,
+					closingBalance,
+					"BANK_STATEMENT_V2",
+					"UPLOAD_V2",
+				)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				// Insert audit action for bank_balances_manual marking it pending approval
+				_, err = tx.Exec(`
+				       INSERT INTO auditactionbankbalances (
+					       balance_id, actiontype, processing_status, requested_by, requested_at
+				       ) VALUES ($1, $2, $3, $4, $5)
+			       `,
+					bsid,
+					"CREATE",
+					"PENDING_APPROVAL",
+					body.UserID,
+					time.Now(),
+				)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				// Finally, record the statement approval itself
+				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				if err := tx.Commit(); err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           true,
-					"message":           "Bank statement approved",
+					"message":           "Bank statement approved and bank balance created",
 				})
 			}
 		}
