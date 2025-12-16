@@ -41,6 +41,7 @@ func StartCashService(db *sql.DB) {
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", bankstatement.GetAllBankStatementsHandler(db))
 	mux.Handle("/cash/bank-statements/v2/transactions", bankstatement.GetBankStatementTransactionsHandler(db))
+	mux.Handle("/cash/bank-statements/v2/recompute-kpis", bankstatement.RecomputeBankStatementSummaryHandler(db))
 	mux.Handle("/cash/bank-statements/v2/approve", bankstatement.ApproveBankStatementHandler(db))
 	mux.Handle("/cash/bank-statements/v2/reject", bankstatement.RejectBankStatementHandler(db))
 	mux.Handle("/cash/bank-statements/v2/delete", bankstatement.DeleteBankStatementHandler(db))
