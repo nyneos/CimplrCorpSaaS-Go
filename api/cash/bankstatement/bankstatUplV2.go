@@ -29,6 +29,153 @@ var (
 	ErrStatementPeriodExists = errors.New("a statement for this period already exists for this account")
 )
 
+// categoryRuleComponent represents a single rule component used for
+// categorizing transactions. This is shared between the upload and recompute
+// flows so that both use identical matching logic.
+type categoryRuleComponent struct {
+	RuleID         int64
+	Priority       int
+	CategoryID     int64
+	CategoryName   string
+	CategoryType   string
+	ComponentType  string
+	MatchType      sql.NullString
+	MatchValue     sql.NullString
+	AmountOperator sql.NullString
+	AmountValue    sql.NullFloat64
+	TxnFlow        sql.NullString
+	CurrencyCode   sql.NullString
+}
+
+// loadCategoryRuleComponents fetches all active rule components for a given
+// account/entity/bank/global scope, ordered by rule priority. This mirrors the
+// logic originally present in the upload handler so that recompute can reuse
+// the same rules.
+func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID string) ([]categoryRuleComponent, error) {
+	q := `
+	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
+	       FROM cimplrcorpsaas.category_rules r
+	       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
+	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
+	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
+	       WHERE r.is_active = true
+		 AND (
+		       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
+		       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
+		       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
+		       OR (s.scope_type = 'GLOBAL')
+		 )
+	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
+	   `
+
+	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rowsRule.Close()
+
+	rules := []categoryRuleComponent{}
+	for rowsRule.Next() {
+		var rc categoryRuleComponent
+		if err := rowsRule.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode); err != nil {
+			return nil, err
+		}
+		rules = append(rules, rc)
+	}
+	if err := rowsRule.Err(); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// matchCategoryForTransaction applies the rule components to a single
+// transaction and returns the matched category_id, if any. The logic here is
+// exactly the same as what is used during upload so that recompute produces
+// consistent results when new rules are added.
+func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64) sql.NullInt64 {
+	matchedCategoryID := sql.NullInt64{Valid: false}
+	descLower := strings.ToLower(description)
+	for _, rule := range rules {
+		// NARRATION LOGIC
+		if rule.ComponentType == "NARRATION_LOGIC" && rule.MatchType.Valid && rule.MatchValue.Valid {
+			val := strings.ToLower(rule.MatchValue.String)
+			switch rule.MatchType.String {
+			case "CONTAINS":
+				if strings.Contains(descLower, val) {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+			case "EQUALS":
+				if descLower == val {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+			case "STARTS_WITH":
+				if strings.HasPrefix(descLower, val) {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+			case "ENDS_WITH":
+				if strings.HasSuffix(descLower, val) {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+			case "ILIKE":
+				if strings.Contains(descLower, val) {
+					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				}
+			case "REGEX":
+				// Regex not implemented in original logic
+			}
+		}
+		// AMOUNT LOGIC (applies to both withdrawal and deposit)
+		if !matchedCategoryID.Valid && rule.ComponentType == "AMOUNT_LOGIC" && rule.AmountOperator.Valid && rule.AmountValue.Valid {
+			amounts := []float64{}
+			if withdrawal.Valid {
+				amounts = append(amounts, withdrawal.Float64)
+			}
+			if deposit.Valid {
+				amounts = append(amounts, deposit.Float64)
+			}
+			for _, amt := range amounts {
+				switch rule.AmountOperator.String {
+				case ">":
+					if amt > rule.AmountValue.Float64 {
+						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					}
+				case ">=":
+					if amt >= rule.AmountValue.Float64 {
+						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					}
+				case "=":
+					if amt == rule.AmountValue.Float64 {
+						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					}
+				case "<=":
+					if amt <= rule.AmountValue.Float64 {
+						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					}
+				case "<":
+					if amt < rule.AmountValue.Float64 {
+						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					}
+				}
+			}
+		}
+		// TRANSACTION LOGIC (DEBIT/CREDIT)
+		if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
+			if rule.TxnFlow.String == "DEBIT" && withdrawal.Valid && withdrawal.Float64 > 0 {
+				matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+			}
+			if rule.TxnFlow.String == "CREDIT" && deposit.Valid && deposit.Float64 > 0 {
+				matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+			}
+		}
+		// CURRENCY_CONDITION and other component types are ignored here because
+		// the original upload logic didn't implement them either.
+		if matchedCategoryID.Valid {
+			break
+		}
+	}
+	return matchedCategoryID
+}
+
 // parseDate tries multiple date formats for CSV
 func parseDate(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
@@ -69,15 +216,6 @@ func parseDate(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
-	var t time.Time
-	var err error
-	for _, layout := range layouts {
-		t, err = time.Parse(layout, s)
-		if err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, err
 }
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
@@ -208,49 +346,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 
 	// 4. Fetch all active rules/components for this account/entity/bank/global
-	type ruleComponent struct {
-		RuleID         int64
-		Priority       int
-		CategoryID     int64
-		CategoryName   string
-		CategoryType   string
-		ComponentType  string
-		MatchType      sql.NullString
-		MatchValue     sql.NullString
-		AmountOperator sql.NullString
-		AmountValue    sql.NullFloat64
-		TxnFlow        sql.NullString
-		CurrencyCode   sql.NullString
-	}
-	// Get all rules/components for this account, entity, bank, or global (ordered by priority)
-	rules := []ruleComponent{}
-	q := `
-	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	       FROM cimplrcorpsaas.category_rules r
-	       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
-	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
-	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
-	       WHERE r.is_active = true
-		 AND (
-		       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
-		       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
-		       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL) -- TODO: add bank_code logic if needed
-		       OR (s.scope_type = 'GLOBAL')
-		 )
-	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
-       `
-	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID)
+	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch category rules: %w", err)
 	}
-	for rowsRule.Next() {
-		var rc ruleComponent
-		err := rowsRule.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode)
-		if err == nil {
-			rules = append(rules, rc)
-		}
-	}
-	rowsRule.Close()
 
 	// 5. Parse transactions, categorize, and collect KPIs
 	// Find the header row for transactions
@@ -454,91 +553,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		rowJSON, _ := json.Marshal(row)
 
 		// --- CATEGORY MATCHING ---
-		matchedCategoryID := sql.NullInt64{Valid: false}
-		for _, rule := range rules {
-			// NARRATION LOGIC
-			if rule.ComponentType == "NARRATION_LOGIC" && rule.MatchType.Valid && rule.MatchValue.Valid {
-				desc := strings.ToLower(description)
-				val := strings.ToLower(rule.MatchValue.String)
-				switch rule.MatchType.String {
-				case "CONTAINS":
-					if strings.Contains(desc, val) {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "EQUALS":
-					if desc == val {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "STARTS_WITH":
-					if strings.HasPrefix(desc, val) {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "ENDS_WITH":
-					if strings.HasSuffix(desc, val) {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "ILIKE":
-					if strings.Contains(desc, val) {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "REGEX":
-					// Optionally implement regex matching if needed
-				}
-			}
-			// AMOUNT LOGIC (applies to both withdrawal and deposit)
-			if !matchedCategoryID.Valid && rule.ComponentType == "AMOUNT_LOGIC" && rule.AmountOperator.Valid && rule.AmountValue.Valid {
-				// Check both withdrawal and deposit
-				amounts := []float64{}
-				if withdrawal.Valid {
-					amounts = append(amounts, withdrawal.Float64)
-				}
-				if deposit.Valid {
-					amounts = append(amounts, deposit.Float64)
-				}
-				for _, amt := range amounts {
-					switch rule.AmountOperator.String {
-					case ">":
-						if amt > rule.AmountValue.Float64 {
-							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						}
-					case ">=":
-						if amt >= rule.AmountValue.Float64 {
-							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						}
-					case "=":
-						if amt == rule.AmountValue.Float64 {
-							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						}
-					case "<=":
-						if amt <= rule.AmountValue.Float64 {
-							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						}
-					case "<":
-						if amt < rule.AmountValue.Float64 {
-							matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-						}
-					}
-				}
-			}
-			// TRANSACTION LOGIC (DEBIT/CREDIT)
-			if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
-				if rule.TxnFlow.String == "DEBIT" && withdrawal.Valid && withdrawal.Float64 > 0 {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
-				if rule.TxnFlow.String == "CREDIT" && deposit.Valid && deposit.Float64 > 0 {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
-			}
-			// CURRENCY CONDITION
-			if !matchedCategoryID.Valid && rule.ComponentType == "CURRENCY_CONDITION" && rule.CurrencyCode.Valid {
-				// If you have currency info in the row, compare here (pseudo: if rowCurrency == rule.CurrencyCode.String)
-				// Not implemented: add logic if currency is available in transaction row
-			}
-			// CATEGORY_MAPPING, UNIQUE_ID: add as needed
-			if matchedCategoryID.Valid {
-				break
-			}
-		}
+		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
 		if matchedCategoryID.Valid {
 			categoryCount[matchedCategoryID.Int64]++
 			if withdrawal.Valid {
@@ -791,7 +806,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				tx.Rollback()
 				return nil, fmt.Errorf("failed to bulk insert transactions: %w", err)
 			}
-			uploadedCount = len(newTransactions)
 		}
 	}
 	// Report the number of transactions present in the uploaded file (after
@@ -1030,46 +1044,17 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		}
 
 		// Load all rules/components for this account/entity/bank/global so we can
-		// attach category metadata (names/types) to the KPI response, mirroring
-		// the upload behaviour.
-		type ruleComponent struct {
-			RuleID       int64
-			Priority     int
-			CategoryID   int64
-			CategoryName string
-			CategoryType string
-		}
-		rules := []ruleComponent{}
-		qRules := `
-		       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type
-		       FROM cimplrcorpsaas.category_rules r
-		       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
-		       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
-		       WHERE r.is_active = true
-			 AND (
-			       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
-			       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
-			       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
-			       OR (s.scope_type = 'GLOBAL')
-			 )
-		       ORDER BY r.priority ASC, r.rule_id ASC
-	       `
-		rowsRules, err := db.QueryContext(ctx, qRules, accountNumber, entityID)
+		// both re-evaluate categories and attach category metadata (names/types)
+		// to the KPI response, mirroring the upload behaviour.
+		rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID)
 		if err != nil {
 			http.Error(w, "failed to fetch category rules: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		for rowsRules.Next() {
-			var rc ruleComponent
-			if err := rowsRules.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType); err == nil {
-				rules = append(rules, rc)
-			}
-		}
-		rowsRules.Close()
 
 		// Load all transactions for this bank statement
 		rows, err := db.QueryContext(ctx, `
-			SELECT tran_id, value_date, transaction_date, description,
+			SELECT transaction_id, tran_id, value_date, transaction_date, description,
 			       withdrawal_amount, deposit_amount, balance, raw_json, category_id
 			FROM cimplrcorpsaas.bank_statement_transactions
 			WHERE bank_statement_id = $1
@@ -1087,24 +1072,44 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		uncategorized := []map[string]interface{}{}
 		transactionsCount := 0
 		for rows.Next() {
+			var transactionID int64
 			var tranID sql.NullString
 			var valueDate, transactionDate time.Time
 			var description string
 			var withdrawal, deposit, balance sql.NullFloat64
 			var rawJSON json.RawMessage
-			var categoryID sql.NullInt64
-			if err := rows.Scan(&tranID, &valueDate, &transactionDate, &description,
-				&withdrawal, &deposit, &balance, &rawJSON, &categoryID); err != nil {
+			var existingCategoryID sql.NullInt64
+			if err := rows.Scan(&transactionID, &tranID, &valueDate, &transactionDate, &description,
+				&withdrawal, &deposit, &balance, &rawJSON, &existingCategoryID); err != nil {
 				continue
 			}
 			transactionsCount++
-			if categoryID.Valid {
-				categoryCount[categoryID.Int64]++
+
+			// Re-evaluate category for this transaction using the same logic as
+			// the upload flow so that new/updated rules are applied.
+			newCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
+
+			// If the category has changed (including from/to NULL), persist the
+			// new category_id back to the database.
+			if (newCategoryID.Valid != existingCategoryID.Valid) || (newCategoryID.Valid && existingCategoryID.Valid && newCategoryID.Int64 != existingCategoryID.Int64) {
+				if _, err := db.ExecContext(ctx, `
+					UPDATE cimplrcorpsaas.bank_statement_transactions
+					SET category_id = $1
+					WHERE transaction_id = $2
+				`, newCategoryID, transactionID); err != nil {
+					log.Printf("failed to update category_id for transaction_id %d: %v", transactionID, err)
+				}
+			}
+
+			// Use the (potentially updated) category for KPI aggregation and
+			// uncategorized list.
+			if newCategoryID.Valid {
+				categoryCount[newCategoryID.Int64]++
 				if withdrawal.Valid {
-					debitSum[categoryID.Int64] += withdrawal.Float64
+					debitSum[newCategoryID.Int64] += withdrawal.Float64
 				}
 				if deposit.Valid {
-					creditSum[categoryID.Int64] += deposit.Float64
+					creditSum[newCategoryID.Int64] += deposit.Float64
 				}
 			} else {
 				uncategorized = append(uncategorized, map[string]interface{}{
