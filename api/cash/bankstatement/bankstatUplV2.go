@@ -3,6 +3,7 @@ package bankstatement
 import (
 	"bytes"
 	"context"
+	"log"
 
 	"crypto/sha256"
 	"database/sql"
@@ -18,6 +19,14 @@ import (
 
 	"github.com/extrame/xls"
 	"github.com/xuri/excelize/v2"
+)
+
+// Sentinel errors used for mapping to user-friendly messages
+var (
+	ErrFileAlreadyUploaded   = errors.New("bank statement file already uploaded")
+	ErrAccountNotFound       = errors.New("bank account not found in master data")
+	ErrAccountNumberMissing  = errors.New("account number not found in file header")
+	ErrStatementPeriodExists = errors.New("a statement for this period already exists for this account")
 )
 
 // parseDate tries multiple date formats for CSV
@@ -81,7 +90,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		return nil, fmt.Errorf("failed to check file hash: %w", err)
 	}
 	if exists {
-		return nil, errors.New("this file has already been uploaded (idempotency check failed)")
+		return nil, ErrFileAlreadyUploaded
 	}
 
 	// 2. Parse Excel, XLS, or CSV file
@@ -186,13 +195,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 	if accountNumber == "" {
-		return nil, errors.New("account number not found in file header")
+		return nil, ErrAccountNumberMissing
 	}
 
 	// Lookup entity_id and name from masterbankaccount
 	err = db.QueryRowContext(ctx, `SELECT entity_id, COALESCE(account_nickname, bank_name) FROM public.masterbankaccount WHERE account_number = $1 AND is_deleted = false`, accountNumber).Scan(&entityID, &accountName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to lookup account in masterbankaccount: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrAccountNotFound
+		}
+		return nil, fmt.Errorf("db error while looking up account in masterbankaccount: %w", err)
 	}
 
 	// 4. Fetch all active rules/components for this account/entity/bank/global
@@ -307,6 +319,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	creditSum := map[int64]float64{}
 	uncategorized := []map[string]interface{}{}
 	transactions := []BankStatementTransaction{}
+	// Will be filled later after DB insert to indicate which
+	// transactions from this file were newly inserted vs already present.
+	reviewTransactions := []map[string]interface{}{}
+	uploadedCount := 0
 	var lastValidValueDate time.Time
 	var statementPeriodStart, statementPeriodEnd time.Time
 	var openingBalance, closingBalance float64
@@ -589,6 +605,30 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
+	// Preload existing transactions for this account so we can identify which
+	// rows from the uploaded file are truly new vs already present.
+	existingTxnKeys := make(map[string]bool)
+	rowsExisting, err := db.QueryContext(ctx, `
+			SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
+			FROM cimplrcorpsaas.bank_statement_transactions
+			WHERE account_number = $1
+		`, accountNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check existing transactions: %w", err)
+	}
+	defer rowsExisting.Close()
+	for rowsExisting.Next() {
+		var acc string
+		var txDate time.Time
+		var desc string
+		var wAmt, dAmt sql.NullFloat64
+		if scanErr := rowsExisting.Scan(&acc, &txDate, &desc, &wAmt, &dAmt); scanErr != nil {
+			continue
+		}
+		k := buildTxnKey(acc, txDate, desc, wAmt, dAmt)
+		existingTxnKeys[k] = true
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin db transaction: %w", err)
@@ -600,6 +640,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		      INSERT INTO cimplrcorpsaas.bank_statements (
 			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
 		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		      ON CONFLICT ON CONSTRAINT uniq_stmt
+		      DO UPDATE SET
+			      file_hash = EXCLUDED.file_hash,
+			      closing_balance = EXCLUDED.closing_balance
 		      RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
 	if err != nil {
@@ -691,36 +735,70 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// Bulk insert transactions for speed, skip duplicates
 	if len(transactions) > 0 {
-		valueStrings := make([]string, 0, len(transactions))
-		valueArgs := make([]interface{}, 0, len(transactions)*11)
-		for i, t := range transactions {
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-				i*11+1, i*11+2, i*11+3, i*11+4, i*11+5, i*11+6, i*11+7, i*11+8, i*11+9, i*11+10, i*11+11))
-			valueArgs = append(valueArgs,
-				bankStatementID,
-				t.AccountNumber,
-				t.TranID,
-				t.ValueDate,
-				t.TransactionDate,
-				t.Description,
-				t.WithdrawalAmount,
-				t.DepositAmount,
-				t.Balance,
-				t.RawJSON,
-				t.CategoryID,
-			)
+		// Classify transactions into new vs already existing using DATABASE state
+		// only. We assume each row in a single uploaded file is already unique
+		// with respect to the uniq_transaction constraint, so we do NOT
+		// deduplicate within this file here.
+		newTransactions := make([]BankStatementTransaction, 0, len(transactions))
+		for _, t := range transactions {
+			k := buildTxnKey(t.AccountNumber, t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount)
+			if existingTxnKeys[k] {
+				// Already present in DB from earlier statements -> under review
+				reviewTransactions = append(reviewTransactions, map[string]interface{}{
+					"account_number":    t.AccountNumber,
+					"tran_id":           t.TranID.String,
+					"value_date":        t.ValueDate,
+					"transaction_date":  t.TransactionDate,
+					"description":       t.Description,
+					"withdrawal_amount": t.WithdrawalAmount.Float64,
+					"deposit_amount":    t.DepositAmount.Float64,
+					"balance":           t.Balance.Float64,
+					"category_id":       t.CategoryID.Int64,
+				})
+				continue
+			}
+			// Not present in DB -> treat as a new transaction to insert.
+			newTransactions = append(newTransactions, t)
 		}
-		stmt := `INSERT INTO cimplrcorpsaas.bank_statement_transactions (
-					       bank_statement_id, account_number, tran_id, value_date, transaction_date, description, withdrawal_amount, deposit_amount, balance, raw_json, category_id
-				       ) VALUES ` +
-			joinStrings(valueStrings, ",") +
-			` ON CONFLICT (account_number, transaction_date, description, withdrawal_amount, deposit_amount) DO NOTHING`
-		_, err := tx.ExecContext(ctx, stmt, valueArgs...)
-		if err != nil {
-			tx.Rollback()
-			return nil, fmt.Errorf("failed to bulk insert transactions: %w", err)
+
+		if len(newTransactions) > 0 {
+			valueStrings := make([]string, 0, len(newTransactions))
+			valueArgs := make([]interface{}, 0, len(newTransactions)*11)
+			for i, t := range newTransactions {
+				valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+					i*11+1, i*11+2, i*11+3, i*11+4, i*11+5, i*11+6, i*11+7, i*11+8, i*11+9, i*11+10, i*11+11))
+				valueArgs = append(valueArgs,
+					bankStatementID,
+					// account_number
+					t.AccountNumber,
+					t.TranID,
+					t.ValueDate,
+					t.TransactionDate,
+					t.Description,
+					t.WithdrawalAmount,
+					t.DepositAmount,
+					t.Balance,
+					t.RawJSON,
+					t.CategoryID,
+				)
+			}
+			stmt := `INSERT INTO cimplrcorpsaas.bank_statement_transactions (
+				       bank_statement_id, account_number, tran_id, value_date, transaction_date, description, withdrawal_amount, deposit_amount, balance, raw_json, category_id
+			       ) VALUES ` +
+				joinStrings(valueStrings, ",") +
+				` ON CONFLICT (account_number, transaction_date, description, withdrawal_amount, deposit_amount) DO NOTHING`
+			if _, err := tx.ExecContext(ctx, stmt, valueArgs...); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("failed to bulk insert transactions: %w", err)
+			}
+			uploadedCount = len(newTransactions)
 		}
 	}
+	// Report the number of transactions present in the uploaded file (after
+	// parsing), regardless of whether some were duplicates within the same
+	// file. This matches the original behaviour/expectation that
+	// transactions_uploaded_count reflects all rows processed from the upload.
+	uploadedCount = len(transactions)
 
 	// Insert audit action for this bank statement
 	_, err = tx.ExecContext(ctx, `
@@ -761,12 +839,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 	result := map[string]interface{}{
-		"pages_processed":         1, // Excel = 1 sheet
-		"bank_wise_status":        []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
-		"statement_date_coverage": map[string]interface{}{"start": transactions[0].ValueDate, "end": statementPeriodEnd},
-		"category_kpis":           kpiCats,
-		"categories_found":        foundCategories,
-		"uncategorized":           uncategorized,
+		"pages_processed":                 1, // Excel = 1 sheet
+		"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
+		"statement_date_coverage":         map[string]interface{}{"start": transactions[0].ValueDate, "end": statementPeriodEnd},
+		"category_kpis":                   kpiCats,
+		"categories_found":                foundCategories,
+		"uncategorized":                   uncategorized,
+		"transactions_uploaded_count":     uploadedCount,
+		"transactions_under_review_count": len(reviewTransactions),
+		"transactions_under_review":       reviewTransactions,
 	}
 	return result, nil
 }
@@ -1116,18 +1197,28 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 
 func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Only POST method is allowed for this endpoint.",
+			})
 			return
 		}
-		err := r.ParseMultipartForm(32 << 20) // 32MB
-		if err != nil {
-			http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
+		if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Unable to read the uploaded file. Please try again.",
+			})
 			return
 		}
 		file, _, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "File not found in request: "+err.Error(), http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "File not found in request. Please attach a bank statement file.",
+			})
 			return
 		}
 		defer file.Close()
@@ -1135,7 +1226,10 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 		// Use a hash of the file contents for idempotency
 		fileBytes, err := io.ReadAll(file)
 		if err != nil {
-			http.Error(w, "Failed to read file: "+err.Error(), http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Failed to read the uploaded file. Please try again.",
+			})
 			return
 		}
 		hash := sha256.Sum256(fileBytes)
@@ -1147,17 +1241,23 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 
 		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
-				"message": err.Error(),
+				"message": userFriendlyUploadError(err),
 			})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+
+		// Build a user-friendly success message that also highlights any
+		// transactions that were detected as already present and put under review.
+		msg := "Bank statement uploaded successfully"
+		if rc, ok := result["transactions_under_review_count"].(int); ok && rc > 0 {
+			msg = fmt.Sprintf("Bank statement uploaded successfully. %d transactions are under review.", rc)
+		}
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"message": "Bank statement uploaded successfully",
+			"message": msg,
 			"data":    result,
 		})
 	})
@@ -1212,7 +1312,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		return fmt.Errorf("failed to check file hash: %w", err)
 	}
 	if exists {
-		return errors.New("this file has already been uploaded (idempotency check failed)")
+		return ErrFileAlreadyUploaded
 	}
 
 	// 2. Parse Excel file
@@ -1248,13 +1348,16 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		}
 	}
 	if accountNumber == "" {
-		return errors.New("account number not found in file header")
+		return ErrAccountNumberMissing
 	}
 
 	// Lookup entity_id and name from masterbankaccount
 	err = db.QueryRowContext(ctx, `SELECT entity_id, COALESCE(account_nickname, bank_name) FROM public.masterbankaccount WHERE account_number = $1 AND is_deleted = false`, accountNumber).Scan(&entityID, &accountName)
 	if err != nil {
-		return fmt.Errorf("failed to lookup account in masterbankaccount: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAccountNotFound
+		}
+		return fmt.Errorf("db error while looking up account in masterbankaccount: %w", err)
 	}
 
 	// Print extracted data
@@ -1367,7 +1470,7 @@ foundTxnHeader:
 		return fmt.Errorf("failed to check period: %w", err)
 	}
 	if periodExists {
-		return errors.New("a statement for this period already exists for this account")
+		return ErrStatementPeriodExists
 	}
 
 	// 6. Insert bank statement and transactions in a transaction
@@ -1382,6 +1485,10 @@ foundTxnHeader:
 		      INSERT INTO cimplrcorpsaas.bank_statements (
 			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
 		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		      ON CONFLICT ON CONSTRAINT uniq_stmt
+		      DO UPDATE SET
+			      file_hash = EXCLUDED.file_hash,
+			      closing_balance = EXCLUDED.closing_balance
 		      RETURNING bank_statement_id
 	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
 	if err != nil {
@@ -1526,6 +1633,86 @@ foundTxnHeader:
 func cleanAmount(s string) string {
 	s = strings.ReplaceAll(s, ",", "")
 	return strings.TrimSpace(s)
+}
+
+// buildTxnKey creates a stable key used to detect whether a transaction from
+// the uploaded file already exists in the database. It mirrors the UNIQUE
+// constraint used in the ON CONFLICT clause: (account_number, transaction_date,
+// description, withdrawal_amount, deposit_amount).
+func buildTxnKey(accountNumber string, transactionDate time.Time, description string, withdrawal, deposit sql.NullFloat64) string {
+	var wStr, dStr string
+	if withdrawal.Valid {
+		wStr = fmt.Sprintf("%.2f", withdrawal.Float64)
+	}
+	if deposit.Valid {
+		dStr = fmt.Sprintf("%.2f", deposit.Float64)
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s",
+		strings.TrimSpace(strings.ToUpper(accountNumber)),
+		transactionDate.Format("2006-01-02"),
+		strings.TrimSpace(strings.ToLower(description)),
+		wStr,
+		dStr,
+	)
+}
+
+// userFriendlyUploadError converts internal/SQL/Go errors into messages that are safe and easy
+// for end users to understand. It intentionally hides low-level details like pq/SQLSTATE codes.
+func userFriendlyUploadError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// Handle known sentinel errors first
+	if errors.Is(err, ErrFileAlreadyUploaded) {
+		return "This bank statement file was already uploaded earlier. Please upload a different file."
+	}
+	if errors.Is(err, ErrAccountNumberMissing) {
+		return "Could not find the bank account number in the uploaded statement. Please upload the original bank statement downloaded from the bank."
+	}
+	if errors.Is(err, ErrAccountNotFound) {
+		return "Bank account not found in the system for this statement. Please check the account number in master data."
+	}
+	if errors.Is(err, ErrStatementPeriodExists) {
+		return "A statement for this period is already uploaded for this account."
+	}
+
+	msg := err.Error()
+
+	// Map common parsing/format issues to user friendly text
+	if strings.Contains(msg, "transaction header row not found") {
+		return "Could not detect the transactions table in the statement. Please upload the original bank statement in the supported format (Excel/XLS/CSV)."
+	}
+	if strings.Contains(msg, "must have at least one data row") {
+		return "The uploaded statement does not contain any transactions."
+	}
+	if strings.Contains(msg, "failed to parse excel, xls, or csv") || strings.Contains(msg, "failed to parse excel") {
+		return "We could not read this file as a valid Excel/XLS/CSV bank statement. Please check the file format and try again."
+	}
+	if strings.Contains(msg, "failed to get rows") {
+		return "We could not read rows from the uploaded statement. The file may be corrupted or in an unsupported format."
+	}
+	if strings.Contains(msg, "could not parse date") {
+		return "One or more transaction dates in the statement could not be understood. Please verify the dates in the statement and try again."
+	}
+	log.Println("Debug raw mesage", msg)
+	// Map DB write/transaction issues to a generic safe message
+	if strings.Contains(msg, "failed to begin db transaction") ||
+		strings.Contains(msg, "failed to insert bank statement") ||
+		strings.Contains(msg, "failed to upsert bank_balances_manual") ||
+		strings.Contains(msg, "failed to bulk insert transactions") ||
+		strings.Contains(msg, "failed to insert audit action") ||
+		strings.Contains(msg, "failed to commit") {
+		return "Something went wrong while saving the uploaded statement. Please try again !!"
+	}
+
+	// Hide raw pq / SQL / driver details from end user
+	if strings.Contains(msg, "pq:") || strings.Contains(msg, "SQLSTATE") {
+		return "Database error while processing the bank statement. Please try again !!"
+	}
+
+	// Fallback: return the existing message (most of them are already human readable)
+	return msg
 }
 
 // joinStrings is a helper for bulk insert value string joining
