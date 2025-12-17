@@ -280,10 +280,15 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 
 		if len(roleIDs) > 0 {
 			_, err = tx.Exec(`
-				INSERT INTO public.role_permissions (role_id, permission_id, allowed)
-				SELECT UNNEST($1::int[]), UNNEST($2::int[]), UNNEST($3::bool[])
-				ON CONFLICT (role_id, permission_id)
-				DO UPDATE SET allowed = EXCLUDED.allowed
+			INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
+			SELECT UNNEST($1::int[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
+			ON CONFLICT (role_id, permission_id)
+			DO UPDATE SET
+			  allowed = EXCLUDED.allowed,
+			  status = CASE
+			    WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
+			    ELSE role_permissions.status
+			  END
 			`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
