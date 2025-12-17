@@ -403,7 +403,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		WITH rp_data AS (
 			SELECT 
 				p.page_name,
-			p.tab_name,
+			NULLIF(p.tab_name, '') AS tab_name,
 			p.action,
 			COALESCE(rp.allowed, false) AS allowed
 			FROM role_permissions rp
