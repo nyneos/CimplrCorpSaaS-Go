@@ -1,0 +1,4 @@
+*/logs/*
+/logs/*
+*.env
+*.DS_Store
