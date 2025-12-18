@@ -1,6 +1,7 @@
 package statementstatus
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -228,7 +229,7 @@ ORDER BY percent DESC;
 			EntityCompleteness: entityCompleteness,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
 		if err := enc.Encode(resp); err != nil {

@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"log"
@@ -77,7 +78,7 @@ func GetBankAccountFromFolio(ctx context.Context, executor DBExecutor, folioID s
 		WHERE f.folio_id = $1
 		LIMIT 1
 	`
-	
+
 	var info BankAccountInfo
 	err := executor.QueryRow(ctx, query, folioID).Scan(
 		&info.AccountNumber,
@@ -88,12 +89,12 @@ func GetBankAccountFromFolio(ctx context.Context, executor DBExecutor, folioID s
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bank account for folio %s: %w", folioID, err)
 	}
-	
+
 	// Validate that we have at least account_number
 	if info.AccountNumber == "" {
 		return nil, fmt.Errorf("no bank account configured for folio %s", folioID)
 	}
-	
+
 	return &info, nil
 }
 
@@ -117,7 +118,7 @@ func GetBankAccountFromDemat(ctx context.Context, executor DBExecutor, dematID s
 		WHERE d.demat_id = $1
 		LIMIT 1
 	`
-	
+
 	var info BankAccountInfo
 	err := executor.QueryRow(ctx, query, dematID).Scan(
 		&info.AccountNumber,
@@ -128,12 +129,12 @@ func GetBankAccountFromDemat(ctx context.Context, executor DBExecutor, dematID s
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bank account for demat %s: %w", dematID, err)
 	}
-	
+
 	// Validate that we have at least account_number
 	if info.AccountNumber == "" {
 		return nil, fmt.Errorf("no bank account configured for demat %s", dematID)
 	}
-	
+
 	return &info, nil
 }
 
@@ -141,7 +142,7 @@ func GetBankAccountFromDemat(ctx context.Context, executor DBExecutor, dematID s
 func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, mtmData map[string]interface{}) (*JournalEntry, error) {
 	unrealizedGL := parseFloat(mtmData["unrealized_gain_loss"])
 	schemeID := parseString(mtmData["scheme_id"])
-	
+
 	// Handle pointer types for folio_id and demat_id
 	var folioID, dematID string
 	if fid := mtmData["folio_id"]; fid != nil {
@@ -183,13 +184,13 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 	}
 
 	je := &JournalEntry{
-		ActivityID:  activityID,
-		EntityID:    bankAccount.EntityName, // Use entity from bank account
-		EntityName:  bankAccount.EntityName,
-		FolioID:     folioID,
-		DematID:     dematID,
-		EntryDate:   time.Now(),
-		Lines:       []JournalEntryLine{},
+		ActivityID: activityID,
+		EntityID:   bankAccount.EntityName, // Use entity from bank account
+		EntityName: bankAccount.EntityName,
+		FolioID:    folioID,
+		DematID:    dematID,
+		EntryDate:  time.Now(),
+		Lines:      []JournalEntryLine{},
 	}
 
 	roundedAmount := RoundAmount(math.Abs(unrealizedGL), settings.CurrencyPrecision)
@@ -318,7 +319,7 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 			ORDER BY f.folio_id
 			LIMIT 1
 		`
-		
+
 		var linkedFolioID string
 		info := &BankAccountInfo{}
 		err := executor.QueryRow(ctx, query, schemeID).Scan(
@@ -328,15 +329,15 @@ func GenerateJournalEntryForDividend(ctx context.Context, executor DBExecutor, s
 			&info.EntityName,
 			&linkedFolioID,
 		)
-		
+
 		if err != nil {
 			return nil, fmt.Errorf("no bank account found for scheme %s - ensure folio-scheme mapping and bank account are configured: %w", schemeID, err)
 		}
-		
+
 		if info.AccountNumber == "" {
 			return nil, fmt.Errorf("no bank account configured for any folio linked to scheme %s", schemeID)
 		}
-		
+
 		folioID = linkedFolioID
 		bankAccount = info
 	}
@@ -422,7 +423,7 @@ func GenerateJournalEntryForFVO(ctx context.Context, executor DBExecutor, settin
 	log.Printf("[DEBUG FVO GEN] GenerateJournalEntryForFVO called (executor type: %T)", executor)
 	variance := parseFloat(fvoData["variance"])
 	schemeID := parseString(fvoData["scheme_id"])
-	
+
 	// Get scheme name from database
 	log.Printf("[DEBUG FVO GEN] About to query masterscheme for scheme_id: %s", schemeID)
 	var schemeName string
@@ -622,7 +623,7 @@ func parseTime(v interface{}) time.Time {
 		return t
 	}
 	if s, ok := v.(string); ok {
-		if t, err := time.Parse("2006-01-02", s); err == nil {
+		if t, err := time.Parse(constants.DateFormat, s); err == nil {
 			return t
 		}
 	}

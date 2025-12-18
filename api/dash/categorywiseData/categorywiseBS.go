@@ -1,6 +1,7 @@
 package categorywisedata
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -70,7 +71,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil || days <= 0 {
 			days = 30
 		}
-		fromDate := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+		fromDate := time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
 
 		var args []interface{}
 		arg := 1
@@ -340,7 +341,7 @@ LIMIT 2000;
 			"transactions": txns,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(resp)
 	}
 }

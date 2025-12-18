@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/config"
 	"CimplrCorpSaas/internal/logger"
 
@@ -717,13 +718,13 @@ func parseDate(input string) *string {
 	if input == "" {
 		return nil
 	}
-	layout := "02-Jan-2006"
+	layout := constants.DateFormatDash
 	t, err := time.Parse(layout, input)
 	if err != nil {
 		return nil
 	}
 	// Format as YYYY-MM-DD for Supabase compatibility
-	formatted := t.Format("2006-01-02")
+	formatted := t.Format(constants.DateFormat)
 	return &formatted
 }
 

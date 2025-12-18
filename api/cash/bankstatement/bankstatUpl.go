@@ -100,7 +100,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return ""
 		}
 		layouts := []string{
-			"2006-01-02",
+			constants.DateFormat,
 			"02/01/06",
 			"02/01/2006",
 			"02-01-2006",
@@ -110,7 +110,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"2006.01.02",
 			"02.01.2006",
 			"01.02.2006",
-			"02-Jan-2006",
+			constants.DateFormatDash,
 			"02-Jan-06",
 			"2006/1/2",
 			"2/1/2006",
@@ -120,7 +120,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, layout := range layouts {
 			if t, err := time.Parse(layout, dateStr); err == nil {
-				return t.Format("2006-01-02")
+				return t.Format(constants.DateFormat)
 			}
 		}
 		// Try to handle 2-digit year (e.g., 10/12/25, 10-12-25, 10.12.25)
@@ -146,8 +146,8 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				try := year + "-" + month + "-" + day
-				if t, err := time.Parse("2006-01-02", try); err == nil {
-					return t.Format("2006-01-02")
+				if t, err := time.Parse(constants.DateFormat, try); err == nil {
+					return t.Format(constants.DateFormat)
 				}
 			}
 		}

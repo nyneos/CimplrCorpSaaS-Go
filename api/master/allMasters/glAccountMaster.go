@@ -36,7 +36,7 @@ func normalizeDateLocal(dateStr string) string {
 		constants.DateTimeFormat,
 		constants.DateFormatISO,
 	}
-	layouts = append(layouts, []string{"02-Jan-2006", "02-Jan-06", "2-Jan-2006", "2-Jan-06", "02-Jan-2006 15:04:05"}...)
+	layouts = append(layouts, []string{constants.DateFormatDash, "02-Jan-06", "2-Jan-2006", "2-Jan-06", "02-Jan-2006 15:04:05"}...)
 	for _, l := range layouts {
 		if t, err := time.Parse(l, dateStr); err == nil {
 			return t.Format(constants.DateFormat)

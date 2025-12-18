@@ -1,6 +1,7 @@
 package realtimebalances
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -289,7 +290,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		}())
 		row.Scan(&kpi.BankAccounts)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":       true,

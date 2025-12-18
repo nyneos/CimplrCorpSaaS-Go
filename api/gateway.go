@@ -2,6 +2,7 @@ package api
 
 import (
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
@@ -23,13 +24,13 @@ const (
 	headerAccessControlAllowOrigin  = "Access-Control-Allow-Origin"
 	headerAccessControlAllowMethods = "Access-Control-Allow-Methods"
 	headerAccessControlAllowHeaders = "Access-Control-Allow-Headers"
-	headerContentType               = "Content-Type"
-	contentTypeJSON                 = "application/json"
+	headerContentType               = constants.ContentTypeText
+	contentTypeJSON                 = constants.ContentTypeJSON
 	allowOriginAll                  = "*"
 	allowMethodsAll                 = "GET, POST, PUT, DELETE, OPTIONS"
 	allowHeadersAll                 = "Content-Type, Authorization"
 	errAuthServiceUnavailable       = "Auth service unavailable"
-	errMethodNotAllowed             = "Method Not Allowed"
+	errMethodNotAllowed             = constants.ErrMethodNotAllowed
 )
 
 // stripPathPrefix removes /cimplrapigateway from the request path before routing
@@ -128,7 +129,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		http.Error(w, constants.ErrInvalidJSONShort, http.StatusBadRequest)
 		return
 	}
 	if authService == nil {
@@ -158,7 +159,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var raw map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		http.Error(w, constants.ErrInvalidJSONShort, http.StatusBadRequest)
 		return
 	}
 	userID := ""
@@ -299,7 +300,7 @@ func StartGateway() {
 	// Debug endpoint to force logout a user via SSE (for testing only)
 	mux.HandleFunc("/debug/force-logout", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -319,7 +320,7 @@ func StartGateway() {
 	// Debug endpoint to list connected SSE clients
 	mux.HandleFunc("/debug/sse-clients", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		clients := dashboard.GetClients()
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"clients": clients,
 			"count":   dashboard.GetClientCount(),

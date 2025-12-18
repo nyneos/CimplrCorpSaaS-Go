@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -55,7 +56,7 @@ type CategoryRuleComponent struct {
 func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -68,7 +69,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 
 		tx, err := db.Begin()
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer func() {
@@ -82,7 +83,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		var ruleIDs []int64
@@ -101,7 +102,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
 				tx.Rollback()
-				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -110,7 +111,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -127,16 +128,16 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Categories deleted successfully",
@@ -148,7 +149,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -166,10 +167,10 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 		var id int64
 		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.transaction_categories (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    map[string]interface{}{"category_id": id},
@@ -180,14 +181,14 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		// Fetch all categories
 		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer catRows.Close()
@@ -260,7 +261,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    categories,
@@ -272,7 +273,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 func CreateRuleScopeHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body RuleScope
@@ -283,10 +284,10 @@ func CreateRuleScopeHandler(db *sql.DB) http.Handler {
 		var id int64
 		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number) VALUES ($1, $2, $3, $4) RETURNING scope_id`, body.ScopeType, body.EntityID, body.BankCode, body.AccountNumber).Scan(&id)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    map[string]interface{}{"scope_id": id},
@@ -298,7 +299,7 @@ func CreateRuleScopeHandler(db *sql.DB) http.Handler {
 func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -319,10 +320,10 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 		var id int64
 		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive).Scan(&id)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    map[string]interface{}{"rule_id": id},
@@ -334,7 +335,7 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body CategoryRuleComponent
@@ -345,10 +346,10 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		var id int64
 		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, body.RuleID, body.ComponentType, body.MatchType, body.MatchValue, body.AmountOperator, body.AmountValue, body.TxnFlow, body.CurrencyCode, body.IsActive).Scan(&id)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    map[string]interface{}{"component_id": id},
@@ -360,7 +361,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -373,7 +374,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 
 		tx, err := db.Begin()
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer func() {
@@ -387,7 +388,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		var ruleIDs []int64
@@ -406,7 +407,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
 				tx.Rollback()
-				http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -415,7 +416,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -432,16 +433,16 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 		})

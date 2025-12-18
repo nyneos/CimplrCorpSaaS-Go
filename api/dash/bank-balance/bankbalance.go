@@ -76,7 +76,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				       WHERE a.processing_status = 'APPROVED'
 			       `)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()

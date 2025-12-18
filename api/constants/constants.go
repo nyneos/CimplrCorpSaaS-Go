@@ -27,6 +27,8 @@ const (
 	ErrScanFailedPrefix              = "scan failed: "
 	ErrMethodNotAllowed              = "Method Not Allowed"
 	ErrUserIIsRequired               = "user_id is required"
+	ErrRequiredColumnNotFound        = "required column '%s' not found in header"
+	ErrIndexRequired                 = "index required"
 )
 
 // General internal/server/upload error messages
@@ -50,6 +52,10 @@ const (
 	ErrInvalidClearingCodesPayload    = "Invalid clearing_codes payload"
 	ErrUnsupportedFileType            = "unsupported file type"
 	ErrNoMappingForSourceColumn       = "No mapping for source column: %s"
+	ErrActivityInsertFailed           = "Activity insert failed: "
+	ErrMTMInsertFailed                = "MTM insert failed: "
+	ErrSettingKeyRequired             = "setting_key parameter is required"
+	ErrSettingNotFound                = "Setting not found"
 )
 
 // Additional common messages used across handlers
@@ -93,13 +99,14 @@ const (
 
 // DB / SQL error templates
 const (
-	ErrTxStartFailed  = "failed to start transaction: "
-	ErrTxCommitFailed = "failed to commit transaction: "
-	ErrCommitFailed   = "commit failed: "
-	ErrQueryFailed    = "query failed: "
-	FormatSQLError    = "ERROR: %s"
-	ErrRowsError      = "rows error: "
-	ErrRowsScanFailed = "rows scan failed: "
+	ErrTxStartFailed       = "failed to start transaction: "
+	ErrTxCommitFailed      = "failed to commit transaction: "
+	ErrCommitFailed        = "commit failed: "
+	ErrQueryFailed         = "query failed: "
+	FormatSQLError         = "ERROR: %s"
+	ErrRowsError           = "rows error: "
+	ErrRowsScanFailed      = "rows scan failed: "
+	ErrUnsupportedProvider = "unsupported provider"
 )
 
 // SQL formatting patterns
@@ -109,6 +116,7 @@ const (
 	FormatPipelineTriple    = "%s|%s|%s"
 	FormatPipelineTripleAlt = "%s||%s||%s"
 	FormatInsertAuditLog    = "('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())"
+	FormatFiscalYear        = "FY %d-%d"
 )
 
 // Content Types
@@ -130,14 +138,19 @@ const (
 	ErrInvalidSessionCapitalized = "Invalid user_id or session"
 	ErrCommitFailedCapitalized   = "Commit failed: "
 	ErrTxBeginFailedCapitalized  = "tx begin failed: "
+	ErrBeginTransactionFailed    = "begin transaction failed: %w"
 )
 
 // Date formats
 const (
-	DateTimeFormat = "2006-01-02 15:04:05"
-	DateFormat     = "2006-01-02"
-	DateFormatAlt  = "02-01-2006"
-	DateFormatISO  = "2006-01-02T15:04:05"
+	DateTimeFormat      = "2006-01-02 15:04:05"
+	DateFormat          = "2006-01-02"
+	DateFormatAlt       = "02-01-2006"
+	DateFormatISO       = "2006-01-02T15:04:05"
+	DateFormatSlash     = "02/Jan/2006"
+	DateFormatDash      = "02-Jan-2006"
+	DateFormatCustom    = "01-01-1"
+	DateFormatYearMonth = "2006-01"
 )
 
 const (
@@ -185,4 +198,8 @@ const (
 	QuerryCurrencyCode     = " AND cp.currency_code = $%d"
 	QuerryFplCurrency      = " AND fpl.currency = $%d"
 	QuerryFilterGroup      = " AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d"
+)
+
+var (
+	Nifty50 = "NIFTY 50"
 )

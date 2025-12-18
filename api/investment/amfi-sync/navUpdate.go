@@ -409,7 +409,7 @@ func parseDate(input string) *string {
 	if input == "" {
 		return nil
 	}
-	layout := "02-Jan-2006"
+	layout := constants.DateFormatDash
 	t, err := time.Parse(layout, input)
 	if err != nil {
 		return nil

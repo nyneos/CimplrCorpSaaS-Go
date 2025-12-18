@@ -3,6 +3,7 @@
 package commonpool
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -50,7 +51,7 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(transactions)
 	}
 }
@@ -117,7 +118,7 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 		}
 
 		result = append(result, ConsolidatedTransactionPool{
-			Date:      r.ValueDate.Format("2006-01-02"),
+			Date:      r.ValueDate.Format(constants.DateFormat),
 			Entity:    entity.String,
 			Bank:      bank.String,
 			Currency:  currency.String,

@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/utils"
 
 	"github.com/lib/pq"
@@ -15,7 +16,7 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
@@ -52,7 +53,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		// Insert role and return the inserted row
@@ -91,7 +92,7 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 				roleMap[col] = vals[i]
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"role":    roleMap,
@@ -112,7 +113,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		// Get business units from context (set by middleware)
 		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok || len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, "No accessible business units found")
+		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
 
@@ -200,7 +201,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 			}
 			roleData = append(roleData, role)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
@@ -226,7 +227,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		// Uncomment if you want to restrict by business units
 		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok || len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, "No accessible business units found")
+		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
 
@@ -243,7 +244,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 			var id int
 			var status string
 			rows.Scan(&id, &status)
-			if status == "Delete-Approval" {
+			if status == constants.StatusCodeDeleteApproval {
 				toDelete = append(toDelete, id)
 			} else {
 				toApprove = append(toApprove, id)
@@ -284,7 +285,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if approvedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		// Approve roles
@@ -308,7 +309,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": results["deleted"], "approved": results["approved"]})
 	}
 }
@@ -327,7 +328,7 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 		// Middleware: check business units
 		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok || len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, "No accessible business units found")
+		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
 		rows, err := db.Query(
@@ -354,7 +355,7 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			roleMap[col] = vals[i]
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": roleMap})
 	}
 }
@@ -375,7 +376,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 		// Middleware: check business units
 		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok || len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, "No accessible business units found")
+		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
 		// Get rejected_by from session
@@ -388,7 +389,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if rejectedBy == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		rows, err := db.Query(
@@ -415,7 +416,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 			}
 			updated = append(updated, roleMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
 	}
 }
@@ -441,7 +442,7 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 			rows.Scan(&name)
 			roleNames = append(roleNames, name)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
 	}
 }
@@ -465,7 +466,7 @@ func GetJustRolesPERMISSIONapproved(db *sql.DB) http.HandlerFunc {
 			rows.Scan(&name)
 			roleNames = append(roleNames, name)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "roles": roleNames})
 	}
 }
@@ -523,11 +524,11 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		totalPendingQuery := "SELECT COUNT(*) FROM roles WHERE status IN ($1, $2, $3)"
-		totalPending, _ := utils.CountTotal(db, totalPendingQuery, "pending", "Awaiting-Approval", "Delete-Approval")
+		totalPending, _ := utils.CountTotal(db, totalPendingQuery, "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval)
 		pagination.SetPaginationStats(totalPending)
 
 		// Fetch paginated pending roles
-		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) ORDER BY id LIMIT $4 OFFSET $5", "pending", "Awaiting-Approval", "Delete-Approval", pagination.Limit, pagination.Offset)
+		rows, err := db.Query("SELECT * FROM roles WHERE status IN ($1, $2, $3) ORDER BY id LIMIT $4 OFFSET $5", "pending", constants.StatusCodeAwaitingApproval, constants.StatusCodeDeleteApproval, pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -562,7 +563,7 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 			}
 			roleData = append(roleData, role)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"permissions": rolesPerms,
 			"roleData":    roleData,
@@ -595,7 +596,7 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		// Middleware: check business units (uncomment if needed)
 		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok || len(buNames) == 0 {
-		//     respondWithError(w, http.StatusNotFound, "No accessible business units found")
+		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
 		// Prepare fields for update
@@ -609,7 +610,7 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		// Always set status to Awaiting-Approval
-		fields["status"] = "Awaiting-Approval"
+		fields["status"] = constants.StatusCodeAwaitingApproval
 		if len(fields) == 0 {
 			respondWithError(w, http.StatusBadRequest, "No fields to update")
 			return
@@ -656,7 +657,7 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			roleMap[col] = vals[i]
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"role":    roleMap,

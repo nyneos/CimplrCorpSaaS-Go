@@ -48,7 +48,7 @@ func GetSSEServer() *SSEServer {
 // HandleSSE handles SSE connections
 func (s *SSEServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	// Set SSE headers
-	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set(constants.ContentTypeText, "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set(constants.HeaderAccessControlAllowOrigin, "*")

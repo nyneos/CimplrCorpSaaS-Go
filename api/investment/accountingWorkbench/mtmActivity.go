@@ -53,7 +53,7 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateMTMRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -75,14 +75,14 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -105,7 +105,7 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, $2, $3, $4, 'DRAFT')
 			RETURNING activity_id
 		`, activityType, req.EffectiveDate, nullIfEmptyString(req.AccountingPeriod), dataSource).Scan(&activityID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Activity insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrActivityInsertFailed+err.Error())
 			return
 		}
 
@@ -120,7 +120,7 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, activityID, req.SchemeID, nullIfEmptyString(req.FolioID), nullIfEmptyString(req.DematID),
 			req.Units, req.PrevNAV, req.CurrNAV, req.NAVDate, req.PrevValue, req.CurrValue,
 			req.UnrealizedGL, nullIfZeroFloat(req.UnrealizedGLPct)).Scan(&mtmID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "MTM insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrMTMInsertFailed+err.Error())
 			return
 		}
 
@@ -129,12 +129,12 @@ func CreateMTMSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -162,7 +162,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DataSource       string `json:"data_source"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -255,9 +255,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate not future month
 		currentTime := time.Now()
-		requestMonth, _ := time.Parse("2006-01", fmt.Sprintf("%s-%s", year, monthNum))
+		requestMonth, _ := time.Parse(constants.DateFormatYearMonth, fmt.Sprintf("%s-%s", year, monthNum))
 		if requestMonth.After(currentTime) {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format("2006-01")))
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format(constants.DateFormatYearMonth)))
 			return
 		}
 
@@ -278,7 +278,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Single transaction for entire batch
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -418,7 +418,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, $2, $3, $4, 'DRAFT')
 			RETURNING activity_id
 		`, activityType, req.EffectiveDate, req.AccountingPeriod, dataSource).Scan(&activityID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Activity insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrActivityInsertFailed+err.Error())
 			return
 		}
 
@@ -563,7 +563,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"success":     false,
 					"scheme_id":   h.SchemeID,
 					"scheme_name": h.SchemeName,
-					"error":       "MTM insert failed: " + err.Error(),
+					"error":       constants.ErrMTMInsertFailed + err.Error(),
 				})
 				continue
 			}
@@ -587,12 +587,12 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -613,7 +613,7 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateMTMRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.MTMID == 0 {
@@ -633,14 +633,14 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -709,12 +709,12 @@ func UpdateMTM(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 		`, activityID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -808,7 +808,7 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -892,7 +892,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			IncludeHistory   bool   `json:"include_history"`   // Whether to fetch historical NAV data
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -981,9 +981,9 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate not future month
 		currentTime := time.Now()
-		requestMonth, _ := time.Parse("2006-01", fmt.Sprintf("%s-%s", year, monthNum))
+		requestMonth, _ := time.Parse(constants.DateFormatYearMonth, fmt.Sprintf("%s-%s", year, monthNum))
 		if requestMonth.After(currentTime) {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format("2006-01")))
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot process future month '%s'. Current month is %s", req.AccountingPeriod, currentTime.Format(constants.DateFormatYearMonth)))
 			return
 		}
 
@@ -1175,8 +1175,8 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						// If include_history is true, collect historical NAV data for the accounting period
 						if req.IncludeHistory {
 							historicalNAVs = make([]HistoricalNAV, 0)
-							startParsed, _ := time.Parse("2006-01-02", startDate)
-							endParsed, _ := time.Parse("2006-01-02", endDate)
+							startParsed, _ := time.Parse(constants.DateFormat, startDate)
+							endParsed, _ := time.Parse(constants.DateFormat, endDate)
 
 							for _, entry := range apiResp.Data {
 								entryDate, err := time.Parse("02-01-2006", entry.Date) // MFapi format: DD-MM-YYYY
@@ -1189,7 +1189,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 									(entryDate.Equal(endParsed) || entryDate.Before(endParsed)) {
 									if navVal, err := strconv.ParseFloat(entry.NAV, 64); err == nil {
 										historicalNAVs = append(historicalNAVs, HistoricalNAV{
-											Date: entryDate.Format("2006-01-02"),
+											Date: entryDate.Format(constants.DateFormat),
 											NAV:  navVal,
 										})
 									}
@@ -1241,7 +1241,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								var navValue float64
 								if err := localHistRows.Scan(&navDate, &navValue); err == nil {
 									historicalNAVs = append(historicalNAVs, HistoricalNAV{
-										Date: navDate.Format("2006-01-02"),
+										Date: navDate.Format(constants.DateFormat),
 										NAV:  navValue,
 									})
 								}
@@ -1317,7 +1317,7 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Records          []MTMCommitRecord `json:"records"`           // Pre-calculated MTM records from preview
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -1352,7 +1352,7 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Single transaction for entire batch
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1375,7 +1375,7 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, $2, $3, $4, 'DRAFT')
 			RETURNING activity_id
 		`, activityType, req.EffectiveDate, req.AccountingPeriod, dataSource).Scan(&activityID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Activity insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrActivityInsertFailed+err.Error())
 			return
 		}
 
@@ -1421,7 +1421,7 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{
 					"success":   false,
 					"scheme_id": record.SchemeID,
-					"error":     "MTM insert failed: " + err.Error(),
+					"error":     constants.ErrMTMInsertFailed + err.Error(),
 				})
 				continue
 			}
@@ -1442,12 +1442,12 @@ func CommitMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
