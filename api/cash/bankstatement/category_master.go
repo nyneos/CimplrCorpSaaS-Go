@@ -180,7 +180,8 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		tx, err := db.Begin()
+		ctx := r.Context()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -192,32 +193,86 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			}
 		}()
 
-		// Update all uncategorized transactions and capture affected statements
-		rows, err := tx.Query(`
-WITH updated AS (
-  UPDATE cimplrcorpsaas.bank_statement_transactions
-  SET category_id = $1
-  WHERE category_id IS NULL
-  RETURNING bank_statement_id
-)
-SELECT DISTINCT bank_statement_id FROM updated WHERE bank_statement_id IS NOT NULL;
-`, body.CategoryID)
+		rows, err := tx.QueryContext(ctx, `
+SELECT t.transaction_id,
+	   t.bank_statement_id,
+	   bs.account_number,
+	   bs.entity_id,
+	   COALESCE(t.description, ''),
+	   t.withdrawal_amount,
+	   t.deposit_amount
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+WHERE t.category_id IS NULL
+  AND t.bank_statement_id IS NOT NULL;
+`)
 		if err != nil {
 			tx.Rollback()
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var bsIDs []string
+		defer rows.Close()
+
+		type txnRow struct {
+			id     int64
+			bsID   string
+			acct   string
+			entity string
+			desc   string
+			wd     sql.NullFloat64
+			dep    sql.NullFloat64
+		}
+
+		var txns []txnRow
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				bsIDs = append(bsIDs, id)
+			var tr txnRow
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep); err == nil {
+				txns = append(txns, tr)
 			}
 		}
-		rows.Close()
+		if err := rows.Err(); err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-		for _, bsID := range bsIDs {
-			_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)` , bsID, body.UserID, time.Now())
+		ruleCache := make(map[string][]categoryRuleComponent)
+		bsSet := make(map[string]struct{})
+		matchedByCategory := make(map[int64][]int64)
+
+		for _, tr := range txns {
+			cacheKey := tr.acct + "|" + tr.entity
+			rules, ok := ruleCache[cacheKey]
+			if !ok {
+				rules, err = loadCategoryRuleComponents(ctx, db, tr.acct, tr.entity)
+				if err != nil {
+					continue
+				}
+				ruleCache[cacheKey] = rules
+			}
+
+			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep)
+			if matched.Valid && matched.Int64 == body.CategoryID {
+				matchedByCategory[matched.Int64] = append(matchedByCategory[matched.Int64], tr.id)
+				bsSet[tr.bsID] = struct{}{}
+			}
+		}
+
+		updated := 0
+		for catID, txnIDs := range matchedByCategory {
+			if len(txnIDs) == 0 {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, catID, pq.Array(txnIDs)); err != nil {
+				tx.Rollback()
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			updated += len(txnIDs)
+		}
+
+		for bsID := range bsSet {
+			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, body.UserID, time.Now())
 			if err != nil {
 				tx.Rollback()
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -232,8 +287,124 @@ SELECT DISTINCT bank_statement_id FROM updated WHERE bank_statement_id IS NOT NU
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"updated_bank_statements": len(bsIDs),
+			"success":                  true,
+			"updated_transactions":     updated,
+			"affected_bank_statements": len(bsSet),
+		})
+	})
+}
+
+// RecomputeUncategorizedTransactionsHandler applies rules to uncategorized transactions and raises pending edit approvals.
+func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			UserID string `json:"user_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		ctx := r.Context()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+
+		rows, err := tx.QueryContext(ctx, `
+SELECT t.transaction_id,
+       t.bank_statement_id,
+       bs.account_number,
+       bs.entity_id,
+       COALESCE(t.description, ''),
+       t.withdrawal_amount,
+       t.deposit_amount
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+WHERE t.category_id IS NULL
+  AND t.bank_statement_id IS NOT NULL;
+`)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		type txnRow struct {
+			id     int64
+			bsID   string
+			acct   string
+			entity string
+			desc   string
+			wd     sql.NullFloat64
+			dep    sql.NullFloat64
+		}
+
+		var txns []txnRow
+		for rows.Next() {
+			var tr txnRow
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep); err == nil {
+				txns = append(txns, tr)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		ruleCache := make(map[string][]categoryRuleComponent)
+		bsSet := make(map[string]struct{})
+		updated := 0
+
+		for _, tr := range txns {
+			cacheKey := tr.acct + "|" + tr.entity
+			rules, ok := ruleCache[cacheKey]
+			if !ok {
+				rules, err = loadCategoryRuleComponents(ctx, tx, tr.acct, tr.entity)
+				if err != nil {
+					continue
+				}
+				ruleCache[cacheKey] = rules
+			}
+
+			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep)
+			if matched.Valid {
+				if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.Int64, tr.id); err == nil {
+					updated++
+					bsSet[tr.bsID] = struct{}{}
+				}
+			}
+		}
+
+		for bsID := range bsSet {
+			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, body.UserID, time.Now())
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":                  true,
+			"updated_transactions":     updated,
+			"affected_bank_statements": len(bsSet),
 		})
 	})
 }
