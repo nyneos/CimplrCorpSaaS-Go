@@ -52,6 +52,192 @@ type CategoryRuleComponent struct {
 	IsActive       bool     `json:"is_active"`
 }
 
+// ListCategoriesForUserHandler returns minimal category id/name list (POST expects user_id, currently unused for filtering).
+func ListCategoriesForUserHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			UserID string `json:"user_id"`
+		}
+		// best-effort parse; no filter yet
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		rows, err := db.Query(`SELECT category_id, category_name FROM cimplrcorpsaas.transaction_categories ORDER BY category_name`)
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		var out []TransactionCategory
+		for rows.Next() {
+			var c TransactionCategory
+			if err := rows.Scan(&c.CategoryID, &c.CategoryName); err == nil {
+				out = append(out, c)
+			}
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data":    out,
+		})
+	})
+}
+
+// MapTransactionsToCategoryHandler assigns a category to transactions and raises pending edit approval per bank statement.
+func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			TransactionIDs []int64 `json:"transaction_ids"`
+			CategoryID     int64   `json:"category_id"`
+			UserID         string  `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 || body.CategoryID == 0 {
+			http.Error(w, "Missing transaction_ids or category_id", http.StatusBadRequest)
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+
+		// Update category for given transactions
+		if _, err := tx.Exec(`UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, body.CategoryID, pq.Array(body.TransactionIDs)); err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Collect affected bank_statement_ids
+		bsRows, err := tx.Query(`SELECT DISTINCT bank_statement_id FROM cimplrcorpsaas.bank_statement_transactions WHERE transaction_id = ANY($1) AND bank_statement_id IS NOT NULL`, pq.Array(body.TransactionIDs))
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var bsIDs []string
+		for bsRows.Next() {
+			var id string
+			if err := bsRows.Scan(&id); err == nil {
+				bsIDs = append(bsIDs, id)
+			}
+		}
+		bsRows.Close()
+
+		// Insert pending edit approval for each affected statement
+		for _, bsID := range bsIDs {
+			_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, body.UserID, time.Now())
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Transactions mapped and approval requested",
+		})
+	})
+}
+
+// CategorizeUncategorizedTransactionsHandler assigns the given category to all transactions with NULL category
+// and raises pending edit approval for their bank statements.
+func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			CategoryID int64  `json:"category_id"`
+			UserID     string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CategoryID == 0 {
+			http.Error(w, "Missing category_id", http.StatusBadRequest)
+			return
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
+		}()
+
+		// Update all uncategorized transactions and capture affected statements
+		rows, err := tx.Query(`
+WITH updated AS (
+  UPDATE cimplrcorpsaas.bank_statement_transactions
+  SET category_id = $1
+  WHERE category_id IS NULL
+  RETURNING bank_statement_id
+)
+SELECT DISTINCT bank_statement_id FROM updated WHERE bank_statement_id IS NOT NULL;
+`, body.CategoryID)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var bsIDs []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				bsIDs = append(bsIDs, id)
+			}
+		}
+		rows.Close()
+
+		for _, bsID := range bsIDs {
+			_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)` , bsID, body.UserID, time.Now())
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"updated_bank_statements": len(bsIDs),
+		})
+	})
+}
+
 // DeleteMultipleTransactionCategoriesHandler deletes multiple categories and cascades deletes for rules, rule scopes, and rule components
 func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,7 +371,6 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// Fetch all categories
 		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -205,60 +390,101 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 
 		var categories []CategoryWithRules
+		var catIDs []int64
+		catIndex := make(map[int64]int)
 
 		for catRows.Next() {
 			var c TransactionCategory
 			if err := catRows.Scan(&c.CategoryID, &c.CategoryName, &c.CategoryType, &c.Description); err != nil {
 				continue
 			}
+			catIndex[c.CategoryID] = len(categories)
+			catIDs = append(catIDs, c.CategoryID)
+			categories = append(categories, CategoryWithRules{TransactionCategory: c})
+		}
 
-			// Fetch rules for this category
-			ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, c.CategoryID)
-			if err != nil {
-				categories = append(categories, CategoryWithRules{TransactionCategory: c})
+		// Early return if no categories
+		if len(categories) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data":    categories,
+			})
+			return
+		}
+
+		// Fetch all rules for these categories in one query
+		ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(catIDs))
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer ruleRows.Close()
+
+		rulesByCat := make(map[int64][]CategoryRule)
+		var scopeIDs []int64
+		scopeSeen := make(map[int64]struct{})
+		var ruleIDs []int64
+
+		for ruleRows.Next() {
+			var rule CategoryRule
+			if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt); err != nil {
 				continue
 			}
-			var rules []RuleWithDetails
-			for ruleRows.Next() {
-				var rule CategoryRule
-				if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt); err != nil {
-					continue
-				}
+			rulesByCat[rule.CategoryID] = append(rulesByCat[rule.CategoryID], rule)
+			ruleIDs = append(ruleIDs, rule.RuleID)
+			if _, ok := scopeSeen[rule.ScopeID]; !ok && rule.ScopeID != 0 {
+				scopeSeen[rule.ScopeID] = struct{}{}
+				scopeIDs = append(scopeIDs, rule.ScopeID)
+			}
+		}
 
-				// Fetch scope for this rule
-				var scope RuleScope
-				errScope := db.QueryRow(`SELECT scope_id, scope_type, entity_id, bank_code, account_number FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, rule.ScopeID).Scan(&scope.ScopeID, &scope.ScopeType, &scope.EntityID, &scope.BankCode, &scope.AccountNumber)
-				var scopePtr *RuleScope
-				if errScope == nil {
-					scopePtr = &scope
-				}
-
-				// Fetch components for this rule
-				compRows, err := db.Query(`SELECT component_id, rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active FROM cimplrcorpsaas.category_rule_components WHERE rule_id = $1`, rule.RuleID)
-				var components []CategoryRuleComponent
-				if err == nil {
-					for compRows.Next() {
-						var comp CategoryRuleComponent
-						if err := compRows.Scan(&comp.ComponentID, &comp.RuleID, &comp.ComponentType, &comp.MatchType, &comp.MatchValue, &comp.AmountOperator, &comp.AmountValue, &comp.TxnFlow, &comp.CurrencyCode, &comp.IsActive); err != nil {
-							continue
-						}
-						components = append(components, comp)
+		// Fetch scopes in batch
+		scopeMap := make(map[int64]RuleScope)
+		if len(scopeIDs) > 0 {
+			scopeRows, err := db.Query(`SELECT scope_id, scope_type, entity_id, bank_code, account_number FROM cimplrcorpsaas.rule_scope WHERE scope_id = ANY($1)`, pq.Array(scopeIDs))
+			if err == nil {
+				for scopeRows.Next() {
+					var s RuleScope
+					if err := scopeRows.Scan(&s.ScopeID, &s.ScopeType, &s.EntityID, &s.BankCode, &s.AccountNumber); err == nil {
+						scopeMap[s.ScopeID] = s
 					}
-					compRows.Close()
 				}
+				scopeRows.Close()
+			}
+		}
 
-				rules = append(rules, RuleWithDetails{
+		// Fetch components in batch
+		compsByRule := make(map[int64][]CategoryRuleComponent)
+		if len(ruleIDs) > 0 {
+			compRows, err := db.Query(`SELECT component_id, rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
+			if err == nil {
+				for compRows.Next() {
+					var comp CategoryRuleComponent
+					if err := compRows.Scan(&comp.ComponentID, &comp.RuleID, &comp.ComponentType, &comp.MatchType, &comp.MatchValue, &comp.AmountOperator, &comp.AmountValue, &comp.TxnFlow, &comp.CurrencyCode, &comp.IsActive); err == nil {
+						compsByRule[comp.RuleID] = append(compsByRule[comp.RuleID], comp)
+					}
+				}
+				compRows.Close()
+			}
+		}
+
+		// Assemble output
+		for i := range categories {
+			cid := categories[i].CategoryID
+			rules := rulesByCat[cid]
+			for _, rule := range rules {
+				var scopePtr *RuleScope
+				if scope, ok := scopeMap[rule.ScopeID]; ok {
+					scopeCopy := scope
+					scopePtr = &scopeCopy
+				}
+				categories[i].Rules = append(categories[i].Rules, RuleWithDetails{
 					CategoryRule: rule,
 					Scope:        scopePtr,
-					Components:   components,
+					Components:   compsByRule[rule.RuleID],
 				})
 			}
-			ruleRows.Close()
-
-			categories = append(categories, CategoryWithRules{
-				TransactionCategory: c,
-				Rules:               rules,
-			})
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
