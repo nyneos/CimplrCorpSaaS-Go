@@ -17,8 +17,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"github.com/lib/pq"
+
 	"github.com/extrame/xls"
+	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -760,15 +761,58 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	kpiCats := []map[string]interface{}{}
 	foundCategories := []map[string]interface{}{}
 	foundCategoryIDs := map[int64]bool{}
+	totalTxns := len(transactions)
+	groupedTxns := 0
+	ungroupedTxns := 0
+
+	categoryTxns := map[int64][]map[string]interface{}{}
+
+	for i, t := range transactions {
+		if t.CategoryID.Valid {
+			groupedTxns++
+			catID := t.CategoryID.Int64
+			categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
+				"index":             i,
+				"tran_id":           t.TranID.String,
+				"value_date":        t.ValueDate,
+				"transaction_date":  t.TransactionDate,
+				"description":       t.Description,
+				"withdrawal_amount": t.WithdrawalAmount.Float64,
+				"deposit_amount":    t.DepositAmount.Float64,
+				"balance":           t.Balance.Float64,
+				"category_id":       catID,
+			})
+		} else {
+			ungroupedTxns++
+		}
+	}
+
 	for catID, count := range categoryCount {
+		var catName string
+		for _, rule := range rules {
+			if rule.CategoryID == catID {
+				catName = rule.CategoryName
+				break
+			}
+		}
 		kpiCats = append(kpiCats, map[string]interface{}{
-			"category_id": catID,
-			"count":       count,
-			"debit_sum":   debitSum[catID],
-			"credit_sum":  creditSum[catID],
+			"category_id":   catID,
+			"category_name": catName,
+			"count":         count,
+			"debit_sum":     debitSum[catID],
+			"credit_sum":    creditSum[catID],
+			"transactions":  categoryTxns[catID],
 		})
 		foundCategoryIDs[catID] = true
 	}
+
+	groupedPct := 0.0
+	ungroupedPct := 0.0
+	if totalTxns > 0 {
+		groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
+		ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
+	}
+
 	// Add category names/types for found categories
 	for _, rule := range rules {
 		if foundCategoryIDs[rule.CategoryID] {
@@ -791,6 +835,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"transactions_uploaded_count":     uploadedCount,
 		"transactions_under_review_count": len(reviewTransactions),
 		"transactions_under_review":       reviewTransactions,
+		"grouped_transaction_count":       groupedTxns,
+		"ungrouped_transaction_count":     ungroupedTxns,
+		"grouped_transaction_percent":     groupedPct,
+		"ungrouped_transaction_percent":   ungroupedPct,
 	}
 	return result, nil
 }
@@ -878,7 +926,6 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 	// 2. Get all transactions for a bank statement (POST, req: user_id, bank_statement_id)
 }
 
-
 func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -931,16 +978,16 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 
 		for rows.Next() {
 			var (
-				tid        int64
-				entityName string
-				tranID     sql.NullString
-				desc       string
-				category   sql.NullString
-				vdate      time.Time
-				tdate      time.Time
-				withdrawal sql.NullFloat64
-				deposit    sql.NullFloat64
-				balance    sql.NullFloat64
+				tid           int64
+				entityName    string
+				tranID        sql.NullString
+				desc          string
+				category      sql.NullString
+				vdate         time.Time
+				tdate         time.Time
+				withdrawal    sql.NullFloat64
+				deposit       sql.NullFloat64
+				balance       sql.NullFloat64
 				misclassified bool
 			)
 
@@ -966,16 +1013,16 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			}
 
 			resp = append(resp, map[string]interface{}{
-				"transaction_id":    tid,
-				"entity_name":       entityName,
-				"tran_id":           tranID.String,
-				"value_date":        vdate,
-				"transaction_date":  tdate,
-				"description":       desc,
-				"withdrawal_amount": withdrawal.Float64,
-				"deposit_amount":    deposit.Float64,
-				"balance":           balance.Float64,
-				"category_name":     categoryName,
+				"transaction_id":     tid,
+				"entity_name":        entityName,
+				"tran_id":            tranID.String,
+				"value_date":         vdate,
+				"transaction_date":   tdate,
+				"description":        desc,
+				"withdrawal_amount":  withdrawal.Float64,
+				"deposit_amount":     deposit.Float64,
+				"balance":            balance.Float64,
+				"category_name":      categoryName,
 				"misclassified_flag": misclassified,
 			})
 		}
@@ -1022,7 +1069,7 @@ func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler 
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":        true,
+			"success":       true,
 			"updated_count": rowsAffected,
 		})
 	})
@@ -1094,6 +1141,10 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		creditSum := map[int64]float64{}
 		uncategorized := []map[string]interface{}{}
 		transactionsCount := 0
+		totalTxns := 0
+		groupedTxns := 0
+		ungroupedTxns := 0
+		categoryTxns := map[int64][]map[string]interface{}{}
 		for rows.Next() {
 			var transactionID int64
 			var tranID sql.NullString
@@ -1107,6 +1158,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				continue
 			}
 			transactionsCount++
+			totalTxns++
 
 			// Re-evaluate category for this transaction using the same logic as
 			// the upload flow so that new/updated rules are applied.
@@ -1134,6 +1186,19 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				if deposit.Valid {
 					creditSum[newCategoryID.Int64] += deposit.Float64
 				}
+				groupedTxns++
+				catID := newCategoryID.Int64
+				categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
+					"transaction_id":    transactionID,
+					"tran_id":           tranID.String,
+					"value_date":        valueDate,
+					"transaction_date":  transactionDate,
+					"description":       description,
+					"withdrawal_amount": withdrawal.Float64,
+					"deposit_amount":    deposit.Float64,
+					"balance":           balance.Float64,
+					"category_id":       catID,
+				})
 			} else {
 				uncategorized = append(uncategorized, map[string]interface{}{
 					"tran_id":     tranID.String,
@@ -1141,6 +1206,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 					"value_date":  valueDate,
 					"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
 				})
+				ungroupedTxns++
 			}
 		}
 
@@ -1149,11 +1215,20 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		foundCategories := []map[string]interface{}{}
 		foundCategoryIDs := map[int64]bool{}
 		for catID, count := range categoryCount {
+			var catName string
+			for _, rule := range rules {
+				if rule.CategoryID == catID {
+					catName = rule.CategoryName
+					break
+				}
+			}
 			kpiCats = append(kpiCats, map[string]interface{}{
-				"category_id": catID,
-				"count":       count,
-				"debit_sum":   debitSum[catID],
-				"credit_sum":  creditSum[catID],
+				"category_id":   catID,
+				"category_name": catName,
+				"count":         count,
+				"debit_sum":     debitSum[catID],
+				"credit_sum":    creditSum[catID],
+				"transactions":  categoryTxns[catID],
 			})
 			foundCategoryIDs[catID] = true
 		}
@@ -1168,6 +1243,12 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			}
 		}
 
+		groupedPct := 0.0
+		ungroupedPct := 0.0
+		if totalTxns > 0 {
+			groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
+			ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
+		}
 		result := map[string]interface{}{
 			"pages_processed":                 1,
 			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
@@ -1179,6 +1260,10 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			"transactions_uploaded_count":     transactionsCount,
 			"transactions_under_review_count": 0,
 			"transactions_under_review":       []map[string]interface{}{},
+			"grouped_transaction_count":       groupedTxns,
+			"ungrouped_transaction_count":     ungroupedTxns,
+			"grouped_transaction_percent":     groupedPct,
+			"ungrouped_transaction_percent":   ungroupedPct,
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
