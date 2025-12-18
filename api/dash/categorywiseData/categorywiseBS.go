@@ -41,17 +41,17 @@ type EntityBreakdownRow struct {
 }
 
 type TransactionRow struct {
-	TxID        string  `json:"txId"`
-	Date        string  `json:"date"`
-	Category    string  `json:"category,omitempty"`
-	SubCategory string  `json:"subCategory,omitempty"`
-	Entity      string  `json:"entity"`
-	Bank        string  `json:"bank"`
-	Account     string  `json:"account"`
-	Amount      float64 `json:"amount"`
-	Direction   string  `json:"direction"`
-	Narration   string  `json:"narration,omitempty"`
- 	Misclassified bool   `json:"misclassified_flag,omitempty"`
+	TxID          string  `json:"txId"`
+	Date          string  `json:"date"`
+	Category      string  `json:"category,omitempty"`
+	SubCategory   string  `json:"subCategory,omitempty"`
+	Entity        string  `json:"entity"`
+	Bank          string  `json:"bank"`
+	Account       string  `json:"account"`
+	Amount        float64 `json:"amount"`
+	Direction     string  `json:"direction"`
+	Narration     string  `json:"narration,omitempty"`
+	Misclassified bool    `json:"misclassified_flag,omitempty"`
 }
 
 func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -155,82 +155,68 @@ ORDER BY inflow DESC, outflow DESC;
 
 		entitySQL := `
 SELECT 
-	x.entity_id,
-	x.entity_name,
-	x.bank_name,
-	x.account_number,
-	x.inflow,
-	x.outflow,
-	COALESCE(stmts.transactions_json, '[]') AS transactions_json
+  x.entity_id,
+  x.entity_name,
+  x.bank_name,
+  x.account_number,
+  x.inflow,
+  x.outflow,
+  COALESCE(stmts.transactions_json, '[]') AS transactions_json
 FROM (
-	SELECT 
-		bs.entity_id,
-		me.entity_name,
-		COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
-		bs.account_number,
-		SUM(COALESCE(t.deposit_amount,0)) AS inflow,
-		SUM(COALESCE(t.withdrawal_amount,0)) AS outflow
-	FROM cimplrcorpsaas.bank_statement_transactions t
-	JOIN cimplrcorpsaas.bank_statements bs
-		ON t.bank_statement_id = bs.bank_statement_id
-	LEFT JOIN public.masterbankaccount mba
-		ON mba.account_number = bs.account_number
-	LEFT JOIN public.masterbank mb
-		ON mb.bank_id = mba.bank_id
-	LEFT JOIN public.masterentitycash me
-		ON bs.entity_id = me.entity_id
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) ap ON ap.bankstatementid = bs.bank_statement_id
-	   AND ap.processing_status = 'APPROVED'
+  SELECT 
+    bs.entity_id,
+    me.entity_name,
+    COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
+    bs.account_number,
+    SUM(COALESCE(t.deposit_amount,0)) AS inflow,
+    SUM(COALESCE(t.withdrawal_amount,0)) AS outflow
+  FROM cimplrcorpsaas.bank_statement_transactions t
+  JOIN cimplrcorpsaas.bank_statements bs
+    ON t.bank_statement_id = bs.bank_statement_id
+  LEFT JOIN public.masterbankaccount mba
+    ON mba.account_number = bs.account_number
+  LEFT JOIN public.masterbank mb
+    ON mb.bank_id = mba.bank_id
+  LEFT JOIN public.masterentitycash me
+    ON bs.entity_id = me.entity_id
+  JOIN (
+    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+    FROM cimplrcorpsaas.auditactionbankstatement
+    ORDER BY bankstatementid, requested_at DESC
+  ) ap ON ap.bankstatementid = bs.bank_statement_id
+     AND ap.processing_status = 'APPROVED'
 ` + whereClause + `
-	GROUP BY 
-		bs.entity_id,
-		me.entity_name,
-		COALESCE(mba.bank_name, mb.bank_name),
-		bs.account_number
+  GROUP BY 
+    bs.entity_id,
+    me.entity_name,
+    COALESCE(mba.bank_name, mb.bank_name),
+    bs.account_number
 ) x
 LEFT JOIN LATERAL (
-	SELECT json_agg(
-		json_build_object(
-			'date', to_char(COALESCE(tx.transaction_date, tx.value_date), 'YYYY-MM-DD'),
-			'opening_balance', COALESCE(to_char((tx.balance - COALESCE(tx.deposit_amount,0) + COALESCE(tx.withdrawal_amount,0)), '` + wideNumMask + `'), '0.00'),
-			'inflow', COALESCE(to_char(COALESCE(tx.deposit_amount,0), '` + wideNumMask + `'), '0.00'),
-			'outflow', COALESCE(to_char(COALESCE(tx.withdrawal_amount,0), '` + wideNumMask + `'), '0.00'),
-			'closing_balance', COALESCE(to_char(COALESCE(tx.balance,0), '` + wideNumMask + `'), '0.00'),
-			'narration', COALESCE(tx.description, ''),
-			'category', COALESCE(tc.category_name, '')
-		) ORDER BY COALESCE(tx.transaction_date, tx.value_date), tx.transaction_id
-	) AS transactions_json
-	FROM cimplrcorpsaas.bank_statements bs2
-	JOIN cimplrcorpsaas.bank_statement_transactions tx
-		ON tx.bank_statement_id = bs2.bank_statement_id
-	LEFT JOIN cimplrcorpsaas.transaction_categories tc
-		ON tx.category_id = tc.category_id
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
-	   AND ap2.processing_status = 'APPROVED'
-	WHERE bs2.account_number = x.account_number
-	-- also apply the same date & bank/entity/currency filters to the transactions
-	AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
-` + func() string {
-			// We need to append any additional filters (entity/bank/currency) to the lateral transaction WHERE.
-			// The outer whereClause used placeholders starting from $1; our args match those placeholders.
-			// Re-use the same filters except the leading date filter which is already present.
-
-			// entity filter -> bs.entity_id = $2 etc. But in this lateral scope bs2 is the bank_statements table.
-			// We'll append the filters for entity, bank and currency if present by matching placeholders by position.
-			// Build by checking presence of entity/bank/currency values from the outer closure — but we can't access them here.
-			// Instead we simply reuse the same additional conditions via placeholders if they exist.
-			// Constructed earlier: filters included date as first param. If there are more args, include them here.
-			// We know args slice length; if len(args) > 1, include matching conditions in the same order.
-			return ""
-		}() + `
+  SELECT json_agg(
+    json_build_object(
+      'date', to_char(COALESCE(tx.transaction_date, tx.value_date), 'YYYY-MM-DD'),
+      'opening_balance', COALESCE(to_char((tx.balance - COALESCE(tx.deposit_amount,0) + COALESCE(tx.withdrawal_amount,0)), '` + wideNumMask + `'), '0.00'),
+      'inflow', COALESCE(to_char(COALESCE(tx.deposit_amount,0), '` + wideNumMask + `'), '0.00'),
+      'outflow', COALESCE(to_char(COALESCE(tx.withdrawal_amount,0), '` + wideNumMask + `'), '0.00'),
+      'closing_balance', COALESCE(to_char(COALESCE(tx.balance,0), '` + wideNumMask + `'), '0.00'),
+      'narration', COALESCE(tx.description, ''),
+      'category', CASE WHEN tx.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(tc.category_name, '') END
+    ) ORDER BY COALESCE(tx.transaction_date, tx.value_date), tx.transaction_id
+  ) AS transactions_json
+  FROM cimplrcorpsaas.bank_statements bs2
+  JOIN cimplrcorpsaas.bank_statement_transactions tx
+    ON tx.bank_statement_id = bs2.bank_statement_id
+  LEFT JOIN cimplrcorpsaas.transaction_categories tc
+    ON tx.category_id = tc.category_id
+  JOIN (
+    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+    FROM cimplrcorpsaas.auditactionbankstatement
+    ORDER BY bankstatementid, requested_at DESC
+  ) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
+     AND ap2.processing_status = 'APPROVED'
+  WHERE bs2.account_number = x.account_number
+    AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
 ) stmts ON TRUE
 ORDER BY x.entity_name, x.bank_name, x.account_number;
 `
@@ -275,7 +261,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		}
 
 		/* ---------------- Transactions list (flat) ---------------- */
-			txnSQL := `
+		txnSQL := `
 	SELECT
 		t.transaction_id::text,
 		to_char(COALESCE(t.transaction_date, t.value_date), 'YYYY-MM-DD') AS dt,
@@ -402,10 +388,10 @@ LIMIT 2000;
 		}
 
 		resp := map[string]interface{}{
-			"success":      true,
-			"categories":   categories,
-			"entities":     entities,
-			"transactions": txns,
+			"success":                    true,
+			"categories":                 categories,
+			"entities":                   entities,
+			"transactions":               txns,
 			"misclassified_transactions": misclassifiedTxns,
 		}
 
