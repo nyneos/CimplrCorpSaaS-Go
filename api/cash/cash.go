@@ -46,6 +46,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/v2/reject", bankstatement.RejectBankStatementHandler(db))
 	mux.Handle("/cash/bank-statements/v2/delete", bankstatement.DeleteBankStatementHandler(db))
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db))
 	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
@@ -110,3 +111,4 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }
+
