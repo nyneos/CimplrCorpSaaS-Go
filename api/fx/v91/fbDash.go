@@ -11,8 +11,11 @@ import (
 
 	api "CimplrCorpSaas/api"
 
+<<<<<<< HEAD
 	"CimplrCorpSaas/api/constants"
 
+=======
+>>>>>>> origin/main
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -105,7 +108,11 @@ func timeToString(t *time.Time) string {
 
 // StreamRowsAsPayload streams rows inside your RespondWithPayload-compatible format
 func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (NormalizedExposure, error)) {
+<<<<<<< HEAD
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+=======
+	w.Header().Set("Content-Type", "application/json")
+>>>>>>> origin/main
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"success":true,"rows":[`))
 

@@ -47,6 +47,7 @@ type AMCInfo struct {
 	InternalAmcCode string `json:"internal_amc_code"`
 	Status          string `json:"status"`
 	IsDeleted       bool   `json:"is_deleted"`
+	Enriched        bool   `json:"enriched"`
 }
 
 type SchemeInfo struct {
@@ -57,6 +58,7 @@ type SchemeInfo struct {
 	AmcName            string `json:"amc_name"`
 	Status             string `json:"status"`
 	IsDeleted          bool   `json:"is_deleted"`
+	Enriched           bool   `json:"enriched"`
 }
 
 type DPInfo struct {
@@ -66,6 +68,7 @@ type DPInfo struct {
 	Depository string `json:"depository"`
 	Status     string `json:"status"`
 	IsDeleted  bool   `json:"is_deleted"`
+	Enriched   bool   `json:"enriched"`
 }
 
 type DematInfo struct {
@@ -77,6 +80,7 @@ type DematInfo struct {
 	DefaultSettlementAcc string `json:"default_settlement_account"`
 	Status               string `json:"status"`
 	IsDeleted            bool   `json:"is_deleted"`
+	Enriched             bool   `json:"enriched"`
 }
 
 type FolioInfo struct {
@@ -89,6 +93,7 @@ type FolioInfo struct {
 	DefaultRedemptionAccount   string `json:"default_redemption_account"`
 	Status                     string `json:"status"`
 	IsDeleted                  bool   `json:"is_deleted"`
+	Enriched                   bool   `json:"enriched"`
 }
 
 type OnboardMapping struct {
@@ -201,82 +206,106 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get entities breakdown
 		batchInfo.Entities = EntityBreakdown{}
 
-		// Get AMCs
+		// Get AMCs (both new and enriched)
 		amcRows, err := pgxPool.Query(ctx, `
-			SELECT amc_id, amc_name, internal_amc_code, status, COALESCE(is_deleted, false)
-			FROM investment.masteramc 
-			WHERE batch_id::text = $1::text
-			ORDER BY amc_name`, batchID)
+			SELECT 
+				m.amc_id, m.amc_name, COALESCE(m.internal_amc_code, ''), 
+				m.status, COALESCE(m.is_deleted, false), 
+				COALESCE(om.enriched, false) as enriched
+			FROM investment.onboard_mapping om
+			INNER JOIN investment.masteramc m ON m.amc_id = om.reference_id
+			WHERE om.batch_id::text = $1::text 
+			  AND om.reference_type = 'AMC'
+			ORDER BY m.amc_name`, batchID)
 		if err == nil {
 			for amcRows.Next() {
 				var amc AMCInfo
-				amcRows.Scan(&amc.AmcID, &amc.AmcName, &amc.InternalAmcCode, &amc.Status, &amc.IsDeleted)
+				amcRows.Scan(&amc.AmcID, &amc.AmcName, &amc.InternalAmcCode, &amc.Status, &amc.IsDeleted, &amc.Enriched)
 				batchInfo.Entities.AMC = append(batchInfo.Entities.AMC, amc)
 			}
 			amcRows.Close()
 		}
 
-		// Get Schemes
+		// Get Schemes (both new and enriched)
 		schemeRows, err := pgxPool.Query(ctx, `
-			SELECT scheme_id, scheme_name, isin, internal_scheme_code, amc_name, status, COALESCE(is_deleted, false)
-			FROM investment.masterscheme 
-			WHERE batch_id::text = $1::text
-			ORDER BY scheme_name`, batchID)
+			SELECT 
+				m.scheme_id, m.scheme_name, COALESCE(m.isin, ''), 
+				COALESCE(m.internal_scheme_code, ''), m.amc_name, m.status, 
+				COALESCE(m.is_deleted, false), COALESCE(om.enriched, false) as enriched
+			FROM investment.onboard_mapping om
+			INNER JOIN investment.masterscheme m ON m.scheme_id = om.reference_id
+			WHERE om.batch_id::text = $1::text 
+			  AND om.reference_type = 'SCHEME'
+			ORDER BY m.scheme_name`, batchID)
 		if err == nil {
 			for schemeRows.Next() {
 				var scheme SchemeInfo
 				schemeRows.Scan(&scheme.SchemeID, &scheme.SchemeName, &scheme.ISIN,
-					&scheme.InternalSchemeCode, &scheme.AmcName, &scheme.Status, &scheme.IsDeleted)
+					&scheme.InternalSchemeCode, &scheme.AmcName, &scheme.Status, &scheme.IsDeleted, &scheme.Enriched)
 				batchInfo.Entities.Scheme = append(batchInfo.Entities.Scheme, scheme)
 			}
 			schemeRows.Close()
 		}
 
-		// Get DPs
+		// Get DPs (both new and enriched)
 		dpRows, err := pgxPool.Query(ctx, `
-			SELECT dp_id, dp_name, dp_code, depository, status, COALESCE(is_deleted, false)
-			FROM investment.masterdepositoryparticipant 
-			WHERE batch_id::text = $1::text
-			ORDER BY dp_name`, batchID)
+			SELECT 
+				m.dp_id, m.dp_name, COALESCE(m.dp_code, ''), 
+				m.depository, m.status, COALESCE(m.is_deleted, false),
+				COALESCE(om.enriched, false) as enriched
+			FROM investment.onboard_mapping om
+			INNER JOIN investment.masterdepositoryparticipant m ON m.dp_id = om.reference_id
+			WHERE om.batch_id::text = $1::text 
+			  AND om.reference_type = 'DP'
+			ORDER BY m.dp_name`, batchID)
 		if err == nil {
 			for dpRows.Next() {
 				var dp DPInfo
-				dpRows.Scan(&dp.DPID, &dp.DPName, &dp.DPCode, &dp.Depository, &dp.Status, &dp.IsDeleted)
+				dpRows.Scan(&dp.DPID, &dp.DPName, &dp.DPCode, &dp.Depository, &dp.Status, &dp.IsDeleted, &dp.Enriched)
 				batchInfo.Entities.DP = append(batchInfo.Entities.DP, dp)
 			}
 			dpRows.Close()
 		}
 
-		// Get Demats
+		// Get Demats (both new and enriched)
 		dematRows, err := pgxPool.Query(ctx, `
-			SELECT demat_id, entity_name, dp_id, depository, demat_account_number, 
-			       default_settlement_account, status, COALESCE(is_deleted, false)
-			FROM investment.masterdemataccount 
-			WHERE batch_id::text = $1::text
-			ORDER BY entity_name`, batchID)
+			SELECT 
+				m.demat_id, m.entity_name, COALESCE(m.dp_id, ''), m.depository, 
+				m.demat_account_number, m.default_settlement_account, m.status, 
+				COALESCE(m.is_deleted, false), COALESCE(om.enriched, false) as enriched
+			FROM investment.onboard_mapping om
+			INNER JOIN investment.masterdemataccount m ON m.demat_id = om.reference_id
+			WHERE om.batch_id::text = $1::text 
+			  AND om.reference_type = 'DEMAT'
+			ORDER BY m.entity_name`, batchID)
 		if err == nil {
 			for dematRows.Next() {
 				var demat DematInfo
 				dematRows.Scan(&demat.DematID, &demat.EntityName, &demat.DPID, &demat.Depository,
-					&demat.DematAccountNumber, &demat.DefaultSettlementAcc, &demat.Status, &demat.IsDeleted)
+					&demat.DematAccountNumber, &demat.DefaultSettlementAcc, &demat.Status, &demat.IsDeleted, &demat.Enriched)
 				batchInfo.Entities.Demat = append(batchInfo.Entities.Demat, demat)
 			}
 			dematRows.Close()
 		}
 
-		// Get Folios
+		// Get Folios (both new and enriched)
 		folioRows, err := pgxPool.Query(ctx, `
-			SELECT folio_id, entity_name, amc_name, folio_number, first_holder_name,
-			       default_subscription_account, default_redemption_account, status, COALESCE(is_deleted, false)
-			FROM investment.masterfolio 
-			WHERE batch_id::text = $1::text
-			ORDER BY entity_name, folio_number`, batchID)
+			SELECT 
+				m.folio_id, m.entity_name, m.amc_name, m.folio_number, 
+				COALESCE(m.first_holder_name, ''), m.default_subscription_account, 
+				m.default_redemption_account, m.status, COALESCE(m.is_deleted, false),
+				COALESCE(om.enriched, false) as enriched
+			FROM investment.onboard_mapping om
+			INNER JOIN investment.masterfolio m ON m.folio_id = om.reference_id
+			WHERE om.batch_id::text = $1::text 
+			  AND om.reference_type = 'FOLIO'
+			ORDER BY m.entity_name, m.folio_number`, batchID)
 		if err == nil {
 			for folioRows.Next() {
 				var folio FolioInfo
 				folioRows.Scan(&folio.FolioID, &folio.EntityName, &folio.AmcName, &folio.FolioNumber,
 					&folio.FirstHolderName, &folio.DefaultSubscriptionAccount,
-					&folio.DefaultRedemptionAccount, &folio.Status, &folio.IsDeleted)
+					&folio.DefaultRedemptionAccount, &folio.Status, &folio.IsDeleted, &folio.Enriched)
 				batchInfo.Entities.Folio = append(batchInfo.Entities.Folio, folio)
 			}
 			folioRows.Close()

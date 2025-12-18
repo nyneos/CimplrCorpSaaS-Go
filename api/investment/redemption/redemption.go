@@ -3,6 +3,7 @@ package redemption
 import (
 	"CimplrCorpSaas/api"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -25,8 +26,8 @@ type GetPortfolioRequest struct {
 
 // PortfolioHolding represents a single portfolio position
 type PortfolioHolding struct {
-	ID                  int64               `json:"id"`
-	BatchID             string              `json:"batch_id"`
+	ID                  int64               `json:"id,omitempty"`
+	BatchID             string              `json:"batch_id,omitempty"`
 	EntityName          string              `json:"entity_name"`
 	FolioNumber         *string             `json:"folio_number,omitempty"`
 	DematAccNumber      *string             `json:"demat_acc_number,omitempty"`
@@ -34,20 +35,22 @@ type PortfolioHolding struct {
 	SchemeName          string              `json:"scheme_name"`
 	ISIN                *string             `json:"isin,omitempty"`
 	TotalUnits          float64             `json:"total_units"`
+	BlockedUnits        float64             `json:"blocked_units"`
+	AvailableUnits      float64             `json:"available_units"`
 	AvgNAV              float64             `json:"avg_nav"`
 	CurrentNAV          float64             `json:"current_nav"`
 	CurrentValue        float64             `json:"current_value"`
 	TotalInvestedAmount float64             `json:"total_invested_amount"`
 	GainLoss            float64             `json:"gain_loss"`
 	GainLossPercent     float64             `json:"gain_loss_percent"`
-	CreatedAt           string              `json:"created_at"`
+	CreatedAt           string              `json:"created_at,omitempty"`
 	Transactions        []TransactionDetail `json:"transactions"`
 }
 
 // TransactionDetail represents a single transaction
 type TransactionDetail struct {
 	ID                 int64   `json:"id"`
-	BatchID            string  `json:"batch_id"`
+	BatchID            string  `json:"batch_id,omitempty"`
 	TransactionDate    string  `json:"transaction_date"`
 	TransactionType    string  `json:"transaction_type"`
 	SchemeInternalCode *string `json:"scheme_internal_code,omitempty"`
@@ -59,7 +62,7 @@ type TransactionDetail struct {
 	SchemeID           *string `json:"scheme_id,omitempty"`
 	FolioID            *string `json:"folio_id,omitempty"`
 	DematID            *string `json:"demat_id,omitempty"`
-	CreatedAt          string  `json:"created_at"`
+	CreatedAt          string  `json:"created_at,omitempty"`
 }
 
 // CalculateRedemptionRequest models the payload for FIFO redemption calculation
@@ -130,32 +133,73 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Query to get portfolio snapshots for the entity
-		snapshotQuery := `
-			SELECT 
-				id, 
-				batch_id, 
-				entity_name, 
-				folio_number, 
-				demat_acc_number,
-				scheme_id, 
-				scheme_name, 
-				isin,
-				COALESCE(total_units, 0) AS total_units,
-				COALESCE(avg_nav, 0) AS avg_nav,
-				COALESCE(current_nav, 0) AS current_nav,
-				COALESCE(current_value, 0) AS current_value,
-				COALESCE(total_invested_amount, 0) AS total_invested_amount,
-				COALESCE(gain_loss, 0) AS gain_loss,
-				COALESCE(gain_losss_percent, 0) AS gain_losss_percent,
-				TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
-			FROM investment.portfolio_snapshot
-			WHERE entity_name = $1
-				AND COALESCE(total_units, 0) > 0
-			ORDER BY scheme_name, folio_number, demat_acc_number
+		// Aggregate holdings by entity -> scheme (resolved by scheme_id/internal code/isin) and folio/demat
+		// We compute net units = sum(buys) - sum(sells) but compute avg_nav and invested amount from buys only.
+		// blocked_units: Sum directly from onboard_transaction.blocked_units field
+		aggQuery := `
+			WITH latest_snapshots AS (
+				SELECT DISTINCT ON (entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number))
+					entity_name, scheme_id, folio_id, folio_number, demat_id, demat_acc_number
+				FROM investment.portfolio_snapshot
+				WHERE entity_name = $1
+				ORDER BY entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number), created_at DESC
+			),
+			ot AS (
+				SELECT
+					t.id, t.batch_id, t.transaction_date, t.transaction_type, t.scheme_internal_code,
+					t.folio_number, t.demat_acc_number, t.amount, t.units, t.nav,
+					t.scheme_id, t.folio_id, t.demat_id, t.created_at,
+					COALESCE(t.blocked_units, 0) AS blocked_units,
+					COALESCE(t.entity_name, ls.entity_name) AS entity_name,
+					ms.scheme_name AS ms_scheme_name, ms.isin AS ms_isin, ms.scheme_id AS ms_scheme_id, ms.internal_scheme_code AS ms_internal_code
+				FROM investment.onboard_transaction t
+				LEFT JOIN latest_snapshots ls ON 
+					t.scheme_id = ls.scheme_id AND (
+						(t.folio_id IS NOT NULL AND t.folio_id = ls.folio_id) OR
+						(t.demat_id IS NOT NULL AND t.demat_id = ls.demat_id) OR
+						(t.folio_number IS NOT NULL AND t.folio_number = ls.folio_number) OR
+						(t.demat_acc_number IS NOT NULL AND t.demat_acc_number = ls.demat_acc_number)
+					)
+				LEFT JOIN investment.masterscheme ms ON (
+					ms.scheme_id = t.scheme_id OR ms.internal_scheme_code = t.scheme_internal_code OR ms.isin = t.scheme_id
+				)
+				-- filter by entity from either transaction or snapshot
+				WHERE (t.entity_name = $1 OR ls.entity_name = $1)
+					AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
+			)
+			SELECT
+				ot.entity_name,
+				COALESCE(ot.folio_number,'') AS folio_number,
+				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
+				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id) AS scheme_id,
+				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code) AS scheme_name,
+				COALESCE(ot.ms_isin,'') AS isin,
+				COALESCE(ot.folio_id, '') AS folio_id,
+				COALESCE(ot.demat_id, '') AS demat_id,
+				-- available units: (buys - sells) minus blocked units
+				(SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.blocked_units,0) ELSE 0 END)) AS units,
+				-- avg_nav based only on buy transactions
+				CASE WHEN SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)=0 THEN 0
+					ELSE SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.nav,0)*COALESCE(ot.units,0) ELSE 0 END)
+						/ SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+				END AS avg_nav,
+			-- invested amount based only on buy transactions
+			SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.amount,0) ELSE 0 END) AS total_invested_amount
+			FROM ot
+			GROUP BY ot.entity_name, COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''),
+				COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id), 
+				COALESCE(ot.ms_scheme_name, ot.scheme_internal_code), 
+				COALESCE(ot.ms_isin,''),
+				COALESCE(ot.folio_id, ''),
+				COALESCE(ot.demat_id, '')
+			HAVING (SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)) > 0
+			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
 		`
 
-		rows, err := pgxPool.Query(ctx, snapshotQuery, req.EntityName)
+		rows, err := pgxPool.Query(ctx, aggQuery, req.EntityName)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -164,56 +208,119 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		holdings := []PortfolioHolding{}
 		for rows.Next() {
-			var h PortfolioHolding
-			if err := rows.Scan(
-				&h.ID,
-				&h.BatchID,
-				&h.EntityName,
-				&h.FolioNumber,
-				&h.DematAccNumber,
-				&h.SchemeID,
-				&h.SchemeName,
-				&h.ISIN,
-				&h.TotalUnits,
-				&h.AvgNAV,
-				&h.CurrentNAV,
-				&h.CurrentValue,
-				&h.TotalInvestedAmount,
-				&h.GainLoss,
-				&h.GainLossPercent,
-				&h.CreatedAt,
-			); err != nil {
+			var entityName, folioNumber, dematAcc, schemeID, schemeName, isin, folioIDStr, dematIDStr string
+			var units, avgNav, totalInvested float64
+			if err := rows.Scan(&entityName, &folioNumber, &dematAcc, &schemeID, &schemeName, &isin, &folioIDStr, &dematIDStr, &units, &avgNav, &totalInvested); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
 
-			// Fetch transactions for this holding
-			txQuery := `
-				SELECT 
-					id,
-					batch_id,
-					TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
-					transaction_type,
-					scheme_internal_code,
-					folio_number,
-					demat_acc_number,
-					COALESCE(amount, 0) AS amount,
-					COALESCE(units, 0) AS units,
-					COALESCE(nav, 0) AS nav,
-					scheme_id,
-					folio_id,
-					demat_id,
-					TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
-				FROM investment.onboard_transaction
-				WHERE scheme_id = $1
-					AND (
-						($2::text IS NOT NULL AND folio_number = $2)
-						OR ($3::text IS NOT NULL AND demat_acc_number = $3)
-					)
-				ORDER BY transaction_date ASC, id ASC
-			`
+			// Ensure units are not negative
+			if units < 0 {
+				units = 0
+			}
 
-			txRows, err := pgxPool.Query(ctx, txQuery, h.SchemeID, h.FolioNumber, h.DematAccNumber)
+			// Fetch latest snapshot for current_nav if available
+			// Use the folio_id/demat_id we got from the query
+			var folioID, dematID sql.NullString
+			if folioIDStr != "" {
+				folioID.String = folioIDStr
+				folioID.Valid = true
+			} else if folioNumber != "" {
+				_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 LIMIT 1`, folioNumber).Scan(&folioID)
+			}
+			if dematIDStr != "" {
+				dematID.String = dematIDStr
+				dematID.Valid = true
+			} else if dematAcc != "" {
+				_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 LIMIT 1`, dematAcc).Scan(&dematID)
+			}
+
+			var currentNav float64
+			var totalInvestedSnapshot float64
+			var snapshotNav sql.NullFloat64
+
+			// Try fetching snapshot by folio_id/demat_id first, fallback to folio_number/demat_acc_number
+			err := pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(current_nav,0), COALESCE(total_invested_amount,0)
+				FROM investment.portfolio_snapshot
+				WHERE entity_name=$1 AND scheme_id=$2 
+					AND ((folio_id IS NOT NULL AND folio_id=$3) OR (demat_id IS NOT NULL AND demat_id=$4)
+						OR (folio_number IS NOT NULL AND folio_number=$5) OR (demat_acc_number IS NOT NULL AND demat_acc_number=$6))
+				ORDER BY created_at DESC LIMIT 1
+			`, entityName, schemeID, folioID, dematID, nullIfEmptyString(folioNumber), nullIfEmptyString(dematAcc)).Scan(&snapshotNav, &totalInvestedSnapshot)
+			if err == nil {
+				if snapshotNav.Valid {
+					currentNav = snapshotNav.Float64
+				} else {
+					// fallback to avgNav if snapshot nav is null
+					currentNav = avgNav
+				}
+			} else {
+				// fallback to avgNav if no snapshot found
+				currentNav = avgNav
+			}
+
+			h := PortfolioHolding{
+				ID:                  0,
+				BatchID:             "",
+				EntityName:          entityName,
+				FolioNumber:         nil,
+				DematAccNumber:      nil,
+				SchemeID:            schemeID,
+				SchemeName:          schemeName,
+				ISIN:                nil,
+				TotalUnits:          units,
+				BlockedUnits:        0,
+				AvailableUnits:      units,
+				AvgNAV:              avgNav,
+				CurrentNAV:          currentNav,
+				CurrentValue:        units * currentNav,
+				TotalInvestedAmount: totalInvested,
+				GainLoss:            (units * currentNav) - totalInvested,
+				GainLossPercent:     0,
+				CreatedAt:           "",
+				Transactions:        []TransactionDetail{},
+			}
+			if isin != "" {
+				h.ISIN = &isin
+			}
+			if folioNumber != "" {
+				h.FolioNumber = &folioNumber
+			}
+			if dematAcc != "" {
+				h.DematAccNumber = &dematAcc
+			}
+			if totalInvested != 0 {
+				h.GainLossPercent = (h.GainLoss / totalInvested) * 100.0
+			}
+
+			// Fetch individual BUY transactions for this holding (ordered FIFO)
+			txQuery := `
+								SELECT 
+										ot.id,
+										ot.batch_id,
+										TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+										ot.transaction_type,
+										ot.scheme_internal_code,
+										ot.folio_number,
+										ot.demat_acc_number,
+										COALESCE(ot.amount, 0) AS amount,
+										COALESCE(ot.units, 0) AS units,
+										COALESCE(ot.nav, 0) AS nav,
+										ot.scheme_id,
+										ot.folio_id,
+										ot.demat_id,
+										TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
+								FROM investment.onboard_transaction ot
+								LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+								WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
+									AND ( (ot.folio_number = $1) OR (ot.demat_acc_number = $2) )
+									AND ( ot.scheme_id = $3 OR ot.scheme_internal_code = $4 OR ms.isin = $5 OR ms.scheme_name = $6 )
+								ORDER BY ot.transaction_date ASC, ot.id ASC
+						`
+
+			txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, isin, schemeName)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 				return
@@ -308,83 +415,29 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// Fetch portfolio snapshot to get current holding and NAV
-		snapshotQuery := `
-			SELECT 
-				scheme_name,
-				COALESCE(total_units, 0) AS total_units,
-				COALESCE(current_nav, 0) AS current_nav,
-				COALESCE(total_invested_amount, 0) AS total_invested_amount
-			FROM investment.portfolio_snapshot
-			WHERE entity_name = $1
-				AND scheme_id = $2
-				AND (
-					($3::text IS NOT NULL AND folio_number = $3)
-					OR ($4::text IS NOT NULL AND demat_acc_number = $4)
-				)
-			ORDER BY created_at DESC
-			LIMIT 1
-		`
-
-		var schemeName string
-		var totalUnits, currentNAV, totalInvested float64
-		if err := pgxPool.QueryRow(ctx, snapshotQuery, req.EntityName, req.SchemeID, req.FolioNumber, req.DematAccNumber).Scan(
-			&schemeName, &totalUnits, &currentNAV, &totalInvested,
-		); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Portfolio holding not found: "+err.Error())
-			return
-		}
-
-		// Calculate redemption units based on input
-		var redemptionUnits float64
-		if req.Units != nil {
-			redemptionUnits = *req.Units
-		} else if req.Amount != nil {
-			if currentNAV <= 0 {
-				api.RespondWithError(w, http.StatusBadRequest, "Current NAV is zero or invalid, cannot calculate units from amount")
-				return
-			}
-			redemptionUnits = *req.Amount / currentNAV
-		} else if req.Percent != nil {
-			if *req.Percent <= 0 || *req.Percent > 100 {
-				api.RespondWithError(w, http.StatusBadRequest, "Percent must be between 0 and 100")
-				return
-			}
-			redemptionUnits = totalUnits * (*req.Percent / 100.0)
-		}
-
-		// Validate redemption units
-		if redemptionUnits <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Redemption units must be positive")
-			return
-		}
-		if redemptionUnits > totalUnits {
-			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed total holding (%.6f)", redemptionUnits, totalUnits))
-			return
-		}
-
-		// Fetch all BUY/PURCHASE transactions ordered by date (FIFO)
+		// We'll compute holdings from transaction rows so totals are aggregated across batches.
+		// Fetch all BUY/PURCHASE transactions ordered by date (FIFO) with flexible scheme matching and entity filter
 		txQuery := `
 			SELECT 
-				id,
-				TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
-				COALESCE(units, 0) AS units,
-				COALESCE(amount, 0) AS amount,
-				COALESCE(nav, 0) AS nav,
-				scheme_internal_code,
-				folio_number,
-				demat_acc_number
-			FROM investment.onboard_transaction
-			WHERE scheme_id = $1
-				AND (
-					($2::text IS NOT NULL AND folio_number = $2)
-					OR ($3::text IS NOT NULL AND demat_acc_number = $3)
-				)
-				AND LOWER(transaction_type) IN ('buy', 'purchase', 'subscription')
-			ORDER BY transaction_date ASC, id ASC
+				ot.id,
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				COALESCE(ot.units, 0) AS units,
+				COALESCE(ot.amount, 0) AS amount,
+				COALESCE(ot.nav, 0) AS nav,
+				ot.scheme_internal_code,
+				ot.folio_number,
+				ot.demat_acc_number
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
+			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+			WHERE ps.entity_name = $1
+				AND LOWER(ot.transaction_type) IN ('buy', 'purchase', 'subscription')
+				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
+			ORDER BY ot.transaction_date ASC, ot.id ASC
 		`
 
-		rows, err := pgxPool.Query(ctx, txQuery, req.SchemeID, req.FolioNumber, req.DematAccNumber)
+		rows, err := pgxPool.Query(ctx, txQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 			return
@@ -420,6 +473,15 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			purchases = append(purchases, tx)
 		}
+		// compute sum of purchased units and total invested from purchases
+		var sumPurchaseUnits float64
+		var sumPurchaseAmount float64
+		var weightedNavNum float64
+		for _, p := range purchases {
+			sumPurchaseUnits += p.Units
+			sumPurchaseAmount += p.Amount
+			weightedNavNum += p.NAV * p.Units
+		}
 
 		if rows.Err() != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Rows error: "+rows.Err().Error())
@@ -434,19 +496,19 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch all existing SELL/REDEMPTION transactions to calculate already redeemed units
 		sellQuery := `
 			SELECT 
-				TO_CHAR(transaction_date, 'YYYY-MM-DD') AS transaction_date,
-				COALESCE(units, 0) AS units
-			FROM investment.onboard_transaction
-			WHERE scheme_id = $1
-				AND (
-					($2::text IS NOT NULL AND folio_number = $2)
-					OR ($3::text IS NOT NULL AND demat_acc_number = $3)
-				)
-				AND LOWER(transaction_type) IN ('sell', 'redemption')
-			ORDER BY transaction_date ASC, id ASC
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				COALESCE(ot.units, 0) AS units
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
+			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+			WHERE ps.entity_name = $1
+				AND LOWER(ot.transaction_type) IN ('sell', 'redemption')
+				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
+			ORDER BY ot.transaction_date ASC, ot.id ASC
 		`
 
-		sellRows, err := pgxPool.Query(ctx, sellQuery, req.SchemeID, req.FolioNumber, req.DematAccNumber)
+		sellRows, err := pgxPool.Query(ctx, sellQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Sell query failed: "+err.Error())
 			return
@@ -461,6 +523,128 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			existingSells = append(existingSells, tx)
+		}
+
+		// compute sum of sold units (treat sells as absolute units)
+		var sumSellUnits float64
+		for _, s := range existingSells {
+			sumSellUnits += math.Abs(s.Units)
+		}
+
+		// total holding available = purchases - sells
+		totalUnits := sumPurchaseUnits - sumSellUnits
+
+		// determine average NAV from purchases (weighted)
+		var avgNav float64
+		if sumPurchaseUnits > 0 {
+			avgNav = weightedNavNum / sumPurchaseUnits
+		}
+
+		// Get folio_id or demat_id from master tables for snapshot lookup
+		var folioID, dematID sql.NullString
+		if req.FolioNumber != nil && *req.FolioNumber != "" {
+			_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 LIMIT 1`, *req.FolioNumber).Scan(&folioID)
+		}
+		if req.DematAccNumber != nil && *req.DematAccNumber != "" {
+			_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 LIMIT 1`, *req.DematAccNumber).Scan(&dematID)
+		}
+
+		// Fetch current NAV from latest portfolio_snapshot with fallback to folio_number/demat_acc_number
+		var currentNAV float64
+		var schemeName string
+		var tmpNav sql.NullFloat64
+		var tmpInvest sql.NullFloat64
+
+		folioNumberStr := ""
+		if req.FolioNumber != nil {
+			folioNumberStr = *req.FolioNumber
+		}
+		dematAccStr := ""
+		if req.DematAccNumber != nil {
+			dematAccStr = *req.DematAccNumber
+		}
+
+		if err := pgxPool.QueryRow(ctx, `
+		SELECT COALESCE(current_nav,0), COALESCE(total_invested_amount,0) 
+		FROM investment.portfolio_snapshot
+		WHERE entity_name=$1 AND scheme_id=$2 
+			AND ((folio_id IS NOT NULL AND folio_id=$3) OR (demat_id IS NOT NULL AND demat_id=$4)
+				OR (folio_number IS NOT NULL AND folio_number=$5) OR (demat_acc_number IS NOT NULL AND demat_acc_number=$6))
+		ORDER BY created_at DESC LIMIT 1
+	`, req.EntityName, req.SchemeID, folioID, dematID, nullIfEmptyString(folioNumberStr), nullIfEmptyString(dematAccStr)).Scan(&tmpNav, &tmpInvest); err == nil {
+			if tmpNav.Valid && tmpNav.Float64 > 0 {
+				currentNAV = tmpNav.Float64
+			} else {
+				currentNAV = avgNav
+			}
+		} else {
+			currentNAV = avgNav
+		} // try to lookup scheme name from masterscheme
+		if err := pgxPool.QueryRow(ctx, `SELECT COALESCE(scheme_name,'') FROM investment.masterscheme WHERE scheme_id=$1 OR internal_scheme_code=$1 OR isin=$1 LIMIT 1`, req.SchemeID).Scan(&schemeName); err != nil {
+			schemeName = ""
+		}
+
+		// Calculate blocked units from pending/approved redemption initiations
+		var blockedUnits float64
+		blockedQuery := `
+		SELECT COALESCE(SUM(ri.by_units), 0)
+		FROM investment.redemption_initiation ri
+		LEFT JOIN investment.auditactionredemption aar ON aar.redemption_id = ri.redemption_id
+		WHERE ri.entity_name = $1
+			AND ri.scheme_id = $2
+			AND (ri.folio_id = $3 OR ri.folio_id = $4 OR ri.demat_id = $5 OR ri.demat_id = $6)
+			AND ri.is_deleted = false
+			AND aar.action_id = (
+				SELECT action_id FROM investment.auditactionredemption 
+				WHERE redemption_id = ri.redemption_id 
+				ORDER BY requested_at DESC LIMIT 1
+			)
+			AND aar.processing_status IN ('PENDING_APPROVAL', 'APPROVED')
+	`
+		if err := pgxPool.QueryRow(ctx, blockedQuery, req.EntityName, req.SchemeID,
+			folioID, nullIfEmptyString(folioNumberStr),
+			dematID, nullIfEmptyString(dematAccStr)).Scan(&blockedUnits); err != nil {
+			blockedUnits = 0
+		}
+
+		// Calculate available units
+		availableUnits := totalUnits - blockedUnits
+		if availableUnits < 0 {
+			availableUnits = 0
+		}
+
+		// Calculate redemption units based on input (now that we have currentNAV and totalUnits)
+		var redemptionUnits float64
+		if req.Units != nil {
+			redemptionUnits = *req.Units
+		} else if req.Amount != nil {
+			if currentNAV <= 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "Current NAV is zero or invalid, cannot calculate units from amount")
+				return
+			}
+			redemptionUnits = *req.Amount / currentNAV
+		} else if req.Percent != nil {
+			if *req.Percent <= 0 || *req.Percent > 100 {
+				api.RespondWithError(w, http.StatusBadRequest, "Percent must be between 0 and 100")
+				return
+			}
+			redemptionUnits = totalUnits * (*req.Percent / 100.0)
+		}
+
+		// Validate redemption units
+		if redemptionUnits <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Redemption units must be positive")
+			return
+		}
+		if redemptionUnits > totalUnits {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed total holding (%.6f)", redemptionUnits, totalUnits))
+			return
+		}
+
+		// CRITICAL: Check against available units (total - blocked)
+		if redemptionUnits > availableUnits {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed available units (%.6f). %.6f units are blocked in pending/approved redemptions.", redemptionUnits, availableUnits, blockedUnits))
+			return
 		}
 
 		if sellRows.Err() != nil {

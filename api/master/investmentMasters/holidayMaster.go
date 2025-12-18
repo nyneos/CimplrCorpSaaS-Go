@@ -956,7 +956,7 @@ FROM investment.mastercalendar mc
 LEFT JOIN latest_audit l ON l.calendar_id = mc.calendar_id
 LEFT JOIN history h ON h.calendar_id = mc.calendar_id
 WHERE COALESCE(mc.is_deleted,false) = false
-ORDER BY l.requested_at DESC NULLS LAST, mc.calendar_name, mc.calendar_code;
+ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	, mc.calendar_name, mc.calendar_code;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1002,9 +1002,10 @@ func GetCalendarListLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 WITH latest_audit AS (
     SELECT DISTINCT ON (calendar_id)
         calendar_id,
-        requested_at
+        requested_at,
+        checker_at
     FROM investment.auditactioncalendar
-    ORDER BY calendar_id, requested_at DESC
+    ORDER BY calendar_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 )
 SELECT
     mc.calendar_id,
@@ -1015,8 +1016,7 @@ SELECT
 FROM investment.mastercalendar mc
 LEFT JOIN latest_audit la ON la.calendar_id = mc.calendar_id
 WHERE COALESCE(mc.is_deleted,false) = false
-ORDER BY 
-    la.requested_at DESC NULLS LAST,
+ORDER BY GREATEST(COALESCE(la.requested_at, '1970-01-01'::timestamp), COALESCE(la.checker_at, '1970-01-01'::timestamp)) DESC,
     mc.calendar_name;
 		`
 

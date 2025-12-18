@@ -29,6 +29,7 @@ type CreateSchemeRequestSingle struct {
 	InternalSchemeCode string `json:"internal_scheme_code"`
 	InternalRiskRating string `json:"internal_risk_rating"`
 	ErpGlAccount       string `json:"erp_gl_account"`
+	AmfiSchemeCode     string `json:"amfi_scheme_code"`
 	Status             string `json:"status,omitempty"`
 	Source             string `json:"source,omitempty"` // ignored, we set Manual
 }
@@ -59,7 +60,7 @@ func isAMCApproved(ctx context.Context, pgxPool *pgxpool.Pool, amcName string) (
 		WITH latest AS (
 			SELECT DISTINCT ON (amc_id) amc_id, processing_status
 			FROM investment.auditactionamc
-			ORDER BY amc_id, requested_at DESC
+			ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		)
 		SELECT 1
 		FROM investment.masteramc m
@@ -129,6 +130,7 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"internal_scheme_code": true,
 			"internal_risk_rating": true,
 			"erp_gl_account":       true,
+			"amfi_scheme_code":     true,
 			constants.KeyStatus:    true,
 			"source":               true,
 		}
@@ -296,7 +298,6 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		// Validate required
 		if strings.TrimSpace(req.SchemeName) == "" ||
-			strings.TrimSpace(req.ISIN) == "" ||
 			strings.TrimSpace(req.AmcName) == "" ||
 			strings.TrimSpace(req.InternalSchemeCode) == "" ||
 			strings.TrimSpace(req.InternalRiskRating) == "" ||
@@ -331,12 +332,14 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// check ISIN uniqueness (non-deleted)
-		var tmp int
-		err = pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.ISIN).Scan(&tmp)
-		if err == nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Scheme with ISIN already exists")
-			return
+		// check ISIN uniqueness (non-deleted) only if ISIN is provided
+		if strings.TrimSpace(req.ISIN) != "" {
+			var tmp int
+			err = pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.ISIN).Scan(&tmp)
+			if err == nil {
+				api.RespondWithError(w, http.StatusBadRequest, "Scheme with ISIN already exists")
+				return
+			}
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -349,15 +352,15 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertQ := `
 			INSERT INTO investment.masterscheme (
 				scheme_name, isin, amc_name, internal_scheme_code,
-				internal_risk_rating, erp_gl_account, status, source
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual')
+				internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual')
 			RETURNING scheme_id
 		`
 
 		var schemeID string
 		if err := tx.QueryRow(ctx, insertQ,
 			req.SchemeName, req.ISIN, req.AmcName, req.InternalSchemeCode,
-			req.InternalRiskRating, req.ErpGlAccount, defaultIfEmpty(req.Status, "Active"),
+			req.InternalRiskRating, req.ErpGlAccount, req.AmfiSchemeCode, defaultIfEmpty(req.Status, "Active"),
 		).Scan(&schemeID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
 			return
@@ -378,9 +381,10 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{
-			"scheme_id":   schemeID,
-			"scheme_name": req.SchemeName,
-			"source":      "Manual",
+			"scheme_id":        schemeID,
+			"scheme_name":      req.SchemeName,
+			"amfi_scheme_code": req.AmfiSchemeCode,
+			"source":           "Manual",
 		})
 	}
 }
@@ -426,15 +430,15 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch existing values for old_ columns
 		sel := `
-			SELECT scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source
+			SELECT scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source
 			FROM investment.masterscheme
 			WHERE scheme_id=$1
 			FOR UPDATE
 		`
-		var oldVals [8]interface{}
+		var oldVals [9]interface{}
 		if err := tx.QueryRow(ctx, sel, req.SchemeID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
+			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
@@ -448,7 +452,8 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"internal_scheme_code": 3,
 			"internal_risk_rating": 4,
 			"erp_gl_account":       5,
-			constants.KeyStatus:    6,
+			"amfi_scheme_code":     6,
+			"status":               7,
 		}
 
 		var sets []string
@@ -620,7 +625,7 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, actiontype, processing_status
 			FROM investment.auditactionscheme
 			WHERE scheme_id = ANY($1)
-			ORDER BY scheme_id, requested_at DESC
+			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
@@ -743,7 +748,7 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT DISTINCT ON (scheme_id) action_id, scheme_id, processing_status
 			FROM investment.auditactionscheme
 			WHERE scheme_id = ANY($1)
-			ORDER BY scheme_id, requested_at DESC
+			ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
@@ -813,7 +818,7 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.auditactionscheme
 				ORDER BY scheme_id, requested_at DESC
 			)
-			SELECT m.scheme_id, m.scheme_name, m.isin, m.internal_scheme_code, m.amc_name
+			SELECT m.scheme_id, m.scheme_name, m.isin, m.internal_scheme_code, m.amc_name, m.amfi_scheme_code
 			FROM investment.masterscheme m
 			JOIN latest l ON l.scheme_id = m.scheme_id
 			WHERE UPPER(l.processing_status) = 'APPROVED' 
@@ -829,10 +834,10 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var id, name, isin, code, amc string
-			_ = rows.Scan(&id, &name, &isin, &code, &amc)
+			var id, name, isin, code, amc, amfiCode string
+			_ = rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode)
 			out = append(out, map[string]interface{}{
-				"scheme_id": id, "scheme_name": name, "isin": isin, "internal_scheme_code": code, "amc_name": amc,
+				"scheme_id": id, "scheme_name": name, "isin": isin, "internal_scheme_code": code, "amc_name": amc, "amfi_scheme_code": amfiCode,
 			})
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -862,7 +867,8 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.scheme_name, '') AS scheme_name,
 				COALESCE(m.isin, '') AS isin,
 				COALESCE(m.internal_scheme_code, '') AS internal_scheme_code,
-				COALESCE(m.amc_name, '') AS amc_name
+				COALESCE(m.amc_name, '') AS amc_name,
+				COALESCE(m.amfi_scheme_code, '') AS amfi_scheme_code
 			FROM investment.masterscheme m
 			JOIN latest l ON l.scheme_id = m.scheme_id
 			WHERE UPPER(l.processing_status) = 'APPROVED'
@@ -887,8 +893,8 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var id, name, isin, code, amc string
-			if err := rows.Scan(&id, &name, &isin, &code, &amc); err != nil {
+			var id, name, isin, code, amc, amfiCode string
+			if err := rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
@@ -898,6 +904,7 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"isin":                 isin,
 				"internal_scheme_code": code,
 				"amc_name":             amc,
+				"amfi_scheme_code":     amfiCode,
 			})
 		}
 
@@ -952,7 +959,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.scheme_id = m.scheme_id
 			LEFT JOIN history h ON h.scheme_id = m.scheme_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.scheme_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -978,7 +985,7 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1001,6 +1008,7 @@ type SchemeInput struct {
 	InternalSchemeCode string `json:"internal_scheme_code"`
 	InternalRiskRating string `json:"internal_risk_rating"`
 	ErpGlAccount       string `json:"erp_gl_account"`
+	AmfiSchemeCode     string `json:"amfi_scheme_code"`
 	Status             string `json:"status,omitempty"`
 }
 
@@ -1033,7 +1041,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, row := range req.Rows {
 			// basic validation
-			if strings.TrimSpace(row.SchemeName) == "" || strings.TrimSpace(row.ISIN) == "" ||
+			if strings.TrimSpace(row.SchemeName) == "" ||
 				strings.TrimSpace(row.AmcName) == "" || strings.TrimSpace(row.InternalSchemeCode) == "" ||
 				strings.TrimSpace(row.InternalRiskRating) == "" || strings.TrimSpace(row.ErpGlAccount) == "" {
 				results = append(results, map[string]interface{}{
@@ -1058,14 +1066,16 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// ensure ISIN uniqueness
-			var tmp int
-			err = pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, row.ISIN).Scan(&tmp)
-			if err == nil {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("ISIN already exists: %s", row.ISIN),
-				})
-				continue
+			// ensure ISIN uniqueness only if ISIN is provided
+			if strings.TrimSpace(row.ISIN) != "" {
+				var tmp int
+				err = pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, row.ISIN).Scan(&tmp)
+				if err == nil {
+					results = append(results, map[string]interface{}{
+						constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("ISIN already exists: %s", row.ISIN),
+					})
+					continue
+				}
 			}
 
 			tx, err := pgxPool.Begin(ctx)
@@ -1080,9 +1090,9 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			insertQ := `
 				INSERT INTO investment.masterscheme (
 					scheme_name, isin, amc_name, internal_scheme_code,
-					internal_risk_rating, erp_gl_account, status, source
+					internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source
 				)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual')
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual')
 				RETURNING scheme_id
 			`
 			var schemeID string
@@ -1093,6 +1103,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.InternalSchemeCode,
 				row.InternalRiskRating,
 				row.ErpGlAccount,
+				row.AmfiSchemeCode,
 				defaultIfEmpty(row.Status, "Active"),
 			).Scan(&schemeID)
 
@@ -1126,6 +1137,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				constants.ValueSuccess: true,
 				"scheme_id":            schemeID,
 				"scheme_name":          row.SchemeName,
+				"amfi_scheme_code":     row.AmfiSchemeCode,
 				"source":               "Manual",
 				"requested":            userEmail,
 			})
@@ -1158,7 +1170,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid or inactive session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1203,7 +1215,8 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"internal_scheme_code": 3,
 				"internal_risk_rating": 4,
 				"erp_gl_account":       5,
-				constants.KeyStatus:    6,
+				"amfi_scheme_code":     6,
+				constants.KeyStatus:    7,
 			}
 
 			var sets []string

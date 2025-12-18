@@ -12,6 +12,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,16 +21,18 @@ import (
 // ---------------------------
 
 type CreateConfirmationRequest struct {
-	UserID        string  `json:"user_id"`
-	InitiationID  string  `json:"initiation_id"`
-	NAVDate       string  `json:"nav_date"` // YYYY-MM-DD
-	NAV           float64 `json:"nav"`
-	AllottedUnits float64 `json:"allotted_units"`
-	StampDuty     float64 `json:"stamp_duty,omitempty"`
-	NetAmount     float64 `json:"net_amount"`
-	ActualNAV     float64 `json:"actual_nav,omitempty"`
-	ActualUnits   float64 `json:"actual_allotted_units,omitempty"`
-	Status        string  `json:"status,omitempty"`
+	UserID             string  `json:"user_id"`
+	InitiationID       string  `json:"initiation_id"`
+	NAVDate            string  `json:"nav_date"` // YYYY-MM-DD
+	NAV                float64 `json:"nav"`
+	AllottedUnits      float64 `json:"allotted_units"`
+	StampDuty          float64 `json:"stamp_duty,omitempty"`
+	NetAmount          float64 `json:"net_amount"`
+	ActualNAV          float64 `json:"actual_nav,omitempty"`
+	ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
+	ResolutionComments string  `json:"resolution_comment,omitempty"`
+	ResolutionVariance string  `json:"resolution_variance,omitempty"`
+	Status             string  `json:"status,omitempty"`
 }
 
 type UpdateConfirmationRequest struct {
@@ -54,10 +57,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// validate required fields
 		if strings.TrimSpace(req.InitiationID) == "" ||
 			strings.TrimSpace(req.NAVDate) == "" ||
-			req.NAV <= 0 ||
-			req.AllottedUnits <= 0 ||
 			req.NetAmount <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields: initiation_id, nav_date, nav, allotted_units, net_amount")
+			api.RespondWithError(w, http.StatusBadRequest, "Missing required fields: initiation_id, nav_date, net_amount")
 			return
 		}
 
@@ -100,8 +101,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insertQ := `
 			INSERT INTO investment.investment_confirmation (
 				initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-				actual_nav, actual_allotted_units, variance_nav, variance_units, status
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			RETURNING confirmation_id
 		`
 		var confirmationID string
@@ -116,6 +117,8 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullIfZero(req.ActualUnits),
 			varianceNAV,
 			varianceUnits,
+			req.ResolutionComments,
+			req.ResolutionVariance,
 			status,
 		).Scan(&confirmationID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
@@ -153,15 +156,17 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 			Rows   []struct {
-				InitiationID  string  `json:"initiation_id"`
-				NAVDate       string  `json:"nav_date"`
-				NAV           float64 `json:"nav"`
-				AllottedUnits float64 `json:"allotted_units"`
-				StampDuty     float64 `json:"stamp_duty,omitempty"`
-				NetAmount     float64 `json:"net_amount"`
-				ActualNAV     float64 `json:"actual_nav,omitempty"`
-				ActualUnits   float64 `json:"actual_allotted_units,omitempty"`
-				Status        string  `json:"status,omitempty"`
+				InitiationID       string  `json:"initiation_id"`
+				NAVDate            string  `json:"nav_date"`
+				NAV                float64 `json:"nav"`
+				AllottedUnits      float64 `json:"allotted_units"`
+				StampDuty          float64 `json:"stamp_duty,omitempty"`
+				NetAmount          float64 `json:"net_amount"`
+				ActualNAV          float64 `json:"actual_nav,omitempty"`
+				ActualUnits        float64 `json:"actual_allotted_units,omitempty"`
+				ResolutionComments string  `json:"resolution_comment,omitempty"`
+				ResolutionVariance string  `json:"resolution_variance,omitempty"`
+				Status             string  `json:"status,omitempty"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -193,7 +198,7 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			initiationID := strings.TrimSpace(row.InitiationID)
 			navDate := strings.TrimSpace(row.NAVDate)
 
-			if initiationID == "" || navDate == "" || row.NAV <= 0 || row.AllottedUnits <= 0 || row.NetAmount <= 0 {
+			if initiationID == "" || navDate == "" || row.NetAmount <= 0 {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: "Missing required fields: initiation_id, nav_date, nav, allotted_units, net_amount",
 				})
@@ -226,11 +231,11 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.investment_confirmation (
 					initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-					actual_nav, actual_allotted_units, variance_nav, variance_units, status
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+					actual_nav, actual_allotted_units, variance_nav, variance_units, resolution_comment, resolution_variance, status
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 				RETURNING confirmation_id
 			`, initiationID, navDate, row.NAV, row.AllottedUnits, row.StampDuty, row.NetAmount,
-				nullIfZero(row.ActualNAV), nullIfZero(row.ActualUnits), varianceNAV, varianceUnits, status).Scan(&confirmationID); err != nil {
+				nullIfZero(row.ActualNAV), nullIfZero(row.ActualUnits), varianceNAV, varianceUnits, row.ResolutionComments, row.ResolutionVariance, status).Scan(&confirmationID); err != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "initiation_id": initiationID, constants.ValueError: "Insert failed: " + err.Error(),
 				})
@@ -308,15 +313,16 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// fetch existing values
 		sel := `
 			SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount, 
-			       actual_nav, actual_allotted_units, variance_nav, variance_units, status
+				   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
+				   resolution_comment, resolution_variance
 			FROM investment.investment_confirmation
 			WHERE confirmation_id=$1
 			FOR UPDATE
 		`
-		var oldVals [11]interface{}
+		var oldVals [13]interface{}
 		if err := tx.QueryRow(ctx, sel, req.ConfirmationID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
-			&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10],
+			&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 		); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
 			return
@@ -333,7 +339,9 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"actual_allotted_units": 7,
 			"variance_nav":          8,
 			"variance_units":        9,
-			constants.KeyStatus:     10,
+			"status":                10,
+			"resolution_comment":    11,
+			"resolution_variance":   12,
 		}
 
 		var sets []string
@@ -410,7 +418,7 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid or inactive session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -432,12 +440,13 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			sel := `
 				SELECT initiation_id, nav_date, nav, allotted_units, stamp_duty, net_amount,
-				       actual_nav, actual_allotted_units, variance_nav, variance_units, status
+					   actual_nav, actual_allotted_units, variance_nav, variance_units, status,
+					   resolution_comment, resolution_variance
 				FROM investment.investment_confirmation WHERE confirmation_id=$1 FOR UPDATE`
-			var oldVals [11]interface{}
+			var oldVals [13]interface{}
 			if err := tx.QueryRow(ctx, sel, row.ConfirmationID).Scan(
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3], &oldVals[4],
-				&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10],
+				&oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 			); err != nil {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "confirmation_id": row.ConfirmationID, constants.ValueError: "fetch failed: " + err.Error()})
 				continue
@@ -454,7 +463,9 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"actual_allotted_units": 7,
 				"variance_nav":          8,
 				"variance_units":        9,
-				constants.KeyStatus:     10,
+				"status":                10,
+				"resolution_comment":    11,
+				"resolution_variance":   12,
 			}
 
 			var sets []string
@@ -872,6 +883,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_stamp_duty,
 				m.net_amount,
 				m.old_net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+				(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
 				m.actual_nav,
 				m.old_actual_nav,
 				m.actual_allotted_units,
@@ -880,12 +893,28 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_variance_nav,
 				m.variance_units,
 				m.old_variance_units,
+	                m.resolution_comment,
+	                m.old_resolution_comment,
+	                m.resolution_variance,
+	                m.old_resolution_variance,
 				m.status,
 				m.old_status,
 				m.confirmed_by,
 				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
 				m.is_deleted,
 				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -906,8 +935,21 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation m
 			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = i.scheme_id OR
+				s.scheme_name = i.scheme_id OR
+				s.internal_scheme_code = i.scheme_id OR
+				s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
 			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY m.nav_date DESC, m.initiation_id;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -925,6 +967,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"allotted_units": true, "old_allotted_units": true,
 			"stamp_duty": true, "old_stamp_duty": true,
 			"net_amount": true, "old_net_amount": true,
+			"gross_amount": true, "old_gross_amount": true,
 			"actual_nav": true, "old_actual_nav": true,
 			"actual_allotted_units": true, "old_actual_allotted_units": true,
 			"variance_nav": true, "old_variance_nav": true,
@@ -969,7 +1012,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1025,6 +1068,8 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_stamp_duty,
 				m.net_amount,
 				m.old_net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+				(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
 				m.actual_nav,
 				m.old_actual_nav,
 				m.actual_allotted_units,
@@ -1033,12 +1078,28 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_variance_nav,
 				m.variance_units,
 				m.old_variance_units,
+	                m.resolution_comment,
+	                m.old_resolution_comment,
+	                m.resolution_variance,
+	                m.old_resolution_variance,
 				m.status,
 				m.old_status,
 				m.confirmed_by,
 				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
 				m.is_deleted,
 				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount,
 
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
@@ -1059,6 +1120,19 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_confirmation m
 			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
 			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = i.scheme_id OR
+				s.scheme_name = i.scheme_id OR
+				s.internal_scheme_code = i.scheme_id OR
+				s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
 			ORDER BY m.nav_date DESC, m.initiation_id;
 		`
 
@@ -1118,7 +1192,7 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1133,7 +1207,6 @@ func GetAllConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-
 		q := `
 			WITH latest AS (
 				SELECT DISTINCT ON (confirmation_id)
@@ -1150,13 +1223,44 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.allotted_units,
 				m.stamp_duty,
 				m.net_amount,
+				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
 				m.actual_nav,
 				m.actual_allotted_units,
 				m.variance_nav,
 				m.variance_units,
-				m.status
+				m.resolution_comment,
+				m.old_resolution_comment,
+				m.resolution_variance,
+				m.old_resolution_variance,
+				m.status,
+
+				-- initiation fields
+				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+				i.entity_name AS initiation_entity_name,
+				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+				COALESCE(s.amc_name, '') AS initiation_amc_name,
+				COALESCE(f.folio_number, '') AS initiation_folio_number,
+				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+				COALESCE(i.amount, 0) AS initiation_amount
+
 			FROM investment.investment_confirmation m
 			JOIN latest l ON l.confirmation_id = m.confirmation_id
+			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = i.scheme_id OR
+				s.scheme_name = i.scheme_id OR
+				s.internal_scheme_code = i.scheme_id OR
+				s.isin = i.scheme_id
+			)
+			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+			LEFT JOIN investment.masterdemataccount d ON (
+				d.demat_id::text = i.demat_id OR
+				d.default_settlement_account = i.demat_id OR
+				d.demat_account_number = i.demat_id
+			)
 			WHERE 
 				UPPER(l.processing_status) = 'APPROVED'
 				AND COALESCE(m.is_deleted,false)=false
@@ -1170,44 +1274,21 @@ func GetApprovedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		out := []map[string]interface{}{}
+		fields := rows.FieldDescriptions()
+		out := make([]map[string]interface{}, 0, 100)
 		for rows.Next() {
-			var confirmationID, initiationID, navDate, status string
-			var nav, allottedUnits, stampDuty, netAmount float64
-			var actualNAV, actualUnits, varianceNAV, varianceUnits *float64
-			_ = rows.Scan(&confirmationID, &initiationID, &navDate, &nav, &allottedUnits, &stampDuty, &netAmount,
-				&actualNAV, &actualUnits, &varianceNAV, &varianceUnits, &status)
-
-			rec := map[string]interface{}{
-				"confirmation_id":   confirmationID,
-				"initiation_id":     initiationID,
-				"nav_date":          navDate,
-				"nav":               nav,
-				"allotted_units":    allottedUnits,
-				"stamp_duty":        stampDuty,
-				"net_amount":        netAmount,
-				constants.KeyStatus: status,
-			}
-			// always include these keys; default to 0 if nil
-			if actualNAV != nil {
-				rec["actual_nav"] = *actualNAV
-			} else {
-				rec["actual_nav"] = 0
-			}
-			if actualUnits != nil {
-				rec["actual_allotted_units"] = *actualUnits
-			} else {
-				rec["actual_allotted_units"] = 0
-			}
-			if varianceNAV != nil {
-				rec["variance_nav"] = *varianceNAV
-			} else {
-				rec["variance_nav"] = 0
-			}
-			if varianceUnits != nil {
-				rec["variance_units"] = *varianceUnits
-			} else {
-				rec["variance_units"] = 0
+			vals, _ := rows.Values()
+			rec := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					rec[string(f.Name)] = ""
+				} else {
+					if t, ok := vals[i].(time.Time); ok {
+						rec[string(f.Name)] = t.Format(constants.DateTimeFormat)
+					} else {
+						rec[string(f.Name)] = vals[i]
+					}
+				}
 			}
 			out = append(out, rec)
 		}
@@ -1232,18 +1313,12 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Create batch
-	var batchID string
-	batchInsert := `
-		INSERT INTO investment.onboard_batch (user_id, user_email, source, total_records, status)
-		VALUES ($1, $2, $3, 0, $4)
-		RETURNING batch_id
-	`
-	if err := tx.QueryRow(ctx, batchInsert, userID, confirmedBy, "Investment Confirmation Batch", "IN_PROGRESS").Scan(&batchID); err != nil {
-		return nil, fmt.Errorf("batch creation failed: %w", err)
-	}
+	// Use a generated transient batch ID (do not create an entry in `onboard_batch`)
+	batchID := uuid.New().String()
 
 	// Fetch confirmation details with related initiation and scheme info
+	// NOTE: investment_initiation stores string identifiers in scheme_id/folio_id/demat_id, not UUIDs
+	// We need to resolve these to actual master table IDs
 	query := `
 		SELECT 
 			c.confirmation_id,
@@ -1251,25 +1326,45 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			c.nav_date,
 			c.nav,
 			c.allotted_units,
+			c.actual_nav,
+			c.actual_allotted_units,
 			c.stamp_duty,
 			c.net_amount,
 			c.status,
 			i.transaction_date,
 			i.entity_name,
-			i.scheme_id,
-			i.folio_id,
-			i.demat_id,
+			i.scheme_id AS scheme_identifier,
+			i.folio_id AS folio_identifier,
+			i.demat_id AS demat_identifier,
 			i.amount AS initiation_amount,
-			s.scheme_name,
-			s.isin,
-			s.internal_scheme_code,
+			-- Resolve actual scheme details
+			COALESCE(s.scheme_id::text, s2.scheme_id::text, s3.scheme_id::text, s4.scheme_id::text) AS resolved_scheme_id,
+			COALESCE(s.scheme_name, s2.scheme_name, s3.scheme_name, s4.scheme_name) AS scheme_name,
+			COALESCE(s.isin, s2.isin, s3.isin, s4.isin) AS isin,
+			COALESCE(s.internal_scheme_code, s2.internal_scheme_code, s3.internal_scheme_code, s4.internal_scheme_code) AS internal_scheme_code,
+			-- Resolve actual folio details
+			f.folio_id::text AS resolved_folio_id,
 			f.folio_number,
-			d.demat_account_number
+			f.entity_name AS folio_entity_name,
+			-- Resolve actual demat details
+			d.demat_id::text AS resolved_demat_id,
+			d.demat_account_number,
+			d.entity_name AS demat_entity_name
 		FROM investment.investment_confirmation c
 		JOIN investment.investment_initiation i ON i.initiation_id = c.initiation_id
-		LEFT JOIN investment.masterscheme s ON s.scheme_id = i.scheme_id
-		LEFT JOIN investment.masterfolio f ON f.folio_id = i.folio_id
-		LEFT JOIN investment.masterdemataccount d ON d.demat_id = i.demat_id
+		-- Resolve scheme by trying multiple match strategies
+		LEFT JOIN investment.masterscheme s ON s.scheme_id::text = i.scheme_id
+		LEFT JOIN investment.masterscheme s2 ON s2.scheme_name = i.scheme_id
+		LEFT JOIN investment.masterscheme s3 ON s3.internal_scheme_code = i.scheme_id
+		LEFT JOIN investment.masterscheme s4 ON s4.isin = i.scheme_id
+		-- Resolve folio by trying folio_id or folio_number
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+		-- Resolve demat by trying demat_id or demat_account_number
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = i.demat_id OR 
+			d.demat_account_number = i.demat_id OR
+			d.default_settlement_account = i.demat_id
+		)
 		WHERE c.confirmation_id = ANY($1)
 			AND c.status = 'CONFIRMED'
 			AND COALESCE(c.is_deleted, false) = false
@@ -1282,25 +1377,32 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	defer rows.Close()
 
 	type ConfirmationData struct {
-		ConfirmationID     string
-		InitiationID       string
-		NAVDate            time.Time
-		NAV                float64
-		AllottedUnits      float64
-		StampDuty          float64
-		NetAmount          float64
-		Status             string
-		TransactionDate    time.Time
-		EntityName         string
-		SchemeID           string
-		FolioID            *string
-		DematID            *string
-		InitiationAmount   float64
-		SchemeName         *string
-		ISIN               *string
-		InternalSchemeCode *string
-		FolioNumber        *string
-		DematAccountNumber *string
+		ConfirmationID      string
+		InitiationID        string
+		NAVDate             time.Time
+		NAV                 float64
+		AllottedUnits       float64
+		ActualNAV           float64
+		ActualAllottedUnits float64
+		StampDuty           float64
+		NetAmount           float64
+		Status              string
+		TransactionDate     time.Time
+		EntityName          string
+		SchemeIdentifier    string  // String from initiation (could be name, code, isin, etc)
+		FolioIdentifier     *string // String from initiation (could be folio_number or folio_id)
+		DematIdentifier     *string // String from initiation (could be demat_account_number or demat_id)
+		InitiationAmount    float64
+		ResolvedSchemeID    *string // Actual scheme_id from masterscheme (string/varchar)
+		SchemeName          *string
+		ISIN                *string
+		InternalSchemeCode  *string
+		ResolvedFolioID     *string // Actual folio_id from masterfolio (string/varchar)
+		FolioNumber         *string
+		FolioEntityName     *string
+		ResolvedDematID     *string // Actual demat_id from masterdemataccount (string/varchar)
+		DematAccountNumber  *string
+		DematEntityName     *string
 	}
 
 	confirmations := []ConfirmationData{}
@@ -1308,9 +1410,12 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		var cd ConfirmationData
 		if err := rows.Scan(
 			&cd.ConfirmationID, &cd.InitiationID, &cd.NAVDate, &cd.NAV, &cd.AllottedUnits,
+			&cd.ActualNAV, &cd.ActualAllottedUnits,
 			&cd.StampDuty, &cd.NetAmount, &cd.Status, &cd.TransactionDate, &cd.EntityName,
-			&cd.SchemeID, &cd.FolioID, &cd.DematID, &cd.InitiationAmount, &cd.SchemeName,
-			&cd.ISIN, &cd.InternalSchemeCode, &cd.FolioNumber, &cd.DematAccountNumber,
+			&cd.SchemeIdentifier, &cd.FolioIdentifier, &cd.DematIdentifier, &cd.InitiationAmount,
+			&cd.ResolvedSchemeID, &cd.SchemeName, &cd.ISIN, &cd.InternalSchemeCode,
+			&cd.ResolvedFolioID, &cd.FolioNumber, &cd.FolioEntityName,
+			&cd.ResolvedDematID, &cd.DematAccountNumber, &cd.DematEntityName,
 		); err != nil {
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
@@ -1324,36 +1429,43 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	processedIDs := []string{}
 
 	for _, cd := range confirmations {
+		// Use resolved folio_number and demat_account_number (already fetched from JOINs)
+		var folioNumber, dematAccNumber *string
+		if cd.FolioNumber != nil && *cd.FolioNumber != "" {
+			folioNumber = cd.FolioNumber
+		}
+		if cd.DematAccountNumber != nil && *cd.DematAccountNumber != "" {
+			dematAccNumber = cd.DematAccountNumber
+		}
+
+		// Validate we have essential data
+		if cd.ResolvedSchemeID == nil {
+			return nil, fmt.Errorf("failed to resolve scheme for confirmation %s - scheme identifier: %s", cd.ConfirmationID, cd.SchemeIdentifier)
+		}
+
 		// Insert transaction into onboard_transaction
+		// Resolve entity_name: prefer folio/demat entity, fallback to initiation entity
+		var entityName *string
+		if cd.FolioEntityName != nil && *cd.FolioEntityName != "" {
+			entityName = cd.FolioEntityName
+		} else if cd.DematEntityName != nil && *cd.DematEntityName != "" {
+			entityName = cd.DematEntityName
+		} else if cd.EntityName != "" {
+			entityName = &cd.EntityName
+		}
+
+		// Validate actual values are present - do not fall back to expected values
+		if cd.ActualAllottedUnits <= 0 || cd.ActualNAV <= 0 {
+			return nil, fmt.Errorf("confirmation %s missing actual values: actual_allotted_units=%f, actual_nav=%f",
+				cd.ConfirmationID, cd.ActualAllottedUnits, cd.ActualNAV)
+		}
+
 		txInsert := `
 			INSERT INTO investment.onboard_transaction (
 				batch_id, transaction_date, transaction_type, folio_number, demat_acc_number,
-				amount, units, nav, scheme_id, scheme_name, isin, folio_id, demat_id,
-				scheme_internal_code, entity_name
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+				amount, units, nav, scheme_id, folio_id, demat_id, scheme_internal_code, entity_name, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		`
-
-		// Resolve folio_number or demat_account_number from IDs
-		var folioNumber, dematAccNumber *string
-		if cd.FolioNumber != nil {
-			folioNumber = cd.FolioNumber
-		} else if cd.FolioID != nil {
-			var fn string
-			_ = tx.QueryRow(ctx, `SELECT folio_number FROM investment.masterfolio WHERE folio_id=$1`, *cd.FolioID).Scan(&fn)
-			if fn != "" {
-				folioNumber = &fn
-			}
-		}
-
-		if cd.DematAccountNumber != nil {
-			dematAccNumber = cd.DematAccountNumber
-		} else if cd.DematID != nil {
-			var da string
-			_ = tx.QueryRow(ctx, `SELECT demat_account_number FROM investment.masterdemataccount WHERE demat_id=$1`, *cd.DematID).Scan(&da)
-			if da != "" {
-				dematAccNumber = &da
-			}
-		}
 
 		if _, err := tx.Exec(ctx, txInsert,
 			batchID,
@@ -1362,15 +1474,13 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			folioNumber,
 			dematAccNumber,
 			cd.NetAmount,
-			cd.AllottedUnits,
-			cd.NAV,
-			cd.SchemeID,
-			cd.SchemeName,
-			cd.ISIN,
-			cd.FolioID,
-			cd.DematID,
+			cd.ActualAllottedUnits, // Use actual units (validated above)
+			cd.ActualNAV,           // Use actual NAV (validated above)
+			cd.ResolvedSchemeID,    // Use actual scheme_id (string)
+			cd.ResolvedFolioID,     // Use actual folio_id (string)
+			cd.ResolvedDematID,     // Use actual demat_id (string)
 			cd.InternalSchemeCode,
-			cd.EntityName,
+			entityName, // Entity from folio/demat or initiation
 		); err != nil {
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
@@ -1388,19 +1498,37 @@ func processInvestmentConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 		processedIDs = append(processedIDs, cd.ConfirmationID)
 	}
 
-	// Refresh portfolio snapshot
+	// Refresh portfolio snapshot based on ALL transactions for affected entities
+	// Group by folio_id and demat_id (unique identifiers) instead of non-unique folio_number/demat_acc_number
+	// Delete existing snapshots for affected folio_id/demat_id combinations
 	deleteSnap := `
 		DELETE FROM investment.portfolio_snapshot
-		WHERE batch_id IN (
-			SELECT DISTINCT batch_id FROM investment.onboard_transaction WHERE batch_id=$1
-		)
+		WHERE (folio_id IS NOT NULL AND folio_id IN (
+			SELECT DISTINCT ot.folio_id
+			FROM investment.onboard_transaction ot
+			WHERE ot.batch_id = $1 AND ot.folio_id IS NOT NULL
+		))
+		OR (demat_id IS NOT NULL AND demat_id IN (
+			SELECT DISTINCT ot.demat_id
+			FROM investment.onboard_transaction ot
+			WHERE ot.batch_id = $1 AND ot.demat_id IS NOT NULL
+		))
 	`
 	if _, err := tx.Exec(ctx, deleteSnap, batchID); err != nil {
 		return nil, fmt.Errorf("delete snapshot failed: %w", err)
 	}
 
+	// Rebuild snapshots for affected folio_id/demat_id using ALL their transactions (not just current batch)
 	snapshotQ := `
-WITH scheme_resolved AS (
+WITH affected_folios_demats AS (
+    SELECT DISTINCT 
+        ot.folio_id,
+        ot.demat_id
+    FROM investment.onboard_transaction ot
+    WHERE ot.batch_id = $1
+        AND (ot.folio_id IS NOT NULL OR ot.demat_id IS NOT NULL)
+),
+scheme_resolved AS (
     SELECT
         ot.batch_id,
         ot.transaction_date,
@@ -1411,58 +1539,57 @@ WITH scheme_resolved AS (
         COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
         ot.demat_acc_number,
-        COALESCE(fsm.scheme_id, ms2.scheme_id) AS scheme_id,
-        COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
-        COALESCE(ms.isin, ms2.isin) AS isin
+        ot.folio_id,
+        ot.demat_id,
+        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id, ms.scheme_id) AS scheme_id,
+        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
+        COALESCE(ms2.isin, ms.isin) AS isin
     FROM investment.onboard_transaction ot
-    LEFT JOIN investment.masterfolio mf 
-        ON mf.folio_number = ot.folio_number
-    LEFT JOIN investment.masterdemataccount md
-        ON md.demat_account_number = ot.demat_acc_number
-    LEFT JOIN investment.folioschememapping fsm 
-        ON fsm.folio_id = mf.folio_id
-    LEFT JOIN investment.masterscheme ms 
-        ON ms.scheme_id = fsm.scheme_id
-    LEFT JOIN investment.masterscheme ms2
-        ON ms2.internal_scheme_code = ot.scheme_internal_code
-    WHERE ot.batch_id = $1
+    LEFT JOIN investment.masterfolio mf ON mf.folio_id = ot.folio_id
+    LEFT JOIN investment.masterdemataccount md ON md.demat_id = ot.demat_id
+    LEFT JOIN investment.folioschememapping fsm ON fsm.folio_id = ot.folio_id
+    LEFT JOIN investment.masterscheme ms ON ms.scheme_id = fsm.scheme_id
+    LEFT JOIN investment.masterscheme ms2 ON ms2.scheme_id::text = ot.scheme_id OR ms2.internal_scheme_code = ot.scheme_internal_code
+    WHERE (ot.folio_id IN (SELECT folio_id FROM affected_folios_demats WHERE folio_id IS NOT NULL)
+        OR ot.demat_id IN (SELECT demat_id FROM affected_folios_demats WHERE demat_id IS NOT NULL))
 ),
 transaction_summary AS (
     SELECT
         entity_name,
         folio_number,
         demat_acc_number,
+        folio_id,
+        demat_id,
         scheme_id,
         scheme_name,
         isin,
+        -- Net units: BUY positive, SELL negative
         SUM(CASE 
             WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
+            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN units
             ELSE units
         END) AS total_units,
+        -- Total invested: sum of BUY amounts only
         SUM(CASE 
             WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN amount
-            WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -amount
-            ELSE amount
+            ELSE 0
         END) AS total_invested_amount,
+        -- Avg NAV: weighted average of BUY transactions only
         CASE 
             WHEN SUM(CASE 
                 WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-                ELSE units
+                ELSE 0
             END) = 0 THEN 0
             ELSE SUM(CASE 
                 WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN nav * units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -nav * units
-                ELSE nav * units
+                ELSE 0
             END) / SUM(CASE 
                 WHEN LOWER(transaction_type) IN ('purchase', 'buy', 'subscription') THEN units
-                WHEN LOWER(transaction_type) IN ('sell', 'redemption') THEN -units
-                ELSE units
+                ELSE 0
             END)
         END AS avg_nav
     FROM scheme_resolved
-    GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
 ),
 latest_nav AS (
     SELECT DISTINCT ON (scheme_name)
@@ -1478,6 +1605,8 @@ INSERT INTO investment.portfolio_snapshot (
   entity_name,
   folio_number,
   demat_acc_number,
+  folio_id,
+  demat_id,
   scheme_id,
   scheme_name,
   isin,
@@ -1495,6 +1624,8 @@ SELECT
   ts.entity_name,
   ts.folio_number,
   ts.demat_acc_number,
+  ts.folio_id,
+  ts.demat_id,
   ts.scheme_id,
   ts.scheme_name,
   ts.isin,
@@ -1523,15 +1654,9 @@ WHERE ts.total_units > 0;
 		snapshotCount = 0
 	}
 
-	// Mark batch as completed
-	updateBatch := `
-		UPDATE investment.onboard_batch
-		SET total_records=$1, status='COMPLETED', completed_at=now()
-		WHERE batch_id=$2
-	`
-	if _, err := tx.Exec(ctx, updateBatch, len(processedIDs), batchID); err != nil {
-		return nil, fmt.Errorf("update batch failed: %w", err)
-	}
+	// NOTE: We no longer create or update an `onboard_batch` row.
+	// The transient `batchID` is used only to group inserted transactions and snapshots,
+	// but no entry is persisted in `investment.onboard_batch`.
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit failed: %w", err)

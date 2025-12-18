@@ -18,8 +18,11 @@ import (
 	"strings"
 	"time"
 
+<<<<<<< HEAD
 	"CimplrCorpSaas/api/constants"
 
+=======
+>>>>>>> origin/main
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -104,10 +107,18 @@ type TxCSVRow struct {
 
 // Response structure
 type UploadResponse struct {
+<<<<<<< HEAD
 	Success bool             `json:"success"`
 	BatchID string           `json:"batch_id,omitempty"`
 	Counts  map[string]int64 `json:"counts,omitempty"`
 	Message string           `json:"message,omitempty"`
+=======
+	Success        bool             `json:"success"`
+	BatchID        string           `json:"batch_id,omitempty"`
+	Counts         map[string]int64 `json:"counts,omitempty"`
+	EnrichedCounts map[string]int64 `json:"enriched_counts,omitempty"`
+	Message        string           `json:"message,omitempty"`
+>>>>>>> origin/main
 }
 
 // helper
@@ -161,6 +172,7 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid date %s: %v", dtStr, err)
 		}
+<<<<<<< HEAD
 		dt, err := time.Parse(constants.DateFormat, normalizedDate)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse normalized date %s: %v", normalizedDate, err)
@@ -172,14 +184,33 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 		if len(rec) >= 8 {
 			dematAccNumber = strings.TrimSpace(rec[4])
 			amountIdx = 5
+=======
+		dt, err := time.Parse("2006-01-02", normalizedDate)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse normalized date %s: %v", normalizedDate, err)
+		}
+		// Handle both folio and demat
+		// CSV format: TransactionDate,TransactionType,SchemeInternalCode,FolioNumber,Amount,Units,NAV,DematAccNumber
+		// So: rec[0]=date, rec[1]=type, rec[2]=scheme, rec[3]=folio, rec[4]=amount, rec[5]=units, rec[6]=nav, rec[7]=demat (if present)
+		folioNumber := strings.TrimSpace(rec[3])
+		dematAccNumber := ""
+		if len(rec) >= 8 {
+			dematAccNumber = strings.TrimSpace(rec[7]) // DematAccNumber is at the END of the row
+>>>>>>> origin/main
 		}
 		// Validate: either folio or demat must be present
 		if folioNumber == "" && dematAccNumber == "" {
 			return nil, fmt.Errorf("either folio_number or demat_acc_number must be provided")
 		}
+<<<<<<< HEAD
 		amount, _ := strconv.ParseFloat(strings.TrimSpace(rec[amountIdx]), 64)
 		units, _ := strconv.ParseFloat(strings.TrimSpace(rec[amountIdx+1]), 64)
 		nav, _ := strconv.ParseFloat(strings.TrimSpace(rec[amountIdx+2]), 64)
+=======
+		amount, _ := strconv.ParseFloat(strings.TrimSpace(rec[4]), 64)
+		units, _ := strconv.ParseFloat(strings.TrimSpace(rec[5]), 64)
+		nav, _ := strconv.ParseFloat(strings.TrimSpace(rec[6]), 64)
+>>>>>>> origin/main
 		rows = append(rows, TxCSVRow{TransactionDate: dt, TransactionType: strings.TrimSpace(rec[1]), SchemeInternalCode: strings.TrimSpace(rec[2]), FolioNumber: folioNumber, DematAccNumber: dematAccNumber, Amount: amount, Units: units, Nav: nav})
 	}
 	return rows, nil
@@ -198,9 +229,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+<<<<<<< HEAD
 		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+=======
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+>>>>>>> origin/main
 			return
 		}
 		// resolve user email from active sessions
@@ -212,7 +249,11 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
+<<<<<<< HEAD
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+=======
+			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+>>>>>>> origin/main
 			return
 		}
 		log.Printf("[bulk] user %s (%s)", userID, userEmail)
@@ -221,7 +262,11 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
 			log.Printf("[bulk] tx begin: %v", err)
+<<<<<<< HEAD
 			api.RespondWithError(w, 500, constants.ErrTxBegin+err.Error())
+=======
+			api.RespondWithError(w, 500, "tx begin: "+err.Error())
+>>>>>>> origin/main
 			return
 		}
 		defer func() {
@@ -330,7 +375,19 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dematMap := map[string]string{}  // key: demat_account_number -> demat_id
 		folioMap := map[string]string{}  // key: folio_number -> folio_id
 
+<<<<<<< HEAD
 		counts := map[string]int64{"amc": 0, "scheme": 0, "dp": 0, "demat": 0, "folio": 0, "transactions": 0, "snapshot": 0}
+=======
+		// Track which entities are enriched (pre-existing)
+		enrichedAMCs := make(map[string]bool)
+		enrichedSchemes := make(map[string]bool)
+		enrichedDPs := make(map[string]bool)
+		enrichedDemats := make(map[string]bool)
+		enrichedFolios := make(map[string]bool)
+
+		counts := map[string]int64{"amc": 0, "scheme": 0, "dp": 0, "demat": 0, "folio": 0, "transactions": 0, "snapshot": 0}
+		enrichedCounts := map[string]int64{"amc": 0, "scheme": 0, "dp": 0, "demat": 0, "folio": 0}
+>>>>>>> origin/main
 
 		// Process AMCs
 		log.Printf("[bulk] starting AMC processing, found %d AMCs", len(amcs))
@@ -348,7 +405,12 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if existing != "" {
 				log.Printf("[bulk] amc[%d] found existing: %s", i, existing)
+<<<<<<< HEAD
 				amcMap[defaultIfEmpty(a.InternalAmcCode, a.AmcName)] = existing
+=======
+				key := defaultIfEmpty(a.InternalAmcCode, a.AmcName)
+				amcMap[key] = existing
+>>>>>>> origin/main
 				// Create mapping entry instead of updating batch_id
 				_, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, amc_id) VALUES ($1, $2)`, batchID, existing)
 				if err != nil {
@@ -359,6 +421,11 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				log.Printf("[bulk] amc[%d] created mapping for existing entity", i)
 				// If enriched, don't create audit record
 				if a.Enriched {
+<<<<<<< HEAD
+=======
+					enrichedCounts["amc"]++
+					enrichedAMCs[key] = true
+>>>>>>> origin/main
 					continue
 				}
 				// Otherwise, treat as duplicate
@@ -422,7 +489,13 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				if d.Enriched {
+<<<<<<< HEAD
 					continue
+=======
+					enrichedCounts["dp"]++
+					continue
+					enrichedDPs[d.DPCode] = true
+>>>>>>> origin/main
 				}
 				continue
 			}
@@ -463,8 +536,15 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 				if dm.Enriched {
+<<<<<<< HEAD
 					continue
 				}
+=======
+					enrichedCounts["demat"]++
+					continue
+				}
+				enrichedDemats[dm.DematAccountNumber] = true
+>>>>>>> origin/main
 				continue
 			}
 			var dematID string
@@ -496,11 +576,21 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				folioMap[f.FolioNumber] = f.FolioID
 				// Create mapping entry
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, f.FolioID, f.FolioNumber); err != nil {
+<<<<<<< HEAD
 					log.Printf(constants.ErrBulkFolioMappingInsertFailed, err)
 					api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
 					return
 				}
 				continue
+=======
+					log.Printf("[bulk] folio mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+					return
+				}
+				enrichedCounts["scheme"]++
+				continue
+				enrichedFolios[f.FolioNumber] = true
+>>>>>>> origin/main
 			}
 			// Resolve amc_name if empty - try to lookup from entity_name or use a default
 			folioAmcName := f.AmcName
@@ -525,12 +615,22 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				folioMap[f.FolioNumber] = existing
 				// Create mapping entry
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, existing, f.FolioNumber); err != nil {
+<<<<<<< HEAD
 					log.Printf(constants.ErrBulkFolioMappingInsertFailed, err)
 					api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
+=======
+					log.Printf("[bulk] folio mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+>>>>>>> origin/main
 					return
 				}
 				if f.Enriched {
 					continue
+<<<<<<< HEAD
+=======
+					enrichedCounts["folio"]++
+					enrichedFolios[f.FolioNumber] = true
+>>>>>>> origin/main
 				}
 				continue
 			}
@@ -542,8 +642,13 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// Create mapping entry for new folio
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, folioID, f.FolioNumber); err != nil {
+<<<<<<< HEAD
 				log.Printf(constants.ErrBulkFolioMappingInsertFailed, err)
 				api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
+=======
+				log.Printf("[bulk] folio mapping insert failed: %v", err)
+				api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, folioID, userEmail); err != nil {
@@ -588,8 +693,13 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					schemeMap[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = existing
 					// Create mapping entry for enriched scheme
 					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, existing, s.SchemeName); err != nil {
+<<<<<<< HEAD
 						log.Printf(constants.ErrBulkSchemeMappingInsertFailed, err)
 						api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
+=======
+						log.Printf("[bulk] scheme mapping insert failed: %v", err)
+						api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+>>>>>>> origin/main
 						return
 					}
 					continue
@@ -600,6 +710,10 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if s.InternalSchemeCode != "" {
 				log.Printf("[bulk] scheme checking existing by internal_code: %s", s.InternalSchemeCode)
 				_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, s.InternalSchemeCode).Scan(&existing)
+<<<<<<< HEAD
+=======
+				enrichedSchemes[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = true
+>>>>>>> origin/main
 			}
 			if existing == "" && s.ISIN != "" {
 				log.Printf("[bulk] scheme checking existing by isin: %s", s.ISIN)
@@ -614,16 +728,29 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				schemeMap[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = existing
 				// Create mapping entry for existing scheme
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, existing, s.SchemeName); err != nil {
+<<<<<<< HEAD
 					log.Printf(constants.ErrBulkSchemeMappingInsertFailed, err)
 					api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
 					return
 				}
 				if s.Enriched {
+=======
+					log.Printf("[bulk] scheme mapping insert failed: %v", err)
+					api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+					return
+				}
+				if s.Enriched {
+					enrichedCounts["scheme"]++
+>>>>>>> origin/main
 					continue
 				}
 				continue
 			}
 			var schemeID string
+<<<<<<< HEAD
+=======
+			enrichedSchemes[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = true
+>>>>>>> origin/main
 			if err := tx.QueryRow(ctx, `INSERT INTO investment.masterscheme (scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source, batch_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'Manual',$8) RETURNING scheme_id`,
 				s.SchemeName,
 				s.ISIN,
@@ -639,8 +766,13 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// Create mapping entry for new scheme
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, schemeID, s.SchemeName); err != nil {
+<<<<<<< HEAD
 				log.Printf(constants.ErrBulkSchemeMappingInsertFailed, err)
 				api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
+=======
+				log.Printf("[bulk] scheme mapping insert failed: %v", err)
+				api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, schemeID, userEmail); err != nil {
@@ -654,37 +786,72 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Insert onboard_mapping for all created or enriched entries
 		for k, v := range amcMap {
+<<<<<<< HEAD
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'AMC',$3,$4)`, batchID, v, k, true); err != nil {
 				log.Printf("[bulk] onboard mapping amc failed: %v", err)
 				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
+=======
+			isEnriched := enrichedAMCs[k]
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'AMC',$3,$4)`, batchID, v, k, isEnriched); err != nil {
+				log.Printf("[bulk] onboard mapping amc failed: %v", err)
+				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		}
 		for k, v := range schemeMap {
+<<<<<<< HEAD
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'SCHEME',$3,$4)`, batchID, v, k, true); err != nil {
 				log.Printf("[bulk] onboard mapping scheme failed: %v", err)
 				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
+=======
+			isEnriched := enrichedSchemes[k]
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'SCHEME',$3,$4)`, batchID, v, k, isEnriched); err != nil {
+				log.Printf("[bulk] onboard mapping scheme failed: %v", err)
+				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		}
 		for k, v := range dpMap {
+<<<<<<< HEAD
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DP',$3,$4)`, batchID, v, k, true); err != nil {
 				log.Printf("[bulk] onboard mapping dp failed: %v", err)
 				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
+=======
+			isEnriched := enrichedDPs[k]
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DP',$3,$4)`, batchID, v, k, isEnriched); err != nil {
+				log.Printf("[bulk] onboard mapping dp failed: %v", err)
+				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		}
 		for k, v := range dematMap {
+<<<<<<< HEAD
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DEMAT',$3,$4)`, batchID, v, k, true); err != nil {
 				log.Printf("[bulk] onboard mapping demat failed: %v", err)
 				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
+=======
+			isEnriched := enrichedDemats[k]
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DEMAT',$3,$4)`, batchID, v, k, isEnriched); err != nil {
+				log.Printf("[bulk] onboard mapping demat failed: %v", err)
+				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		}
 		for k, v := range folioMap {
+<<<<<<< HEAD
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'FOLIO',$3,$4)`, batchID, v, k, true); err != nil {
 				log.Printf("[bulk] onboard mapping folio failed: %v", err)
 				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
+=======
+			isEnriched := enrichedFolios[k]
+			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'FOLIO',$3,$4)`, batchID, v, k, isEnriched); err != nil {
+				log.Printf("[bulk] onboard mapping folio failed: %v", err)
+				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		}
@@ -782,9 +949,24 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		log.Printf("[bulk] portfolio_onboarding_map populated for all entity types")
 
+<<<<<<< HEAD
 		// Parse transactions CSV if present
 		var txRows []TxCSVRow
 		if fhArr := r.MultipartForm.File["transactions"]; len(fhArr) > 0 {
+=======
+		// Parse transactions CSV if present - check both "files" and "transactions" keys
+		var txRows []TxCSVRow
+		var fhArr []*multipart.FileHeader
+		if files := r.MultipartForm.File["files"]; len(files) > 0 {
+			fhArr = files
+			log.Printf("[bulk] found CSV under 'files' key")
+		} else if txFiles := r.MultipartForm.File["transactions"]; len(txFiles) > 0 {
+			fhArr = txFiles
+			log.Printf("[bulk] found CSV under 'transactions' key")
+		}
+		
+		if len(fhArr) > 0 {
+>>>>>>> origin/main
 			f, err := fhArr[0].Open()
 			if err != nil {
 				log.Printf("[bulk] open transactions file: %v", err)
@@ -799,6 +981,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			log.Printf("[bulk] parsed %d transaction rows", len(txRows))
+<<<<<<< HEAD
 			// insert transactions -- use prepared multi-row insert in this tx
 			for _, tr := range txRows {
 				// resolve scheme_id
@@ -809,6 +992,89 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.SchemeInternalCode).Scan(&schemeID)
 				}
 				// resolve folio_id if folio_number provided
+=======
+
+			// Build reverse lookup maps for enriched data validation
+			enrichedSchemesByCode := make(map[string]SchemeInput)
+			for _, s := range schemes {
+				if s.InternalSchemeCode != "" {
+					enrichedSchemesByCode[s.InternalSchemeCode] = s
+				}
+			}
+			enrichedFoliosByNumber := make(map[string]FolioInput)
+			for _, f := range folios {
+				if f.FolioNumber != "" {
+					enrichedFoliosByNumber[f.FolioNumber] = f
+				}
+			}
+			enrichedDematsByNumber := make(map[string]DematInput)
+			for _, d := range demats {
+				if d.DematAccountNumber != "" {
+					enrichedDematsByNumber[d.DematAccountNumber] = d
+				}
+			}
+
+			// Insert transactions with validation and enrichment
+			for _, tr := range txRows {
+				// Validate transaction against enriched data if provided
+				if enrichedScheme, exists := enrichedSchemesByCode[tr.SchemeInternalCode]; exists {
+					log.Printf("[bulk] transaction scheme %s validated against enriched scheme: %s", tr.SchemeInternalCode, enrichedScheme.SchemeName)
+				}
+				if tr.FolioNumber != "" {
+					if enrichedFolio, exists := enrichedFoliosByNumber[tr.FolioNumber]; exists {
+						log.Printf("[bulk] transaction folio %s validated against enriched folio for entity: %s", tr.FolioNumber, enrichedFolio.EntityName)
+					}
+				}
+				if tr.DematAccNumber != "" {
+					if enrichedDemat, exists := enrichedDematsByNumber[tr.DematAccNumber]; exists {
+						log.Printf("[bulk] transaction demat %s validated against enriched demat for entity: %s", tr.DematAccNumber, enrichedDemat.EntityName)
+					}
+				}
+
+				// Resolve entity_name from folio or demat
+				var entityName string
+				if tr.FolioNumber != "" {
+					// Try from folios map first (enriched or newly created)
+					for _, f := range folios {
+						if f.FolioNumber == tr.FolioNumber {
+							entityName = f.EntityName
+							break
+						}
+					}
+					// If not found, query DB
+					if entityName == "" {
+						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false`, tr.FolioNumber).Scan(&entityName)
+					}
+				} else if tr.DematAccNumber != "" {
+					// Try from demats map first
+					for _, d := range demats {
+						if d.DematAccountNumber == tr.DematAccNumber {
+							entityName = d.EntityName
+							break
+						}
+					}
+					// If not found, query DB
+					if entityName == "" {
+						_ = tx.QueryRow(ctx, `SELECT entity_name FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false`, tr.DematAccNumber).Scan(&entityName)
+					}
+				}
+
+				// Resolve scheme_id (prioritize from enriched data, fallback to DB)
+				var schemeID string
+				if v, ok := schemeMap[tr.SchemeInternalCode]; ok {
+					schemeID = v
+					log.Printf("[bulk] transaction resolved scheme_id from schemeMap: %s -> %s", tr.SchemeInternalCode, schemeID)
+				} else {
+					_ = tx.QueryRow(ctx, `SELECT scheme_id FROM investment.masterscheme WHERE internal_scheme_code=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.SchemeInternalCode).Scan(&schemeID)
+					if schemeID != "" {
+						log.Printf("[bulk] transaction resolved scheme_id from DB: %s -> %s", tr.SchemeInternalCode, schemeID)
+					} else {
+						log.Printf("[bulk] WARNING: transaction could not resolve scheme_id for internal_code: %s", tr.SchemeInternalCode)
+					}
+				}
+
+				// Resolve folio_id if folio_number provided (prioritize from enriched data, fallback to DB)
+>>>>>>> origin/main
 				var folioID string
 				if tr.FolioNumber != "" {
 					if v, ok := folioMap[tr.FolioNumber]; ok {
@@ -817,7 +1083,12 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						_ = tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.FolioNumber).Scan(&folioID)
 					}
 				}
+<<<<<<< HEAD
 				// resolve demat_id if demat_acc_number provided
+=======
+
+				// Resolve demat_id if demat_acc_number provided (prioritize from enriched data, fallback to DB)
+>>>>>>> origin/main
 				var dematID string
 				if tr.DematAccNumber != "" {
 					if v, ok := dematMap[tr.DematAccNumber]; ok {
@@ -826,14 +1097,33 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						_ = tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, tr.DematAccNumber).Scan(&dematID)
 					}
 				}
+<<<<<<< HEAD
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, demat_acc_number, amount, units, nav, scheme_id, folio_id, demat_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, nullableString(tr.FolioNumber), nullableString(tr.DematAccNumber), tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID), nullableString(dematID)); err != nil {
+=======
+
+				// Insert transaction with resolved IDs and entity_name
+				// Note: Store all values as POSITIVE. Transaction type ('Purchase', 'Sell', etc.) 
+				// determines direction in snapshot calculations.
+				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, demat_acc_number, amount, units, nav, scheme_id, folio_id, demat_id, entity_name, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, nullableString(tr.FolioNumber), nullableString(tr.DematAccNumber), tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID), nullableString(dematID), nullableString(entityName)); err != nil {
+>>>>>>> origin/main
 					log.Printf("[bulk] insert onboard_transaction failed: %v", err)
 					api.RespondWithError(w, 500, "insert transaction failed: "+err.Error())
 					return
 				}
 				counts["transactions"]++
 			}
+<<<<<<< HEAD
 			log.Printf("[bulk] inserted %d transactions", counts["transactions"])
+=======
+			log.Printf("[bulk] inserted %d transactions with entity_name populated (validated against enriched data where available)", counts["transactions"])
+			
+			// STRICT VALIDATION: Ensure at least one transaction was inserted
+			if counts["transactions"] == 0 {
+				log.Printf("[bulk] STRICT: no transactions inserted, rolling back batch %s", batchID)
+				api.RespondWithError(w, 400, "No transactions were inserted. Upload must contain valid transactions.")
+				return
+			}
+>>>>>>> origin/main
 		}
 
 		// Only create snapshots if there are transactions
@@ -847,6 +1137,7 @@ WITH scheme_resolved AS (
         ot.amount,
         ot.units,
         ot.nav,
+<<<<<<< HEAD
         COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
         ot.demat_acc_number,
@@ -864,6 +1155,33 @@ WITH scheme_resolved AS (
         ON ms.scheme_id = fsm.scheme_id
     LEFT JOIN investment.masterscheme ms2
         ON ms2.internal_scheme_code = ot.scheme_internal_code
+=======
+        COALESCE(ot.entity_name, mf.entity_name, md.entity_name) AS entity_name,
+        ot.folio_number,
+        ot.demat_acc_number,
+        ot.folio_id,
+        ot.demat_id,
+        -- Prioritize scheme_id from transaction, then resolve via internal_code or folio mapping
+        COALESCE(ot.scheme_id, ms_direct.scheme_id, ms_code.scheme_id, ms_folio.scheme_id) AS scheme_id,
+        COALESCE(ms_direct.scheme_name, ms_code.scheme_name, ms_folio.scheme_name) AS scheme_name,
+        COALESCE(ms_direct.isin, ms_code.isin, ms_folio.isin) AS isin
+    FROM investment.onboard_transaction ot
+    LEFT JOIN investment.masterfolio mf 
+        ON mf.folio_id = ot.folio_id
+    LEFT JOIN investment.masterdemataccount md
+        ON md.demat_id = ot.demat_id
+    -- Direct scheme_id lookup
+    LEFT JOIN investment.masterscheme ms_direct
+        ON ms_direct.scheme_id = ot.scheme_id
+    -- Lookup by internal_scheme_code
+    LEFT JOIN investment.masterscheme ms_code
+        ON ms_code.internal_scheme_code = ot.scheme_internal_code
+    -- Lookup via folio scheme mapping
+    LEFT JOIN investment.folioschememapping fsm 
+        ON fsm.folio_id = ot.folio_id
+    LEFT JOIN investment.masterscheme ms_folio
+        ON ms_folio.scheme_id = fsm.scheme_id
+>>>>>>> origin/main
     WHERE ot.batch_id = $1
 ),
 transaction_summary AS (
@@ -871,6 +1189,11 @@ transaction_summary AS (
         entity_name,
         folio_number,
         demat_acc_number,
+<<<<<<< HEAD
+=======
+        folio_id,
+        demat_id,
+>>>>>>> origin/main
         scheme_id,
         scheme_name,
         isin,
@@ -901,7 +1224,11 @@ transaction_summary AS (
             END)
         END AS avg_nav
     FROM scheme_resolved
+<<<<<<< HEAD
     GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+=======
+    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
+>>>>>>> origin/main
 ),
 latest_nav AS (
     SELECT DISTINCT ON (scheme_name)
@@ -917,6 +1244,11 @@ INSERT INTO investment.portfolio_snapshot (
   entity_name,
   folio_number,
   demat_acc_number,
+<<<<<<< HEAD
+=======
+  folio_id,
+  demat_id,
+>>>>>>> origin/main
   scheme_id,
   scheme_name,
   isin,
@@ -934,6 +1266,11 @@ SELECT
   ts.entity_name,
   ts.folio_number,
   ts.demat_acc_number,
+<<<<<<< HEAD
+=======
+  ts.folio_id,
+  ts.demat_id,
+>>>>>>> origin/main
   ts.scheme_id,
   ts.scheme_name,
   ts.isin,
@@ -981,14 +1318,24 @@ WHERE ts.total_units > 0;
 		// commit
 		if err := tx.Commit(ctx); err != nil {
 			log.Printf("[bulk] commit failed: %v", err)
+<<<<<<< HEAD
 			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
+=======
+			api.RespondWithError(w, 500, "commit failed: "+err.Error())
+>>>>>>> origin/main
 			return
 		}
 		tx = nil
 		log.Printf("[bulk] committed batch %s", batchID)
 		log.Printf("[bulk] final counts: %+v", counts)
+<<<<<<< HEAD
 
 		res := UploadResponse{Success: true, BatchID: batchID, Counts: counts, Message: "bulk onboard completed"}
+=======
+		log.Printf("[bulk] enriched counts: %+v", enrichedCounts)
+
+		res := UploadResponse{Success: true, BatchID: batchID, Counts: counts, EnrichedCounts: enrichedCounts, Message: "bulk onboard completed"}
+>>>>>>> origin/main
 		log.Printf("[bulk] sending response: %+v", res)
 		api.RespondWithPayload(w, true, "", res)
 	}
@@ -1015,17 +1362,30 @@ func NormalizeDate(dateStr string) (string, error) {
 	// Try common layouts first
 	layouts := []string{
 		// ISO formats
+<<<<<<< HEAD
 		constants.DateFormat,
 		"2006/01/02",
 		"2006.01.02",
 		time.RFC3339,
 		constants.DateTimeFormat,
 		constants.DateFormatISO,
+=======
+		"2006-01-02",
+		"2006/01/02",
+		"2006.01.02",
+		time.RFC3339,
+		constants.DateTimeFormat,
+		"2006-01-02T15:04:05",
+>>>>>>> origin/main
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05.000Z",
 
 		// DD-MM-YYYY formats
+<<<<<<< HEAD
 		constants.DateFormatAlt,
+=======
+		"02-01-2006",
+>>>>>>> origin/main
 		"02/01/2006",
 		"02.01.2006",
 		"02-01-2006 15:04:05",
@@ -1084,7 +1444,11 @@ func NormalizeDate(dateStr string) (string, error) {
 			if t.Year() < 1900 || t.Year() > 9999 {
 				continue
 			}
+<<<<<<< HEAD
 			return t.Format(constants.DateFormat), nil
+=======
+			return t.Format("2006-01-02"), nil
+>>>>>>> origin/main
 		}
 	}
 
@@ -1104,7 +1468,11 @@ func NormalizeDate(dateStr string) (string, error) {
 				if m, err := strconv.Atoi(dateStr[4:6]); err == nil {
 					if d, err := strconv.Atoi(dateStr[6:8]); err == nil {
 						if y >= 1900 && y <= 9999 {
+<<<<<<< HEAD
 							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format(constants.DateFormat), nil
+=======
+							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format("2006-01-02"), nil
+>>>>>>> origin/main
 						}
 					}
 				}
@@ -1132,7 +1500,11 @@ func NormalizeDate(dateStr string) (string, error) {
 				t = base.AddDate(0, 0, int(v))
 			}
 			if t.Year() >= 1900 && t.Year() <= 9999 {
+<<<<<<< HEAD
 				return t.Format(constants.DateFormat), nil
+=======
+				return t.Format("2006-01-02"), nil
+>>>>>>> origin/main
 			}
 		}
 	}
@@ -1171,10 +1543,17 @@ func RefreshPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Support both JSON and form
+<<<<<<< HEAD
 		contentType := r.Header.Get(constants.ContentTypeText)
 		if strings.Contains(contentType, constants.ContentTypeJSON) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
+=======
+		contentType := r.Header.Get("Content-Type")
+		if strings.Contains(contentType, "application/json") {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, 400, "invalid JSON: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		} else {
@@ -1210,6 +1589,7 @@ WITH scheme_resolved AS (
         COALESCE(mf.entity_name, md.entity_name) AS entity_name,
         ot.folio_number,
         ot.demat_acc_number,
+<<<<<<< HEAD
         COALESCE(fsm.scheme_id, ms2.scheme_id) AS scheme_id,
         COALESCE(ms.scheme_name, ms2.scheme_name) AS scheme_name,
         COALESCE(ms.isin, ms2.isin) AS isin
@@ -1220,6 +1600,18 @@ WITH scheme_resolved AS (
         ON md.demat_account_number = ot.demat_acc_number
     LEFT JOIN investment.folioschememapping fsm 
         ON fsm.folio_id = mf.folio_id
+=======
+        COALESCE(ot.scheme_id, fsm.scheme_id, ms2.scheme_id) AS scheme_id,
+        COALESCE(ms2.scheme_name, ms.scheme_name) AS scheme_name,
+        COALESCE(ms2.isin, ms.isin) AS isin
+    FROM investment.onboard_transaction ot
+    LEFT JOIN investment.masterfolio mf 
+        ON mf.folio_id = ot.folio_id
+    LEFT JOIN investment.masterdemataccount md
+        ON md.demat_id = ot.demat_id
+    LEFT JOIN investment.folioschememapping fsm 
+        ON fsm.folio_id = ot.folio_id
+>>>>>>> origin/main
     LEFT JOIN investment.masterscheme ms 
         ON ms.scheme_id = fsm.scheme_id
     LEFT JOIN investment.masterscheme ms2
@@ -1231,6 +1623,11 @@ transaction_summary AS (
         entity_name,
         folio_number,
         demat_acc_number,
+<<<<<<< HEAD
+=======
+        ot.folio_id,
+        ot.demat_id,
+>>>>>>> origin/main
         scheme_id,
         scheme_name,
         isin,
@@ -1261,7 +1658,11 @@ transaction_summary AS (
             END)
         END AS avg_nav
     FROM scheme_resolved
+<<<<<<< HEAD
     GROUP BY entity_name, folio_number, demat_acc_number, scheme_id, scheme_name, isin
+=======
+    GROUP BY entity_name, folio_number, demat_acc_number, folio_id, demat_id, scheme_id, scheme_name, isin
+>>>>>>> origin/main
 ),
 latest_nav AS (
     SELECT DISTINCT ON (scheme_name)
@@ -1277,6 +1678,11 @@ INSERT INTO investment.portfolio_snapshot (
   entity_name,
   folio_number,
   demat_acc_number,
+<<<<<<< HEAD
+=======
+  folio_id,
+  demat_id,
+>>>>>>> origin/main
   scheme_id,
   scheme_name,
   isin,
@@ -1294,6 +1700,11 @@ SELECT
   ts.entity_name,
   ts.folio_number,
   ts.demat_acc_number,
+<<<<<<< HEAD
+=======
+  ts.folio_id,
+  ts.demat_id,
+>>>>>>> origin/main
   ts.scheme_id,
   ts.scheme_name,
   ts.isin,
@@ -1344,10 +1755,17 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Support both JSON and form
+<<<<<<< HEAD
 		contentType := r.Header.Get(constants.ContentTypeText)
 		if strings.Contains(contentType, constants.ContentTypeJSON) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
+=======
+		contentType := r.Header.Get("Content-Type")
+		if strings.Contains(contentType, "application/json") {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				api.RespondWithError(w, 400, "invalid JSON: "+err.Error())
+>>>>>>> origin/main
 				return
 			}
 		} else {

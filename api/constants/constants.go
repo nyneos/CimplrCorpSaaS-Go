@@ -2,7 +2,7 @@ package constants
 
 // Common error messages
 const (
-	ErrInvalidSession                = "invalid user_id or session" //"User not found in active sessions"
+	ErrInvalidSession                = "invalid user_id or session" //"User not found in active sessions".  "Invalid or inactive session"
 	ErrInvalidJSON                   = "invalid json or missing fields"
 	ErrInvalidJSONRequired           = "invalid json or missing required fields"
 	ErrExposureHeaderIDsUserID       = "exposureHeaderIds and user_id are required"
@@ -98,6 +98,8 @@ const (
 	ErrCommitFailed   = "commit failed: "
 	ErrQueryFailed    = "query failed: "
 	FormatSQLError    = "ERROR: %s"
+	ErrRowsError      = "rows error: "
+	ErrRowsScanFailed = "rows scan failed: "
 )
 
 // SQL formatting patterns

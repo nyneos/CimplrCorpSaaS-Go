@@ -29,7 +29,6 @@ type CreateProposalRequest struct {
 	TotalAmount  float64                   `json:"total_amount"`
 	HorizonDays  *int                      `json:"horizon_days"`
 	Source       string                    `json:"source"`
-	Status       string                    `json:"status"`
 	BatchID      string                    `json:"batch_id"`
 	Reason       string                    `json:"reason"`
 	Allocations  []ProposalAllocationInput `json:"allocations"`
@@ -44,7 +43,6 @@ type UpdateProposalRequest struct {
 	TotalAmount  float64                         `json:"total_amount"`
 	HorizonDays  *int                            `json:"horizon_days"`
 	Source       string                          `json:"source"`
-	Status       string                          `json:"status"`
 	BatchID      string                          `json:"batch_id"`
 	Reason       string                          `json:"reason"`
 	Allocations  []ProposalAllocationUpsertInput `json:"allocations"`
@@ -131,13 +129,15 @@ type ProposalDetailRequest struct {
 
 // EntityHoldingsRequest models the payload to fetch holdings for an entity
 type EntityHoldingsRequest struct {
-	EntityName string `json:"entity_name"`
+	EntityName string   `json:"entity_name"`
+	AMCNames   []string `json:"amc_names,omitempty"` // Optional filter for AMC names
 }
 
 // EntitySchemeHolding captures per-scheme holding details for an entity
 type EntitySchemeHolding struct {
 	SchemeID       string  `json:"scheme_id"`
 	SchemeName     string  `json:"scheme_name"`
+	AMCName        string  `json:"amc_name"`
 	CurrentHolding float64 `json:"current_holding"`
 }
 
@@ -417,30 +417,30 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 
 		if len(approvedProposals) > 0 {
 			if _, err := tx.Exec(ctx, `
-				UPDATE investment.investment_proposal
-				SET status='Active', is_deleted=false, updated_at=now()
-				WHERE proposal_id = ANY($1)
-			`, approvedProposals); err != nil {
+					UPDATE investment.investment_proposal
+					SET is_deleted=false, updated_at=now()
+					WHERE proposal_id = ANY($1)
+				`, approvedProposals); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to update approved proposals")
 				return
 			}
 		}
 		if len(deletedProposals) > 0 {
 			if _, err := tx.Exec(ctx, `
-				UPDATE investment.investment_proposal
-				SET status='Deleted', is_deleted=true, updated_at=now()
-				WHERE proposal_id = ANY($1)
-			`, deletedProposals); err != nil {
+					UPDATE investment.investment_proposal
+					SET is_deleted=true, updated_at=now()
+					WHERE proposal_id = ANY($1)
+				`, deletedProposals); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to delete proposals")
 				return
 			}
 		}
 		if len(rejectedProposals) > 0 {
 			if _, err := tx.Exec(ctx, `
-				UPDATE investment.investment_proposal
-				SET status='Rejected', updated_at=now()
-				WHERE proposal_id = ANY($1)
-			`, rejectedProposals); err != nil {
+					UPDATE investment.investment_proposal
+					SET updated_at=now()
+					WHERE proposal_id = ANY($1)
+				`, rejectedProposals); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to reject proposals")
 				return
 			}
@@ -556,7 +556,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if _, err := tx.Exec(ctx, `
 			UPDATE investment.investment_proposal
-			SET status='PENDING_DELETE_APPROVAL', updated_at=now()
+			SET updated_at=now()
 			WHERE proposal_id = ANY($1)
 		`, readyForDelete); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to tag proposals for delete")
@@ -634,8 +634,7 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_horizon_days,
 				p.source,
 				p.old_source,
-				p.status,
-				p.old_status,
+				-- status and old_status removed per schema change
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -656,7 +655,8 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.investment_proposal p
 			LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
 			LEFT JOIN history h ON h.proposal_id = p.proposal_id
-			ORDER BY l.requested_at DESC NULLS LAST
+			WHERE COALESCE(p.is_deleted,false)=false
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pool.Query(ctx, metaSQL)
@@ -747,8 +747,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_horizon_days,
 				p.source,
 				p.old_source,
-				p.status,
-				p.old_status,
+				-- status and old_status removed per schema change
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -770,7 +769,6 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN latest_audit l ON l.proposal_id = p.proposal_id
 			LEFT JOIN history h ON h.proposal_id = p.proposal_id
 			WHERE COALESCE(p.is_deleted,false)=false
-				AND UPPER(p.status)='ACTIVE'
 				AND UPPER(l.processing_status)='APPROVED'
 			ORDER BY l.requested_at DESC NULLS LAST
 		`
@@ -874,8 +872,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				p.old_horizon_days,
 				p.source,
 				p.old_source,
-				p.status,
-				p.old_status,
+				-- status and old_status removed per schema change
 				COALESCE(p.is_deleted,false) AS is_deleted,
 				COALESCE(p.batch_id::text,'') AS batch_id,
 				COALESCE(l.actiontype,'') AS action_type,
@@ -983,9 +980,128 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		allocRows.Close()
 
+		// Enrich allocations with scheme name and amc name
+		schemeIDs := make([]string, 0)
+		schemeSet := make(map[string]struct{})
+		for _, a := range allocations {
+			if sid, ok := a["scheme_id"].(string); ok && strings.TrimSpace(sid) != "" {
+				if _, seen := schemeSet[sid]; !seen {
+					schemeSet[sid] = struct{}{}
+					schemeIDs = append(schemeIDs, sid)
+				}
+			}
+		}
+		schemeMap := make(map[string]map[string]interface{})
+		if len(schemeIDs) > 0 {
+			const schemeQ = `SELECT scheme_id, scheme_name, amc_name FROM investment.masterscheme WHERE scheme_id = ANY($1)`
+			rows, err := pool.Query(ctx, schemeQ, schemeIDs)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var sid, sname, amc string
+					if err := rows.Scan(&sid, &sname, &amc); err != nil {
+						continue
+					}
+					schemeMap[sid] = map[string]interface{}{"scheme_name": sname, "amc_name": amc}
+				}
+			}
+		}
+
+		// enrich allocations with schemes and placeholder for entity-specific accounts (will set below)
+		for i, a := range allocations {
+			if sid, ok := a["scheme_id"].(string); ok && sid != "" {
+				if info, ok2 := schemeMap[sid]; ok2 {
+					a["scheme_name"] = info["scheme_name"]
+					a["amc_name"] = info["amc_name"]
+				} else {
+					a["scheme_name"] = ""
+					a["amc_name"] = ""
+				}
+			} else {
+				a["scheme_name"] = ""
+				a["amc_name"] = ""
+			}
+			allocations[i] = a
+		}
+
 		payload := map[string]interface{}{
 			"proposal":    proposal,
 			"allocations": allocations,
+		}
+
+		// enrich with folios/schemes and demats for the same entity
+		entityFolios := make([]map[string]interface{}, 0)
+		entityDemats := make([]map[string]interface{}, 0)
+		entityName := ""
+		if v, ok := proposal["entity_name"].(string); ok {
+			entityName = v
+		}
+		if strings.TrimSpace(entityName) != "" {
+			// Fetch folios for this entity (no scheme array; include entity_name)
+			const folioSQL = `
+			SELECT m.folio_id, m.folio_number, m.default_subscription_account, m.default_redemption_account
+			FROM investment.masterfolio m
+			WHERE COALESCE(m.is_deleted,false)=false AND m.entity_name = $1
+			ORDER BY m.folio_number
+			`
+			rows, err := pool.Query(ctx, folioSQL, entityName)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var folioID, folioNumber, subAcct, redAcct string
+					if err := rows.Scan(&folioID, &folioNumber, &subAcct, &redAcct); err != nil {
+						continue
+					}
+					entityFolios = append(entityFolios, map[string]interface{}{
+						"folio_id":                     folioID,
+						"folio_number":                 folioNumber,
+						"entity_name":                  entityName,
+						"default_subscription_account": subAcct,
+						"default_redemption_account":   redAcct,
+					})
+				}
+			}
+
+			// Fetch demat accounts for this entity
+			const dematSQL = `
+			SELECT demat_id, demat_account_number, default_settlement_account
+			FROM investment.masterdemataccount
+			WHERE COALESCE(is_deleted,false)=false AND entity_name = $1
+			ORDER BY demat_account_number
+			`
+			dRows, derr := pool.Query(ctx, dematSQL, entityName)
+			if derr == nil {
+				defer dRows.Close()
+				for dRows.Next() {
+					var dematID, dematNumber, settlement string
+					if err := dRows.Scan(&dematID, &dematNumber, &settlement); err != nil {
+						continue
+					}
+					entityDemats = append(entityDemats, map[string]interface{}{
+						"demat_id":                   dematID,
+						"demat_account_number":       dematNumber,
+						"default_settlement_account": settlement,
+					})
+				}
+			}
+		}
+
+		// annotate demats with entity (do not include amc names)
+		for i, d := range entityDemats {
+			if _, ok := d["entity_name"]; !ok {
+				d["entity_name"] = entityName
+			}
+			entityDemats[i] = d
+		}
+
+		payload["entity_folios"] = entityFolios
+		payload["entity_demats"] = entityDemats
+
+		// attach entity folios/demats into each allocation
+		for i, a := range allocations {
+			a["entity_folios"] = entityFolios
+			a["entity_demats"] = entityDemats
+			allocations[i] = a
 		}
 		api.RespondWithPayload(w, true, "", payload)
 	}
@@ -1012,7 +1128,9 @@ func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		const holdingsSQL = `
+
+		// Build query with optional AMC filter
+		holdingsSQL := `
 WITH snapshot_agg AS (
 	SELECT 
 		scheme_id,
@@ -1022,33 +1140,63 @@ WITH snapshot_agg AS (
 	WHERE entity_name = $1
 	GROUP BY scheme_id, scheme_name
 ),
+latest_scheme_audit AS (
+	SELECT DISTINCT ON (scheme_id)
+		scheme_id,
+		processing_status
+	FROM investment.auditactionscheme
+	ORDER BY scheme_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
+),
+latest_amc_audit AS (
+	SELECT DISTINCT ON (amc_id)
+		amc_id,
+		processing_status
+	FROM investment.auditactionamc
+	ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
+),
 all_schemes AS (
 	SELECT DISTINCT
 		COALESCE(s.scheme_id, ms.scheme_id::text) AS scheme_id,
 		COALESCE(NULLIF(s.scheme_name,''), ms.scheme_name) AS scheme_name,
+		COALESCE(ms.amc_name, '') AS amc_name,
 		COALESCE(s.current_holding, 0) AS current_holding
 	FROM snapshot_agg s
 	FULL OUTER JOIN investment.masterscheme ms
 		ON ms.scheme_id::text = s.scheme_id OR ms.scheme_name = s.scheme_name
-	WHERE ms.status = 'Active'
-		AND EXISTS (
-			SELECT 1 FROM investment.auditactionscheme a
-			WHERE a.scheme_id = ms.scheme_id::text
-				AND a.processing_status = 'APPROVED'
-			ORDER BY a.requested_at DESC
-			LIMIT 1
-		)
+	JOIN latest_scheme_audit lsa ON lsa.scheme_id = ms.scheme_id::text
+	LEFT JOIN investment.masteramc ma ON ma.amc_name = ms.amc_name
+	LEFT JOIN latest_amc_audit laa ON laa.amc_id = ma.amc_id::text
+	WHERE UPPER(ms.status) = 'ACTIVE'
+		AND COALESCE(ms.is_deleted, false) = false
+		AND UPPER(lsa.processing_status) = 'APPROVED'
+		AND (ma.amc_id IS NULL OR (
+			UPPER(ma.status) = 'ACTIVE'
+			AND COALESCE(ma.is_deleted, false) = false
+			AND UPPER(laa.processing_status) = 'APPROVED'
+		))`
+
+		args := []interface{}{entityName}
+
+		// Add AMC filter if provided
+		if len(req.AMCNames) > 0 {
+			holdingsSQL += `
+		AND ms.amc_name = ANY($2)`
+			args = append(args, req.AMCNames)
+		}
+
+		holdingsSQL += `
 )
 SELECT 
 	COALESCE(scheme_id, '') AS scheme_id,
 	COALESCE(scheme_name, '') AS scheme_name,
+	COALESCE(amc_name, '') AS amc_name,
 	COALESCE(current_holding, 0) AS current_holding
 FROM all_schemes
 WHERE scheme_name IS NOT NULL AND scheme_name != ''
-ORDER BY scheme_name
+ORDER BY amc_name, scheme_name
 `
 
-		rows, err := pool.Query(ctx, holdingsSQL, entityName)
+		rows, err := pool.Query(ctx, holdingsSQL, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch holdings: "+err.Error())
 			return
@@ -1058,7 +1206,7 @@ ORDER BY scheme_name
 		holdings := make([]EntitySchemeHolding, 0, 16)
 		for rows.Next() {
 			var rec EntitySchemeHolding
-			if err := rows.Scan(&rec.SchemeID, &rec.SchemeName, &rec.CurrentHolding); err != nil {
+			if err := rows.Scan(&rec.SchemeID, &rec.SchemeName, &rec.AMCName, &rec.CurrentHolding); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed to read holdings rows")
 				return
 			}
@@ -1072,12 +1220,94 @@ ORDER BY scheme_name
 		api.RespondWithPayload(w, true, "", holdings)
 	}
 }
+
+// GetEntityAccounts returns basic entity info plus folios and demats for an entity
+func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req EntityHoldingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		entityName := strings.TrimSpace(req.EntityName)
+		if entityName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			return
+		}
+
+		ctx := r.Context()
+
+		// Fetch folios for this entity
+		entityFolios := make([]map[string]interface{}, 0)
+		const folioSQL = `
+			SELECT m.folio_id, m.folio_number, m.default_subscription_account, m.default_redemption_account
+			FROM investment.masterfolio m
+			WHERE COALESCE(m.is_deleted,false)=false AND m.entity_name = $1
+			ORDER BY m.folio_number
+		`
+		rows, err := pool.Query(ctx, folioSQL, entityName)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var folioID, folioNumber, subAcct, redAcct string
+				if err := rows.Scan(&folioID, &folioNumber, &subAcct, &redAcct); err != nil {
+					continue
+				}
+				entityFolios = append(entityFolios, map[string]interface{}{
+					"folio_id":                     folioID,
+					"folio_number":                 folioNumber,
+					"entity_name":                  entityName,
+					"default_subscription_account": subAcct,
+					"default_redemption_account":   redAcct,
+				})
+			}
+		}
+
+		// Fetch demats for this entity
+		entityDemats := make([]map[string]interface{}, 0)
+		const dematSQL = `
+			SELECT demat_id, demat_account_number, default_settlement_account
+			FROM investment.masterdemataccount
+			WHERE COALESCE(is_deleted,false)=false AND entity_name = $1
+			ORDER BY demat_account_number
+		`
+		dRows, derr := pool.Query(ctx, dematSQL, entityName)
+		if derr == nil {
+			defer dRows.Close()
+			for dRows.Next() {
+				var dematID, dematNumber, settlement string
+				if err := dRows.Scan(&dematID, &dematNumber, &settlement); err != nil {
+					continue
+				}
+				rec := map[string]interface{}{
+					"demat_id":                   dematID,
+					"demat_account_number":       dematNumber,
+					"default_settlement_account": settlement,
+					"entity_name":                entityName,
+				}
+				entityDemats = append(entityDemats, rec)
+			}
+		}
+
+		payload := map[string]interface{}{
+			"entity":        map[string]interface{}{"entity_name": entityName},
+			"entity_folios": entityFolios,
+			"entity_demats": entityDemats,
+		}
+		api.RespondWithPayload(w, true, "", payload)
+	}
+}
 func normalizeProposalRequest(req *CreateProposalRequest) {
 	req.UserID = strings.TrimSpace(req.UserID)
 	req.ProposalName = strings.TrimSpace(req.ProposalName)
 	req.EntityName = strings.TrimSpace(req.EntityName)
 	req.Source = defaultString(strings.TrimSpace(req.Source), "Manual")
-	req.Status = defaultString(strings.TrimSpace(req.Status), "Active")
 	req.BatchID = strings.TrimSpace(req.BatchID)
 	req.Reason = strings.TrimSpace(req.Reason)
 	for i := range req.Allocations {
@@ -1092,7 +1322,6 @@ func normalizeUpdateProposalRequest(req *UpdateProposalRequest) {
 	req.ProposalName = strings.TrimSpace(req.ProposalName)
 	req.EntityName = strings.TrimSpace(req.EntityName)
 	req.Source = defaultString(strings.TrimSpace(req.Source), "Manual")
-	req.Status = defaultString(strings.TrimSpace(req.Status), "Active")
 	req.BatchID = strings.TrimSpace(req.BatchID)
 	req.Reason = strings.TrimSpace(req.Reason)
 	for i := range req.Allocations {
@@ -1194,8 +1423,8 @@ func parseBatchID(batch string) (*uuid.UUID, error) {
 func insertProposal(ctx context.Context, tx pgx.Tx, req *CreateProposalRequest, batchUUID *uuid.UUID) (string, error) {
 	const insertSQL = `
 		INSERT INTO investment.investment_proposal
-			(proposal_name, entity_name, total_amount, horizon_days, source, status, batch_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+			(proposal_name, entity_name, total_amount, horizon_days, source, batch_id)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING proposal_id
 	`
 	var horizon interface{}
@@ -1213,7 +1442,6 @@ func insertProposal(ctx context.Context, tx pgx.Tx, req *CreateProposalRequest, 
 		req.TotalAmount,
 		horizon,
 		req.Source,
-		req.Status,
 		batch,
 	).Scan(&proposalID)
 	return proposalID, err
@@ -1232,11 +1460,9 @@ func applyProposalUpdate(ctx context.Context, tx pgx.Tx, req *UpdateProposalRequ
 				horizon_days=$4,
 				old_source=source,
 				source=$5,
-				old_status=status,
-				status=$6,
-			batch_id=$7,
+			batch_id=$6,
 			updated_at=now()
-		WHERE proposal_id=$8
+		WHERE proposal_id=$7
 	`
 	var horizon interface{}
 	if req.HorizonDays != nil {
@@ -1252,7 +1478,6 @@ func applyProposalUpdate(ctx context.Context, tx pgx.Tx, req *UpdateProposalRequ
 		req.TotalAmount,
 		horizon,
 		req.Source,
-		req.Status,
 		batch,
 		req.ProposalID,
 	)

@@ -10,18 +10,16 @@ import (
 	"fmt"
 	"net/http"
 
-	"CimplrCorpSaas/api/constants"
-
 	"github.com/lib/pq"
 )
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		constants.ValueSuccess: false,
-		constants.ValueError:   errMsg,
+		"success": false,
+		"error":   errMsg,
 	})
 }
 
@@ -40,20 +38,20 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			UserID               string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
+			respondWithError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 		// Get created_by from session
-		createdBy := ""
+		created_by := ""
 		sessions := auth.GetActiveSessions()
 		for _, s := range sessions {
 			if s.UserID == req.UserID {
-				createdBy = s.Email
+				created_by = s.Email
 				break
 			}
 		}
-		if createdBy == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		if created_by == "" {
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		tx, err := db.Begin()
@@ -81,7 +79,7 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			req.Mobile,
 			req.Address,
 			req.BusinessUnitName,
-			createdBy,
+			created_by,
 		).Scan(&userId)
 		if err != nil {
 			respondWithError(w, http.StatusBadRequest, err.Error())
@@ -99,11 +97,11 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		tx.Commit()
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			constants.KeyUserID:    userId,
-			"role_id":              roleId,
+			"success": true,
+			"user_id": userId,
+			"role_id": roleId,
 		})
 	}
 }
@@ -111,18 +109,18 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 // Handler: Get users for accessible business units
 func GetUsers(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		status := r.URL.Query().Get(constants.KeyStatus)
+		status := r.URL.Query().Get("status")
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
+			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
 			return
 		}
 		// Get business units from context (set by middleware)
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
 		// Pagination
@@ -178,11 +176,11 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 			}
 			users = append(users, rowMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"users":                users,
-			"pagination":           pagination,
+			"success":    true,
+			"users":      users,
+			"pagination": pagination,
 		})
 	}
 }
@@ -200,7 +198,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		// Get business units from context (set by middleware)
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
 		// Query for user by ID, restrict to accessible business units
@@ -224,10 +222,10 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			userMap[col] = vals[i]
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"user":                 userMap,
+			"success": true,
+			"user":    userMap,
 		})
 	}
 }
@@ -237,18 +235,18 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
+			respondWithError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 		id, idOk := req["id"].(string)
-		userID, userIDOk := req[constants.KeyUserID].(string)
+		userID, userIDOk := req["user_id"].(string)
 		if !idOk || !userIDOk || id == "" || userID == "" {
 			respondWithError(w, http.StatusBadRequest, "Missing id or user_id")
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
 		// Get updated_by from session
@@ -261,7 +259,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		// Allowed fields to update
@@ -273,7 +271,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			"mobile":                  true,
 			"address":                 true,
 			"business_unit_name":      true,
-			constants.KeyStatus:       true,
+			"status":                  true,
 			"approved_by":             true,
 			"approved_at":             true,
 			"rejected_by":             true,
@@ -332,8 +330,8 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			userMap[col] = vals[i]
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "user": userMap})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
 	}
 }
 
@@ -363,7 +361,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
 		rows, err := db.Query(
@@ -390,10 +388,10 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 		for i, col := range cols {
 			userMap[col] = vals[i]
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"user":                 userMap,
+			"success": true,
+			"user":    userMap,
 		})
 	}
 }
@@ -413,7 +411,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
 		// Get existing users and their status
@@ -431,7 +429,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			var id, status string
 			rows.Scan(&id, &status)
-			if status == constants.StatusCodeDeleteApproval {
+			if status == "Delete-Approval" {
 				toDelete = append(toDelete, id)
 			} else {
 				toApprove = append(toApprove, id)
@@ -484,7 +482,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if approvedBy == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		// Approve users
@@ -511,8 +509,8 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "deleted": results["deleted"], "approved": results["approved"]})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": results["deleted"], "approved": results["approved"]})
 	}
 }
 
@@ -531,7 +529,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			respondWithError(w, http.StatusNotFound, "No accessible business units found")
 			return
 		}
 		// Get rejected_by from session
@@ -544,7 +542,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if rejectedBy == "" {
-			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			respondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
 			return
 		}
 		rows, err := db.Query(
@@ -571,7 +569,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			}
 			updated = append(updated, userMap)
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
 	}
 }

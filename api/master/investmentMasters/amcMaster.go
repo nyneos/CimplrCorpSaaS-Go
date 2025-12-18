@@ -1110,9 +1110,9 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		q := `
 			WITH latest AS (
-				SELECT DISTINCT ON (amc_id) amc_id, processing_status
+				SELECT DISTINCT ON (amc_id) amc_id, processing_status,requested_at,checker_at
 				FROM investment.auditactionamc
-				ORDER BY amc_id, requested_at DESC
+				ORDER BY amc_id, GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) DESC
 			)
 			SELECT m.amc_id, m.amc_name, m.internal_amc_code
 			FROM investment.masteramc m
@@ -1120,7 +1120,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE UPPER(l.processing_status)='APPROVED'
 			  AND UPPER(m.status)='ACTIVE'
 			  AND COALESCE(m.is_deleted,false)=false
-			ORDER BY m.amc_name;
+			ORDER BY amc_id, GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
 		rows, err := pgxPool.Query(ctx, q)
@@ -1161,13 +1161,13 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_at,
 					a.checker_comment,
 					a.reason
-				FROM investment.auditactionamc a
-				ORDER BY a.amc_id, a.requested_at DESC
+					FROM investment.auditactionamc a
+					ORDER BY a.amc_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
 			history AS (
 				SELECT 
 					amc_id,
-					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS createdBy,
+					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
 					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
 					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
 					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
@@ -1218,7 +1218,7 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 
-				COALESCE(h.createdBy,'') AS createdBy,
+				COALESCE(h.created_by,'') AS created_by,
 				COALESCE(h.created_at,'') AS created_at,
 				COALESCE(h.edited_by,'') AS edited_by,
 				COALESCE(h.edited_at,'') AS edited_at,
@@ -1229,7 +1229,8 @@ func GetAMCsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN latest_audit l ON l.amc_id = m.amc_id
 			LEFT JOIN history h ON h.amc_id = m.amc_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY m.amc_name;
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
+	
 		`
 
 		rows, err := pgxPool.Query(ctx, q)

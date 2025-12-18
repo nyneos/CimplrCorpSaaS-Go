@@ -10,6 +10,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 
 	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

@@ -2,3 +2,4 @@
 /logs/*
 *.env
 *.DS_Store
+cmd/main.go
