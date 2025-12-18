@@ -877,58 +877,153 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 
 	// 2. Get all transactions for a bank statement (POST, req: user_id, bank_statement_id)
 }
+
+
 func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
 		var body struct {
 			UserID          string `json:"user_id"`
 			BankStatementID string `json:"bank_statement_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || body.BankStatementID == "" {
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+			body.UserID == "" || body.BankStatementID == "" {
 			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
 			return
 		}
+
 		rows, err := db.Query(`
-			SELECT t.transaction_id, e.entity_name, t.tran_id, t.value_date, t.transaction_date, t.description, t.withdrawal_amount, t.deposit_amount, t.balance
+			SELECT
+				t.transaction_id,
+				e.entity_name,
+				t.tran_id,
+				t.value_date,
+				t.transaction_date,
+				t.description,
+				t.withdrawal_amount,
+				t.deposit_amount,
+				t.balance,
+				c.category_name,
+				COALESCE(t.misclassified_flag, false) AS misclassified_flag
 			FROM cimplrcorpsaas.bank_statement_transactions t
-			JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
-			JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+			JOIN cimplrcorpsaas.bank_statements s
+				ON t.bank_statement_id = s.bank_statement_id
+			JOIN public.masterentitycash e
+				ON s.entity_id = e.entity_id
+			LEFT JOIN cimplrcorpsaas.transaction_categories c
+				ON t.category_id = c.category_id
 			WHERE t.bank_statement_id = $1
 			ORDER BY t.value_date
 		`, body.BankStatementID)
+
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
+
 		resp := []map[string]interface{}{}
+
 		for rows.Next() {
-			var tid int64
-			var entityName, tranID, desc string
-			var vdate, tdate time.Time
-			var withdrawal, deposit, balance sql.NullFloat64
-			if err := rows.Scan(&tid, &entityName, &tranID, &vdate, &tdate, &desc, &withdrawal, &deposit, &balance); err != nil {
+			var (
+				tid        int64
+				entityName string
+				tranID     sql.NullString
+				desc       string
+				category   sql.NullString
+				vdate      time.Time
+				tdate      time.Time
+				withdrawal sql.NullFloat64
+				deposit    sql.NullFloat64
+				balance    sql.NullFloat64
+				misclassified bool
+			)
+
+			if err := rows.Scan(
+				&tid,
+				&entityName,
+				&tranID,
+				&vdate,
+				&tdate,
+				&desc,
+				&withdrawal,
+				&deposit,
+				&balance,
+				&category,
+				&misclassified,
+			); err != nil {
 				continue
 			}
+
+			categoryName := category.String
+			if !category.Valid || categoryName == "" {
+				categoryName = "Uncategorized"
+			}
+
 			resp = append(resp, map[string]interface{}{
 				"transaction_id":    tid,
 				"entity_name":       entityName,
-				"tran_id":           tranID,
+				"tran_id":           tranID.String,
 				"value_date":        vdate,
 				"transaction_date":  tdate,
 				"description":       desc,
 				"withdrawal_amount": withdrawal.Float64,
 				"deposit_amount":    deposit.Float64,
 				"balance":           balance.Float64,
+				"category_name":     categoryName,
+				"misclassified_flag": misclassified,
 			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    resp,
+		})
+	})
+}
+
+// MarkBankStatementTransactionsMisclassifiedHandler sets misclassified_flag = true
+// for the provided list of transaction IDs.
+func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var body struct {
+			UserID         string  `json:"user_id"`
+			TransactionIDs []int64 `json:"transaction_ids"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.TransactionIDs) == 0 {
+			http.Error(w, "Missing user_id or transaction_ids", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+		res, err := db.ExecContext(ctx, `
+			UPDATE cimplrcorpsaas.bank_statement_transactions
+			SET misclassified_flag = true
+			WHERE transaction_id = ANY($1)
+		`, pq.Array(body.TransactionIDs))
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		rowsAffected, _ := res.RowsAffected()
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"updated_count": rowsAffected,
 		})
 	})
 }
