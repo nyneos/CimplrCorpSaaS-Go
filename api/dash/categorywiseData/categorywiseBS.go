@@ -54,7 +54,21 @@ type TransactionRow struct {
 	Misclassified bool    `json:"misclassified_flag,omitempty"`
 }
 
+type BankBalanceKPI struct {
+	Bank  string  `json:"bank"`
+	Total float64 `json:"total"`
+}
+
+type LowestBalanceAccount struct {
+	Bank     string  `json:"bank"`
+	Account  string  `json:"account"`
+	Balance  float64 `json:"balance"`
+	Currency string  `json:"currency"`
+	AsOfDate string  `json:"as_of_date"`
+}
+
 func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
+
 	// numeric mask wide enough to avoid overflow display
 	const wideNumMask = "FM9999999999999999999999999999990.00"
 
@@ -323,6 +337,108 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			}
 		}
 
+		/* ---------------- Realtime KPIs (bank_balances_manual) ---------------- */
+		kpiArgs := []interface{}{}
+		kArg := 1
+		var kpiFilters []string
+
+		// limit to recent data by horizon
+		kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.as_of_date, CURRENT_DATE) >= $%d::date", kArg))
+		kpiArgs = append(kpiArgs, fromDate)
+		kArg++
+
+		if bankF != "" {
+			kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.bank_name, '') = $%d", kArg))
+			kpiArgs = append(kpiArgs, bankF)
+			kArg++
+		}
+		if currencyF != "" {
+			kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.currency_code, '') = $%d", kArg))
+			kpiArgs = append(kpiArgs, currencyF)
+			kArg++
+		}
+
+		kpiWhere := ""
+		if len(kpiFilters) > 0 {
+			kpiWhere = "WHERE " + strings.Join(kpiFilters, " AND ")
+		}
+
+		highestSQL := `
+	WITH approved AS (
+	  SELECT DISTINCT ON (balance_id) balance_id, processing_status
+	  FROM public.auditactionbankbalances
+	  ORDER BY balance_id, requested_at DESC
+	)
+	SELECT
+	  COALESCE(b.bank_name, 'Unknown') AS bank,
+	  SUM(COALESCE(b.balance_amount, b.closing_balance, 0)) AS total
+	FROM public.bank_balances_manual b
+	JOIN approved ap
+	  ON ap.balance_id = b.balance_id
+	 AND ap.processing_status = 'APPROVED'
+	` + kpiWhere + `
+	GROUP BY COALESCE(b.bank_name, 'Unknown')
+	ORDER BY total DESC
+	LIMIT 1;
+	`
+
+		var highestBank *BankBalanceKPI
+		highestRows, err := pgxPool.Query(ctx, highestSQL, kpiArgs...)
+		if err != nil {
+			http.Error(w, "error querying highest contributing bank: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer highestRows.Close()
+		if highestRows.Next() {
+			var bank string
+			var total float64
+			if err := highestRows.Scan(&bank, &total); err == nil {
+				highestBank = &BankBalanceKPI{Bank: bank, Total: total}
+			}
+		}
+
+		lowestSQL := `
+	WITH approved AS (
+	  SELECT DISTINCT ON (balance_id) balance_id, processing_status
+	  FROM public.auditactionbankbalances
+	  ORDER BY balance_id, requested_at DESC
+	)
+	SELECT
+	  COALESCE(b.bank_name, 'Unknown') AS bank,
+	  COALESCE(b.account_no, '') AS account,
+	  COALESCE(b.balance_amount, b.closing_balance, 0) AS balance,
+	  COALESCE(b.currency_code, '') AS currency_code,
+	  COALESCE(to_char(b.as_of_date, 'YYYY-MM-DD'), '') AS as_of_date
+	FROM public.bank_balances_manual b
+	JOIN approved ap
+	  ON ap.balance_id = b.balance_id
+	 AND ap.processing_status = 'APPROVED'
+	` + kpiWhere + `
+	ORDER BY balance ASC
+	LIMIT 1;
+	`
+
+		var lowestAcct *LowestBalanceAccount
+		lowestRows, err := pgxPool.Query(ctx, lowestSQL, kpiArgs...)
+		if err != nil {
+			http.Error(w, "error querying lowest balance account: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer lowestRows.Close()
+		if lowestRows.Next() {
+			var bank, acct, currency, asOf string
+			var balance float64
+			if err := lowestRows.Scan(&bank, &acct, &balance, &currency, &asOf); err == nil {
+				lowestAcct = &LowestBalanceAccount{
+					Bank:     bank,
+					Account:  acct,
+					Balance:  balance,
+					Currency: currency,
+					AsOfDate: asOf,
+				}
+			}
+		}
+
 		/* ---------------- Misclassified transactions section ---------------- */
 		misclassifiedSQL := `
 SELECT
@@ -393,6 +509,8 @@ LIMIT 2000;
 			"entities":                   entities,
 			"transactions":               txns,
 			"misclassified_transactions": misclassifiedTxns,
+			"highest_contributing_bank":  highestBank,
+			"lowest_balance_account":     lowestAcct,
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
