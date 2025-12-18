@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"time"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -13,7 +14,7 @@ import (
 
 // Handler: GetCurrencyWiseDashboard
 func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	// Spot rates for conversion
+	// Spot rates for conversion (INR stays 1.0 to avoid double converting)
 	var spotRates = map[string]float64{
 		"USD": 1.0,
 		"AUD": 0.68,
@@ -25,7 +26,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		"GBP": 1.28,
 		"JPY": 0.0067,
 		"SEK": 0.095,
-		"INR": 0.0117,
+		"INR": 1.0,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -52,29 +53,36 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Query: fetch entity, bank, account number, currency, balance for status=Approved, filtered by allowed BUs
 		ctx := context.Background()
 		rows, err := pgxPool.Query(ctx, `
-				       SELECT 
-					       e.entity_name, 
-					       b.bank_name, 
-					       mba.account_number, 
-					       mba.currencycode, 
-					       s.opening_balance,
-					       s.closing_balance
-				       FROM cimplrcorpsaas.bank_statements s
-				       JOIN masterbankaccount mba ON s.account_number = mba.account_number
-				       JOIN masterentitycash e ON mba.entity_id = e.entity_id
-				       JOIN masterbank b ON mba.bank_id = b.bank_id
-				       JOIN (
-					       SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-					       FROM cimplrcorpsaas.auditactionbankstatement
-					       ORDER BY bankstatementid, requested_at DESC
-				       ) a ON a.bankstatementid = s.bank_statement_id
-				       JOIN (
-					       SELECT account_number, MAX(statement_period_end) AS maxdate
-					       FROM cimplrcorpsaas.bank_statements
-					       GROUP BY account_number
-				       ) latest ON s.account_number = latest.account_number AND s.statement_period_end = latest.maxdate
-				       WHERE a.processing_status = 'APPROVED'
-			       `)
+			WITH latest_approved AS (
+			    SELECT s.account_number,
+			           MAX(s.statement_period_end) AS maxdate
+			    FROM cimplrcorpsaas.bank_statements s
+			    JOIN (
+			        SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status, requested_at
+			        FROM cimplrcorpsaas.auditactionbankstatement
+			        ORDER BY bankstatementid, requested_at DESC
+			    ) a ON a.bankstatementid = s.bank_statement_id
+			    WHERE a.processing_status = 'APPROVED'
+			    GROUP BY s.account_number
+			)
+			SELECT 
+			       e.entity_name, 
+			       b.bank_name, 
+			       mba.account_number, 
+			       mba.currencycode, 
+			       s.opening_balance,
+			       s.closing_balance
+			FROM cimplrcorpsaas.bank_statements s
+			JOIN masterbankaccount mba ON s.account_number = mba.account_number
+			JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			JOIN masterbank b ON mba.bank_id = b.bank_id
+			JOIN (
+			    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+			    FROM cimplrcorpsaas.auditactionbankstatement
+			    ORDER BY bankstatementid, requested_at DESC
+			) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
+			JOIN latest_approved la ON la.account_number = s.account_number AND la.maxdate = s.statement_period_end
+		`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -83,6 +91,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build flat response
 		resp := []map[string]interface{}{}
+		dayWise := []map[string]interface{}{}
 		for rows.Next() {
 			var entity, bank, accountNumber, currency string
 			var openingBalance, closingBalance float64
@@ -104,13 +113,79 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"closingBalanceINR": closingBalance * spot,
 			})
 		}
+
+		// Day-wise balances (per statement end date, per account)
+		dayRows, err := pgxPool.Query(ctx, `
+			WITH approved AS (
+			    SELECT s.statement_period_end AS day,
+			           e.entity_name,
+			           b.bank_name,
+			           mba.account_number,
+			           mba.currencycode,
+			           s.closing_balance
+			    FROM cimplrcorpsaas.bank_statements s
+			    JOIN masterbankaccount mba ON s.account_number = mba.account_number
+			    JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			    JOIN masterbank b ON mba.bank_id = b.bank_id
+			    JOIN (
+			        SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+			        FROM cimplrcorpsaas.auditactionbankstatement
+			        ORDER BY bankstatementid, requested_at DESC
+			    ) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
+			)
+			SELECT day, entity_name, bank_name, account_number, currencycode, closing_balance
+			FROM approved
+			ORDER BY day DESC, entity_name, bank_name, account_number;
+		`)
+		if err == nil {
+			for dayRows.Next() {
+				var day time.Time
+				var currency, entityName, bankName, accountNo string
+				var closing float64
+				if err := dayRows.Scan(&day, &entityName, &bankName, &accountNo, &currency, &closing); err != nil {
+					continue
+				}
+				spot := spotRates[currency]
+				if spot == 0 {
+					spot = 1.0
+				}
+				dayWise = append(dayWise, map[string]interface{}{
+					"date":              day.Format("2006-01-02"),
+					"entity":            entityName,
+					"bank":              bankName,
+					"accountNumber":     accountNo,
+					"currency":          currency,
+					"closingBalance":    closing,
+					"closingBalanceINR": closing * spot,
+				})
+			}
+			dayRows.Close()
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"balances":        resp,
+			"dayWiseBalances": dayWise,
+		})
 	}
 }
 
 // Handler: GetApprovedBankBalances
 func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	// Spot rates for conversion (INR stays 1.0)
+	var spotRates = map[string]float64{
+		"USD": 1.0,
+		"AUD": 0.68,
+		"CAD": 0.75,
+		"CHF": 1.1,
+		"CNY": 0.14,
+		"RMB": 0.14,
+		"EUR": 1.09,
+		"GBP": 1.28,
+		"JPY": 0.0067,
+		"SEK": 0.095,
+		"INR": 1.0,
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -129,23 +204,37 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get allowed business units from context (set by BU middleware)
 		// Remove BU filtering for diagnostics
 
-		// Query: fetch entity, bank, currency, balance for status=Approved
+		// Query: fetch latest approved closing balance per account (no summing across periods)
 		ctx := context.Background()
 		rows, err := pgxPool.Query(ctx, `
+			WITH latest_approved AS (
+			    SELECT s.account_number,
+			           MAX(s.statement_period_end) AS maxdate
+			    FROM cimplrcorpsaas.bank_statements s
+			    JOIN (
+			        SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status, requested_at
+			        FROM cimplrcorpsaas.auditactionbankstatement
+			        ORDER BY bankstatementid, requested_at DESC
+			    ) a ON a.bankstatementid = s.bank_statement_id
+			    WHERE a.processing_status = 'APPROVED'
+			    GROUP BY s.account_number
+			)
 			SELECT 
-				e.entity_name, 
-				mb.bank_name, 
-				mb.currency_code, 
-				SUM(mb.balance_amount) AS total_closing_balance
-			FROM bank_balances_manual mb
-			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
+			       e.entity_name, 
+			       b.bank_name, 
+			       mba.account_number,
+			       mba.currency, 
+			       s.closing_balance
+			FROM cimplrcorpsaas.bank_statements s
+			JOIN masterbankaccount mba ON s.account_number = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			JOIN masterbank b ON mba.bank_id = b.bank_id
 			JOIN (
-				SELECT DISTINCT ON (balance_id) balance_id, processing_status
-				FROM auditactionbankbalances
-				ORDER BY balance_id, requested_at DESC
-			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
-			GROUP BY e.entity_name, mb.bank_name, mb.currency_code;
+			    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+			    FROM cimplrcorpsaas.auditactionbankstatement
+			    ORDER BY bankstatementid, requested_at DESC
+			) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
+			JOIN latest_approved la ON la.account_number = s.account_number AND la.maxdate = s.statement_period_end
 		`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -153,38 +242,85 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer rows.Close()
 
-		// Build nested response
-		entityMap := map[string]map[string]map[string]float64{} // entity -> bank -> currency -> balance
+		// Build nested response entity -> bank -> accounts and day-wise history
+		entityMap := map[string]map[string][]map[string]interface{}{}
 		for rows.Next() {
-			var entity, bank, currency string
+			var entity, bank, accountNumber, currency string
 			var balance float64
-			if err := rows.Scan(&entity, &bank, &currency, &balance); err != nil {
+			if err := rows.Scan(&entity, &bank, &accountNumber, &currency, &balance); err != nil {
 				continue
 			}
+			spot := spotRates[currency]
+			if spot == 0 {
+				spot = 1.0
+			}
 			if _, ok := entityMap[entity]; !ok {
-				entityMap[entity] = map[string]map[string]float64{}
+				entityMap[entity] = map[string][]map[string]interface{}{}
 			}
-			if _, ok := entityMap[entity][bank]; !ok {
-				entityMap[entity][bank] = map[string]float64{}
+			entityMap[entity][bank] = append(entityMap[entity][bank], map[string]interface{}{
+				"accountNumber":     accountNumber,
+				"currency":          currency,
+				"closingBalance":    balance,
+				"closingBalanceINR": balance * spot,
+			})
+		}
+
+		dayWise := []map[string]interface{}{}
+		dayRows, err := pgxPool.Query(ctx, `
+			WITH approved AS (
+			    SELECT s.statement_period_end AS day,
+			           e.entity_name,
+			           b.bank_name,
+			           mba.account_number,
+			           mba.currency,
+			           s.closing_balance
+			    FROM cimplrcorpsaas.bank_statements s
+			    JOIN masterbankaccount mba ON s.account_number = mba.account_number
+			    JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			    JOIN masterbank b ON mba.bank_id = b.bank_id
+			    JOIN (
+			        SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+			        FROM cimplrcorpsaas.auditactionbankstatement
+			        ORDER BY bankstatementid, requested_at DESC
+			    ) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
+			)
+			SELECT day, entity_name, bank_name, account_number, currency, closing_balance
+			FROM approved
+			ORDER BY day DESC, entity_name, bank_name, account_number;
+		`)
+		if err == nil {
+			for dayRows.Next() {
+				var day time.Time
+				var currency, entityName, bankName, accountNo string
+				var closing float64
+				if err := dayRows.Scan(&day, &entityName, &bankName, &accountNo, &currency, &closing); err != nil {
+					continue
+				}
+				spot := spotRates[currency]
+				if spot == 0 {
+					spot = 1.0
+				}
+				dayWise = append(dayWise, map[string]interface{}{
+					"date":              day.Format("2006-01-02"),
+					"entity":            entityName,
+					"bank":              bankName,
+					"accountNumber":     accountNo,
+					"currency":          currency,
+					"closingBalance":    closing,
+					"closingBalanceINR": closing * spot,
+				})
 			}
-			entityMap[entity][bank][currency] = balance
+			dayRows.Close()
 		}
 
 		// Format response
 		resp := []map[string]interface{}{}
 		for entity, banks := range entityMap {
 			banksArr := []map[string]interface{}{}
-			for bank, currencies := range banks {
-				currArr := []map[string]interface{}{}
-				for currency, balance := range currencies {
-					currArr = append(currArr, map[string]interface{}{
-						"currency": currency,
-						"balance":  balance,
-					})
-				}
+			for bank, accounts := range banks {
 				banksArr = append(banksArr, map[string]interface{}{
-					"bank":       bank,
-					"currencies": currArr,
+					"bank":     bank,
+					"accounts": accounts,
 				})
 			}
 			resp = append(resp, map[string]interface{}{
@@ -193,7 +329,10 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"balances":        resp,
+			"dayWiseBalances": dayWise,
+		})
 	}
 }
 
@@ -211,7 +350,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		"GBP": 1.28,
 		"JPY": 0.0067,
 		"SEK": 0.095,
-		"INR": 0.0117,
+		"INR": 1.0,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -228,16 +367,31 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 		rows, err := pgxPool.Query(ctx, `
-			SELECT  e.entity_name, mb.bank_name, mb.account_no, mb.currency_code, SUM(mb.balance_amount) AS closing_balance
-			FROM bank_balances_manual mb
-			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
-			JOIN masterentitycash e ON mba.entity_id = e.entity_id
-			JOIN (
-				SELECT DISTINCT ON (balance_id) balance_id, processing_status
-				FROM auditactionbankbalances
-				ORDER BY balance_id, requested_at DESC
-			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
-			GROUP BY e.entity_name, mb.bank_name, mb.account_no, mb.currency_code;
+			WITH approved AS (
+			    SELECT mb.*, COALESCE(mb.as_of_date, CURRENT_DATE) AS dt
+			    FROM bank_balances_manual mb
+			    JOIN (
+			        SELECT DISTINCT ON (balance_id) balance_id, processing_status
+			        FROM auditactionbankbalances
+			        ORDER BY balance_id, requested_at DESC
+			    ) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
+			),
+			latest AS (
+			    SELECT DISTINCT ON (mb.account_no)
+			           COALESCE(e.entity_name, '') AS entity_name,
+			           COALESCE(mb.bank_name, b.bank_name, '') AS bank_name,
+			           mb.account_no,
+			           mb.currency_code,
+			           mb.balance_amount,
+			           mb.dt
+			    FROM approved mb
+			    JOIN masterbankaccount mba ON mb.account_no = mba.account_number
+			    LEFT JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			    LEFT JOIN masterbank b ON mba.bank_id = b.bank_id
+			    ORDER BY mb.account_no, mb.dt DESC, mb.balance_id DESC
+			)
+			SELECT entity_name, bank_name, account_no, currency_code, balance_amount
+			FROM latest;
 		`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -246,6 +400,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		resp := []map[string]interface{}{}
+		dayWise := []map[string]interface{}{}
 		for rows.Next() {
 			var entity, bankName, accountNo, currency string
 			var closingBalance float64
@@ -268,8 +423,63 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"closingBalanceINR": inr,
 			})
 		}
+
+		// Day-wise manual balances per account
+		dayRows, err := pgxPool.Query(ctx, `
+			WITH approved AS (
+			    SELECT mb.*, COALESCE(mb.as_of_date, CURRENT_DATE) AS dt
+			    FROM bank_balances_manual mb
+			    JOIN (
+			        SELECT DISTINCT ON (balance_id) balance_id, processing_status
+			        FROM auditactionbankbalances
+			        ORDER BY balance_id, requested_at DESC
+			    ) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
+			)
+			SELECT COALESCE(e.entity_name, '') AS entity_name,
+			       COALESCE(mb.bank_name, b.bank_name, '') AS bank_name,
+			       mb.account_no,
+			       mb.currency_code,
+			       mb.balance_amount,
+			       mb.dt
+			FROM approved mb
+			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
+			LEFT JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			LEFT JOIN masterbank b ON mba.bank_id = b.bank_id
+			ORDER BY mb.dt DESC, entity_name, bank_name, mb.account_no;
+		`)
+		if err == nil {
+			for dayRows.Next() {
+				var entityName, bankName, accountNo, currency string
+				var closing float64
+				var day time.Time
+				if err := dayRows.Scan(&entityName, &bankName, &accountNo, &currency, &closing, &day); err != nil {
+					continue
+				}
+				spot := spotRates[currency]
+				if spot == 0 {
+					spot = 1.0
+				}
+				bal := math.Abs(closing)
+				bal = math.Round(bal*100) / 100
+				inr := math.Round((bal*spot)*100) / 100
+				dayWise = append(dayWise, map[string]interface{}{
+					"date":              day.Format("2006-01-02"),
+					"entity":            entityName,
+					"bank":              bankName,
+					"accountNumber":     accountNo,
+					"currency":          currency,
+					"closingBalance":    bal,
+					"closingBalanceINR": inr,
+				})
+			}
+			dayRows.Close()
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"balances":        resp,
+			"dayWiseBalances": dayWise,
+		})
 	}
 }
 
