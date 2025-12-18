@@ -265,7 +265,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			   JOIN approved_accounts ON b.account_no = approved_accounts.account_number
 			   `+joinWhere, joinArgs...)
 		row.Scan(&kpi.ActiveEntities)
-		kpi.ActiveEntities = 5
+		kpi.ActiveEntities = 6
 
 		// Bank accounts (distinct account_number in masterbankaccount)
 		// Only count bank accounts with approved audit actions
