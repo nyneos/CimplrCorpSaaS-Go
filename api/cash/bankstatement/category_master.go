@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -50,6 +51,49 @@ type CategoryRuleComponent struct {
 	TxnFlow        *string  `json:"txn_flow,omitempty"`
 	CurrencyCode   *string  `json:"currency_code,omitempty"`
 	IsActive       bool     `json:"is_active"`
+}
+
+// ruleQueryerLocal abstracts QueryContext for both *sql.DB and *sql.Tx within this file.
+type ruleQueryerLocal interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+// loadCategoryRuleComponentsLocal mirrors the rule loader used during upload/recompute without depending on the upload file.
+func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string) ([]categoryRuleComponent, error) {
+	const q = `
+	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
+	       FROM cimplrcorpsaas.category_rules r
+	       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
+	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
+	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
+	       WHERE r.is_active = true
+	     AND (
+	           (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
+	           OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
+	           OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
+	           OR (s.scope_type = 'GLOBAL')
+	     )
+	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
+	   `
+
+	rows, err := db.QueryContext(ctx, q, accountNumber, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []categoryRuleComponent
+	for rows.Next() {
+		var rc categoryRuleComponent
+		if err := rows.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode); err != nil {
+			return nil, err
+		}
+		rules = append(rules, rc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return rules, nil
 }
 
 // ListCategoriesForUserHandler returns minimal category id/name list (POST expects user_id, currently unused for filtering).
@@ -244,7 +288,7 @@ WHERE t.category_id IS NULL
 			cacheKey := tr.acct + "|" + tr.entity
 			rules, ok := ruleCache[cacheKey]
 			if !ok {
-				rules, err = loadCategoryRuleComponents(ctx, db, tr.acct, tr.entity)
+				rules, err = loadCategoryRuleComponentsLocal(ctx, db, tr.acct, tr.entity)
 				if err != nil {
 					continue
 				}
@@ -370,7 +414,7 @@ WHERE t.category_id IS NULL
 			cacheKey := tr.acct + "|" + tr.entity
 			rules, ok := ruleCache[cacheKey]
 			if !ok {
-				rules, err = loadCategoryRuleComponents(ctx, tx, tr.acct, tr.entity)
+				rules, err = loadCategoryRuleComponentsLocal(ctx, tx, tr.acct, tr.entity)
 				if err != nil {
 					continue
 				}
