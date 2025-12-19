@@ -512,6 +512,11 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		if len(ruleIDs) > 0 {
 			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
+				if isFKViolation(err) {
+					tx.Rollback()
+					http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+					return
+				}
 				tx.Rollback()
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
@@ -521,6 +526,11 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// 3. Delete all rules for these categories
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
+			if isFKViolation(err) {
+				tx.Rollback()
+				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				return
+			}
 			tx.Rollback()
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -538,6 +548,11 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// 5. Delete the categories themselves
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
+			if isFKViolation(err) {
+				tx.Rollback()
+				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				return
+			}
 			tx.Rollback()
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -555,7 +570,6 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		})
 	})
 }
-
 // --- Category CRUD ---
 func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
