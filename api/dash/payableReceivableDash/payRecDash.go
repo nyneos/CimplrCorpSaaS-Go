@@ -9,6 +9,8 @@ import (
 
 	"CimplrCorpSaas/api"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,21 +28,21 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// static spot rates to USD (example/fallback)
 	spotRates := map[string]float64{
 		"USD": 1.0,
-	"AUD": 0.68,
-	"CAD": 0.75,
-	"CHF": 1.1,
-	"CNY": 0.14,
-	"RMB": 0.14,
-	"EUR": 1.09,
-	"GBP": 1.28,
-	"JPY": 0.0067,
-	"SEK": 0.095,
-	"INR": 0.0117,
+		"AUD": 0.68,
+		"CAD": 0.75,
+		"CHF": 1.1,
+		"CNY": 0.14,
+		"RMB": 0.14,
+		"EUR": 1.09,
+		"GBP": 1.28,
+		"JPY": 0.0067,
+		"SEK": 0.095,
+		"INR": 0.0117,
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, "Method not allowed")
+			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -48,7 +50,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, "Missing or invalid user_id in body")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
@@ -74,7 +76,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	`
 		rows, err := pgxPool.Query(ctx, payQ)
 		if err != nil {
-			api.RespondWithResult(w, false, "DB error: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for rows.Next() {
@@ -94,7 +96,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Counterparty: counterparty,
 				Type:         "Payable",
 				InvoiceNo:    invoice,
-				DueDate:      due.Format("2006-01-02"),
+				DueDate:      due.Format(constants.DateFormat),
 				Amount:       converted,
 				Entity:       entity,
 			})
@@ -117,7 +119,7 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	`
 		rows2, err := pgxPool.Query(ctx, recQ)
 		if err != nil {
-			api.RespondWithResult(w, false, "DB error: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		for rows2.Next() {
@@ -137,15 +139,15 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Counterparty: counterparty,
 				Type:         "Receivable",
 				InvoiceNo:    invoice,
-				DueDate:      due.Format("2006-01-02"),
+				DueDate:      due.Format(constants.DateFormat),
 				Amount:       converted,
 				Entity:       entity,
 			})
 		}
 		rows2.Close()
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -153,14 +155,14 @@ func GetPayablesReceivables(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithResult(w, false, "Method not allowed")
+			api.RespondWithResult(w, false, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			api.RespondWithResult(w, false, "Missing or invalid user_id in body")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
@@ -366,7 +368,7 @@ func GetPayRecForecast(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			resp = append(resp, map[string]interface{}{"date_range": b.Label, "entities": entArr})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": resp})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": resp})
 	}
 }

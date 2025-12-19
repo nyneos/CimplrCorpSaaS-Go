@@ -2,6 +2,7 @@ package benchmarks
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -245,7 +246,7 @@ func GetIndexList() http.HandlerFunc {
 			}
 			api.RespondWithPayload(w, true, "", result)
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -254,7 +255,7 @@ func GetIndexList() http.HandlerFunc {
 func GetIndexSeries() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -264,14 +265,14 @@ func GetIndexSeries() http.HandlerFunc {
 			Flag     string `json:"flag"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "index required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrIndexRequired)
 			return
 		}
 		if req.Flag == "" {
@@ -295,7 +296,7 @@ func GetIndexSeries() http.HandlerFunc {
 				"raw":        json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -304,7 +305,7 @@ func GetIndexSeries() http.HandlerFunc {
 func GetIndexSnapshot() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -313,14 +314,14 @@ func GetIndexSnapshot() http.HandlerFunc {
 			Index    string `json:"index"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "index required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrIndexRequired)
 			return
 		}
 
@@ -338,7 +339,7 @@ func GetIndexSnapshot() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -347,7 +348,7 @@ func GetIndexSnapshot() http.HandlerFunc {
 func GetIndexConstituents() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -356,14 +357,14 @@ func GetIndexConstituents() http.HandlerFunc {
 			Index    string `json:"index"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "index required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrIndexRequired)
 			return
 		}
 
@@ -381,7 +382,7 @@ func GetIndexConstituents() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -390,7 +391,7 @@ func GetIndexConstituents() http.HandlerFunc {
 func GetMarketMovers() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -399,14 +400,14 @@ func GetMarketMovers() http.HandlerFunc {
 			Index    string `json:"index"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.Provider == "" {
 			req.Provider = "nse"
 		}
 		if req.Index == "" {
-			req.Index = "NIFTY 50"
+			req.Index = constants.Nifty50
 		}
 
 		ctx := r.Context()
@@ -423,7 +424,7 @@ func GetMarketMovers() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -449,7 +450,7 @@ func GetMarketStatus() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -480,7 +481,7 @@ func GetMarketHeatmap() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -506,7 +507,7 @@ func GetAdvanceDeclines() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -540,7 +541,7 @@ func GetMarqueeData() http.HandlerFunc {
 			}
 			api.RespondWithPayload(w, true, "", result)
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -566,7 +567,7 @@ func Get52WeekHighLow() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -592,7 +593,7 @@ func GetMarketTurnover() http.HandlerFunc {
 				"raw":      json.RawMessage(body),
 			})
 		default:
-			api.RespondWithError(w, http.StatusBadRequest, "unsupported provider")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUnsupportedProvider)
 		}
 	}
 }
@@ -639,7 +640,7 @@ func normalizeNSEGraphData(body []byte) interface{} {
 			if len(v) >= 2 {
 				if ts, ok := v[0].(float64); ok {
 					pt.Timestamp = int64(ts)
-					pt.Date = time.UnixMilli(int64(ts)).Format("2006-01-02")
+					pt.Date = time.UnixMilli(int64(ts)).Format(constants.DateFormat)
 					pt.Label = time.UnixMilli(int64(ts)).Format("Jan")
 				}
 				if val, ok := v[1].(float64); ok {
@@ -651,17 +652,23 @@ func normalizeNSEGraphData(body []byte) interface{} {
 				}
 			}
 		case map[string]interface{}:
-			if ts, ok := v["timestamp"].(float64); ok {
-				pt.Timestamp = int64(ts)
-				pt.Date = time.UnixMilli(int64(ts)).Format("2006-01-02")
-				pt.Label = time.UnixMilli(int64(ts)).Format("Jan")
-			} else if ts, ok := v["time"].(float64); ok {
-				pt.Timestamp = int64(ts)
-				pt.Date = time.UnixMilli(int64(ts)).Format("2006-01-02")
-				pt.Label = time.UnixMilli(int64(ts)).Format("Jan")
+			// Accept either "timestamp" or "time" (both are float64 representing millis)
+			var tsVal float64
+			var tsOk bool
+			if t1, ok := v["timestamp"].(float64); ok {
+				tsVal = t1
+				tsOk = true
+			} else if t2, ok := v["time"].(float64); ok {
+				tsVal = t2
+				tsOk = true
+			}
+			if tsOk {
+				pt.Timestamp = int64(tsVal)
+				pt.Date = time.UnixMilli(int64(tsVal)).Format(constants.DateFormat)
+				pt.Label = time.UnixMilli(int64(tsVal)).Format("Jan")
 			} else if dateStr, ok := v["date"].(string); ok {
 				pt.Date = dateStr
-				if t, err := time.Parse("02-Jan-2006", dateStr); err == nil {
+				if t, err := time.Parse(constants.DateFormatDash, dateStr); err == nil {
 					pt.Timestamp = t.UnixMilli()
 					pt.Label = t.Format("Jan")
 				}

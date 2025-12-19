@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"net/http"
 
@@ -28,7 +29,7 @@ func GetAMFISchemeMasterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -72,7 +73,7 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -101,9 +102,6 @@ func GetAMFINavStagingSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetDistinctAMCNamesFromAMFI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-
-		// Get distinct AMC names from both AMFI staging tables
-		// Exclude AMCs that exist in masteramc and are deleted
 		query := `
 			WITH amfi_amcs AS (
     SELECT DISTINCT amc_name

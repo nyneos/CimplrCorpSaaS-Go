@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +46,7 @@ type BankRequest struct {
 	Category string `json:"category,omitempty"`
 	Status   string `json:"status,omitempty"`
 }
+
 func normalizeHeader(headers []string) []string {
 	out := make([]string, len(headers))
 	for i, h := range headers {
@@ -62,7 +65,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []CounterpartyRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -75,7 +78,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -84,13 +87,13 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, rrow := range req.Rows {
 			if rrow.CounterpartyName == "" || rrow.CounterpartyCode == "" || rrow.CounterpartyType == "" {
-				created = append(created, map[string]interface{}{"success": false, "error": "missing required fields", "counterparty_name": rrow.CounterpartyName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing required fields", "counterparty_name": rrow.CounterpartyName})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				created = append(created, map[string]interface{}{"success": false, "error": "failed to start tx: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + err.Error()})
 				continue
 			}
 
@@ -99,14 +102,14 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var effFrom, effTo interface{}
 			if strings.TrimSpace(rrow.EffFrom) != "" {
 				if norm := NormalizeDate(rrow.EffFrom); norm != "" {
-					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 						effFrom = tval
 					}
 				}
 			}
 			if strings.TrimSpace(rrow.EffTo) != "" {
 				if norm := NormalizeDate(rrow.EffTo); norm != "" {
-					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 						effTo = tval
 					}
 				}
@@ -118,7 +121,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
 			if _, err := tx.Exec(ctx, q, id, rrow.InputMethod, rrow.CounterpartyName, rrow.CounterpartyCode, rrow.CounterpartyType, rrow.Address, rrow.Status, rrow.Country, rrow.Contact, rrow.Email, effFrom, effTo, rrow.Tags); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "counterparty_name": rrow.CounterpartyName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "counterparty_name": rrow.CounterpartyName})
 				continue
 			}
 
@@ -127,7 +130,7 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, b := range rrow.Banks {
 				// required: bank (name), country, currency
 				if strings.TrimSpace(b.BankName) == "" || strings.TrimSpace(b.Country) == "" || strings.TrimSpace(b.Currency) == "" {
-					bankResults = append(bankResults, map[string]interface{}{"success": false, "error": "missing bank required fields"})
+					bankResults = append(bankResults, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing bank required fields"})
 					continue
 				}
 				// generate bank_id with CBn- prefix
@@ -162,26 +165,26 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bankQ := `INSERT INTO mastercounterpartybanks (bank_id, counterparty_id, bank, country, branch, account, swift, rel, currency, category, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`
 				if _, err := tx.Exec(ctx, bankQ, bankID, id, b.BankName, b.Country, branch, account, swift, rel, b.Currency, category, status); err != nil {
 					tx.Rollback(ctx)
-					created = append(created, map[string]interface{}{"success": false, "error": "bank insert failed: " + err.Error(), "counterparty_name": rrow.CounterpartyName})
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "bank insert failed: " + err.Error(), "counterparty_name": rrow.CounterpartyName})
 					goto nextRow
 				}
-				bankResults = append(bankResults, map[string]interface{}{"success": true, "bank_id": bankID})
+				bankResults = append(bankResults, map[string]interface{}{constants.ValueSuccess: true, "bank_id": bankID})
 			}
 		nextRow:
 
 			auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "id": id})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "id": id})
 				continue
 			}
-			entry := map[string]interface{}{"success": true, "counterparty_id": id, "counterparty_name": rrow.CounterpartyName}
+			entry := map[string]interface{}{constants.ValueSuccess: true, "counterparty_id": id, "counterparty_name": rrow.CounterpartyName}
 			if len(bankResults) > 0 {
 				entry["banks"] = bankResults
 			}
@@ -208,7 +211,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		// validate session
@@ -220,7 +223,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -309,7 +312,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_counterparty_type": ifaceToString(oldCtype),
 				"address":               ifaceToString(addr),
 				"old_address":           ifaceToString(oldAddr),
-				"status":                ifaceToString(status),
+				constants.KeyStatus:     ifaceToString(status),
 				"old_status":            ifaceToString(oldStatus),
 				"country":               ifaceToString(country),
 				"old_country":           ifaceToString(oldCountry),
@@ -392,8 +395,8 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -421,7 +424,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -429,7 +432,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := `SELECT bank_id, bank, old_bank, country, old_country, branch, old_branch, account, old_account, swift, old_swift, rel, old_rel, currency, old_currency, category, old_category, status, old_status FROM mastercounterpartybanks WHERE counterparty_id = $1`
 		rows, err := pgxPool.Query(ctx, q, req.CounterpartyID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -442,25 +445,25 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			out = append(out, map[string]interface{}{
-				"bank_id":      bankID,
-				"bank":         ifaceToString(bank),
-				"old_bank":     ifaceToString(oldBank),
-				"country":      ifaceToString(country),
-				"old_country":  ifaceToString(oldCountry),
-				"branch":       ifaceToString(branch),
-				"old_branch":   ifaceToString(oldBranch),
-				"account":      ifaceToString(account),
-				"old_account":  ifaceToString(oldAccount),
-				"swift":        ifaceToString(swift),
-				"old_swift":    ifaceToString(oldSwift),
-				"rel":          ifaceToString(rel),
-				"old_rel":      ifaceToString(oldRel),
-				"currency":     ifaceToString(currency),
-				"old_currency": ifaceToString(oldCurrency),
-				"category":     ifaceToString(category),
-				"old_category": ifaceToString(oldCategory),
-				"status":       ifaceToString(status),
-				"old_status":   ifaceToString(oldStatus),
+				"bank_id":           bankID,
+				"bank":              ifaceToString(bank),
+				"old_bank":          ifaceToString(oldBank),
+				"country":           ifaceToString(country),
+				"old_country":       ifaceToString(oldCountry),
+				"branch":            ifaceToString(branch),
+				"old_branch":        ifaceToString(oldBranch),
+				"account":           ifaceToString(account),
+				"old_account":       ifaceToString(oldAccount),
+				"swift":             ifaceToString(swift),
+				"old_swift":         ifaceToString(oldSwift),
+				"rel":               ifaceToString(rel),
+				"old_rel":           ifaceToString(oldRel),
+				"currency":          ifaceToString(currency),
+				"old_currency":      ifaceToString(oldCurrency),
+				"category":          ifaceToString(category),
+				"old_category":      ifaceToString(oldCategory),
+				constants.KeyStatus: ifaceToString(status),
+				"old_status":        ifaceToString(oldStatus),
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -479,7 +482,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -490,7 +493,7 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -525,8 +528,8 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -542,7 +545,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		updatedBy := ""
@@ -553,7 +556,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -561,12 +564,12 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if row.CounterpartyID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "missing counterparty_id"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing counterparty_id"})
 				continue
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error()})
 				continue
 			}
 			committed := false
@@ -579,7 +582,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sel := `SELECT counterparty_name, counterparty_code, counterparty_type, address, status, country, contact, email, eff_from, eff_to, tags FROM mastercounterparty WHERE counterparty_id=$1 FOR UPDATE`
 				var existingName, existingCode, existingType, existingAddr, existingStatus, existingCountry, existingContact, existingEmail, existingEffFrom, existingEffTo, existingTags interface{}
 				if err := tx.QueryRow(ctx, sel, row.CounterpartyID).Scan(&existingName, &existingCode, &existingType, &existingAddr, &existingStatus, &existingCountry, &existingContact, &existingEmail, &existingEffFrom, &existingEffTo, &existingTags); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "counterparty_id": row.CounterpartyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "counterparty_id": row.CounterpartyID})
 					return
 				}
 
@@ -604,7 +607,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("address=$%d, old_address=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingAddr))
 						pos += 2
-					case "status":
+					case constants.KeyStatus:
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
 						pos += 2
@@ -628,7 +631,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							pos += 2
 						} else {
 							if norm := NormalizeDate(s); norm != "" {
-								if tval, err := time.Parse("2006-01-02", norm); err == nil {
+								if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 									sets = append(sets, fmt.Sprintf("eff_from=$%d, old_eff_from=$%d", pos, pos+1))
 									args = append(args, tval, existingEffFrom)
 									pos += 2
@@ -642,7 +645,7 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							pos += 2
 						} else {
 							if norm := NormalizeDate(s); norm != "" {
-								if tval, err := time.Parse("2006-01-02", norm); err == nil {
+								if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 									sets = append(sets, fmt.Sprintf("eff_to=$%d, old_eff_to=$%d", pos, pos+1))
 									args = append(args, tval, existingEffTo)
 									pos += 2
@@ -663,29 +666,29 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercounterparty SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE counterparty_id=$%d RETURNING counterparty_id", pos)
 					args = append(args, row.CounterpartyID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "update failed: " + err.Error(), "counterparty_id": row.CounterpartyID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "counterparty_id": row.CounterpartyID})
 						return
 					}
 				}
 
 				auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "audit failed: " + err.Error(), "counterparty_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "counterparty_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "counterparty_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "counterparty_id": updatedID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "counterparty_id": updatedID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "counterparty_id": updatedID})
 			}()
 		}
 
 		overall := true
 		for _, r := range results {
-			if ok, exists := r["success"]; exists {
+			if ok, exists := r[constants.ValueSuccess]; exists {
 				if b, okb := ok.(bool); okb {
 					if !b {
 						overall = false
@@ -718,7 +721,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		updatedBy := ""
@@ -729,7 +732,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -737,13 +740,13 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.BankID) == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "missing bank_id"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing bank_id"})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error(), "bank_id": row.BankID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "bank_id": row.BankID})
 				continue
 			}
 			committed := false
@@ -759,7 +762,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var counterpartyID string
 				var exBank, exCountry, exBranch, exAccount, exSwift, exRel, exCurrency, exCategory, exStatus interface{}
 				if err := tx.QueryRow(ctx, sel, row.BankID).Scan(&counterpartyID, &exBank, &exCountry, &exBranch, &exAccount, &exSwift, &exRel, &exCurrency, &exCategory, &exStatus); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "bank_id": row.BankID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "bank_id": row.BankID})
 					return
 				}
 
@@ -800,7 +803,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("category=$%d, old_category=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(exCategory))
 						pos += 2
-					case "status":
+					case constants.KeyStatus:
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(exStatus))
 						pos += 2
@@ -814,7 +817,7 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercounterpartybanks SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE bank_id=$%d RETURNING bank_id", pos)
 					args = append(args, row.BankID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedBankID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "update failed: " + err.Error(), "bank_id": row.BankID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "bank_id": row.BankID})
 						return
 					}
 				}
@@ -822,16 +825,16 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// insert audit action for parent counterparty to mark edit pending
 				auditQ := `INSERT INTO auditactioncounterparty (counterparty_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, counterpartyID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "bank_id": updatedBankID, "counterparty_id": counterpartyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "bank_id": updatedBankID, "counterparty_id": counterpartyID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "bank_id": updatedBankID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "bank_id": updatedBankID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "bank_id": updatedBankID, "counterparty_id": counterpartyID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "bank_id": updatedBankID, "counterparty_id": counterpartyID})
 			}()
 		}
 
@@ -850,7 +853,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason          string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -862,7 +865,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -874,7 +877,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -894,12 +897,12 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "counterparty_ids": body.CounterpartyIDs})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "counterparty_ids": body.CounterpartyIDs})
 	}
 }
 
@@ -912,7 +915,7 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment         string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -923,14 +926,14 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -999,11 +1002,11 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		committed = true
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
 
@@ -1016,7 +1019,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment         string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1027,14 +1030,14 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1118,7 +1121,7 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		committed = true
@@ -1131,7 +1134,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -1141,7 +1144,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
@@ -1155,17 +1158,17 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
@@ -1219,7 +1222,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1263,7 +1266,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tgtCols = append(tgtCols, t)
 				} else {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrNoMappingForSourceColumn, h))
 					return
 				}
 			}
@@ -1298,13 +1301,13 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }
 
@@ -1313,7 +1316,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// === Step 1: Identify user ===
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var req struct {
 				UserID string `json:"user_id"`
@@ -1322,7 +1325,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = req.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -1334,13 +1337,13 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		// === Step 2: Parse uploaded CSV ===
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -1355,7 +1358,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"counterparty_code": true,
 			"counterparty_type": true,
 			"address":           true,
-			"status":            true,
+			constants.KeyStatus: true,
 			"country":           true,
 			"contact":           true,
 			"email":             true,
@@ -1369,7 +1372,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
@@ -1416,7 +1419,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							vals[j] = nil
 						} else if c == "eff_from" || c == "eff_to" {
 							if norm := NormalizeDate(cell); norm != "" {
-								if t, err := time.Parse("2006-01-02", norm); err == nil {
+								if t, err := time.Parse(constants.DateFormat, norm); err == nil {
 									vals[j] = t
 								} else {
 									vals[j] = norm
@@ -1439,7 +1442,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// === Step 5: Transaction (sync all inserts) ===
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1476,7 +1479,7 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Final commit (sync)
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
@@ -1484,10 +1487,10 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]any{
-			"success":   true,
-			"batch_ids": batchIDs,
+			constants.ValueSuccess: true,
+			"batch_ids":            batchIDs,
 		})
 	}
 }
@@ -1497,7 +1500,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// --- user ---
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var req struct {
 				UserID string `json:"user_id"`
@@ -1506,7 +1509,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = req.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		userName := ""
@@ -1517,7 +1520,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1530,7 +1533,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// --- parse multipart ---
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -1540,16 +1543,16 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		allowed := map[string]bool{
-			"bank_id":  true,
-			"bank":     true,
-			"country":  true,
-			"branch":   true,
-			"account":  true,
-			"swift":    true,
-			"rel":      true,
-			"currency": true,
-			"category": true,
-			"status":   true,
+			"bank_id":           true,
+			"bank":              true,
+			"country":           true,
+			"branch":            true,
+			"account":           true,
+			"swift":             true,
+			"rel":               true,
+			"currency":          true,
+			"category":          true,
+			constants.KeyStatus: true,
 		}
 
 		batchIDs := []string{}
@@ -1557,7 +1560,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
@@ -1622,7 +1625,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// --- Sync transaction: COPY + single audit INSERT ---
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1652,7 +1655,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// commit
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
@@ -1661,7 +1664,7 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// respond
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }

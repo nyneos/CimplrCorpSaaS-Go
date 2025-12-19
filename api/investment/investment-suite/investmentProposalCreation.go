@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -143,14 +145,14 @@ type EntitySchemeHolding struct {
 func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		ctx := r.Context()
 		var req CreateProposalRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -162,7 +164,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		userEmail, ok := resolveUserEmail(req.UserID)
 		if !ok {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -174,7 +176,7 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -211,14 +213,14 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		ctx := r.Context()
 		var req UpdateProposalRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -230,7 +232,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		userEmail, ok := resolveUserEmail(req.UserID)
 		if !ok {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -242,7 +244,7 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -285,14 +287,14 @@ func BulkRejectProposals(pool *pgxpool.Pool) http.HandlerFunc {
 func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		ctx := r.Context()
 		var req ProposalBulkActionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -304,13 +306,13 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 
 		userEmail, ok := resolveUserEmail(req.UserID)
 		if !ok {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -467,14 +469,14 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		ctx := r.Context()
 		var req ProposalBulkDeleteRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -486,13 +488,13 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 
 		userEmail, ok := resolveUserEmail(req.UserID)
 		if !ok {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid or inactive user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -587,7 +589,7 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -679,7 +681,7 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				case nil:
 					rec[key] = ""
 				case time.Time:
-					rec[key] = v.Format("2006-01-02 15:04:05")
+					rec[key] = v.Format(constants.DateTimeFormat)
 				default:
 					rec[key] = v
 				}
@@ -700,7 +702,7 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -793,7 +795,7 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 				case nil:
 					rec[key] = ""
 				case time.Time:
-					rec[key] = v.Format("2006-01-02 15:04:05")
+					rec[key] = v.Format(constants.DateTimeFormat)
 				default:
 					rec[key] = v
 				}
@@ -814,13 +816,13 @@ func GetApprovedProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		var req ProposalDetailRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		req.ProposalID = strings.TrimSpace(req.ProposalID)
@@ -918,7 +920,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			case nil:
 				proposal[key] = ""
 			case time.Time:
-				proposal[key] = v.Format("2006-01-02 15:04:05")
+				proposal[key] = v.Format(constants.DateTimeFormat)
 			default:
 				proposal[key] = v
 			}
@@ -964,7 +966,7 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 				case nil:
 					rec[key] = ""
 				case time.Time:
-					rec[key] = v.Format("2006-01-02 15:04:05")
+					rec[key] = v.Format(constants.DateTimeFormat)
 				default:
 					rec[key] = v
 				}
@@ -1109,19 +1111,19 @@ func GetProposalDetail(pool *pgxpool.Pool) http.HandlerFunc {
 func GetEntitySchemeHoldings(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		var req EntityHoldingsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		entityName := strings.TrimSpace(req.EntityName)
 		if entityName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
 			return
 		}
 
@@ -1223,13 +1225,13 @@ ORDER BY amc_name, scheme_name
 func GetEntityAccounts(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
 		var req EntityHoldingsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -1330,13 +1332,13 @@ func normalizeUpdateProposalRequest(req *UpdateProposalRequest) {
 
 func validateProposalRequest(req *CreateProposalRequest) error {
 	if req.UserID == "" {
-		return fmt.Errorf("user_id is required")
+		return fmt.Errorf(constants.ErrUserIIsRequired)
 	}
 	if req.ProposalName == "" {
 		return fmt.Errorf("proposal_name is required")
 	}
 	if req.EntityName == "" {
-		return fmt.Errorf("entity_name is required")
+		return fmt.Errorf(constants.ErrEntityNameRequired)
 	}
 	if req.TotalAmount <= 0 {
 		return fmt.Errorf("total_amount must be greater than zero")
@@ -1362,7 +1364,7 @@ func validateProposalRequest(req *CreateProposalRequest) error {
 
 func validateUpdateProposalRequest(req *UpdateProposalRequest) error {
 	if req.UserID == "" {
-		return fmt.Errorf("user_id is required")
+		return fmt.Errorf(constants.ErrUserIIsRequired)
 	}
 	if req.ProposalID == "" {
 		return fmt.Errorf("proposal_id is required")
@@ -1371,7 +1373,7 @@ func validateUpdateProposalRequest(req *UpdateProposalRequest) error {
 		return fmt.Errorf("proposal_name is required")
 	}
 	if req.EntityName == "" {
-		return fmt.Errorf("entity_name is required")
+		return fmt.Errorf(constants.ErrEntityNameRequired)
 	}
 	if req.TotalAmount <= 0 {
 		return fmt.Errorf("total_amount must be greater than zero")
@@ -1659,10 +1661,10 @@ func normalizeBulkActionRequest(req *ProposalBulkActionRequest) {
 
 func validateBulkActionRequest(req *ProposalBulkActionRequest) error {
 	if req.UserID == "" {
-		return fmt.Errorf("user_id is required")
+		return fmt.Errorf(constants.ErrUserIIsRequired)
 	}
 	if len(req.ProposalIDs) == 0 {
-		return fmt.Errorf("proposal_ids are required")
+		return fmt.Errorf(constants.ErrProposalIDsRequired)
 	}
 	return nil
 }
@@ -1675,10 +1677,10 @@ func normalizeBulkDeleteRequest(req *ProposalBulkDeleteRequest) {
 
 func validateBulkDeleteRequest(req *ProposalBulkDeleteRequest) error {
 	if req.UserID == "" {
-		return fmt.Errorf("user_id is required")
+		return fmt.Errorf(constants.ErrUserIIsRequired)
 	}
 	if len(req.ProposalIDs) == 0 {
-		return fmt.Errorf("proposal_ids are required")
+		return fmt.Errorf(constants.ErrProposalIDsRequired)
 	}
 	return nil
 }
@@ -1686,7 +1688,7 @@ func validateBulkDeleteRequest(req *ProposalBulkDeleteRequest) error {
 func gatherProposalIDs(ctx context.Context, tx pgx.Tx, proposalIDs []string) ([]string, []string, error) {
 	ordered := normalizeStringSlice(proposalIDs)
 	if len(ordered) == 0 {
-		return nil, nil, fmt.Errorf("proposal_ids are required")
+		return nil, nil, fmt.Errorf(constants.ErrProposalIDsRequired)
 	}
 
 	rows, err := tx.Query(ctx, `

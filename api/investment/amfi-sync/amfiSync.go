@@ -9,6 +9,8 @@ import (
 
 	"CimplrCorpSaas/internal/jobs"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -38,16 +40,16 @@ type LogEntry struct {
 func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		// Initialize response
 		response := SyncResponse{
 			Success: false,
-			Status:  "error",
+			Status:  constants.ValueError,
 			Data: SyncData{
 				LastChecked: time.Now().Format("02-01-2006 15:04"),
 			},
@@ -162,7 +164,7 @@ func SyncSchemesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Update response with success data
 		response.Success = true
-		response.Status = "success"
+		response.Status = constants.ValueSuccess
 		response.Data.NewAmcs = newAmcs
 		response.Data.NewSchemes = newSchemes
 		response.Data.TotalProcessed = finalSchemeCount

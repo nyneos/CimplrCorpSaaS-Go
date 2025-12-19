@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -20,7 +22,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SystemTransactionID == "" || len(req.Fields) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "system_transaction_id and at least one field to update must be provided in body"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_id and at least one field to update must be provided in body"})
 			return
 		}
 		// Check if booking exists
@@ -28,14 +30,14 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM forward_bookings WHERE system_transaction_id = $1)", req.SystemTransactionID).Scan(&exists)
 		if err != nil || !exists {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No matching forward booking found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No matching forward booking found"})
 			return
 		}
 		// Get valid columns for forward_bookings
 		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to fetch columns"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
 			return
 		}
 		validCols := map[string]bool{}
@@ -57,7 +59,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		updateFields["processing_status"] = "pending"
 		if len(updateFields) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No valid fields to update"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No valid fields to update"})
 			return
 		}
 		// Build dynamic SET clause
@@ -68,7 +70,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		}
 		setClause := make([]string, len(keys))
 		for i, k := range keys {
-			setClause[i] = fmt.Sprintf("%s = $%d", k, i+1)
+			setClause[i] = fmt.Sprintf(constants.FormatSQLColumnArg, k, i+1)
 			values = append(values, updateFields[k])
 		}
 		values = append(values, req.SystemTransactionID)
@@ -78,7 +80,7 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		colRows2, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'forward_bookings'`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to fetch columns"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch columns"})
 			return
 		}
 		var allCols []string
@@ -96,16 +98,16 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 		}
 		if err := row.Scan(valPtrs...); err != nil {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No matching forward booking found after update"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "No matching forward booking found after update"})
 			return
 		}
 		result := map[string]interface{}{}
 		for i, col := range allCols {
 			result[col] = vals[i]
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": result})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
 	}
 }
 
@@ -113,31 +115,31 @@ func UpdateForwardBookingFields(db *sql.DB) http.HandlerFunc {
 func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID               string   `json:"user_id"`
 			SystemTransactionIDs []string `json:"system_transaction_ids"`
-			ProcessingStatus string `json:"processing_status"`
+			ProcessingStatus     string   `json:"processing_status"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 		if len(req.SystemTransactionIDs) == 0 || (req.ProcessingStatus != "Approved" && req.ProcessingStatus != "Rejected") {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "system_transaction_ids (array) and valid processing_status (Approved/Rejected) required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) and valid processing_status (Approved/Rejected) required"})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		// Find which records are delete-approval and accessible
 		delRows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(req.SystemTransactionIDs))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		var deletedIds []string
@@ -158,7 +160,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			_, err := db.Exec(`DELETE FROM forward_bookings WHERE system_transaction_id = ANY($1) AND processing_status = 'Delete-approval'`, pq.Array(deletedIds))
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 				return
 			}
 		}
@@ -182,7 +184,7 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(updateIds))
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 				return
 			}
 			var eligibleIds []string
@@ -228,12 +230,12 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if len(updatedRows) > 0 || len(deletedIds) > 0 {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updatedRows, "deleted": deletedIds})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updatedRows, "deleted": deletedIds})
 		} else {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "No matching forward bookings found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching forward bookings found"})
 		}
 	}
 }
@@ -242,30 +244,30 @@ func BulkUpdateForwardBookingProcessingStatus(db *sql.DB) http.HandlerFunc {
 func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID               string   `json:"user_id"`
 			SystemTransactionIDs []string `json:"system_transaction_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 		if len(req.SystemTransactionIDs) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "system_transaction_ids (array) required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "system_transaction_ids (array) required"})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		// Only update those belonging to accessible business units
 		rows, err := db.Query(`SELECT system_transaction_id, entity_level_0 FROM forward_bookings WHERE system_transaction_id = ANY($1)`, pq.Array(req.SystemTransactionIDs))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		var eligibleIds []string
@@ -283,14 +285,14 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 		rows.Close()
 		if len(eligibleIds) == 0 {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "No matching forward bookings found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching forward bookings found"})
 			return
 		}
 		updateQuery := `UPDATE forward_bookings SET processing_status = 'Delete-approval' WHERE system_transaction_id = ANY($1) RETURNING *`
 		resultRows, err := db.Query(updateQuery, pq.Array(eligibleIds))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		cols, _ := resultRows.Columns()
@@ -310,12 +312,11 @@ func BulkDeleteForwardBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		resultRows.Close()
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
-
 
 // Handler: AddForwardConfirmationManualEntry
 func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
@@ -330,13 +331,13 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		found := false
@@ -348,7 +349,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		}
 		if !found {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "You do not have access to this business unit"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "You do not have access to this business unit"})
 			return
 		}
 		// Convert empty string date fields to nil
@@ -378,7 +379,7 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 			req.EntityLevel0,
 		}
 		row := db.QueryRow(updateQuery, updateValues...)
-		cols := []string{"internal_reference_id", "entity_level_0", "bank_transaction_id", "swift_unique_id", "bank_confirmation_date", "status", "processing_status"}
+		cols := []string{"internal_reference_id", "entity_level_0", "bank_transaction_id", "swift_unique_id", "bank_confirmation_date", constants.KeyStatus, "processing_status"}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
 		for i := range vals {
@@ -386,16 +387,15 @@ func AddForwardConfirmationManualEntry(db *sql.DB) http.HandlerFunc {
 		}
 		if err := row.Scan(valPtrs...); err != nil {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "No matching record found or already confirmed"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "No matching record found or already confirmed"})
 			return
 		}
 		result := make(map[string]interface{})
 		for i, col := range cols {
 			result[col] = vals[i]
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": result})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": result})
 	}
 }
-

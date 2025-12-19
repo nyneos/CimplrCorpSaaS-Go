@@ -57,5 +57,3 @@ func CountTotal(db *sql.DB, query string, args ...interface{}) (int, error) {
 	}
 	return total, nil
 }
-
-// change

@@ -6,16 +6,18 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
 // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-// 	w.Header().Set("Content-Type", "application/json")
+// 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 	w.WriteHeader(status)
 // 	json.NewEncoder(w).Encode(map[string]interface{}{
-// 		"success": false,
-// 		"error":   errMsg,
+// 		constants.ValueSuccess: false,
+// 		constants.ValueError:   errMsg,
 // 	})
 // }
 
@@ -26,14 +28,14 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 
 		// Get business units from context (set by middleware)
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -97,10 +99,10 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			}
 			proposals = append(proposals, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"proposals": proposals,
+			constants.ValueSuccess: true,
+			"proposals":            proposals,
 		})
 	}
 }

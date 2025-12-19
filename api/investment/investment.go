@@ -10,8 +10,8 @@ import (
 	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
-	redemption "CimplrCorpSaas/api/investment/redemption"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
+	redemption "CimplrCorpSaas/api/investment/redemption"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -115,7 +115,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/accounting/activity/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.BulkRejectActivityActions(pool))))
 	mux.Handle("/investment/accounting/activity/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetActivitiesWithAudit(pool))))
 	mux.Handle("/investment/accounting/activity/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetApprovedActivities(pool))))
-	
+
 	// Accounting Workbench - Journal Entry endpoints
 	mux.Handle("/investment/accounting/journal-entries", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetJournalEntries(pool))))
 

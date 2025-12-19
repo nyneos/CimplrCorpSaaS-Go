@@ -2,6 +2,8 @@ package portfolio
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
+
 	// "context"
 	"encoding/json"
 	"net/http"
@@ -30,7 +32,7 @@ func RefreshPortfolioSnapshots(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -149,7 +151,7 @@ WHERE ts.total_units > 0;
 
 		// Commit
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 

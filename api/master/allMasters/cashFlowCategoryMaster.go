@@ -3,18 +3,21 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+
 	// "bufio"
-	"log"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -78,12 +81,12 @@ func ifaceToTimeString(v interface{}) string {
 	}
 	switch t := v.(type) {
 	case time.Time:
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	case *time.Time:
 		if t == nil {
 			return ""
 		}
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	case string:
 		return t
 	case *string:
@@ -180,7 +183,7 @@ func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, err
 		}
 		return rows, nil
 	}
-	return nil, errors.New("unsupported file type")
+	return nil, errors.New(constants.ErrUnsupportedFileType)
 }
 
 func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -190,7 +193,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Categories []CashFlowCategoryRequest `json:"categories"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		createdBy := ""
@@ -202,7 +205,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -212,13 +215,13 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, cat := range req.Categories {
 			if cat.CategoryName == "" || cat.CategoryType == "" || cat.DefaultMapping == "" || cat.CashflowNature == "" || cat.UsageFlag == "" || cat.Status == "" {
-				created = append(created, map[string]interface{}{"success": false, "error": "Missing required fields", "category_name": cat.CategoryName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingRequiredFieldsUser, "category_name": cat.CategoryName})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				created = append(created, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + err.Error(), "category_name": cat.CategoryName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + err.Error(), "category_name": cat.CategoryName})
 				continue
 			}
 			categoryID := "CFC-" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:7]
@@ -260,7 +263,7 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			if err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "category_name": cat.CategoryName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "category_name": cat.CategoryName})
 				continue
 			}
 			auditSQL := `INSERT INTO auditactioncashflowcategory (
@@ -268,15 +271,15 @@ func CreateAndSyncCashFlowCategories(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditSQL, categoryID, nil, createdBy); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "Audit insert failed: " + err.Error(), "category_id": categoryID})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "category_id": categoryID})
 				continue
 			}
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "Commit failed: " + err.Error(), "category_id": categoryID})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error(), "category_id": categoryID})
 				continue
 			}
-			created = append(created, map[string]interface{}{"success": true, "category_id": categoryID, "category_name": cat.CategoryName})
+			created = append(created, map[string]interface{}{constants.ValueSuccess: true, "category_id": categoryID, "category_name": cat.CategoryName})
 			nameToID[strings.ToLower(cat.CategoryName)] = categoryID
 		}
 		relAdded := 0
@@ -396,65 +399,65 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"id":   categoryID,
 				"name": ifaceToString(categoryNameI),
 				"data": map[string]interface{}{
-					"category_id":   categoryID,
-					"category_name": ifaceToString(categoryNameI),
-					"category_type": ifaceToString(categoryTypeI),
-					"parent_category_name": ifaceToString(parentCategoryNameI),
-					"default_mapping":   ifaceToString(defaultMappingI),
-					"cashflow_nature":   ifaceToString(cashflowNatureI),
-					"usage_flag":        ifaceToString(usageFlagI),
-					"description":       ifaceToString(descriptionI),
-					"status":            ifaceToString(statusI),
-					"old_category_name": ifaceToString(oldCategoryNameI),
-					"old_category_type": ifaceToString(oldCategoryTypeI),
+					"category_id":              categoryID,
+					"category_name":            ifaceToString(categoryNameI),
+					"category_type":            ifaceToString(categoryTypeI),
+					"parent_category_name":     ifaceToString(parentCategoryNameI),
+					"default_mapping":          ifaceToString(defaultMappingI),
+					"cashflow_nature":          ifaceToString(cashflowNatureI),
+					"usage_flag":               ifaceToString(usageFlagI),
+					"description":              ifaceToString(descriptionI),
+					constants.KeyStatus:        ifaceToString(statusI),
+					"old_category_name":        ifaceToString(oldCategoryNameI),
+					"old_category_type":        ifaceToString(oldCategoryTypeI),
 					"old_parent_category_name": ifaceToString(oldParentCategoryNameI),
-					"old_default_mapping":   ifaceToString(oldDefaultMappingI),
-					"old_cashflow_nature":   ifaceToString(oldCashflowNatureI),
-					"old_usage_flag":        ifaceToString(oldUsageFlagI),
-					"old_description":       ifaceToString(oldDescriptionI),
-					"old_status":            ifaceToString(oldStatusI),
-					"is_top_level_category": isTopLevelCategory,
-					"is_deleted":            isDeleted,
-					"category_level":        ifaceToInt(categoryLevelI),
-					"old_category_level":    ifaceToInt(oldCategoryLevelI),
-					"erp_type":              ifaceToString(erpTypeI),
-					"erp_ext":               ifaceToString(erpExtI),
-					"erp_segment":           ifaceToString(erpSegmentI),
-					"old_erp_type":          ifaceToString(oldErpTypeI),
-					"old_erp_ext":           ifaceToString(oldErpExtI),
-					"old_erp_segment":       ifaceToString(oldErpSegmentI),
-					"sap_fsv":               ifaceToString(sapFsvI),
-					"sap_node":              ifaceToString(sapNodeI),
-					"sap_bukrs":             ifaceToString(sapBukrsI),
-					"sap_notes":             ifaceToString(sapNotesI),
-					"old_sap_fsv":           ifaceToString(oldSapFsvI),
-					"old_sap_node":          ifaceToString(oldSapNodeI),
-					"old_sap_bukrs":         ifaceToString(oldSapBukrsI),
-					"old_sap_notes":         ifaceToString(oldSapNotesI),
-					"oracle_ledger":         ifaceToString(oracleLedgerI),
-					"oracle_cf_code":        ifaceToString(oracleCFCodeI),
-					"oracle_cf_name":        ifaceToString(oracleCFNameI),
-					"oracle_line":           ifaceToString(oracleLineI),
-					"old_oracle_ledger":     ifaceToString(oldOracleLedgerI),
-					"old_oracle_cf_code":    ifaceToString(oldOracleCFCodeI),
-					"old_oracle_cf_name":    ifaceToString(oldOracleCFNameI),
-					"old_oracle_line":       ifaceToString(oldOracleLineI),
-					"tally_group":           ifaceToString(tallyGroupI),
-					"tally_voucher":         ifaceToString(tallyVoucherI),
-					"tally_notes":           ifaceToString(tallyNotesI),
-					"old_tally_group":       ifaceToString(oldTallyGroupI),
-					"old_tally_voucher":     ifaceToString(oldTallyVoucherI),
-					"old_tally_notes":       ifaceToString(oldTallyNotesI),
-					"sage_section":          ifaceToString(sageSectionI),
-					"sage_line":             ifaceToString(sageLineI),
-					"sage_notes":            ifaceToString(sageNotesI),
-					"old_sage_section":      ifaceToString(oldSageSectionI),
-					"old_sage_line":         ifaceToString(oldSageLineI),
-					"old_sage_notes":        ifaceToString(oldSageNotesI),
-					"processing_status":     ifaceToString(processingStatusI),
-					"requested_by":          ifaceToString(requestedByI),
-					"requested_at":          ifaceToTimeString(requestedAtI),
-					"created_by":            "", "created_at": "", "edited_by": "", "edited_at": "", "deleted_by": "", "deleted_at": "",
+					"old_default_mapping":      ifaceToString(oldDefaultMappingI),
+					"old_cashflow_nature":      ifaceToString(oldCashflowNatureI),
+					"old_usage_flag":           ifaceToString(oldUsageFlagI),
+					"old_description":          ifaceToString(oldDescriptionI),
+					"old_status":               ifaceToString(oldStatusI),
+					"is_top_level_category":    isTopLevelCategory,
+					"is_deleted":               isDeleted,
+					"category_level":           ifaceToInt(categoryLevelI),
+					"old_category_level":       ifaceToInt(oldCategoryLevelI),
+					"erp_type":                 ifaceToString(erpTypeI),
+					"erp_ext":                  ifaceToString(erpExtI),
+					"erp_segment":              ifaceToString(erpSegmentI),
+					"old_erp_type":             ifaceToString(oldErpTypeI),
+					"old_erp_ext":              ifaceToString(oldErpExtI),
+					"old_erp_segment":          ifaceToString(oldErpSegmentI),
+					"sap_fsv":                  ifaceToString(sapFsvI),
+					"sap_node":                 ifaceToString(sapNodeI),
+					"sap_bukrs":                ifaceToString(sapBukrsI),
+					"sap_notes":                ifaceToString(sapNotesI),
+					"old_sap_fsv":              ifaceToString(oldSapFsvI),
+					"old_sap_node":             ifaceToString(oldSapNodeI),
+					"old_sap_bukrs":            ifaceToString(oldSapBukrsI),
+					"old_sap_notes":            ifaceToString(oldSapNotesI),
+					"oracle_ledger":            ifaceToString(oracleLedgerI),
+					"oracle_cf_code":           ifaceToString(oracleCFCodeI),
+					"oracle_cf_name":           ifaceToString(oracleCFNameI),
+					"oracle_line":              ifaceToString(oracleLineI),
+					"old_oracle_ledger":        ifaceToString(oldOracleLedgerI),
+					"old_oracle_cf_code":       ifaceToString(oldOracleCFCodeI),
+					"old_oracle_cf_name":       ifaceToString(oldOracleCFNameI),
+					"old_oracle_line":          ifaceToString(oldOracleLineI),
+					"tally_group":              ifaceToString(tallyGroupI),
+					"tally_voucher":            ifaceToString(tallyVoucherI),
+					"tally_notes":              ifaceToString(tallyNotesI),
+					"old_tally_group":          ifaceToString(oldTallyGroupI),
+					"old_tally_voucher":        ifaceToString(oldTallyVoucherI),
+					"old_tally_notes":          ifaceToString(oldTallyNotesI),
+					"sage_section":             ifaceToString(sageSectionI),
+					"sage_line":                ifaceToString(sageLineI),
+					"sage_notes":               ifaceToString(sageNotesI),
+					"old_sage_section":         ifaceToString(oldSageSectionI),
+					"old_sage_line":            ifaceToString(oldSageLineI),
+					"old_sage_notes":           ifaceToString(oldSageNotesI),
+					"processing_status":        ifaceToString(processingStatusI),
+					"requested_by":             ifaceToString(requestedByI),
+					"requested_at":             ifaceToTimeString(requestedAtI),
+					"created_by":               "", "created_at": "", "edited_by": "", "edited_at": "", "deleted_by": "", "deleted_at": "",
 					"action_type":     ifaceToString(actionTypeI),
 					"action_id":       ifaceToString(actionIDI),
 					"checker_by":      ifaceToString(checkerByI),
@@ -604,14 +607,14 @@ func GetCashFlowCategoryHierarchyPGX(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(rowsOut)
 	}
 }
 
 func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		var req struct {
 			UserID string `json:"user_id"`
 			Level  int    `json:"level"`
@@ -630,7 +633,7 @@ func FindParentCashFlowCategoryAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !validUser {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -682,7 +685,7 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -694,7 +697,7 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -724,8 +727,8 @@ func GetCashFlowCategoryNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "categories": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "categories": out})
 	}
 }
 func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -739,7 +742,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"categories"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		updatedBy := ""
@@ -751,7 +754,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -761,13 +764,13 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		for _, cat := range req.Categories {
 			if cat.CategoryID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "Missing category_id"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Missing category_id"})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + err.Error(), "category_id": cat.CategoryID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + err.Error(), "category_id": cat.CategoryID})
 				continue
 			}
 			committed := false
@@ -781,7 +784,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var (
 					existingCategoryNameI                                                                    interface{}
 					existingCategoryTypeI                                                                    interface{}
-					existingParentCategoryNameI                                                            *string
+					existingParentCategoryNameI                                                              *string
 					existingDefaultMappingI                                                                  interface{}
 					existingCashflowNatureI                                                                  interface{}
 					existingUsageFlagI                                                                       interface{}
@@ -805,7 +808,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&existingErpTypeI, &existingErpExtI, &existingErpSegmentI, &existingSapFsvI, &existingSapNodeI, &existingSapBukrsI, &existingSapNotesI,
 					&existingOracleLedgerI, &existingOracleCFCodeI, &existingOracleCFNameI, &existingOracleLineI,
 					&existingTallyGroupI, &existingTallyVoucherI, &existingTallyNotesI, &existingSageSectionI, &existingSageLineI, &existingSageNotesI); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing category: " + err.Error(), "category_id": cat.CategoryID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing category: " + err.Error(), "category_id": cat.CategoryID})
 					return
 				}
 				var sets []string
@@ -848,7 +851,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("description=$%d, old_description=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingDescriptionI))
 						pos += 2
-					case "status":
+					case constants.KeyStatus:
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingStatusI))
 						pos += 2
@@ -980,7 +983,7 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercashflowcategory SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE category_id=$%d RETURNING category_id", pos)
 					args = append(args, cat.CategoryID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedCategoryID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "category_id": cat.CategoryID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "category_id": cat.CategoryID})
 						return
 					}
 				} else {
@@ -990,26 +993,26 @@ func UpdateCashFlowCategoryBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					category_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
 				if _, err := tx.Exec(ctx, auditQuery, updatedCategoryID, "EDIT", "PENDING_EDIT_APPROVAL", cat.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Category updated but audit log failed: " + err.Error(), "category_id": updatedCategoryID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Category updated but audit log failed: " + err.Error(), "category_id": updatedCategoryID})
 					return
 				}
 				if parentProvided != "" {
 					var exists bool
 					err := tx.QueryRow(ctx, `SELECT true FROM cashflowcategoryrelationships WHERE parent_category_name=$1 AND child_category_name=$2`, parentProvided, ifaceToString(existingCategoryNameI)).Scan(&exists)
-					if err == nil && exists {
-					} else {
+					// Insert only when the query returned an error or the relationship does not exist
+					if err != nil || !exists {
 						if _, err := tx.Exec(ctx, `INSERT INTO cashflowcategoryrelationships (parent_category_name, child_category_name, status) VALUES ($1,$2,'Active')`, parentProvided, ifaceToString(existingCategoryNameI)); err == nil {
-							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "parent_category_name": parentProvided, "child_category_name": ifaceToString(existingCategoryNameI)})
+							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "parent_category_name": parentProvided, "child_category_name": ifaceToString(existingCategoryNameI)})
 						}
 					}
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "category_id": updatedCategoryID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Transaction commit failed: " + err.Error(), "category_id": updatedCategoryID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "category_id": updatedCategoryID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "category_id": updatedCategoryID})
 			}()
 		}
 
@@ -1029,7 +1032,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -1047,7 +1050,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1101,7 +1104,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1126,7 +1129,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(updated) == 0 {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusBadRequest, "No rows updated")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsUpdated)
 			return
 		}
 		for _, cid := range updated {
@@ -1138,7 +1141,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -1154,7 +1157,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1166,7 +1169,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1235,7 +1238,7 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		success := len(updated) > 0
 		if !success {
-			api.RespondWithPayload(w, false, "No rows updated", map[string]interface{}{"updated": updated})
+			api.RespondWithPayload(w, false, constants.ErrNoRowsUpdated, map[string]interface{}{"updated": updated})
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
@@ -1250,7 +1253,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -1263,7 +1266,7 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1335,19 +1338,18 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		success := len(updated) > 0
 		if !success {
-			api.RespondWithPayload(w, false, "No rows updated", map[string]interface{}{"updated": updated})
+			api.RespondWithPayload(w, false, constants.ErrNoRowsUpdated, map[string]interface{}{"updated": updated})
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
 
-
 func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -1357,7 +1359,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
@@ -1373,17 +1375,17 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
@@ -1427,7 +1429,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1468,7 +1470,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tgtCols = append(tgtCols, tgt)
 				} else {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrNoMappingForSourceColumn, h))
 					return
 				}
 			}
@@ -1533,7 +1535,7 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
@@ -1545,16 +1547,15 @@ func UploadCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-
 func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
-			startOverall := time.Now()
-			timings := make([]map[string]interface{}, 0)
+		ctx := r.Context()
+		startOverall := time.Now()
+		timings := make([]map[string]interface{}, 0)
 
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		userName := ""
@@ -1565,7 +1566,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1586,7 +1587,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(records) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
 			return
 		}
 		header := records[0]
@@ -1599,7 +1600,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allowed := map[string]bool{
 			"category_name": true, "category_type": true, "parent_category_name": true,
 			"default_mapping": true, "cashflow_nature": true, "usage_flag": true,
-			"description": true, "status": true, "is_deleted": true,
+			"description": true, constants.KeyStatus: true, "is_deleted": true,
 			"erp_type": true, "erp_ext": true, "erp_segment": true,
 			"sap_fsv": true, "sap_node": true, "sap_bukrs": true, "sap_notes": true,
 			"oracle_ledger": true, "oracle_cf_code": true, "oracle_cf_name": true, "oracle_line": true,
@@ -1642,7 +1643,7 @@ func UploadCashFlowCategorySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer func() {
@@ -1724,7 +1725,7 @@ AND (
 `
 		updateStart := time.Now()
 		if _, err := tx.Exec(ctx, updateSQL); err != nil {
-			api.RespondWithError(w, 500, "Update failed: "+err.Error())
+			api.RespondWithError(w, 500, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 		updateDur := time.Since(updateStart)
@@ -1785,7 +1786,7 @@ ON CONFLICT DO NOTHING;
 `
 		auditStart := time.Now()
 		if _, err := tx.Exec(ctx, auditSQL, userName); err != nil {
-			api.RespondWithError(w, 500, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, 500, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 		auditDur := time.Since(auditStart)
@@ -1794,26 +1795,26 @@ ON CONFLICT DO NOTHING;
 
 		commitStart := time.Now()
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		commitDur := time.Since(commitStart)
 		timings = append(timings, map[string]interface{}{"phase": "commit", "ms": commitDur.Milliseconds()})
 		log.Printf("[UploadCashFlowCategorySimple] commit elapsed=%v file=%s", commitDur, fh.Filename)
 		tx = nil
-		
+
 		dur := time.Since(startOverall)
 		timings = append(timings, map[string]interface{}{"phase": "total", "ms": dur.Milliseconds()})
 		resp := map[string]interface{}{
-			"success":     true,
-			"file":        fh.Filename,
-			"rows":        rowCount,
-			"duration_ms": dur.Milliseconds(),
-			"batch_id":    uuid.New().String(),
-			"timings":     timings,
+			constants.ValueSuccess: true,
+			"file":                 fh.Filename,
+			"rows":                 rowCount,
+			"duration_ms":          dur.Milliseconds(),
+			"batch_id":             uuid.New().String(),
+			"timings":              timings,
 		}
 		log.Printf("[UploadCashFlowCategorySimple] finished rows=%d total_ms=%d file=%s", rowCount, dur.Milliseconds(), fh.Filename)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }

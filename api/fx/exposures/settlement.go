@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -26,7 +28,7 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `
@@ -79,8 +81,8 @@ func FilterForwardBookingsForSettlement(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
 	}
 }
 
@@ -98,7 +100,7 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `
@@ -137,13 +139,19 @@ func GetForwardBookingsByEntityAndCurrency(db *sql.DB) http.HandlerFunc {
 		for rows.Next() {
 			vals := make([]interface{}, len(cols))
 			valPtrs := make([]interface{}, len(cols))
-			for i := range vals { valPtrs[i] = &vals[i] }
-			if err := rows.Scan(valPtrs...); err != nil { continue }
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			if err := rows.Scan(valPtrs...); err != nil {
+				continue
+			}
 			rowMap := map[string]interface{}{}
-			for i, col := range cols { rowMap[col] = vals[i] }
+			for i, col := range cols {
+				rowMap[col] = vals[i]
+			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
 	}
 }

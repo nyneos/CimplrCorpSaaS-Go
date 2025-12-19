@@ -12,6 +12,8 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,11 +28,11 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"payload"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
@@ -45,7 +47,7 @@ func BulkUpdateValueDates(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requester == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid user/session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		updated := make([]string, 0, len(req.Rows))
@@ -96,21 +98,21 @@ func parseFlexibleDate(dateStr string) (time.Time, error) {
 	}
 	dateStr = regexp.MustCompile(`\s+`).ReplaceAllString(dateStr, " ")
 	layouts := []string{
-		"2006-01-02",
+		constants.DateFormat,
 		"2006/01/02",
 		"2006.01.02",
 		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
+		constants.DateTimeFormat,
+		constants.DateFormatISO,
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05.000Z",
-		"02-01-2006",
+		constants.DateFormatAlt,
 		"02/01/2006",
 		"02.01.2006",
 		"01-02-2006",
 		"01/02/2006",
 		"01.02.2006",
-		"02-Jan-2006",
+		constants.DateFormatDash,
 		"2-Jan-2006",
 		"02 Jan 2006",
 		"Jan 02, 2006",
@@ -175,7 +177,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		approver := ""
@@ -186,14 +188,14 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if approver == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid user/session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		sel := `SELECT exposure_header_id, exposure_creation_status FROM public.exposure_headers WHERE exposure_header_id = ANY($1)`
 		rows, err := pool.Query(ctx, sel, req.ExposureIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -204,7 +206,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var status *string
 			_ = rows.Scan(&id, &status)
-			if status != nil && *status == "Delete-Approval" {
+			if status != nil && *status == constants.StatusCodeDeleteApproval {
 				toDelete = append(toDelete, id)
 			} else {
 				toApprove = append(toApprove, id)
@@ -221,7 +223,7 @@ func BulkApproveExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			uq := `UPDATE public.exposure_headers SET exposure_creation_status='Approved', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
 			r2, err := pool.Query(ctx, uq, toApprove)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 				return
 			}
 			defer r2.Close()
@@ -346,7 +348,7 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		rejector := ""
@@ -357,16 +359,16 @@ func BulkRejectExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if rejector == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid user/session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Rejected', rejection_comment=$1, rejected_by=$2, rejected_at=now(), updated_at=now() WHERE exposure_header_id = ANY($3) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), rejector, req.ExposureIDs)
 		q := `UPDATE public.exposure_headers SET exposure_creation_status='Rejected', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
-	rows, err := pool.Query(ctx, q, req.ExposureIDs)
+		rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -390,7 +392,7 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.ExposureIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		deleter := ""
@@ -401,16 +403,16 @@ func BulkDeleteExposures(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if deleter == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid user/session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		// q := `UPDATE public.exposure_headers SET approval_status='Delete-approval',delete_comment=$1, is_active = FALSE, updated_at=now() WHERE exposure_header_id = ANY($2) RETURNING exposure_header_id`
 		// rows, err := pool.Query(ctx, q, nullifyEmpty(req.Comment), req.ExposureIDs)
 		q := `UPDATE public.exposure_headers SET exposure_creation_status='Delete-Approval', updated_at=now() WHERE exposure_header_id = ANY($1) RETURNING exposure_header_id`
-	rows, err := pool.Query(ctx, q, req.ExposureIDs)
+		rows, err := pool.Query(ctx, q, req.ExposureIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "db error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()

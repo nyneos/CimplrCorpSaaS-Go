@@ -3,6 +3,7 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -47,7 +48,7 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateDividendRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -77,14 +78,14 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -107,7 +108,7 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, $2, $3, $4, 'DRAFT')
 			RETURNING activity_id
 		`, activityType, req.EffectiveDate, nullIfEmptyString(req.AccountingPeriod), dataSource).Scan(&activityID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Activity insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrActivityInsertFailed+err.Error())
 			return
 		}
 
@@ -131,12 +132,12 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -173,7 +174,7 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -199,7 +200,7 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Single transaction for entire batch
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -222,7 +223,7 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1, $2, $3, $4, 'DRAFT')
 			RETURNING activity_id
 		`, activityType, req.EffectiveDate, nullIfEmptyString(req.AccountingPeriod), dataSource).Scan(&activityID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Activity insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrActivityInsertFailed+err.Error())
 			return
 		}
 
@@ -269,12 +270,12 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -293,7 +294,7 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateDividendRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.DividendID) == "" {
@@ -313,14 +314,14 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -386,12 +387,12 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 		`, activityID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -474,7 +475,7 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -491,7 +492,7 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 

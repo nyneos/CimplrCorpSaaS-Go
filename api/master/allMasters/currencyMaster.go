@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
@@ -25,8 +27,8 @@ type CurrencyMasterRequest struct {
 	// UserID        string `json:"user_id"`
 }
 type CurrencyMasterUpdateRequest struct {
-	CurrencyID string `json:"currency_id"`
-	Status     string `json:"status"`
+	CurrencyID       string `json:"currency_id"`
+	Status           string `json:"status"`
 	DecimalPlaces    int    `json:"decimal_places"`
 	UserID           string `json:"user_id"`
 	OLDStatus        string `json:"old_status"`
@@ -42,7 +44,7 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Currency []CurrencyMasterRequest `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		userID := req.UserID
@@ -55,16 +57,16 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
 			if len(cur.CurrencyCode) != 3 || cur.CurrencyName == "" || cur.Country == "" || cur.DecimalPlaces < 0 || cur.DecimalPlaces > 4 || cur.Status == "" {
 				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         "Invalid currency details",
-					"currency_code": cur.CurrencyCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Invalid currency details",
+					"currency_code":        cur.CurrencyCode,
 				})
 				continue
 			}
@@ -72,9 +74,9 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
 				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         "Failed to start transaction: " + txErr.Error(),
-					"currency_code": cur.CurrencyCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrTxStartFailed + txErr.Error(),
+					"currency_code":        cur.CurrencyCode,
 				})
 				continue
 			}
@@ -93,9 +95,9 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err != nil {
 				tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         err.Error(),
-					"currency_code": cur.CurrencyCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   err.Error(),
+					"currency_code":        cur.CurrencyCode,
 				})
 				continue
 			}
@@ -112,33 +114,33 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if auditErr != nil {
 				tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         "Currency created but audit log failed: " + auditErr.Error(),
-					"currency_id":   currencyID,
-					"currency_code": cur.CurrencyCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Currency created but audit log failed: " + auditErr.Error(),
+					"currency_id":          currencyID,
+					"currency_code":        cur.CurrencyCode,
 				})
 				continue
 			}
 			if commitErr := tx.Commit(ctx); commitErr != nil {
 				results = append(results, map[string]interface{}{
-					"success":       false,
-					"error":         "Transaction commit failed: " + commitErr.Error(),
-					"currency_id":   currencyID,
-					"currency_code": cur.CurrencyCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Transaction commit failed: " + commitErr.Error(),
+					"currency_id":          currencyID,
+					"currency_code":        cur.CurrencyCode,
 				})
 				continue
 			}
 			results = append(results, map[string]interface{}{
-				"success":       true,
-				"currency_id":   currencyID,
-				"currency_code": cur.CurrencyCode,
+				constants.ValueSuccess: true,
+				"currency_id":          currencyID,
+				"currency_code":        cur.CurrencyCode,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": finalSuccess,
-			"results": results,
+			constants.ValueSuccess: finalSuccess,
+			"results":              results,
 		})
 	}
 }
@@ -259,7 +261,7 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"symbol":             symbol,
 				"decimal_places":     decimalPlaces,
 				"old_decimal_places": oldDecimalPlaces,
-				"status":             status,
+				constants.KeyStatus:  status,
 				"old_status":         oldStatus,
 				"processing_status":  ifaceToString(processingStatusPtr),
 				"action_type":        ifaceToString(actionTypePtr),
@@ -286,10 +288,10 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			currencies = make([]map[string]interface{}, 0)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    currencies,
+			constants.ValueSuccess: true,
+			"data":                 currencies,
 		})
 	}
 }
@@ -305,7 +307,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		userID := req.UserID
@@ -318,7 +320,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		var results []map[string]interface{}
@@ -326,7 +328,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ctx := r.Context()
 			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "currency_id": cur.CurrencyID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + txErr.Error(), "currency_id": cur.CurrencyID})
 				continue
 			}
 			committed := false
@@ -336,7 +338,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tx.Rollback(ctx)
 					}
 					if p := recover(); p != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "currency_id": cur.CurrencyID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "panic: " + fmt.Sprint(p), "currency_id": cur.CurrencyID})
 					}
 				}()
 
@@ -345,7 +347,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var exStatus *string
 				sel := `SELECT decimal_places, status FROM mastercurrency WHERE currency_id=$1 FOR UPDATE`
 				if err := tx.QueryRow(ctx, sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing currency: " + err.Error(), "currency_id": cur.CurrencyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing currency: " + err.Error(), "currency_id": cur.CurrencyID})
 					return
 				}
 
@@ -381,7 +383,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("decimal_places=$%d, old_decimal_places=$%d", pos, pos+1))
 						args = append(args, newDec, oldVal)
 						pos += 2
-					case "status":
+					case constants.KeyStatus:
 						newStatus := fmt.Sprint(v)
 						oldVal := ""
 						if exStatus != nil {
@@ -416,7 +418,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercurrency SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE currency_id=$%d RETURNING currency_id, currency_code", pos)
 					args = append(args, cur.CurrencyID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&currencyID, &currencyCode); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "currency_id": cur.CurrencyID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "currency_id": cur.CurrencyID})
 						return
 					}
 				} else {
@@ -427,23 +429,23 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					currency_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
 				if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Currency updated but audit log failed: " + err.Error(), "currency_id": currencyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Currency updated but audit log failed: " + err.Error(), "currency_id": currencyID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "currency_id": currencyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Transaction commit failed: " + err.Error(), "currency_id": currencyID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "currency_id": currencyID, "currency_code": currencyCode})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "currency_id": currencyID, "currency_code": currencyCode})
 			}()
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		finalSuccess := api.IsBulkSuccess(results)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": finalSuccess,
-			"results": results,
+			constants.ValueSuccess: finalSuccess,
+			"results":              results,
 		})
 	}
 }
@@ -467,11 +469,11 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-	query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
-	rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
+		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
+		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -483,10 +485,10 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows.Scan(&id, &currencyID)
 			updated = append(updated, id, currencyID)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"updated": updated,
+			constants.ValueSuccess: true,
+			"updated":              updated,
 		})
 	}
 }
@@ -512,7 +514,7 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 			}
 // 		}
 // 		if checkerBy == "" {
-// 			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+// 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 // 			return
 // 		}
 // 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
@@ -535,28 +537,28 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 			_, _ = pgxPool.Exec(r.Context(), `UPDATE mastercurrency SET is_deleted = true WHERE currency_id = ANY($1)`, pq.Array(currencyIDsToDelete))
 // 		}
 
-// 		// Then, approve the rest
-// 	query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
-// 	rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
-// 		if err != nil {
-// 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-// 			return
-// 		}
-// 		defer rows.Close()
-// 		var updated []string
-// 		for rows.Next() {
-// 			var id, currencyID string
-// 			rows.Scan(&id, &currencyID)
-// 			updated = append(updated, id, currencyID)
-// 		}
-// 		w.Header().Set("Content-Type", "application/json")
-// 		json.NewEncoder(w).Encode(map[string]interface{}{
-// 			"success": true,
-// 			"updated": updated,
-// 			"deleted": deleted,
-// 		})
-// 	}
-// }
+//			// Then, approve the rest
+//		query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
+//		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
+//			if err != nil {
+//				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+//				return
+//			}
+//			defer rows.Close()
+//			var updated []string
+//			for rows.Next() {
+//				var id, currencyID string
+//				rows.Scan(&id, &currencyID)
+//				updated = append(updated, id, currencyID)
+//			}
+//			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+//			json.NewEncoder(w).Encode(map[string]interface{}{
+//				constants.ValueSuccess: true,
+//				"updated": updated,
+//				"deleted": deleted,
+//			})
+//		}
+//	}
 func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -581,7 +583,7 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -644,16 +646,14 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Step 6: Send response ---
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"updated": updated,
-			"deleted": deleted,
+			constants.ValueSuccess: true,
+			"updated":              updated,
+			"deleted":              deleted,
 		})
 	}
 }
-
-
 
 func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -675,7 +675,7 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := r.Context()
@@ -690,10 +690,10 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, actionID)
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"created": results,
+			constants.ValueSuccess: true,
+			"created":              results,
 		})
 	}
 }
@@ -735,7 +735,7 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"decimal_place": decimalPlace,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
@@ -744,8 +744,8 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = make([]map[string]interface{}, 0)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
+			constants.ValueSuccess: true,
+			"results":              results,
 		})
 	}
 }

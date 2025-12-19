@@ -3,6 +3,7 @@ package investmentsuite
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"bufio"
 	"bytes"
 	"context"
@@ -62,7 +63,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateInitiationRequestSingle
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -96,14 +97,14 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -137,7 +138,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactioninitiation (initiation_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, initiationID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
@@ -154,7 +155,7 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -191,12 +192,12 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -208,7 +209,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -224,7 +225,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if txnDate == "" || entityName == "" || schemeID == "" || row.Amount <= 0 {
 				results = append(results, map[string]interface{}{
-					"success": false, "error": "Missing required fields: transaction_date, entity_name, scheme_id, amount",
+					constants.ValueSuccess: false, constants.ValueError: "Missing required fields: transaction_date, entity_name, scheme_id, amount",
 				})
 				continue
 			}
@@ -232,7 +233,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Either folio_id OR demat_id must be provided
 			if strings.TrimSpace(row.FolioID) == "" && strings.TrimSpace(row.DematID) == "" {
 				results = append(results, map[string]interface{}{
-					"success": false, "error": "Either folio_id or demat_id is required",
+					constants.ValueSuccess: false, constants.ValueError: "Either folio_id or demat_id is required",
 				})
 				continue
 			}
@@ -240,14 +241,14 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// if source is Proposal, proposal_id is required
 			if strings.ToUpper(source) == "PROPOSAL" && proposalID == "" {
 				results = append(results, map[string]interface{}{
-					"success": false, "error": "proposal_id is required when source is 'Proposal'",
+					constants.ValueSuccess: false, constants.ValueError: "proposal_id is required when source is 'Proposal'",
 				})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "TX begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -260,7 +261,7 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING initiation_id
 			`, nullIfEmpty(proposalID), txnDate, entityName, schemeID, nullIfEmpty(row.FolioID), nullIfEmpty(row.DematID), row.Amount, source).Scan(&initiationID); err != nil {
 				results = append(results, map[string]interface{}{
-					"success": false, "proposal_id": proposalID, "error": "Insert failed: " + err.Error(),
+					constants.ValueSuccess: false, "proposal_id": proposalID, constants.ValueError: "Insert failed: " + err.Error(),
 				})
 				continue
 			}
@@ -270,23 +271,23 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 			`, initiationID, userEmail); err != nil {
 				results = append(results, map[string]interface{}{
-					"success": false, "initiation_id": initiationID, "error": "Audit insert failed: " + err.Error(),
+					constants.ValueSuccess: false, "initiation_id": initiationID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(),
 				})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				results = append(results, map[string]interface{}{
-					"success": false, "initiation_id": initiationID, "error": "Commit failed: " + err.Error(),
+					constants.ValueSuccess: false, "initiation_id": initiationID, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error(),
 				})
 				continue
 			}
 
 			result := map[string]interface{}{
-				"success":       true,
-				"initiation_id": initiationID,
-				"entity_name":   entityName,
-				"source":        source,
+				constants.ValueSuccess: true,
+				"initiation_id":        initiationID,
+				"entity_name":          entityName,
+				"source":               source,
 			}
 			if proposalID != "" {
 				result["proposal_id"] = proposalID
@@ -318,7 +319,7 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateInitiationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.InitiationID) == "" {
@@ -326,7 +327,7 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -338,14 +339,14 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -385,7 +386,7 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			lk := strings.ToLower(k)
 			if idx, ok := fieldPairs[lk]; ok {
 				oldField := "old_" + lk
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", lk, pos, oldField, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
 				pos += 2
 			}
@@ -399,7 +400,7 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.investment_initiation SET %s, updated_at=now() WHERE initiation_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.InitiationID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -408,12 +409,12 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactioninitiation (initiation_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 		`, req.InitiationID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -439,7 +440,7 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -451,7 +452,7 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid or inactive session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -460,13 +461,13 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, row := range req.Rows {
 			if row.InitiationID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "initiation_id missing"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "initiation_id missing"})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "tx begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -479,7 +480,7 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 				&oldVals[4], &oldVals[5], &oldVals[6],
 			); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "fetch failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: "fetch failed: " + err.Error()})
 				continue
 			}
 
@@ -501,14 +502,14 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				lk := strings.ToLower(k)
 				if idx, ok := fieldPairs[lk]; ok {
 					oldField := "old_" + lk
-					sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", lk, pos, oldField, pos+1))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 					args = append(args, v, oldVals[idx])
 					pos += 2
 				}
 			}
 
 			if len(sets) == 0 {
-				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "No valid fields"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: "No valid fields"})
 				continue
 			}
 
@@ -516,7 +517,7 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, row.InitiationID)
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "update failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
 				continue
 			}
 
@@ -524,16 +525,16 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactioninitiation (initiation_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 			`, row.InitiationID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "audit insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "initiation_id": row.InitiationID, "error": "commit failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "initiation_id": row.InitiationID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
 				continue
 			}
 
-			results = append(results, map[string]interface{}{"success": true, "initiation_id": row.InitiationID, "requested": userEmail})
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "initiation_id": row.InitiationID, "requested": userEmail})
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
@@ -552,7 +553,7 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason        string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.InitiationIDs) == 0 {
@@ -568,14 +569,14 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -591,7 +592,7 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.InitiationIDs})
@@ -610,7 +611,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment       string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -621,14 +622,14 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -641,7 +642,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.InitiationIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -672,7 +673,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
-			api.RespondWithPayload(w, false, "No approvable actions found", map[string]any{
+			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
 				"approved_initiation_ids": []string{},
 				"deleted_initiations":     []string{},
 			})
@@ -710,7 +711,7 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -741,7 +742,7 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment       string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -752,14 +753,14 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -772,7 +773,7 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.InitiationIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -816,12 +817,12 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -922,7 +923,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -937,19 +938,19 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rec[string(f.Name)] = ""
 				} else {
 					if t, ok := vals[i].(time.Time); ok {
-						rec[string(f.Name)] = t.Format("2006-01-02 15:04:05")
+						rec[string(f.Name)] = t.Format(constants.DateTimeFormat)
 					} else {
 						rec[string(f.Name)] = vals[i]
 					}
 				}
 			}
-			
+
 			// Fetch NAV from MFapi if not available in local database
 			navValue, _ := rec["nav"].(float64)
 			if navValue == 0 {
 				// Try to get AMFI scheme code to fetch from MFapi
 				var amfiSchemeCode, internalCode, isin string
-				
+
 				// Get scheme_id and all possible identifiers to query for AMFI code
 				schemeID, _ := rec["scheme_id"].(string)
 				if schemeID != "" {
@@ -962,7 +963,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						WHERE scheme_id = $1 OR internal_scheme_code = $1 OR isin = $1 OR scheme_name = $1
 						LIMIT 1
 					`, schemeID).Scan(&amfiSchemeCode, &internalCode, &isin)
-					
+
 					// Try multiple codes in order of preference
 					codesToTry := []string{}
 					if err == nil {
@@ -973,7 +974,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							codesToTry = append(codesToTry, internalCode)
 						}
 					}
-					
+
 					// Try each code until we get a valid NAV
 					navFetched := false
 					for _, code := range codesToTry {
@@ -982,7 +983,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if err == nil && resp.StatusCode == 200 {
 							body, _ := io.ReadAll(resp.Body)
 							resp.Body.Close()
-							
+
 							var apiResp struct {
 								Meta struct {
 									SchemeCode string `json:"scheme_code"`
@@ -993,7 +994,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								} `json:"data"`
 								Status string `json:"status"`
 							}
-							
+
 							if json.Unmarshal(body, &apiResp) == nil && len(apiResp.Data) > 0 {
 								// Get the latest NAV (first entry)
 								latestEntry := apiResp.Data[0]
@@ -1009,7 +1010,7 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							resp.Body.Close()
 						}
 					}
-					
+
 					// If still no NAV after trying all codes, mark as unavailable
 					if !navFetched {
 						rec["nav_source"] = "Unavailable"
@@ -1020,12 +1021,12 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				rec["nav_source"] = "Local"
 			}
-			
+
 			out = append(out, rec)
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1122,7 +1123,7 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1137,7 +1138,7 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rec[string(f.Name)] = ""
 				} else {
 					if t, ok := vals[i].(time.Time); ok {
-						rec[string(f.Name)] = t.Format("2006-01-02 15:04:05")
+						rec[string(f.Name)] = t.Format(constants.DateTimeFormat)
 					} else {
 						rec[string(f.Name)] = vals[i]
 					}
@@ -1147,7 +1148,7 @@ func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1216,7 +1217,7 @@ func parseCashFlowCategoryFile(file multipart.File, ext string) ([][]string, err
 		return rows, nil
 
 	default:
-		return nil, errors.New("unsupported file type")
+		return nil, errors.New(constants.ErrUnsupportedFileType)
 	}
 }
 

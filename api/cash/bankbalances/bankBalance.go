@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 	"strings"
+	"time"
+
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -39,12 +41,12 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason         string   `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "invalid json: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id required")
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -82,7 +84,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -146,7 +148,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment    string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, "invalid json or missing fields")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := ""
@@ -157,7 +159,7 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -220,8 +222,8 @@ func BulkApproveBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// return structured JSON
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "approved_count": len(actionIDs), "deleted": deleted})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs), "deleted": deleted})
 	}
 }
 
@@ -235,7 +237,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment    string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, "invalid json or missing fields")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := ""
@@ -246,7 +248,7 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -287,8 +289,8 @@ func BulkRejectBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rejected_count": len(actionIDs)})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
 	}
 }
 
@@ -302,7 +304,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BalanceIDs) == 0 {
-			api.RespondWithResult(w, false, "invalid json or missing fields")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		requestedBy := ""
@@ -313,7 +315,7 @@ func BulkRequestDeleteBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -362,7 +364,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
@@ -379,7 +381,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -397,7 +399,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, base)
 		if err != nil {
-			api.RespondWithResult(w, false, "DB error: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -542,8 +544,8 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -677,7 +679,7 @@ func (n *sqlNullTime) Scan(v interface{}) error {
 }
 func (n sqlNullTime) ValueOrZero() interface{} {
 	if n.Valid {
-		return n.T.Format("2006-01-02")
+		return n.T.Format(constants.DateFormat)
 	}
 	return ""
 }
@@ -688,6 +690,7 @@ func nullifyFloat(f *float64) interface{} {
 	}
 	return *f
 }
+
 // UpdateBankBalance updates allowed fields for a specific balance_id, copies existing values into old_* columns and creates an EDIT audit action (PENDING_EDIT_APPROVAL)
 func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -698,7 +701,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "invalid json: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" || req.BalanceID == "" {
@@ -715,7 +718,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -755,13 +758,13 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// helper to append set and old set
 		addStrField := func(col, oldcol string, val interface{}, cur sqlNullString) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			args = append(args, nullifyEmpty(fmt.Sprint(val)))
 			args = append(args, cur.ValueOrZero())
 			pos += 2
 		}
 		addFloatField := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			// val may be float64 or nil
 			if val == nil {
 				args = append(args, nil)

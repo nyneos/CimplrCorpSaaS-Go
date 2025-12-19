@@ -186,7 +186,7 @@ package exposures
 // 			payableLogic = "standard"
 // 		}
 
-// 		userID := r.FormValue("user_id")
+// 		userID := r.FormValue(constants.KeyUserID)
 // 		if userID == "" {
 // 			userID = "1"
 // 		}
@@ -297,14 +297,12 @@ package exposures
 
 // 			// Get file extension and parse using helper function
 // 			fileExt := strings.ToLower(filepath.Ext(fh.Filename))
-			
 // 			// Use the helper function to parse both CSV and Excel files
 // 			allRows, err := ubParseUploadFile(tmpFile, fileExt)
 // 			if err != nil {
 // 				httpError(w, http.StatusBadRequest, "file parse error: "+err.Error())
 // 				return
 // 			}
-			
 // 			if len(allRows) == 0 {
 // 				httpError(w, http.StatusBadRequest, "empty file or no data rows")
 // 				return
@@ -350,13 +348,13 @@ package exposures
 // 			batchID := uuid.New()
 // 			conn, err := pool.Acquire(ctx)
 // 			if err != nil {
-// 				httpError(w, 500, "db acquire: "+err.Error())
+// 				httpError(w, 500, constants.ErrDBAcquire+err.Error())
 // 				return
 // 			}
 // 			tx, err := conn.Begin(ctx)
 // 			if err != nil {
 // 				conn.Release()
-// 				httpError(w, 500, "tx begin: "+err.Error())
+// 				httpError(w, 500, constants.ErrTxBegin+err.Error())
 // 				return
 // 			}
 // 			committed := false
@@ -385,7 +383,7 @@ package exposures
 // 				defer wgCopy.Done()
 // 				_, stagingErr = tx.CopyFrom(ctx,
 // 					pgx.Identifier{"public", "staging_exposures"},
-// 					[]string{"staging_id", "batch_id", "exposure_source", "raw_payload", "mapped_payload", "ingestion_timestamp", "status"},
+// 					[]string{"staging_id", "batch_id", "exposure_source", "raw_payload", "mapped_payload", "ingestion_timestamp", constants.KeyStatus},
 // 					stagingSrc)
 // 			}()
 
@@ -524,13 +522,13 @@ package exposures
 // 			//       For customers (FBL5N) if net < 0 => Non-Qualified
 // 			netMap := make(map[string]float64)
 // 			for _, e := range exposuresFloat {
-// 				key := fmt.Sprintf("%s|%s|%s", e.Source, e.CompanyCode, e.Party)
+// 				key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
 // 				netMap[key] += e.AmountFloat
 // 			}
 // 			flaggedCount := 0
 // 			for i := range exposuresFloat {
 // 				e := &exposuresFloat[i]
-// 				key := fmt.Sprintf("%s|%s|%s", e.Source, e.CompanyCode, e.Party)
+// 				key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
 // 				net := netMap[key]
 // 				switch e.Source {
 // 				case "FBL1N", "FBL3N":
@@ -668,7 +666,7 @@ package exposures
 // 				"exposure_header_id", "company_code", "entity", "entity1", "entity2", "entity3",
 // 				"exposure_type", "document_id", "document_date", "counterparty_type", "counterparty_code",
 // 				"counterparty_name", "currency", "total_original_amount", "total_open_amount",
-// 				"value_date", "status", "is_active", "created_at", "updated_at", "approval_status",
+// 				"value_date", constants.KeyStatus, "is_active", "created_at", "updated_at", "approval_status",
 // 				"exposure_creation_status",
 // 				"approval_comment", "approved_by", "delete_comment", "requested_by", "rejection_comment",
 // 				"approved_at", "rejected_by", "rejected_at", "time_based", "amount_in_local_currency",
@@ -685,17 +683,17 @@ package exposures
 // 				var valDate interface{}
 // 				var postDate interface{}
 // 				if q.DocumentDate != "" {
-// 					if t, terr := time.Parse("2006-01-02", q.DocumentDate); terr == nil {
+// 					if t, terr := time.Parse(constants.DateFormat, q.DocumentDate); terr == nil {
 // 						docDate = t
 // 					}
 // 				}
 // 				if q.NetDueDate != "" {
-// 					if t, terr := time.Parse("2006-01-02", q.NetDueDate); terr == nil {
+// 					if t, terr := time.Parse(constants.DateFormat, q.NetDueDate); terr == nil {
 // 						valDate = t
 // 					}
 // 				}
 // 				if q.PostingDate != "" {
-// 					if t, terr := time.Parse("2006-01-02", q.PostingDate); terr == nil {
+// 					if t, terr := time.Parse(constants.DateFormat, q.PostingDate); terr == nil {
 // 						postDate = t
 // 					}
 // 				}
@@ -1039,7 +1037,7 @@ package exposures
 // 		} // end files loop
 
 // 		writeJSON(w, map[string]interface{}{
-// 			"success":      true,
+// 			constants.ValueSuccess:      true,
 // 			"results":      results,
 // 			"duration_sec": time.Since(start).Seconds(),
 // 		})
@@ -1314,15 +1312,15 @@ package exposures
 // 	if s == "" {
 // 		return "", nil
 // 	}
-// 	layouts := []string{"2006-01-02", "02-01-2006", "01/02/2006", "2006/01/02", "2 Jan 2006", time.RFC3339, "20060102", "02-Jan-2006"}
+// 	layouts := []string{constants.DateFormat, constants.DateFormatAlt, "01/02/2006", "2006/01/02", "2 Jan 2006", time.RFC3339, "20060102", constants.DateFormatDash}
 // 	for _, l := range layouts {
 // 		if t, err := time.Parse(l, s); err == nil {
-// 			return t.Format("2006-01-02"), nil
+// 			return t.Format(constants.DateFormat), nil
 // 		}
 // 	}
 // 	if len(s) >= 10 {
-// 		if t, err := time.Parse("2006-01-02", s[:10]); err == nil {
-// 			return t.Format("2006-01-02"), nil
+// 		if t, err := time.Parse(constants.DateFormat, s[:10]); err == nil {
+// 			return t.Format(constants.DateFormat), nil
 // 		}
 // 	}
 // 	return "", fmt.Errorf("unparseable date: %s", dateStr)
@@ -1383,7 +1381,7 @@ package exposures
 // }
 
 // func writeJSON(w http.ResponseWriter, v interface{}) {
-// 	w.Header().Set("Content-Type", "application/json")
+// 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 	enc := json.NewEncoder(w)
 // 	enc.SetIndent("", "  ")
 // 	_ = enc.Encode(v)
@@ -1391,7 +1389,7 @@ package exposures
 
 // func httpError(w http.ResponseWriter, status int, msg string) {
 // 	w.WriteHeader(status)
-// 	writeJSON(w, map[string]interface{}{"success": false, "error": msg})
+// 	writeJSON(w, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: msg})
 // }
 
 // func detectExposureCategory(src string) string {
@@ -1447,10 +1445,10 @@ package exposures
 // 	if s == "" {
 // 		return nil
 // 	}
-// 	if t, err := time.Parse("2006-01-02", s); err == nil {
+// 	if t, err := time.Parse(constants.DateFormat, s); err == nil {
 // 		return t
 // 	}
-// 	if t, err := time.Parse("02-01-2006", s); err == nil {
+// 	if t, err := time.Parse(constants.DateFormatAlt, s); err == nil {
 // 		return t
 // 	}
 // 	return nil
@@ -1474,5 +1472,5 @@ package exposures
 // 		}
 // 		return rows, nil
 // 	}
-// 	return nil, errors.New("unsupported file type")
+// 	return nil, errors.New(constants.ErrUnsupportedFileType)
 // }

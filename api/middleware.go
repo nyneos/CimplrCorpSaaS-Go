@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 )
 
 type contextKey string
@@ -20,30 +21,30 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var userID string
-			ct := r.Header.Get("Content-Type")
-			if strings.HasPrefix(ct, "application/json") && (r.Method == "POST" || r.Method == "PUT") {
+			ct := r.Header.Get(constants.ContentTypeText)
+			if strings.HasPrefix(ct, constants.ContentTypeJSON) && (r.Method == "POST" || r.Method == "PUT") {
 				var bodyMap map[string]interface{}
 				_ = json.NewDecoder(r.Body).Decode(&bodyMap)
-				if uid, ok := bodyMap["user_id"].(string); ok {
+				if uid, ok := bodyMap[constants.KeyUserID].(string); ok {
 					userID = uid
 				}
 				// Re-marshal and reset body for downstream handlers
 				bodyBytes, _ := json.Marshal(bodyMap)
 				r.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
-			} else if strings.HasPrefix(ct, "multipart/form-data") && (r.Method == "POST" || r.Method == "PUT") {
+			} else if strings.HasPrefix(ct, constants.ContentTypeMultipart) && (r.Method == "POST" || r.Method == "PUT") {
 				// Parse multipart form to get user_id
 				err := r.ParseMultipartForm(32 << 20) // 32MB
 				if err == nil {
-					userID = r.FormValue("user_id")
+					userID = r.FormValue(constants.KeyUserID)
 				}
 			}
 
 			if userID == "" {
 				log.Println("[ERROR] Missing user_id in request")
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "Missing user_id",
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrMissingUserID,
 				})
 				return
 			}
@@ -59,10 +60,10 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 			if !found {
 				log.Println("[ERROR] Invalid session for user_id:", userID)
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "Invalid session",
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrInvalidSession,
 				})
 				return
 			}
@@ -72,10 +73,10 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			err := db.QueryRow("SELECT business_unit_name FROM users WHERE id = $1", userID).Scan(&userBu)
 			if err != nil || userBu == "" {
 				log.Println("[ERROR] User not found or has no business unit assigned for user_id:", userID)
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "User not found or has no business unit assigned",
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
 				})
 				return
 			}
@@ -88,10 +89,10 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			).Scan(&rootEntityId)
 			if err != nil {
 				log.Println("[ERROR] Business unit entity not found for userBu:", userBu)
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "Business unit entity not found",
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
 				})
 				return
 			}
@@ -111,10 +112,10 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
             `, rootEntityId)
 			if err != nil {
 				log.Println("[ERROR] No accessible business units found for rootEntityId:", rootEntityId)
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "No accessible business units found",
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
 				})
 				return
 			}
@@ -129,10 +130,10 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 			}
 			if len(buNames) == 0 {
 				log.Println("[ERROR] No accessible business units found for user_id:", userID)
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   "No accessible business units found",
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.ErrNoAccessibleBusinessUnit,
 				})
 				return
 			}
@@ -142,4 +143,3 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 		})
 	}
 }
-

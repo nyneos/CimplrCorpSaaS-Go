@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -155,7 +157,7 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req BatchInfoRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, "Invalid JSON: "+err.Error())
+			api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -165,7 +167,7 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, 400, "user_id required")
+			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -397,12 +399,12 @@ func GetAllBatches(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var req BatchListRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, "Invalid JSON: "+err.Error())
+			api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, 400, "user_id required")
+			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
 			return
 		}
 

@@ -9,36 +9,38 @@ import (
 	"strconv"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
 
 type EntityMasterRequest struct {
-	EntityName                string      `json:"entity_name"`
-	ParentName                string      `json:"parentname"`
-	IsTopLevelEntity          bool        `json:"is_top_level_entity"`
-	Address                   string      `json:"address"`
-	ContactPhone              string      `json:"contact_phone"`
-	ContactEmail              string      `json:"contact_email"`
-	RegistrationNumber        string      `json:"registration_number"`
-	PanGST                    string      `json:"pan_gst"`
-	LegalEntityIdentifier     string      `json:"legal_entity_identifier"`
-	TaxIdentificationNumber   string      `json:"tax_identification_number"`
-	DefaultCurrency           string      `json:"default_currency"`
-	AssociatedBusinessUnits   string      `json:"associated_business_units"`
-	ReportingCurrency         string      `json:"reporting_currency"`
-	UniqueIdentifier          string      `json:"unique_identifier"`
-	LegalEntityType           string      `json:"legal_entity_type"`
-	FxTradingAuthority        string      `json:"fx_trading_authority"`
-	InternalFxTradingLimit    string      `json:"internal_fx_trading_limit"`
-	AssociatedTreasuryContact string      `json:"associated_treasury_contact"`
-	IsDeleted                 bool        `json:"is_deleted"`
-	ApprovalStatus            string      `json:"approval_status"`
-	Level                     string      `json:"level"`
-	Comments                  string      `json:"comments"`
-	CompanyName               string      `json:"company_name"`
-	CreatedBy                 string      `json:"created_by"`
-	UpdatedBy                 string      `json:"updated_by"`
+	EntityName                string `json:"entity_name"`
+	ParentName                string `json:"parentname"`
+	IsTopLevelEntity          bool   `json:"is_top_level_entity"`
+	Address                   string `json:"address"`
+	ContactPhone              string `json:"contact_phone"`
+	ContactEmail              string `json:"contact_email"`
+	RegistrationNumber        string `json:"registration_number"`
+	PanGST                    string `json:"pan_gst"`
+	LegalEntityIdentifier     string `json:"legal_entity_identifier"`
+	TaxIdentificationNumber   string `json:"tax_identification_number"`
+	DefaultCurrency           string `json:"default_currency"`
+	AssociatedBusinessUnits   string `json:"associated_business_units"`
+	ReportingCurrency         string `json:"reporting_currency"`
+	UniqueIdentifier          string `json:"unique_identifier"`
+	LegalEntityType           string `json:"legal_entity_type"`
+	FxTradingAuthority        string `json:"fx_trading_authority"`
+	InternalFxTradingLimit    string `json:"internal_fx_trading_limit"`
+	AssociatedTreasuryContact string `json:"associated_treasury_contact"`
+	IsDeleted                 bool   `json:"is_deleted"`
+	ApprovalStatus            string `json:"approval_status"`
+	Level                     string `json:"level"`
+	Comments                  string `json:"comments"`
+	CompanyName               string `json:"company_name"`
+	CreatedBy                 string `json:"created_by"`
+	UpdatedBy                 string `json:"updated_by"`
 }
 
 type EntityMasterBulkRequest struct {
@@ -54,7 +56,7 @@ type EntityMasterBulkRequest struct {
 // 		}
 // 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 // 			w.WriteHeader(http.StatusBadRequest)
-// 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid JSON"})
+// 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
 // 			return
 // 		}
 // 		// Get created_by from session
@@ -68,7 +70,7 @@ type EntityMasterBulkRequest struct {
 // 		}
 // 		// if createdBy == "" {
 // 		// 	w.WriteHeader(http.StatusBadRequest)
-// 		// 	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid user_id or session"})
+// 		// 	json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
 // 		// 	return
 // 		// }
 // 		// Insert entities
@@ -111,11 +113,11 @@ type EntityMasterBulkRequest struct {
 // 				createdBy,
 // 			).Scan(&newEntityID)
 // 			if err != nil {
-// 				inserted = append(inserted, map[string]interface{}{"success": false, "error": err.Error(), "entity_name": entity.EntityName})
+// 				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_name": entity.EntityName})
 // 				continue
 // 			}
 // 			entityIDs[entity.EntityName] = newEntityID
-// 			inserted = append(inserted, map[string]interface{}{"success": true, "entity_id": newEntityID, "entity_name": entity.EntityName})
+// 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "entity_id": newEntityID, "entity_name": entity.EntityName})
 // 		}
 // 		// Sync relationships
 // 		relationshipsAdded := []map[string]interface{}{}
@@ -134,9 +136,9 @@ type EntityMasterBulkRequest struct {
 // 				}
 // 			}
 // 		}
-// 		w.Header().Set("Content-Type", "application/json")
+// 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 		json.NewEncoder(w).Encode(map[string]interface{}{
-// 			"success": true,
+// 			constants.ValueSuccess: true,
 // 			"entities": inserted,
 // 			"relationshipsAdded": len(relationshipsAdded),
 // 			"details": relationshipsAdded,
@@ -152,7 +154,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid JSON"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
 			return
 		}
 		// Get created_by from session
@@ -166,7 +168,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 		}
 		// if createdBy == "" {
 		// 	w.WriteHeader(http.StatusBadRequest)
-		// 	json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid user_id or session"})
+		// 	json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
 		// 	return
 		// }
 		// Insert entities
@@ -209,11 +211,11 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				createdBy,
 			).Scan(&newEntityID)
 			if err != nil {
-				inserted = append(inserted, map[string]interface{}{"success": false, "error": err.Error(), "entity_name": entity.EntityName})
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_name": entity.EntityName})
 				continue
 			}
 			entityIDs[entity.EntityName] = newEntityID
-			inserted = append(inserted, map[string]interface{}{"success": true, "entity_id": newEntityID, "entity_name": entity.EntityName})
+			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "entity_id": newEntityID, "entity_name": entity.EntityName})
 		}
 		// Sync relationships: use entity_id for parent/child. Parent may be created in this batch
 		// (entityIDs map) or may already exist in DB (lookup by name). Skip if we can't resolve IDs.
@@ -250,16 +252,15 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
-			"entities":           inserted,
-			"relationshipsAdded": len(relationshipsAdded),
-			"details":            relationshipsAdded,
+			constants.ValueSuccess: true,
+			"entities":             inserted,
+			"relationshipsAdded":   len(relationshipsAdded),
+			"details":              relationshipsAdded,
 		})
 	}
 }
-
 
 // GET handler to return entity hierarchy, excluding deleted entities and their descendants
 func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
@@ -268,7 +269,7 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 		entitiesRows, err := db.Query("SELECT * FROM masterentity")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		defer entitiesRows.Close()
@@ -289,9 +290,9 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 			}
 			entityID := e["entity_id"].(string)
 			entityMap[entityID] = map[string]interface{}{
-				"id": entityID,
-				"name": e["entity_name"],
-				"data": e,
+				"id":       entityID,
+				"name":     e["entity_name"],
+				"data":     e,
 				"children": []interface{}{},
 			}
 			if e["is_deleted"] == true {
@@ -303,7 +304,7 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 		relRows, err := db.Query("SELECT * FROM entityrelationships")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		defer relRows.Close()
@@ -327,7 +328,7 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 			relationships = append(relationships, rel)
 		}
 		// Find all entity_ids that are deleted or descendants of deleted
-	    	getAllDescendants := func(ids []string) []string {
+		getAllDescendants := func(ids []string) []string {
 			all := map[string]bool{}
 			queue := append([]string{}, ids...)
 			for _, id := range ids {
@@ -389,19 +390,21 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 				topLevel = append(topLevel, e)
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(topLevel)
 	}
 }
 
-
 // Approve entity (and descendants if Delete-Approval)
 func ApproveEntity(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct { ID string `json:"id"`; Comments string `json:"comments"` }
+		var req struct {
+			ID       string `json:"id"`
+			Comments string `json:"comments"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "message": "Missing id in body" })
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "Missing id in body"})
 			return
 		}
 		id := req.ID
@@ -409,10 +412,10 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 		err := db.QueryRow(`SELECT approval_status FROM masterentity WHERE entity_id = $1`, id).Scan(&status)
 		if err == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "message": "Entity not found" })
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrEntityNotFound})
 			return
 		}
-		if status == "Delete-Approval" {
+		if status == constants.StatusCodeDeleteApproval {
 			// Get all descendants
 			relRows, _ := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
 			defer relRows.Close()
@@ -426,55 +429,78 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 			getAllDescendants := func(ids []string) []string {
 				all := map[string]bool{}
 				queue := append([]string{}, ids...)
-				for _, id := range ids { all[id] = true }
+				for _, id := range ids {
+					all[id] = true
+				}
 				for len(queue) > 0 {
 					current := queue[0]
 					queue = queue[1:]
 					for _, child := range parentMap[current] {
-						if !all[child] { all[child] = true; queue = append(queue, child) }
+						if !all[child] {
+							all[child] = true
+							queue = append(queue, child)
+						}
 					}
 				}
 				result := []string{}
-				for id := range all { result = append(result, id) }
+				for id := range all {
+					result = append(result, id)
+				}
 				return result
 			}
 			allToApprove := getAllDescendants([]string{id})
 			rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Delete-Approved', is_deleted = true, comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToApprove), req.Comments)
-			if err != nil { w.WriteHeader(http.StatusInternalServerError); json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "error": err.Error() }); return }
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				return
+			}
 			defer rows.Close()
 			if rows.Next() {
-				cols, _ := rows.Columns(); vals := make([]interface{}, len(cols)); valPtrs := make([]interface{}, len(cols)); for i := range cols { valPtrs[i] = &vals[i] }
+				cols, _ := rows.Columns()
+				vals := make([]interface{}, len(cols))
+				valPtrs := make([]interface{}, len(cols))
+				for i := range cols {
+					valPtrs[i] = &vals[i]
+				}
 				rows.Scan(valPtrs...)
-				entity := map[string]interface{}{}; for i, col := range cols { entity[col] = vals[i] }
-				json.NewEncoder(w).Encode(map[string]interface{}{ "success": true, "entity": entity })
+				entity := map[string]interface{}{}
+				for i, col := range cols {
+					entity[col] = vals[i]
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "entity": entity})
 				return
 			}
 		} else {
-	       rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Approved', comments = $2 WHERE entity_id = $1 RETURNING *`, id, req.Comments)
-	       if err != nil {
-		       w.WriteHeader(http.StatusInternalServerError)
-		       json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "error": err.Error() })
-		       return
-	       }
-	       defer rows.Close()
-	       if rows.Next() {
-		       cols, _ := rows.Columns()
-		       vals := make([]interface{}, len(cols))
-		       valPtrs := make([]interface{}, len(cols))
-		       for i := range cols { valPtrs[i] = &vals[i] }
-		       scanErr := rows.Scan(valPtrs...)
-		       if scanErr != nil {
-			       w.WriteHeader(http.StatusInternalServerError)
-			       json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "error": scanErr.Error() })
-			       return
-		       }
-		       entity := map[string]interface{}{}
-		       for i, col := range cols { entity[col] = vals[i] }
-		       json.NewEncoder(w).Encode(map[string]interface{}{ "success": true, "entity": entity })
-	       } else {
-		       w.WriteHeader(http.StatusNotFound)
-		       json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "message": "Entity not found" })
-	       }
+			rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Approved', comments = $2 WHERE entity_id = $1 RETURNING *`, id, req.Comments)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				return
+			}
+			defer rows.Close()
+			if rows.Next() {
+				cols, _ := rows.Columns()
+				vals := make([]interface{}, len(cols))
+				valPtrs := make([]interface{}, len(cols))
+				for i := range cols {
+					valPtrs[i] = &vals[i]
+				}
+				scanErr := rows.Scan(valPtrs...)
+				if scanErr != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: scanErr.Error()})
+					return
+				}
+				entity := map[string]interface{}{}
+				for i, col := range cols {
+					entity[col] = vals[i]
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "entity": entity})
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrEntityNotFound})
+			}
 		}
 	}
 }
@@ -482,10 +508,13 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 // Bulk reject entities (and descendants)
 func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct { EntityIds []string `json:"entityIds"`; Comments string `json:"comments"` }
+		var req struct {
+			EntityIds []string `json:"entityIds"`
+			Comments  string   `json:"comments"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.EntityIds) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "message": "entityIds array required" })
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "entityIds array required"})
 			return
 		}
 		relRows, _ := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
@@ -499,31 +528,49 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 		getAllDescendants := func(ids []string) []string {
 			all := map[string]bool{}
 			queue := append([]string{}, ids...)
-			for _, id := range ids { all[id] = true }
+			for _, id := range ids {
+				all[id] = true
+			}
 			for len(queue) > 0 {
 				current := queue[0]
 				queue = queue[1:]
 				for _, child := range parentMap[current] {
-					if !all[child] { all[child] = true; queue = append(queue, child) }
+					if !all[child] {
+						all[child] = true
+						queue = append(queue, child)
+					}
 				}
 			}
 			result := []string{}
-			for id := range all { result = append(result, id) }
+			for id := range all {
+				result = append(result, id)
+			}
 			return result
 		}
 		allToReject := getAllDescendants(req.EntityIds)
 		rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Rejected', comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToReject), req.Comments)
-		if err != nil { w.WriteHeader(http.StatusInternalServerError); json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "error": err.Error() }); return }
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
 		defer rows.Close()
 		updated := []map[string]interface{}{}
 		cols, _ := rows.Columns()
 		for rows.Next() {
-			vals := make([]interface{}, len(cols)); valPtrs := make([]interface{}, len(cols)); for i := range cols { valPtrs[i] = &vals[i] }
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range cols {
+				valPtrs[i] = &vals[i]
+			}
 			rows.Scan(valPtrs...)
-			entity := map[string]interface{}{}; for i, col := range cols { entity[col] = vals[i] }
+			entity := map[string]interface{}{}
+			for i, col := range cols {
+				entity[col] = vals[i]
+			}
 			updated = append(updated, entity)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{ "success": true, "updated": updated })
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
 
@@ -536,7 +583,7 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" || len(req.Fields) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "message": "Missing id or fields in body" })
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "Missing id or fields in body"})
 			return
 		}
 		setClause := ""
@@ -550,31 +597,35 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 		setClause += "approval_status = 'Pending'"
 		args = append(args, req.ID)
 		query := "UPDATE masterentity SET " + setClause + " WHERE entity_id = $" + strconv.Itoa(i) + " RETURNING *"
-	       rows, err := db.Query(query, args...)
-	       if err != nil {
-		       w.WriteHeader(http.StatusInternalServerError)
-		       json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "error": err.Error() })
-		       return
-	       }
-	       defer rows.Close()
-	       if rows.Next() {
-		       cols, _ := rows.Columns()
-		       vals := make([]interface{}, len(cols))
-		       valPtrs := make([]interface{}, len(cols))
-		       for i := range cols { valPtrs[i] = &vals[i] }
-		       scanErr := rows.Scan(valPtrs...)
-		       if scanErr != nil {
-			       w.WriteHeader(http.StatusInternalServerError)
-			       json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "error": scanErr.Error() })
-			       return
-		       }
-		       entity := map[string]interface{}{}
-		       for i, col := range cols { entity[col] = vals[i] }
-		       json.NewEncoder(w).Encode(map[string]interface{}{ "success": true, "entity": entity })
-	       } else {
-		       w.WriteHeader(http.StatusNotFound)
-		       json.NewEncoder(w).Encode(map[string]interface{}{ "success": false, "message": "Entity not found" })
-	       }
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		defer rows.Close()
+		if rows.Next() {
+			cols, _ := rows.Columns()
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range cols {
+				valPtrs[i] = &vals[i]
+			}
+			scanErr := rows.Scan(valPtrs...)
+			if scanErr != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: scanErr.Error()})
+				return
+			}
+			entity := map[string]interface{}{}
+			for i, col := range cols {
+				entity[col] = vals[i]
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "entity": entity})
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrEntityNotFound})
+		}
 	}
 }
 
@@ -582,7 +633,11 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 func GetAllEntityNames(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rows, err := db.Query("SELECT entity_name FROM masterentity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND is_deleted = false")
-		if err != nil { w.WriteHeader(http.StatusInternalServerError); json.NewEncoder(w).Encode(map[string]interface{}{ "error": err.Error() }); return }
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: err.Error()})
+			return
+		}
 		defer rows.Close()
 		var names []string
 		for rows.Next() {
@@ -596,131 +651,133 @@ func GetAllEntityNames(db *sql.DB) http.HandlerFunc {
 
 // Delete entity (and descendants if Delete-Approval)
 func DeleteEntity(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        var req struct {
-            ID       string `json:"id"`
-            Comments string `json:"comments"`
-        }
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
-            w.WriteHeader(http.StatusBadRequest)
-            json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Missing id in body"})
-            return
-        }
-        // Fetch all relationships
-        relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
-        if err != nil {
-            w.WriteHeader(http.StatusInternalServerError)
-            json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
-            return
-        }
-        defer relRows.Close()
-        parentMap := map[string][]string{}
-        for relRows.Next() {
-            var parent, child string
-            if err := relRows.Scan(&parent, &child); err == nil {
-                parentMap[parent] = append(parentMap[parent], child)
-            }
-        }
-        // Traverse descendants
-        getAllDescendants := func(ids []string) []string {
-            all := map[string]bool{}
-            queue := append([]string{}, ids...)
-            for _, id := range ids {
-                all[id] = true
-            }
-            for len(queue) > 0 {
-                current := queue[0]
-                queue = queue[1:]
-                for _, child := range parentMap[current] {
-                    if !all[child] {
-                        all[child] = true
-                        queue = append(queue, child)
-                    }
-                }
-            }
-            result := []string{}
-            for id := range all {
-                result = append(result, id)
-            }
-            return result
-        }
-        allToDelete := getAllDescendants([]string{req.ID})
-        rows, err := db.Query(
-            `UPDATE masterentity SET approval_status = 'Delete-Approval', comments = $2 WHERE entity_id = ANY($1) RETURNING *`,
-            pq.Array(allToDelete), req.Comments,
-        )
-        if err != nil {
-            w.WriteHeader(http.StatusInternalServerError)
-            json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
-            return
-        }
-        defer rows.Close()
-        updated := []map[string]interface{}{}
-        cols, _ := rows.Columns()
-        for rows.Next() {
-            vals := make([]interface{}, len(cols))
-            valPtrs := make([]interface{}, len(cols))
-            for i := range cols {
-                valPtrs[i] = &vals[i]
-            }
-            rows.Scan(valPtrs...)
-            entity := map[string]interface{}{}
-            for i, col := range cols {
-                entity[col] = vals[i]
-            }
-            updated = append(updated, entity)
-        }
-        if len(updated) == 0 {
-            w.WriteHeader(http.StatusNotFound)
-            json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Entity not found"})
-            return
-        }
-        json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID       string `json:"id"`
+			Comments string `json:"comments"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "Missing id in body"})
+			return
+		}
+		// Fetch all relationships
+		relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		defer relRows.Close()
+		parentMap := map[string][]string{}
+		for relRows.Next() {
+			var parent, child string
+			if err := relRows.Scan(&parent, &child); err == nil {
+				parentMap[parent] = append(parentMap[parent], child)
+			}
+		}
+		// Traverse descendants
+		getAllDescendants := func(ids []string) []string {
+			all := map[string]bool{}
+			queue := append([]string{}, ids...)
+			for _, id := range ids {
+				all[id] = true
+			}
+			for len(queue) > 0 {
+				current := queue[0]
+				queue = queue[1:]
+				for _, child := range parentMap[current] {
+					if !all[child] {
+						all[child] = true
+						queue = append(queue, child)
+					}
+				}
+			}
+			result := []string{}
+			for id := range all {
+				result = append(result, id)
+			}
+			return result
+		}
+		allToDelete := getAllDescendants([]string{req.ID})
+		rows, err := db.Query(
+			`UPDATE masterentity SET approval_status = 'Delete-Approval', comments = $2 WHERE entity_id = ANY($1) RETURNING *`,
+			pq.Array(allToDelete), req.Comments,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		defer rows.Close()
+		updated := []map[string]interface{}{}
+		cols, _ := rows.Columns()
+		for rows.Next() {
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range cols {
+				valPtrs[i] = &vals[i]
+			}
+			rows.Scan(valPtrs...)
+			entity := map[string]interface{}{}
+			for i, col := range cols {
+				entity[col] = vals[i]
+			}
+			updated = append(updated, entity)
+		}
+		if len(updated) == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrEntityNotFound})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
+	}
 }
 
 // Find parent at level
 func FindParentAtLevel(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        var req struct {
-            Level string `json:"level"`
-        }
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Level == "" {
-            w.WriteHeader(http.StatusBadRequest)
-            json.NewEncoder(w).Encode([]string{})
-            return
-        }
-        numericLevel, err := strconv.Atoi(req.Level)
-        if err != nil || numericLevel <= 1 {
-            json.NewEncoder(w).Encode([]string{})
-            return
-        }
-        parentLevel := numericLevel - 1
-        query := `SELECT entity_name FROM masterentity WHERE (TRIM(BOTH ' ' FROM level) = $1 OR TRIM(BOTH ' ' FROM level) = $2) AND (is_deleted = false OR is_deleted IS NULL)`
-        rows, err := db.Query(query, strconv.Itoa(parentLevel), fmt.Sprintf("Level %d", parentLevel))
-        if err != nil {
-            w.WriteHeader(http.StatusInternalServerError)
-            json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
-            return
-        }
-        defer rows.Close()
-        var names []string
-        for rows.Next() {
-            var name string
-            rows.Scan(&name)
-            names = append(names, name)
-        }
-        json.NewEncoder(w).Encode(names)
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Level string `json:"level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Level == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode([]string{})
+			return
+		}
+		numericLevel, err := strconv.Atoi(req.Level)
+		if err != nil || numericLevel <= 1 {
+			json.NewEncoder(w).Encode([]string{})
+			return
+		}
+		parentLevel := numericLevel - 1
+		query := `SELECT entity_name FROM masterentity WHERE (TRIM(BOTH ' ' FROM level) = $1 OR TRIM(BOTH ' ' FROM level) = $2) AND (is_deleted = false OR is_deleted IS NULL)`
+		rows, err := db.Query(query, strconv.Itoa(parentLevel), fmt.Sprintf("Level %d", parentLevel))
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: err.Error()})
+			return
+		}
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			var name string
+			rows.Scan(&name)
+			names = append(names, name)
+		}
+		json.NewEncoder(w).Encode(names)
+	}
 }
 
 func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		// Get user_id from body
-		var req struct { UserID string `json:"user_id"` }
+		var req struct {
+			UserID string `json:"user_id"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Missing user_id in body"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Missing user_id in body"})
 			return
 		}
 		// Get role_id from user_roles
@@ -728,11 +785,11 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		errRole := db.QueryRow("SELECT role_id FROM user_roles WHERE user_id = $1 LIMIT 1", req.UserID).Scan(&roleId)
 		if errRole == sql.ErrNoRows {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Role not found for user"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Role not found for user"})
 			return
 		} else if errRole != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errRole.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errRole.Error()})
 			return
 		}
 		// Get permissions for hierarchical page
@@ -740,156 +797,156 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		rows, errPerm := db.Query(query, roleId)
 		if errPerm != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errPerm.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errPerm.Error()})
 			return
 		}
-        defer rows.Close()
-        pages := map[string]map[string]interface{}{}
-        for rows.Next() {
-            var page, tab, action string
-            var allowed bool
-            rows.Scan(&page, &tab, &action, &allowed)
-            if pages[page] == nil {
-                pages[page] = map[string]interface{}{}
-            }
-            if tab == "" {
-                if pages[page]["pagePermissions"] == nil {
-                    pages[page]["pagePermissions"] = map[string]bool{}
-                }
-                pages[page]["pagePermissions"].(map[string]bool)[action] = allowed
-            } else {
-                if pages[page]["tabs"] == nil {
-                    pages[page]["tabs"] = map[string]map[string]bool{}
-                }
-                if pages[page]["tabs"].(map[string]map[string]bool)[tab] == nil {
-                    pages[page]["tabs"].(map[string]map[string]bool)[tab] = map[string]bool{}
-                }
-                pages[page]["tabs"].(map[string]map[string]bool)[tab][action] = allowed
-            }
-        }
-        // Get entity hierarchy (reuse your GetEntityHierarchy logic)
-        entitiesRows, err := db.Query("SELECT * FROM masterentity")
-        if err != nil {
-            w.WriteHeader(http.StatusInternalServerError)
-            json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
-            return
-        }
-        defer entitiesRows.Close()
-        entities := []map[string]interface{}{}
-        entityMap := map[string]map[string]interface{}{}
-        deletedIds := map[string]bool{}
-        for entitiesRows.Next() {
-            var e = make(map[string]interface{})
-            cols, _ := entitiesRows.Columns()
-            vals := make([]interface{}, len(cols))
-            valPtrs := make([]interface{}, len(cols))
-            for i := range cols {
-                valPtrs[i] = &vals[i]
-            }
-            entitiesRows.Scan(valPtrs...)
-            for i, col := range cols {
-                e[col] = vals[i]
-            }
-            entityID := e["entity_id"].(string)
-            entityMap[entityID] = map[string]interface{}{
-                "id": entityID,
-                "name": e["entity_name"],
-                "data": e,
-                "children": []interface{}{},
-            }
-            if e["is_deleted"] == true {
-                deletedIds[entityID] = true
-            }
-            entities = append(entities, e)
-        }
-        relRows, err := db.Query("SELECT * FROM entityrelationships")
-        if err != nil {
-            w.WriteHeader(http.StatusInternalServerError)
-            json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
-            return
-        }
-        defer relRows.Close()
-        relationships := []map[string]interface{}{}
-        parentMap := map[string][]string{}
-        for relRows.Next() {
-            var rel = make(map[string]interface{})
-            cols, _ := relRows.Columns()
-            vals := make([]interface{}, len(cols))
-            valPtrs := make([]interface{}, len(cols))
-            for i := range cols {
-                valPtrs[i] = &vals[i]
-            }
-            relRows.Scan(valPtrs...)
-            for i, col := range cols {
-                rel[col] = vals[i]
-            }
-            parentID := rel["parent_entity_id"].(string)
-            childID := rel["child_entity_id"].(string)
-            parentMap[parentID] = append(parentMap[parentID], childID)
-            relationships = append(relationships, rel)
-        }
-        getAllDescendants := func(ids []string) []string {
-            all := map[string]bool{}
-            queue := append([]string{}, ids...)
-            for _, id := range ids {
-                all[id] = true
-            }
-            for len(queue) > 0 {
-                current := queue[0]
-                queue = queue[1:]
-                children := parentMap[current]
-                for _, child := range children {
-                    if !all[child] {
-                        all[child] = true
-                        queue = append(queue, child)
-                    }
-                }
-            }
-            result := []string{}
-            for id := range all {
-                result = append(result, id)
-            }
-            return result
-        }
-        deletedList := []string{}
-        for id := range deletedIds {
-            deletedList = append(deletedList, id)
-        }
-        allDeleted := getAllDescendants(deletedList)
-        for _, id := range allDeleted {
-            delete(entityMap, id)
-        }
-        for _, entity := range entityMap {
-            entity["children"] = []interface{}{}
-        }
-        for _, rel := range relationships {
-            parentID := rel["parent_entity_id"].(string)
-            childID := rel["child_entity_id"].(string)
-            if entityMap[parentID] != nil && entityMap[childID] != nil {
-                entityMap[parentID]["children"] = append(entityMap[parentID]["children"].([]interface{}), entityMap[childID])
-            }
-        }
-        topLevel := []interface{}{}
-        for _, e := range entityMap {
-            data := e["data"].(map[string]interface{})
-            isTop := false
-            if v, ok := data["is_top_level_entity"]; ok && v == true {
-                isTop = true
-            }
-            isChild := false
-            for _, rel := range relationships {
-                if rel["child_entity_id"].(string) == e["id"].(string) {
-                    isChild = true
-                    break
-                }
-            }
-            if isTop || !isChild {
-                topLevel = append(topLevel, e)
-            }
-        }
-        json.NewEncoder(w).Encode(map[string]interface{}{
-            "hierarchical": pages["hierarchical"],
-            "pageData":     topLevel,
-        })
-    }
+		defer rows.Close()
+		pages := map[string]map[string]interface{}{}
+		for rows.Next() {
+			var page, tab, action string
+			var allowed bool
+			rows.Scan(&page, &tab, &action, &allowed)
+			if pages[page] == nil {
+				pages[page] = map[string]interface{}{}
+			}
+			if tab == "" {
+				if pages[page]["pagePermissions"] == nil {
+					pages[page]["pagePermissions"] = map[string]bool{}
+				}
+				pages[page]["pagePermissions"].(map[string]bool)[action] = allowed
+			} else {
+				if pages[page]["tabs"] == nil {
+					pages[page]["tabs"] = map[string]map[string]bool{}
+				}
+				if pages[page]["tabs"].(map[string]map[string]bool)[tab] == nil {
+					pages[page]["tabs"].(map[string]map[string]bool)[tab] = map[string]bool{}
+				}
+				pages[page]["tabs"].(map[string]map[string]bool)[tab][action] = allowed
+			}
+		}
+		// Get entity hierarchy (reuse your GetEntityHierarchy logic)
+		entitiesRows, err := db.Query("SELECT * FROM masterentity")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		defer entitiesRows.Close()
+		entities := []map[string]interface{}{}
+		entityMap := map[string]map[string]interface{}{}
+		deletedIds := map[string]bool{}
+		for entitiesRows.Next() {
+			var e = make(map[string]interface{})
+			cols, _ := entitiesRows.Columns()
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range cols {
+				valPtrs[i] = &vals[i]
+			}
+			entitiesRows.Scan(valPtrs...)
+			for i, col := range cols {
+				e[col] = vals[i]
+			}
+			entityID := e["entity_id"].(string)
+			entityMap[entityID] = map[string]interface{}{
+				"id":       entityID,
+				"name":     e["entity_name"],
+				"data":     e,
+				"children": []interface{}{},
+			}
+			if e["is_deleted"] == true {
+				deletedIds[entityID] = true
+			}
+			entities = append(entities, e)
+		}
+		relRows, err := db.Query("SELECT * FROM entityrelationships")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		defer relRows.Close()
+		relationships := []map[string]interface{}{}
+		parentMap := map[string][]string{}
+		for relRows.Next() {
+			var rel = make(map[string]interface{})
+			cols, _ := relRows.Columns()
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range cols {
+				valPtrs[i] = &vals[i]
+			}
+			relRows.Scan(valPtrs...)
+			for i, col := range cols {
+				rel[col] = vals[i]
+			}
+			parentID := rel["parent_entity_id"].(string)
+			childID := rel["child_entity_id"].(string)
+			parentMap[parentID] = append(parentMap[parentID], childID)
+			relationships = append(relationships, rel)
+		}
+		getAllDescendants := func(ids []string) []string {
+			all := map[string]bool{}
+			queue := append([]string{}, ids...)
+			for _, id := range ids {
+				all[id] = true
+			}
+			for len(queue) > 0 {
+				current := queue[0]
+				queue = queue[1:]
+				children := parentMap[current]
+				for _, child := range children {
+					if !all[child] {
+						all[child] = true
+						queue = append(queue, child)
+					}
+				}
+			}
+			result := []string{}
+			for id := range all {
+				result = append(result, id)
+			}
+			return result
+		}
+		deletedList := []string{}
+		for id := range deletedIds {
+			deletedList = append(deletedList, id)
+		}
+		allDeleted := getAllDescendants(deletedList)
+		for _, id := range allDeleted {
+			delete(entityMap, id)
+		}
+		for _, entity := range entityMap {
+			entity["children"] = []interface{}{}
+		}
+		for _, rel := range relationships {
+			parentID := rel["parent_entity_id"].(string)
+			childID := rel["child_entity_id"].(string)
+			if entityMap[parentID] != nil && entityMap[childID] != nil {
+				entityMap[parentID]["children"] = append(entityMap[parentID]["children"].([]interface{}), entityMap[childID])
+			}
+		}
+		topLevel := []interface{}{}
+		for _, e := range entityMap {
+			data := e["data"].(map[string]interface{})
+			isTop := false
+			if v, ok := data["is_top_level_entity"]; ok && v == true {
+				isTop = true
+			}
+			isChild := false
+			for _, rel := range relationships {
+				if rel["child_entity_id"].(string) == e["id"].(string) {
+					isChild = true
+					break
+				}
+			}
+			if isTop || !isChild {
+				topLevel = append(topLevel, e)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"hierarchical": pages["hierarchical"],
+			"pageData":     topLevel,
+		})
+	}
 }

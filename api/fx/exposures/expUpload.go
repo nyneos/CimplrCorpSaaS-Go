@@ -21,6 +21,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/xuri/excelize/v2"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -61,11 +63,11 @@ func UploadExposure(w http.ResponseWriter, r *http.Request) {
 // Helper: send JSON error response and log
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
@@ -91,17 +93,17 @@ func NormalizeDate(dateStr string) string {
 	// Try common layouts first (preserve original behavior)
 	layouts := []string{
 		// ISO formats
-		"2006-01-02",
+		constants.DateFormat,
 		"2006/01/02",
 		"2006.01.02",
 		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
+		constants.DateTimeFormat,
+		constants.DateFormatISO,
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05.000Z",
 
 		// DD-MM-YYYY formats
-		"02-01-2006",
+		constants.DateFormatAlt,
 		"02/01/2006",
 		"02.01.2006",
 		"02-01-2006 15:04:05",
@@ -117,7 +119,7 @@ func NormalizeDate(dateStr string) string {
 		"01.02.2006 15:04:05",
 
 		// Text month formats
-		"02-Jan-2006",
+		constants.DateFormatDash,
 		"02-Jan-06",
 		"2-Jan-2006",
 		"2-Jan-06",
@@ -160,7 +162,7 @@ func NormalizeDate(dateStr string) string {
 			if t.Year() < 1900 || t.Year() > 9999 {
 				continue
 			}
-			return t.Format("2006-01-02")
+			return t.Format(constants.DateFormat)
 		}
 	}
 
@@ -183,7 +185,7 @@ func NormalizeDate(dateStr string) string {
 				if m, err := strconv.Atoi(dateStr[4:6]); err == nil {
 					if d, err := strconv.Atoi(dateStr[6:8]); err == nil {
 						if y >= 1900 && y <= 9999 {
-							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format(constants.DateFormat)
 						}
 					}
 				}
@@ -211,7 +213,7 @@ func NormalizeDate(dateStr string) string {
 				t = base.AddDate(0, 0, int(v))
 			}
 			if t.Year() >= 1900 && t.Year() <= 9999 {
-				return t.Format("2006-01-02")
+				return t.Format(constants.DateFormat)
 			}
 		}
 	}
@@ -340,16 +342,16 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if val, ok := headerFields["document_date"]; ok {
-	headerFields["value_date"] = val
-	delete(headerFields, "document_date")
-}
+			headerFields["value_date"] = val
+			delete(headerFields, "document_date")
+		}
 		// Update header if needed
 		if len(headerFields) > 0 {
 			setParts := []string{}
 			values := []interface{}{}
 			i := 1
 			for k, v := range headerFields {
-				setParts = append(setParts, fmt.Sprintf("%s = $%d", k, i))
+				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
 				values = append(values, v)
 				i++
 			}
@@ -373,7 +375,7 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			values := []interface{}{}
 			i := 1
 			for k, v := range lineFields {
-				setParts = append(setParts, fmt.Sprintf("%s = $%d", k, i))
+				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
 				values = append(values, v)
 				i++
 			}
@@ -437,10 +439,10 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 			results = append(results, rowMap)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    results,
+			constants.ValueSuccess: true,
+			"data":                 results,
 		})
 	}
 }
@@ -452,7 +454,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 
@@ -489,7 +491,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT entity_name FROM descendants
 		`, rootEntityId)
 		if err != nil {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		defer rows.Close()
@@ -501,7 +503,7 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -540,54 +542,54 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
-									// If column already set and new value is empty, preserve the existing value
-					if _, exists := rowMap[col]; exists && pv == "" {
-						continue
-					}
-					rowMap[col] = pv
+				// If column already set and new value is empty, preserve the existing value
+				if _, exists := rowMap[col]; exists && pv == "" {
+					continue
+				}
+				rowMap[col] = pv
 			}
-				// Normalize date-like fields for frontend (DD-MM-YYYY)
-				for k, v := range rowMap {
-					lk := strings.ToLower(k)
-					if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
-						switch tv := v.(type) {
-						case string:
-							if nd := NormalizeDate(tv); nd != "" {
-								// Try to parse the normalized date and reformat to dd-mm-yyyy
-								var perr error
-								layouts := []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"}
-								parsedOK := false
-								var parsed time.Time
-								for _, l := range layouts {
-									parsed, perr = time.Parse(l, nd)
-									if perr == nil {
-										rowMap[k] = parsed.Format("02-01-2006")
-										parsedOK = true
-										break
-									}
-								}
-								if !parsedOK {
-									// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
-									parts := strings.Split(nd, "-")
-									if len(parts) == 3 && len(parts[0]) == 4 {
-										rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
-									} else {
-										rowMap[k] = nd
-									}
+			// Normalize date-like fields for frontend (DD-MM-YYYY)
+			for k, v := range rowMap {
+				lk := strings.ToLower(k)
+				if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
+					switch tv := v.(type) {
+					case string:
+						if nd := NormalizeDate(tv); nd != "" {
+							// Try to parse the normalized date and reformat to dd-mm-yyyy
+							var perr error
+							layouts := []string{constants.DateFormat, time.RFC3339, constants.DateFormatISO, constants.DateTimeFormat}
+							parsedOK := false
+							var parsed time.Time
+							for _, l := range layouts {
+								parsed, perr = time.Parse(l, nd)
+								if perr == nil {
+									rowMap[k] = parsed.Format(constants.DateFormatAlt)
+									parsedOK = true
+									break
 								}
 							}
-						case time.Time:
-							rowMap[k] = tv.Format("02-01-2006")
-						case *time.Time:
-							if tv != nil {
-								rowMap[k] = tv.Format("02-01-2006")
-							} else {
-								rowMap[k] = ""
+							if !parsedOK {
+								// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
+								parts := strings.Split(nd, "-")
+								if len(parts) == 3 && len(parts[0]) == 4 {
+									rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
+								} else {
+									rowMap[k] = nd
+								}
 							}
+						}
+					case time.Time:
+						rowMap[k] = tv.Format(constants.DateFormatAlt)
+					case *time.Time:
+						if tv != nil {
+							rowMap[k] = tv.Format(constants.DateFormatAlt)
+						} else {
+							rowMap[k] = ""
 						}
 					}
 				}
-				joinData = append(joinData, rowMap)
+			}
+			joinData = append(joinData, rowMap)
 		}
 
 		// Fetch permissions for 'exposure-upload' page for this role
@@ -607,13 +609,13 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 					var pageName, tabName, action string
 					var allowed bool
 					if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err == nil {
-						if pageName != "exposure-upload" {
+						if pageName != constants.ExposureUpload {
 							continue
 						}
-						if exposureUploadPerms["exposure-upload"] == nil {
-							exposureUploadPerms["exposure-upload"] = map[string]interface{}{}
+						if exposureUploadPerms[constants.ExposureUpload] == nil {
+							exposureUploadPerms[constants.ExposureUpload] = map[string]interface{}{}
 						}
-						perms := exposureUploadPerms["exposure-upload"].(map[string]interface{})
+						perms := exposureUploadPerms[constants.ExposureUpload].(map[string]interface{})
 						if tabName == "" {
 							if perms["pagePermissions"] == nil {
 								perms["pagePermissions"] = map[string]interface{}{}
@@ -637,12 +639,12 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			"buAccessible": buNames,
 			"pageData":     joinData,
 		}
-		if perms, ok := exposureUploadPerms["exposure-upload"]; ok {
-			resp["exposure-upload"] = perms
+		if perms, ok := exposureUploadPerms[constants.ExposureUpload]; ok {
+			resp[constants.ExposureUpload] = perms
 		}
 		// Debug: log sizes so we can see why clients receive empty responses
 		log.Printf("[DEBUG] GetExposureHeadersLineItems: buAccessible=%d, pageData=%d", len(buNames), len(joinData))
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		b, jerr := json.Marshal(resp)
 		if jerr != nil {
 			respondWithError(w, http.StatusInternalServerError, "JSON marshal failed: "+jerr.Error())
@@ -661,7 +663,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 
@@ -712,7 +714,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			SELECT entity_name FROM descendants
 		`, rootEntityId)
 		if err != nil {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		defer rows.Close()
@@ -724,7 +726,7 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -763,55 +765,55 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 				} else if s, ok := pv.(string); ok && s == "" {
 					pv = ""
 				}
-				
-					// If column already set and new value is empty, preserve the existing value
-					if _, exists := rowMap[col]; exists && pv == "" {
-						continue
-					}
-					rowMap[col] = pv
+
+				// If column already set and new value is empty, preserve the existing value
+				if _, exists := rowMap[col]; exists && pv == "" {
+					continue
+				}
+				rowMap[col] = pv
 			}
-				// Normalize date-like fields for frontend (YYYY-MM-DD)
-				for k, v := range rowMap {
-					lk := strings.ToLower(k)
-					if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
-						switch tv := v.(type) {
-						case string:
-							if nd := NormalizeDate(tv); nd != "" {
-								// Try to parse the normalized date and reformat to dd-mm-yyyy
-								var perr error
-								layouts := []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"}
-								parsedOK := false
-								var parsed time.Time
-								for _, l := range layouts {
-									parsed, perr = time.Parse(l, nd)
-									if perr == nil {
-										rowMap[k] = parsed.Format("02-01-2006")
-										parsedOK = true
-										break
-									}
-								}
-								if !parsedOK {
-									// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
-									parts := strings.Split(nd, "-")
-									if len(parts) == 3 && len(parts[0]) == 4 {
-										rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
-									} else {
-										rowMap[k] = nd
-									}
+			// Normalize date-like fields for frontend (YYYY-MM-DD)
+			for k, v := range rowMap {
+				lk := strings.ToLower(k)
+				if strings.Contains(lk, "date") || strings.HasSuffix(lk, "_at") {
+					switch tv := v.(type) {
+					case string:
+						if nd := NormalizeDate(tv); nd != "" {
+							// Try to parse the normalized date and reformat to dd-mm-yyyy
+							var perr error
+							layouts := []string{constants.DateFormat, time.RFC3339, constants.DateFormatISO, constants.DateTimeFormat}
+							parsedOK := false
+							var parsed time.Time
+							for _, l := range layouts {
+								parsed, perr = time.Parse(l, nd)
+								if perr == nil {
+									rowMap[k] = parsed.Format(constants.DateFormatAlt)
+									parsedOK = true
+									break
 								}
 							}
-						case time.Time:
-							rowMap[k] = tv.Format("02-01-2006")
-						case *time.Time:
-							if tv != nil {
-								rowMap[k] = tv.Format("02-01-2006")
-							} else {
-								rowMap[k] = ""
+							if !parsedOK {
+								// Fallback: if nd looks like yyyy-mm-dd, swap to dd-mm-yyyy
+								parts := strings.Split(nd, "-")
+								if len(parts) == 3 && len(parts[0]) == 4 {
+									rowMap[k] = parts[2] + "-" + parts[1] + "-" + parts[0]
+								} else {
+									rowMap[k] = nd
+								}
 							}
+						}
+					case time.Time:
+						rowMap[k] = tv.Format(constants.DateFormatAlt)
+					case *time.Time:
+						if tv != nil {
+							rowMap[k] = tv.Format(constants.DateFormatAlt)
+						} else {
+							rowMap[k] = ""
 						}
 					}
 				}
-				joinData = append(joinData, rowMap)
+			}
+			joinData = append(joinData, rowMap)
 		}
 		// Fetch permissions for 'exposure-upload' page for this role
 		exposureUploadPerms := map[string]interface{}{}
@@ -830,13 +832,13 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 					var pageName, tabName, action string
 					var allowed bool
 					if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err == nil {
-						if pageName != "exposure-upload" {
+						if pageName != constants.ExposureUpload {
 							continue
 						}
-						if exposureUploadPerms["exposure-upload"] == nil {
-							exposureUploadPerms["exposure-upload"] = map[string]interface{}{}
+						if exposureUploadPerms[constants.ExposureUpload] == nil {
+							exposureUploadPerms[constants.ExposureUpload] = map[string]interface{}{}
 						}
-						perms := exposureUploadPerms["exposure-upload"].(map[string]interface{})
+						perms := exposureUploadPerms[constants.ExposureUpload].(map[string]interface{})
 						if tabName == "" {
 							if perms["pagePermissions"] == nil {
 								perms["pagePermissions"] = map[string]interface{}{}
@@ -860,10 +862,10 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			"buAccessible": buNames,
 			"pageData":     joinData,
 		}
-		if perms, ok := exposureUploadPerms["exposure-upload"]; ok {
-			resp["exposure-upload"] = perms
+		if perms, ok := exposureUploadPerms[constants.ExposureUpload]; ok {
+			resp[constants.ExposureUpload] = perms
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -877,7 +879,7 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			DeleteComment     string   `json:"delete_comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrExposureHeaderIDsUserID)
 			return
 		}
 
@@ -891,7 +893,7 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -910,14 +912,14 @@ func DeleteExposureHeaders(db *sql.DB) http.HandlerFunc {
 		if count == 0 {
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "No matching exposure_headers found",
+				constants.ValueSuccess: false,
+				"message":              "No matching exposure_headers found",
 			})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
+			constants.ValueSuccess: true,
+			"message":              fmt.Sprintf("%d exposure_header(s) marked for delete approval", count),
 		})
 	}
 }
@@ -931,7 +933,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			RejectionComment  string   `json:"rejection_comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrExposureHeaderIDsUserID)
 			return
 		}
 
@@ -945,7 +947,7 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if rejectedBy == "" {
-			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -978,8 +980,8 @@ func RejectMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			rejected = append(rejected, rowMap)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"rejected": rejected,
+			constants.ValueSuccess: true,
+			"rejected":             rejected,
 		})
 	}
 }
@@ -993,7 +995,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			ApprovalComment   string   `json:"approval_comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.ExposureHeaderIds) == 0 || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "exposureHeaderIds and user_id are required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrExposureHeaderIDsUserID)
 			return
 		}
 
@@ -1007,7 +1009,7 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if approvedBy == "" {
-			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -1246,11 +1248,11 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 		}
 		tx.Commit()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"deleted":  results["deleted"],
-			"approved": results["approved"],
-			"rolled":   results["rolled"],
-			"skipped":  results["skipped"],
+			constants.ValueSuccess: true,
+			"deleted":              results["deleted"],
+			"approved":             results["approved"],
+			"rolled":               results["rolled"],
+			"skipped":              results["skipped"],
 		})
 	}
 }
@@ -1264,15 +1266,15 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Invalid multipart form: "+err.Error())
 			return
 		}
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 		// Get buNames from context (from middleware)
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		// Supported file fields
@@ -1296,11 +1298,11 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 				filename := fh.Filename
 				tempFile, err := os.CreateTemp("", "upload-*")
 				// if err != nil {
-				// 	results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to save file"})
+				// 	results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to save file"})
 				// 	continue
 				// }
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to open file"})
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToOpenFile})
 					tempFile.Close()
 					os.Remove(tempFile.Name())
 					continue
@@ -1309,12 +1311,12 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 					filename := fh.Filename
 					tempFile, err := os.CreateTemp("", "upload-*")
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to save file"})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to save file"})
 						continue
 					}
 					f, err := fh.Open()
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to open file"})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToOpenFile})
 						tempFile.Close()
 						os.Remove(tempFile.Name())
 						continue
@@ -1329,7 +1331,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 						reader := csv.NewReader(file)
 						headers, err := reader.Read()
 						if err != nil {
-							results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to read CSV headers"})
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders})
 							file.Close()
 							os.Remove(tempFile.Name())
 							continue
@@ -1337,7 +1339,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 						// Clean headers - remove BOM and trim whitespace
 						for i, h := range headers {
 							// Remove UTF-8 BOM if present
-							h = strings.TrimPrefix(h, "\ufeff")
+							h = strings.TrimPrefix(h, constants.ErrInvalidJSONBOM)
 							// Remove other invisible characters and trim
 							h = strings.TrimSpace(h)
 							headers[i] = h
@@ -1359,14 +1361,14 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 					} else if ext == ".xlsx" || ext == ".xls" {
 						xl, err := excelize.OpenFile(tempFile.Name())
 						if err != nil {
-							results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to read Excel file"})
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to read Excel file"})
 							os.Remove(tempFile.Name())
 							continue
 						}
 						sheet := xl.GetSheetName(0)
 						rows, err := xl.GetRows(sheet)
 						if err != nil || len(rows) < 1 {
-							results = append(results, map[string]interface{}{"filename": filename, "error": "No data in Excel file"})
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "No data in Excel file"})
 							os.Remove(tempFile.Name())
 							continue
 						}
@@ -1374,7 +1376,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 						// Clean headers - remove BOM and trim whitespace
 						for i, h := range headers {
 							// Remove UTF-8 BOM if present
-							h = strings.TrimPrefix(h, "\ufeff")
+							h = strings.TrimPrefix(h, constants.ErrInvalidJSONBOM)
 							// Remove other invisible characters and trim
 							h = strings.TrimSpace(h)
 							headers[i] = h
@@ -1393,7 +1395,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 							dataArr = append(dataArr, obj)
 						}
 					} else {
-						results = append(results, map[string]interface{}{"filename": filename, "error": "Unsupported file type"})
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrUnsupportedFileType})
 						os.Remove(tempFile.Name())
 						continue
 					}
@@ -1443,7 +1445,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 							len(invalidRows), allowedBUs, buCol)
 						results = append(results, map[string]interface{}{
 							"filename":             filename,
-							"error":                errorMsg,
+							constants.ValueError:   errorMsg,
 							"invalidRows":          invalidRows,
 							"allowedBusinessUnits": buNames,
 							"validationField":      buCol,
@@ -1512,7 +1514,7 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 						query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
 						_, err := db.Exec(query, vals...)
 						if err != nil {
-							results = append(results, map[string]interface{}{"filename": filename, "error": "Failed to insert row: " + err.Error()})
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
 							db.Exec(fmt.Sprintf("DELETE FROM %s WHERE upload_batch_id = $1", field.TableName), uploadBatchId)
 							os.Remove(tempFile.Name())
 							break
@@ -1695,18 +1697,18 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 						msg = "Batch absorbed into exposures"
 					}
 					results = append(results, map[string]interface{}{
-						"success":           success,
-						"filename":          filename,
-						"message":           msg,
-						"uploadBatchId":     uploadBatchId,
-						"insertedRows":      insertedRows,
-						"insertedFinalRows": insertedFinalRows,
+						constants.ValueSuccess: success,
+						"filename":             filename,
+						"message":              msg,
+						"uploadBatchId":        uploadBatchId,
+						"insertedRows":         insertedRows,
+						"insertedFinalRows":    insertedFinalRows,
 					})
 					os.Remove(tempFile.Name())
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		var allErrors []string
 		// Collect errors from absorptionErrors
 		if len(absorptionErrors) > 0 {
@@ -1714,12 +1716,12 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 		}
 		// Collect errors from results
 		for _, res := range results {
-			if errMsg, ok := res["error"].(string); ok && errMsg != "" {
+			if errMsg, ok := res[constants.ValueError].(string); ok && errMsg != "" {
 				allErrors = append(allErrors, errMsg)
 			}
-			if success, ok := res["success"].(bool); ok && !success {
+			if success, ok := res[constants.ValueSuccess].(bool); ok && !success {
 				// If not already in errors, add generic error
-				if errMsg, ok := res["error"].(string); !ok || errMsg == "" {
+				if errMsg, ok := res[constants.ValueError].(string); !ok || errMsg == "" {
 					allErrors = append(allErrors, fmt.Sprintf("File %v failed to process.", res["filename"]))
 				}
 			}
@@ -1730,16 +1732,16 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 		if len(allErrors) > 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   strings.Join(allErrors, "; "),
+				constants.ValueSuccess: false,
+				constants.ValueError:   strings.Join(allErrors, "; "),
 			})
 			return
 		}
 		// All successful
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    results,
+			constants.ValueSuccess: true,
+			"data":                 results,
 		})
 
 	}

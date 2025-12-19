@@ -13,6 +13,7 @@ import (
 
 	"github.com/lib/pq"
 	// "github.com/lib/pq"
+	"CimplrCorpSaas/api/constants"
 )
 
 // Handler: CancellationStatusRequest
@@ -28,7 +29,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationDate == "" || req.CancellationRate == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id, booking_amounts (map), cancellation_date, and cancellation_rate are required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "user_id, booking_amounts (map), cancellation_date, and cancellation_rate are required"})
 			return
 		}
 		for bid, amtCancelled := range req.BookingAmounts {
@@ -37,7 +38,7 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 			err := db.QueryRow(`SELECT status FROM forward_bookings WHERE system_transaction_id = $1`, bid).Scan(&currentStatus)
 			if err != nil || currentStatus != "Pending Cancellation" {
 				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{"error": "Booking not in pending cancellation state"})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Booking not in pending cancellation state"})
 				return
 			}
 			// Perform the actual cancellation logic (ledger, cancellation record, etc.)
@@ -78,10 +79,10 @@ func CancellationStatusRequest(db *sql.DB) http.HandlerFunc {
 				_, _ = db.Exec(`UPDATE forward_bookings SET status = 'Partiallu Cancelled' WHERE system_transaction_id = $1`, bid)
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Forward Cancellation Request Processed Successfully",
+			constants.ValueSuccess: true,
+			"message":              "Forward Cancellation Request Processed Successfully",
 		})
 	}
 }
@@ -94,13 +95,13 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id is required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "failed to retrieve business units"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
 			return
 		}
 		// Join forward_cancellations with forward_bookings to get entity_level_0 (bu)
@@ -113,7 +114,7 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(getQuery, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "failed to retrieve pending cancellations"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending cancellations"})
 			return
 		}
 		defer rows.Close()
@@ -168,10 +169,10 @@ func GetPendingCancellations(db *sql.DB) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"bookings": bookings,
+			constants.ValueSuccess: true,
+			"bookings":             bookings,
 		})
 	}
 }
@@ -207,13 +208,13 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 || req.CancellationDate == "" {
-			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -240,10 +241,10 @@ func RolloverForwardBooking(db *sql.DB) http.HandlerFunc {
 				return
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Forward rollover request submitted for approval",
+			constants.ValueSuccess: true,
+			"message":              "Forward rollover request submitted for approval",
 		})
 	}
 }
@@ -255,12 +256,12 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id is required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `
@@ -379,8 +380,8 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
 	}
 }
 
@@ -397,7 +398,7 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `
@@ -471,8 +472,8 @@ func GetExposuresByBookingIds(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
 	}
 }
 
@@ -515,10 +516,10 @@ func CreateForwardCancellations(db *sql.DB) http.HandlerFunc {
 				return
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Forward cancellation request submitted for approval",
+			constants.ValueSuccess: true,
+			"message":              "Forward cancellation request submitted for approval",
 		})
 	}
 }
@@ -530,7 +531,7 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 			BookingAmounts map[string]float64 `json:"booking_amounts"` // booking_id: amount_cancelled
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BookingAmounts) == 0 {
-			respondWithError(w, http.StatusBadRequest, "Invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		for bid, amtCancelled := range req.BookingAmounts {
@@ -620,10 +621,10 @@ func RolloverStatusRequest(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Forward Rollover Request Processed Successfully",
+			constants.ValueSuccess: true,
+			"message":              "Forward Rollover Request Processed Successfully",
 		})
 	}
 }
@@ -635,13 +636,13 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id is required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIIsRequired})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "failed to retrieve business units"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve business units"})
 			return
 		}
 		// Join forward_rollovers with forward_bookings to get entity_level_0 (bu)
@@ -654,7 +655,7 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(getQuery, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "failed to retrieve pending rollovers"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "failed to retrieve pending rollovers"})
 			return
 		}
 		defer rows.Close()
@@ -709,10 +710,10 @@ func GetPendingRollovers(db *sql.DB) http.HandlerFunc {
 			}
 			bookings = append(bookings, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"bookings": bookings,
+			constants.ValueSuccess: true,
+			"bookings":             bookings,
 		})
 	}
 }

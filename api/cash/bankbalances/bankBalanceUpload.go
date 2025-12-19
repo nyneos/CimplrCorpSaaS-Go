@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -43,15 +45,15 @@ func ubParseUploadFile(file multipart.File, ext string) ([][]string, error) {
 		}
 		return rows, nil
 	}
-	return nil, errors.New("unsupported file type")
+	return nil, errors.New(constants.ErrUnsupportedFileType)
 }
 
 // Helper: normalize date string to YYYY-MM-DD
 func normalizeDate(dateStr string) string {
-	layouts := []string{"2006-01-02", "02-01-2006", "01/02/2006", "2 Jan 2006", "2006/01/02"}
+	layouts := []string{constants.DateFormat, constants.DateFormatAlt, "01/02/2006", "2 Jan 2006", "2006/01/02"}
 	for _, layout := range layouts {
 		if t, err := time.Parse(layout, dateStr); err == nil {
-			return t.Format("2006-01-02")
+			return t.Format(constants.DateFormat)
 		}
 	}
 	return dateStr // fallback, let DB error if invalid
@@ -73,7 +75,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			// also allow JSON body with user_id
 			var req struct {
@@ -84,7 +86,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userID == "" {
-			http.Error(w, "user_id required", http.StatusBadRequest)
+			http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
 			return
 		}
 
@@ -98,12 +100,12 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			http.Error(w, "User not found in active sessions", http.StatusUnauthorized)
+			http.Error(w, constants.ErrInvalidSession, http.StatusUnauthorized)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, "Failed to parse multipart form", http.StatusBadRequest)
+			http.Error(w, constants.ErrFailedToParseMultipartForm, http.StatusBadRequest)
 			return
 		}
 
@@ -308,16 +310,16 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				if err := tx.Commit(ctx); err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 					return
 				}
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
-			"batch_ids": batchIDs,
+			constants.ValueSuccess: true,
+			"batch_ids":            batchIDs,
 		})
 	}
 }

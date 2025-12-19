@@ -9,6 +9,8 @@ import (
 
 	"CimplrCorpSaas/api/auth"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,15 +19,15 @@ type cashContextKey string
 const (
 	CashBankAccountsKey cashContextKey = "cashBankAccounts"
 	// slice of BankInfo
-	CashBanksKey         cashContextKey = "cashBanks"
-	CashEntityIDsKey     cashContextKey = "cashEntityIDs"
+	CashBanksKey     cashContextKey = "cashBanks"
+	CashEntityIDsKey cashContextKey = "cashEntityIDs"
 	// slice of BankAccountInfo (detailed)
 	CashBankAccountsInfoKey cashContextKey = "cashBankAccountsInfo"
-	CashCurrenciesKey   cashContextKey = "cashCurrencies"
+	CashCurrenciesKey       cashContextKey = "cashCurrencies"
 	// map: currency_code -> decimal_places
 	CashCurrencyDecimalsKey cashContextKey = "cashCurrencyDecimals"
-	CashCategoriesKey   cashContextKey = "cashCategories"
-	CashGLAccountsKey   cashContextKey = "cashGLAccounts"
+	CashCategoriesKey       cashContextKey = "cashCategories"
+	CashGLAccountsKey       cashContextKey = "cashGLAccounts"
 )
 
 // BankInfo holds minimal bank metadata returned to handlers
@@ -52,19 +54,19 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var userID string
-			ct := r.Header.Get("Content-Type")
-			if strings.HasPrefix(ct, "application/json") && (r.Method == "POST" || r.Method == "PUT") {
+			ct := r.Header.Get(constants.ContentTypeText)
+			if strings.HasPrefix(ct, constants.ContentTypeJSON) && (r.Method == "POST" || r.Method == "PUT") {
 				var bodyMap map[string]interface{}
 				_ = json.NewDecoder(r.Body).Decode(&bodyMap)
-				if uid, ok := bodyMap["user_id"].(string); ok {
+				if uid, ok := bodyMap[constants.KeyUserID].(string); ok {
 					userID = uid
 				}
 				// reset body
 				bodyBytes, _ := json.Marshal(bodyMap)
 				r.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
-			} else if strings.HasPrefix(ct, "multipart/form-data") && (r.Method == "POST" || r.Method == "PUT") {
+			} else if strings.HasPrefix(ct, constants.ContentTypeMultipart) && (r.Method == "POST" || r.Method == "PUT") {
 				if err := r.ParseMultipartForm(32 << 20); err == nil {
-					userID = r.FormValue("user_id")
+					userID = r.FormValue(constants.KeyUserID)
 				}
 			}
 
@@ -85,7 +87,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 			}
 			if !found {
 				LogError("Invalid session for user_id: %s", userID)
-				RespondWithPayload(w, false, "Invalid session", nil)
+				RespondWithPayload(w, false, constants.ErrInvalidSessionShort, nil)
 				return
 			}
 
@@ -157,7 +159,7 @@ FROM descendants;
             `, rootEntityId)
 			if buErr != nil {
 				LogError("No accessible business units found for rootEntityId: %s", rootEntityId)
-				RespondWithPayload(w, false, "No accessible business units found", nil)
+				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
 				return
 			}
 			defer buRows.Close()
@@ -173,7 +175,7 @@ FROM descendants;
 			}
 			if len(buNames) == 0 {
 				LogError("No accessible business units found for user_id: %s", userID)
-				RespondWithPayload(w, false, "No accessible business units found", nil)
+				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
 				return
 			}
 

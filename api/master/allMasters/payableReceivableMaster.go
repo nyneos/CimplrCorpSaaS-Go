@@ -3,15 +3,17 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	exposures "CimplrCorpSaas/api/fx/exposures"
 	"context"
 	"encoding/json"
 	"fmt"
 	"time"
-	exposures "CimplrCorpSaas/api/fx/exposures"
-	
+
 	// "mime/multipart"
 	"net/http"
 	"strings"
+
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -66,7 +68,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []PayableReceivableRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -79,7 +81,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -92,7 +94,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				missing = append(missing, "type_name")
 			}
 			if strings.TrimSpace(rrow.Status) == "" {
-				missing = append(missing, "status")
+				missing = append(missing, constants.KeyStatus)
 			}
 			if strings.TrimSpace(rrow.Direction) == "" {
 				missing = append(missing, "direction")
@@ -104,13 +106,13 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				missing = append(missing, "default_currency")
 			}
 			if len(missing) > 0 {
-				created = append(created, map[string]interface{}{"success": false, "error": fmt.Sprintf("missing required fields: %s", strings.Join(missing, ", "))})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("missing required fields: %s", strings.Join(missing, ", "))})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				created = append(created, map[string]interface{}{"success": false, "error": "failed to start tx: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to start tx: " + err.Error()})
 				continue
 			}
 
@@ -118,27 +120,27 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			sp := "sp_" + strings.ReplaceAll(uuid.New().String(), "-", "_")
 			if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "failed to create savepoint: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to create savepoint: " + err.Error()})
 				continue
 			}
 
 			if err := tx.QueryRow(ctx, `SELECT 'TYP-' || LPAD(nextval('payable_receivable_seq')::text, 6, '0')`).Scan(&id); err != nil {
 				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{"success": false, "error": "failed to generate type_id: " + err.Error(), "type_name": rrow.TypeName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to generate type_id: " + err.Error(), "type_name": rrow.TypeName})
 				tx.Commit(ctx)
 				continue
 			}
 			var effFrom, effTo interface{}
 			if strings.TrimSpace(rrow.EffectiveFrom) != "" {
 				if norm := NormalizeDate(rrow.EffectiveFrom); norm != "" {
-					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 						effFrom = tval
 					}
 				}
 			}
 			if strings.TrimSpace(rrow.EffectiveTo) != "" {
 				if norm := NormalizeDate(rrow.EffectiveTo); norm != "" {
-					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 						effTo = tval
 					}
 				}
@@ -196,7 +198,7 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.Segment,
 			).Scan(&id); err != nil {
 				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "type_name": rrow.TypeName})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "type_name": rrow.TypeName})
 				tx.Commit(ctx)
 				continue
 			}
@@ -204,27 +206,27 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "id": id})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "id": id})
 				continue
 			}
-			created = append(created, map[string]interface{}{"success": true, "type_id": id, "type_name": rrow.TypeName})
+			created = append(created, map[string]interface{}{constants.ValueSuccess: true, "type_id": id, "type_name": rrow.TypeName})
 		}
 
 		overall := true
 		for _, r := range created {
-			if ok, found := r["success"].(bool); !found || !ok {
+			if ok, found := r[constants.ValueSuccess].(bool); !found || !ok {
 				overall = false
 				break
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": overall, "rows": created})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": created})
 	}
 }
 
@@ -243,7 +245,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -254,7 +256,7 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -561,8 +563,8 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -572,7 +574,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -585,7 +587,7 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -632,8 +634,8 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -648,7 +650,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		// get updated_by
@@ -661,7 +663,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -669,12 +671,12 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if row.TypeID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "missing type_id"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing type_id"})
 				continue
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error()})
 				continue
 			}
 			committed := false
@@ -741,168 +743,71 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&existingSapTaxCode, &existingOracleLedger, &existingOracleTransactionType, &existingOracleDistributionSet, &existingOracleSource,
 					&existingTallyVoucherType, &existingTallyTaxClass, &existingTallyLedgerGroup, &existingSageNominalControl, &existingSageAnalysisCode, &existingExternalCode, &existingSegment, &existingStatus,
 				); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "type_id": row.TypeID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "type_id": row.TypeID})
 					return
 				}
 
 				var sets []string
 				var args []interface{}
 				pos := 1
+
+				// map of existing values keyed by the incoming field name
+				existingMap := map[string]interface{}{
+					"type_code":                   existingTypeCode,
+					"type_name":                   existingTypeName,
+					"direction":                   existingDirection,
+					"business_unit_division":      existingBusinessUnitDivision,
+					"default_currency":            existingDefaultCurrency,
+					"default_due_days":            existingDefaultDueDays,
+					"payment_terms_name":          existingPaymentTermsName,
+					"allow_netting":               existingAllowNetting,
+					"settlement_discount":         existingSettlementDiscount,
+					"settlement_discount_percent": existingSettlementDiscountPercent,
+					"tax_applicable":              existingTaxApplicable,
+					"tax_code":                    existingTaxCode,
+					"default_recon_gl":            existingDefaultReconGL,
+					"offset_revenue_expense_gl":   existingOffsetRevenueExpenseGL,
+					"cash_flow_category":          existingCashFlowCategory,
+					"category":                    existingCategory,
+					"effective_from":              existingEffectiveFrom,
+					"effective_to":                existingEffectiveTo,
+					"tags":                        existingTags,
+					"erp_type":                    existingErpType,
+					"sap_company_code":            existingSapCompanyCode,
+					"sap_fi_doc_type":             existingSapFiDocType,
+					"sap_posting_key_debit":       existingSapPostingKeyDebit,
+					"sap_posting_key_credit":      existingSapPostingKeyCredit,
+					"sap_reconciliation_gl":       existingSapReconciliationGL,
+					"sap_tax_code":                existingSapTaxCode,
+					"oracle_ledger":               existingOracleLedger,
+					"oracle_transaction_type":     existingOracleTransactionType,
+					"oracle_distribution_set":     existingOracleDistributionSet,
+					"oracle_source":               existingOracleSource,
+					"tally_voucher_type":          existingTallyVoucherType,
+					"tally_tax_class":             existingTallyTaxClass,
+					"tally_ledger_group":          existingTallyLedgerGroup,
+					"sage_nominal_control":        existingSageNominalControl,
+					"sage_analysis_code":          existingSageAnalysisCode,
+					"external_code":               existingExternalCode,
+					"segment":                     existingSegment,
+				}
+
 				for k, v := range row.Fields {
+					if oldVal, ok := existingMap[k]; ok {
+						// generic two-column update: <col>=$n, old_<col>=$n+1
+						sets = append(sets, fmt.Sprintf("%s=$%d, old_%s=$%d", k, pos, k, pos+1))
+						args = append(args, fmt.Sprint(v), ifaceToString(oldVal))
+						pos += 2
+						continue
+					}
+
 					switch k {
-					case "type_code":
-						sets = append(sets, fmt.Sprintf("type_code=$%d, old_type_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTypeCode))
-						pos += 2
-					case "type_name":
-						sets = append(sets, fmt.Sprintf("type_name=$%d, old_type_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTypeName))
-						pos += 2
-					case "direction":
-						sets = append(sets, fmt.Sprintf("direction=$%d, old_direction=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDirection))
-						pos += 2
-					case "business_unit_division":
-						sets = append(sets, fmt.Sprintf("business_unit_division=$%d, old_business_unit_division=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingBusinessUnitDivision))
-						pos += 2
-					case "default_currency":
-						sets = append(sets, fmt.Sprintf("default_currency=$%d, old_default_currency=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDefaultCurrency))
-						pos += 2
-					case "default_due_days":
-						sets = append(sets, fmt.Sprintf("default_due_days=$%d, old_default_due_days=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDefaultDueDays))
-						pos += 2
-					case "payment_terms_name":
-						sets = append(sets, fmt.Sprintf("payment_terms_name=$%d, old_payment_terms_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingPaymentTermsName))
-						pos += 2
-					case "allow_netting":
-						sets = append(sets, fmt.Sprintf("allow_netting=$%d, old_allow_netting=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingAllowNetting))
-						pos += 2
-					case "settlement_discount":
-						sets = append(sets, fmt.Sprintf("settlement_discount=$%d, old_settlement_discount=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSettlementDiscount))
-						pos += 2
-					case "settlement_discount_percent":
-						sets = append(sets, fmt.Sprintf("settlement_discount_percent=$%d, old_settlement_discount_percent=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSettlementDiscountPercent))
-						pos += 2
-					case "tax_applicable":
-						sets = append(sets, fmt.Sprintf("tax_applicable=$%d, old_tax_applicable=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTaxApplicable))
-						pos += 2
-					case "tax_code":
-						sets = append(sets, fmt.Sprintf("tax_code=$%d, old_tax_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTaxCode))
-						pos += 2
-					case "default_recon_gl":
-						sets = append(sets, fmt.Sprintf("default_recon_gl=$%d, old_default_recon_gl=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingDefaultReconGL))
-						pos += 2
-					case "offset_revenue_expense_gl":
-						sets = append(sets, fmt.Sprintf("offset_revenue_expense_gl=$%d, old_offset_revenue_expense_gl=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOffsetRevenueExpenseGL))
-						pos += 2
-					case "cash_flow_category":
-						sets = append(sets, fmt.Sprintf("cash_flow_category=$%d, old_cash_flow_category=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingCashFlowCategory))
-						pos += 2
-					case "category":
-						sets = append(sets, fmt.Sprintf("category=$%d, old_category=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingCategory))
-						pos += 2
-					case "effective_from":
-						sets = append(sets, fmt.Sprintf("effective_from=$%d, old_effective_from=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingEffectiveFrom))
-						pos += 2
-					case "effective_to":
-						sets = append(sets, fmt.Sprintf("effective_to=$%d, old_effective_to=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingEffectiveTo))
-						pos += 2
-					case "tags":
-						sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTags))
-						pos += 2
-					case "erp_type":
-						sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingErpType))
-						pos += 2
-					case "sap_company_code":
-						sets = append(sets, fmt.Sprintf("sap_company_code=$%d, old_sap_company_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapCompanyCode))
-						pos += 2
-					case "sap_fi_doc_type":
-						sets = append(sets, fmt.Sprintf("sap_fi_doc_type=$%d, old_sap_fi_doc_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapFiDocType))
-						pos += 2
-					case "sap_posting_key_debit":
-						sets = append(sets, fmt.Sprintf("sap_posting_key_debit=$%d, old_sap_posting_key_debit=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapPostingKeyDebit))
-						pos += 2
-					case "sap_posting_key_credit":
-						sets = append(sets, fmt.Sprintf("sap_posting_key_credit=$%d, old_sap_posting_key_credit=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapPostingKeyCredit))
-						pos += 2
-					case "sap_reconciliation_gl":
-						sets = append(sets, fmt.Sprintf("sap_reconciliation_gl=$%d, old_sap_reconciliation_gl=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapReconciliationGL))
-						pos += 2
-					case "sap_tax_code":
-						sets = append(sets, fmt.Sprintf("sap_tax_code=$%d, old_sap_tax_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSapTaxCode))
-						pos += 2
-					case "oracle_ledger":
-						sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLedger))
-						pos += 2
-					case "oracle_transaction_type":
-						sets = append(sets, fmt.Sprintf("oracle_transaction_type=$%d, old_oracle_transaction_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleTransactionType))
-						pos += 2
-					case "oracle_distribution_set":
-						sets = append(sets, fmt.Sprintf("oracle_distribution_set=$%d, old_oracle_distribution_set=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleDistributionSet))
-						pos += 2
-					case "oracle_source":
-						sets = append(sets, fmt.Sprintf("oracle_source=$%d, old_oracle_source=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleSource))
-						pos += 2
-					case "tally_voucher_type":
-						sets = append(sets, fmt.Sprintf("tally_voucher_type=$%d, old_tally_voucher_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyVoucherType))
-						pos += 2
-					case "tally_tax_class":
-						sets = append(sets, fmt.Sprintf("tally_tax_class=$%d, old_tally_tax_class=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyTaxClass))
-						pos += 2
-					case "tally_ledger_group":
-						sets = append(sets, fmt.Sprintf("tally_ledger_group=$%d, old_tally_ledger_group=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyLedgerGroup))
-						pos += 2
-					case "sage_nominal_control":
-						sets = append(sets, fmt.Sprintf("sage_nominal_control=$%d, old_sage_nominal_control=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSageNominalControl))
-						pos += 2
-					case "sage_analysis_code":
-						sets = append(sets, fmt.Sprintf("sage_analysis_code=$%d, old_sage_analysis_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSageAnalysisCode))
-						pos += 2
-					case "external_code":
-						sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingExternalCode))
-						pos += 2
-					case "segment":
-						sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSegment))
-						pos += 2
-					case "status":
+					case constants.KeyStatus:
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
 						pos += 2
 					default:
+						// unknown or intentionally ignored field
 					}
 				}
 
@@ -911,7 +816,7 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE masterpayablereceivabletype SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE type_id=$%d RETURNING type_id", pos)
 					args = append(args, row.TypeID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "update failed: " + err.Error(), "type_id": row.TypeID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "type_id": row.TypeID})
 						return
 					}
 				}
@@ -919,22 +824,22 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// audit
 				auditQ := `INSERT INTO auditactionpayablereceivable (type_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "audit failed: " + err.Error(), "type_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "type_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "type_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "type_id": updatedID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "type_id": updatedID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "type_id": updatedID})
 			}()
 		}
 
 		overall := true
 		for _, r := range results {
-			if ok, exists := r["success"]; exists {
+			if ok, exists := r[constants.ValueSuccess]; exists {
 				if b, okb := ok.(bool); okb {
 					if !b {
 						overall = false
@@ -949,8 +854,8 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": overall, "rows": results})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
 	}
 }
 
@@ -962,7 +867,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		// validate session / user
@@ -975,7 +880,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -987,7 +892,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1013,13 +918,13 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		committed = true
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
 	}
 }
 
@@ -1031,7 +936,7 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1043,13 +948,13 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1121,12 +1026,12 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
 
@@ -1138,7 +1043,7 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1150,13 +1055,13 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1242,19 +1147,19 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "updated": updated})
 	}
 }
 func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -1264,7 +1169,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
@@ -1279,17 +1184,17 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
@@ -1341,7 +1246,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1437,7 +1342,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Ensure 'status' is provided (master requires NOT NULL). Use COALESCE to default to 'Active'.
 			hasStatus := false
 			for _, c := range tgtCols {
-				if c == "status" {
+				if c == constants.KeyStatus {
 					hasStatus = true
 					break
 				}
@@ -1447,7 +1352,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var selectExprs []string
 			if !hasStatus {
 				// prepend status column with default
-				finalCols = append([]string{"status"}, tgtCols...)
+				finalCols = append([]string{constants.KeyStatus}, tgtCols...)
 				selectExprs = append(selectExprs, "COALESCE(s.status, 'Active') AS status")
 				for _, col := range tgtCols {
 					selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", col, col))
@@ -1455,7 +1360,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				finalCols = tgtCols
 				for _, col := range tgtCols {
-					if col == "status" {
+					if col == constants.KeyStatus {
 						selectExprs = append(selectExprs, "COALESCE(s.status, 'Active') AS status")
 					} else {
 						selectExprs = append(selectExprs, fmt.Sprintf("s.%s AS %s", col, col))
@@ -1509,13 +1414,13 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }

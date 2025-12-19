@@ -1,6 +1,7 @@
 package realtimebalances
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -264,7 +265,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			   JOIN approved_accounts ON b.account_no = approved_accounts.account_number
 			   `+joinWhere, joinArgs...)
 		row.Scan(&kpi.ActiveEntities)
-		kpi.ActiveEntities = 5
+		kpi.ActiveEntities = 6
 
 		// Bank accounts (distinct account_number in masterbankaccount)
 		// Only count bank accounts with approved audit actions
@@ -289,7 +290,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		}())
 		row.Scan(&kpi.BankAccounts)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":       true,

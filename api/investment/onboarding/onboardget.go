@@ -37,7 +37,7 @@ func GetAMFISchemeAMCEnriched(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -67,7 +67,7 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -122,7 +122,7 @@ func GetAMFISchemesByMultipleAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, req.AMCs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -154,7 +154,7 @@ func GetFoliosBySchemeListSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Schemes []string `json:"schemes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Schemes) == 0 {
@@ -213,7 +213,7 @@ func GetFoliosBySchemeListSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, req.Schemes)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -224,12 +224,12 @@ func GetFoliosBySchemeListSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var enriched bool
 			_ = rows.Scan(&schemeName, &folioNumber, &entityName, &amcName, &status, &enriched)
 			out = append(out, map[string]interface{}{
-				"scheme_name":  schemeName,
-				"folio_number": folioNumber,
-				"entity_name":  entityName,
-				"amc_name":     amcName,
-				"status":       status,
-				"enriched":     enriched,
+				"scheme_name":       schemeName,
+				"folio_number":      folioNumber,
+				"entity_name":       entityName,
+				"amc_name":          amcName,
+				constants.KeyStatus: status,
+				"enriched":          enriched,
 			})
 		}
 
@@ -245,7 +245,7 @@ func GetFoliosBySchemeListGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Schemes []string `json:"schemes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Schemes) == 0 {
@@ -304,7 +304,7 @@ func GetFoliosBySchemeListGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, req.Schemes)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -317,11 +317,11 @@ func GetFoliosBySchemeListGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = rows.Scan(&schemeName, &folioNumber, &entityName, &amcName, &status, &enriched)
 
 			grouped[schemeName] = append(grouped[schemeName], map[string]interface{}{
-				"folio_number": folioNumber,
-				"entity_name":  entityName,
-				"amc_name":     amcName,
-				"status":       status,
-				"enriched":     enriched,
+				"folio_number":      folioNumber,
+				"entity_name":       entityName,
+				"amc_name":          amcName,
+				constants.KeyStatus: status,
+				"enriched":          enriched,
 			})
 		}
 
@@ -384,7 +384,7 @@ func GetDematWithDPInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&clientID, &defaultAcc, &dematStatus, &dematSource, &dematDeleted,
 				&dpName, &dpCode, &dpDepository, &dpStatus, &dpSource, &dpDeleted,
 			); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
 
@@ -470,18 +470,18 @@ func GetAllDPs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var isDeleted bool
 
 			if err := rows.Scan(&dpID, &dpName, &dpCode, &depository, &status, &source, &isDeleted); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
 
 			out = append(out, map[string]interface{}{
-				"dp_id":      dpID,
-				"dp_name":    dpName,
-				"dp_code":    dpCode,
-				"depository": depository,
-				"status":     status,
-				"source":     ifNotNil(source),
-				"is_deleted": isDeleted,
+				"dp_id":             dpID,
+				"dp_name":           dpName,
+				"dp_code":           dpCode,
+				"depository":        depository,
+				constants.KeyStatus: status,
+				"source":            ifNotNil(source),
+				"is_deleted":        isDeleted,
 			})
 		}
 

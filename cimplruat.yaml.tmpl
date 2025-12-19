@@ -1,0 +1,63 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "{{ .Values.deployment.app.name }}"
+  namespace: "{{ .Values.deployment.app.namespace }}"
+spec:
+  replicas: {{ .Values.deployment.app.replicaCount }}
+  selector:
+    matchLabels:
+      app: "{{ .Values.deployment.app.name }}"
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: "{{ .Values.deployment.app.name }}"
+    spec:
+      serviceAccount: svc-accnt-s3
+      containers:
+        - name: "{{ .Values.deployment.app.name }}"
+          image: 309318185333.dkr.ecr.ap-south-1.amazonaws.com/{{ .Values.deployment.app.docker }}:$IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: {{ .Values.deployment.app.port }}
+          volumeMounts:
+            - name: efs-pvc
+              mountPath: /opt/uatefs/
+          env:
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DB_PORT
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: cimplruat-secrets
+                  key: DB_NAME
+          # Optional: set runtime environment name or port if needed
+            - name: ENV
+              value: "uat"
+            - name: APP_PORT
+              value: "{{ .Values.deployment.app.port }}"
+      volumes:
+        - name: efs-pvc
+          persistentVolumeClaim:
+            claimName: efs

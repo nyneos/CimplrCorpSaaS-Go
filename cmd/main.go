@@ -33,7 +33,7 @@ func InitDB() (*sql.DB, error) {
 }
 
 func main() {
-	_ = godotenv.Load(".env")
+	_ = godotenv.Load("/.env")
 
 	fmt.Println("ENV CHECK:")
 	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
@@ -109,5 +109,9 @@ func main() {
 	if err := manager.StopAll(); err != nil {
 		log.Fatal("failed to stop:", err)
 	}
-}
 
+	// Close pgx pool if initialized
+	if appmanager.GetPgxPool() != nil {
+		appmanager.GetPgxPool().Close()
+	}
+}

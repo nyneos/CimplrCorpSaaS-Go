@@ -11,47 +11,49 @@ import (
 	"path/filepath"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
 	"fmt"
 	"strconv"
 	"time"
+
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
 
 func NormalizeDate(dateStr string) string {
-    dateStr = strings.TrimSpace(dateStr)
-    if dateStr == "" {
-        return ""
-    }
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return ""
+	}
 
-    layouts := []string{
-        "2006-01-02",
-        "02-01-2006",
-        "2006/01/02",
-        "02/01/2006",
-        "2006.01.02",
-        "02.01.2006",
-        time.RFC3339,
-        "2006-01-02 15:04:05",
-        "2006-01-02T15:04:05",
-    }
-	
-	    layouts = append(layouts, []string{
-        "02-Jan-2006",
-        "02-Jan-06",
-        "2-Jan-2006",
-        "2-Jan-06",
-        "02-Jan-2006 15:04:05",
-    }...)
+	layouts := []string{
+		constants.DateFormat,
+		constants.DateFormatAlt,
+		"2006/01/02",
+		"02/01/2006",
+		"2006.01.02",
+		"02.01.2006",
+		time.RFC3339,
+		constants.DateTimeFormat,
+		constants.DateFormatISO,
+	}
 
-    for _, l := range layouts {
-        if t, err := time.Parse(l, dateStr); err == nil {
-            return t.Format("2006-01-02")
-        }
-    }
+	layouts = append(layouts, []string{
+		constants.DateFormatDash,
+		"02-Jan-06",
+		"2-Jan-2006",
+		"2-Jan-06",
+		"02-Jan-2006 15:04:05",
+	}...)
 
-    return ""
+	for _, l := range layouts {
+		if t, err := time.Parse(l, dateStr); err == nil {
+			return t.Format(constants.DateFormat)
+		}
+	}
+
+	return ""
 }
 
 func normalizeOrderType(orderType string) string {
@@ -84,7 +86,6 @@ func normalizeOrderType(orderType string) string {
 	// You may want to return "" or "Invalid" instead if you want strict validation
 	return orderType
 }
-
 
 // Handler: AddForwardBookingManualEntry
 func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
@@ -127,13 +128,13 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		// Check entity_level_0 access
@@ -146,7 +147,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 		}
 		if !found {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "You do not have access to this business unit"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "You do not have access to this business unit"})
 			return
 		}
 		query := `INSERT INTO forward_bookings (
@@ -199,19 +200,18 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 		}
 		if err := row.Scan(valPtrs...); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		result := make(map[string]interface{})
 		for i, col := range cols {
 			result[col] = vals[i]
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": result})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": result})
 	}
 }
-
 
 // Handler: GetEntityRelevantForwardBookings
 func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
@@ -221,19 +221,19 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		rows, err := db.Query(`SELECT * FROM forward_bookings WHERE entity_level_0 = ANY($1)`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			return
 		}
 		cols, _ := rows.Columns()
@@ -276,27 +276,11 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		rows.Close()
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": data})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": data})
 	}
 }
-// Example Forward Booking handler
-func ForwardBooking(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		UserID string `json:"user_id"`
-		// Add other booking fields as needed
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// TODO: Add session validation and booking logic here
-
-	w.Write([]byte("Booking forwarded!"))
-}
-
 
 // Handler: UploadForwardBookingsMulti
 // Multi-file upload for forward bookings (CSV/Excel)
@@ -308,26 +292,26 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 		err := r.ParseMultipartForm(32 << 20) // 32MB
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to parse form: " + err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
 			return
 		}
 		files := r.MultipartForm.File["files"]
 		if len(files) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No files uploaded"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		results := []map[string]interface{}{}
 		for _, fileHeader := range files {
 			file, err := fileHeader.Open()
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to open file", "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
 				continue
 			}
 			defer file.Close()
@@ -337,11 +321,11 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				reader := csv.NewReader(file)
 				headers, err := reader.Read()
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to read CSV headers", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
 					continue
 				}
 				for i, h := range headers {
-					headers[i] = strings.TrimSpace(strings.TrimPrefix(h, "\uFEFF"))
+					headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
 				}
 				for {
 					record, err := reader.Read()
@@ -358,28 +342,28 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					rows = append(rows, row)
 				}
 			} else if ext == ".xls" || ext == ".xlsx" {
-				tmpFile, err := os.CreateTemp("", "upload-*.xlsx")
+				tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to create temp file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
 					continue
 				}
 				defer os.Remove(tmpFile.Name())
 				_, err = io.Copy(tmpFile, file)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to copy file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
 					tmpFile.Close()
 					continue
 				}
 				tmpFile.Close()
 				f, err := excelize.OpenFile(tmpFile.Name())
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to parse Excel file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
 					continue
 				}
 				sheetName := f.GetSheetName(0)
 				rowsData, err := f.GetRows(sheetName)
 				if err != nil || len(rowsData) < 2 {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "No data to upload"})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 					continue
 				}
 				headers := rowsData[0]
@@ -395,11 +379,11 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					rows = append(rows, row)
 				}
 			} else {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Unsupported file type"})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
 				continue
 			}
 			if len(rows) == 0 {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "No data to upload"})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 				continue
 			}
 			successCount := 0
@@ -414,38 +398,38 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				if ot, ok := r["order_type"].(string); ok {
 					r["order_type"] = normalizeOrderType(ot)
 				}
-					
-					for k, v := range r {
-						// Normalize dates
-						if isDateColumn(k) {
-							if v == nil || v == "" {
-								r[k] = nil
-								continue
-							}
-							norm := NormalizeDate(fmt.Sprint(v))
-							if norm == "" {
-								r[k] = nil
-							} else {
-								r[k] = norm
-							}
+
+				for k, v := range r {
+					// Normalize dates
+					if isDateColumn(k) {
+						if v == nil || v == "" {
+							r[k] = nil
 							continue
 						}
+						norm := NormalizeDate(fmt.Sprint(v))
+						if norm == "" {
+							r[k] = nil
+						} else {
+							r[k] = norm
+						}
+						continue
+					}
 
-						lower := strings.ToLower(k)
-						if lower == "booking_amount" || lower == "actual_value_base_currency" || lower == "spot_rate" || lower == "forward_points" || lower == "bank_margin" || lower == "total_rate" || lower == "value_quote_currency" || lower == "intervening_rate_quote_to_local" || lower == "value_local_currency" {
-							s := fmt.Sprint(v)
-							s = strings.TrimSpace(s)
-							if s == "" {
-								r[k] = nil
+					lower := strings.ToLower(k)
+					if lower == "booking_amount" || lower == "actual_value_base_currency" || lower == "spot_rate" || lower == "forward_points" || lower == "bank_margin" || lower == "total_rate" || lower == "value_quote_currency" || lower == "intervening_rate_quote_to_local" || lower == "value_local_currency" {
+						s := fmt.Sprint(v)
+						s = strings.TrimSpace(s)
+						if s == "" {
+							r[k] = nil
+						} else {
+							if f, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64); err == nil {
+								r[k] = f
 							} else {
-								if f, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64); err == nil {
-									r[k] = f
-								} else {
-									r[k] = v
-								}
+								r[k] = v
 							}
 						}
 					}
+				}
 				query := `INSERT INTO forward_bookings (
 					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
 				) VALUES (
@@ -456,21 +440,21 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				}
 				_, err := db.Exec(query, values...)
 				if err != nil {
-					errorRows = append(errorRows, map[string]interface{}{"row": i + 1, "error": "Database insert error", "details": err.Error()})
+					errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Database insert error", "details": err.Error()})
 				} else {
 					successCount++
 				}
 			}
 			results = append(results, map[string]interface{}{
-				"filename": fileHeader.Filename,
-				"inserted": successCount,
-				"errors": errorRows,
+				"filename":    fileHeader.Filename,
+				"inserted":    successCount,
+				"errors":      errorRows,
 				"invalidRows": invalidRows,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": results})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
 	}
 }
 
@@ -483,7 +467,6 @@ func contains(arr []string, str string) bool {
 	return false
 }
 
-
 // Handler: UploadForwardConfirmationsMulti
 // Multi-file upload for forward confirmations (CSV/Excel) - UPDATE existing records
 // Place below imports and package declaration
@@ -492,26 +475,26 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 		err := r.ParseMultipartForm(32 << 20)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to parse form: " + err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
 			return
 		}
 		files := r.MultipartForm.File["files"]
 		if len(files) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No files uploaded"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoFilesUploaded})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		results := []map[string]interface{}{}
 		for _, fileHeader := range files {
 			file, err := fileHeader.Open()
 			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to open file", "details": err.Error()})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
 				continue
 			}
 			defer file.Close()
@@ -521,11 +504,11 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 				reader := csv.NewReader(file)
 				headers, err := reader.Read()
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to read CSV headers", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
 					continue
 				}
 				for i, h := range headers {
-					headers[i] = strings.TrimSpace(strings.TrimPrefix(h, "\uFEFF"))
+					headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
 				}
 				for {
 					record, err := reader.Read()
@@ -542,28 +525,28 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 					rows = append(rows, row)
 				}
 			} else if ext == ".xls" || ext == ".xlsx" {
-				tmpFile, err := os.CreateTemp("", "upload-*.xlsx")
+				tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to create temp file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
 					continue
 				}
 				defer os.Remove(tmpFile.Name())
 				_, err = io.Copy(tmpFile, file)
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to copy file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
 					tmpFile.Close()
 					continue
 				}
 				tmpFile.Close()
 				f, err := excelize.OpenFile(tmpFile.Name())
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to parse Excel file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
 					continue
 				}
 				sheetName := f.GetSheetName(0)
 				rowsData, err := f.GetRows(sheetName)
 				if err != nil || len(rowsData) < 2 {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "No data to upload"})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 					continue
 				}
 				headers := rowsData[0]
@@ -579,11 +562,11 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 					rows = append(rows, row)
 				}
 			} else {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Unsupported file type"})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
 				continue
 			}
 			if len(rows) == 0 {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "No data to upload"})
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 				continue
 			}
 			successCount := 0
@@ -629,42 +612,40 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 				if err == nil {
 					successCount++
 				} else {
-					errorRows = append(errorRows, map[string]interface{}{"row": i + 1, "error": "No matching record found or already confirmed"})
+					errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "No matching record found or already confirmed"})
 				}
 			}
 			results = append(results, map[string]interface{}{
-				"filename": fileHeader.Filename,
-				"updated": successCount,
-				"errors": errorRows,
+				"filename":    fileHeader.Filename,
+				"updated":     successCount,
+				"errors":      errorRows,
 				"invalidRows": invalidRows,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": results})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
 	}
 }
-
-
 
 func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		err := r.ParseMultipartForm(32 << 20)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to parse form: " + err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
 			return
 		}
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Please login to continue."})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPleaseLogin})
 			return
 		}
 		// sessions := getSessionsByUserId(userID)
 		// if len(sessions) == 0 {
 		// 	w.WriteHeader(http.StatusNotFound)
-		// 	json.NewEncoder(w).Encode(map[string]interface{}{"error": "Session expired or not found. Please login again."})
+		// 	json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Session expired or not found. Please login again."})
 		// 	return
 		// }
 		uploadBatchID := uuid.New().String()
@@ -673,7 +654,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Failed to fetch staging table columns"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch staging table columns"})
 			return
 		}
 		defer colRows.Close()
@@ -690,7 +671,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 			for _, fileHeader := range files {
 				file, err := fileHeader.Open()
 				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to open file", "details": err.Error()})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
 					continue
 				}
 				ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
@@ -699,12 +680,12 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					reader := csv.NewReader(file)
 					headers, err := reader.Read()
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to read CSV headers", "details": err.Error()})
+						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
 						file.Close()
 						continue
 					}
 					for i, h := range headers {
-						headers[i] = strings.TrimSpace(strings.TrimPrefix(h, "\uFEFF"))
+						headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
 					}
 					for {
 						record, err := reader.Read()
@@ -721,15 +702,15 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 						rows = append(rows, row)
 					}
 				} else if ext == ".xls" || ext == ".xlsx" {
-					tmpFile, err := os.CreateTemp("", "upload-*.xlsx")
+					tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to create temp file", "details": err.Error()})
+						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
 						file.Close()
 						continue
 					}
 					_, err = io.Copy(tmpFile, file)
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to copy file", "details": err.Error()})
+						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
 						tmpFile.Close()
 						file.Close()
 						continue
@@ -737,14 +718,14 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					tmpFile.Close()
 					f, err := excelize.OpenFile(tmpFile.Name())
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Failed to parse Excel file", "details": err.Error()})
+						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
 						file.Close()
 						continue
 					}
 					sheetName := f.GetSheetName(0)
 					rowsData, err := f.GetRows(sheetName)
 					if err != nil || len(rowsData) < 2 {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "No data to upload"})
+						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 						file.Close()
 						continue
 					}
@@ -762,13 +743,13 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					}
 					os.Remove(tmpFile.Name())
 				} else {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "Unsupported file type"})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
 					file.Close()
 					continue
 				}
 				file.Close()
 				if len(rows) == 0 {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, "error": "No data to upload"})
+					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 					continue
 				}
 				// Insert into staging_bank_forward
@@ -776,13 +757,13 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 				stagingErrors := []map[string]interface{}{}
 				for i, r := range rows {
 					insertObj := map[string]interface{}{
-						"upload_batch_id": uploadBatchID,
-						"bank_identifier": bankIdentifier,
-						"bank_reference_id": getStringOrUUID(r["bank_reference_id"]),
-						"row_number": i + 1,
+						"upload_batch_id":     uploadBatchID,
+						"bank_identifier":     bankIdentifier,
+						"bank_reference_id":   getStringOrUUID(r["bank_reference_id"]),
+						"row_number":          i + 1,
 						"source_reference_id": r["source_reference_id"],
-						"raw_data": marshalJSON(r),
-						"processing_status": "Pending",
+						"raw_data":            marshalJSON(r),
+						"processing_status":   "Pending",
 					}
 					// Add other columns from stagingCols
 					for _, col := range stagingCols {
@@ -819,7 +800,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					}
 					_, err := db.Exec(fmt.Sprintf("INSERT INTO staging_bank_forward (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
 					if err != nil {
-						stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, "error": err.Error()})
+						stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
 					} else {
 						stagingSuccess++
 					}
@@ -848,7 +829,7 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 						}
 					}
 				} else {
-					bookingErrors = append(bookingErrors, map[string]interface{}{"error": "Failed to fetch mapping: " + err.Error()})
+					bookingErrors = append(bookingErrors, map[string]interface{}{constants.ValueError: "Failed to fetch mapping: " + err.Error()})
 				}
 				for i, r := range rows {
 					booking := map[string]interface{}{}
@@ -905,23 +886,23 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 					}
 					_, err := db.Exec(fmt.Sprintf("INSERT INTO forward_bookings (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
 					if err != nil {
-						bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, "error": err.Error()})
+						bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
 					} else {
 						bookingSuccess++
 					}
 				}
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"staging_inserted": stagingSuccess,
-					"staging_errors": stagingErrors,
+					"filename":          fileHeader.Filename,
+					"staging_inserted":  stagingSuccess,
+					"staging_errors":    stagingErrors,
 					"bookings_inserted": bookingSuccess,
-					"booking_errors": bookingErrors,
+					"booking_errors":    bookingErrors,
 				})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_id": uploadBatchID, "results": results})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_id": uploadBatchID, "results": results})
 	}
 }
 

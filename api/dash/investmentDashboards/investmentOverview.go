@@ -2,6 +2,7 @@ package investmentdashboards
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"fmt"
 	"io"
@@ -29,7 +30,7 @@ type KPICard struct {
 func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -70,12 +71,12 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
             )
             SELECT COALESCE(SUM(tx.units * COALESCE(n.nav_value,0)),0)::float8 FROM tx LEFT JOIN navs n ON n.scheme_ref = tx.scheme_ref
         `
-		_ = pgxPool.QueryRow(ctx, lastAumQ, nullIfEmpty(req.EntityName), lastFyEnd.Format("2006-01-02")).Scan(&lastAUM)
+		_ = pgxPool.QueryRow(ctx, lastAumQ, nullIfEmpty(req.EntityName), lastFyEnd.Format(constants.DateFormat)).Scan(&lastAUM)
 
 		// 2) YTD P&L approx: (current AUM) - (sum buys since FY start) + (sum sell proceeds since FY start)
 		var buysSinceFY, sellsSinceFY float64
-		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::float8 FROM investment.onboard_transaction WHERE transaction_date >= $1 AND LOWER(transaction_type) IN ('buy','purchase','subscription') AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2)`, fyStart.Format("2006-01-02"), nullIfEmpty(req.EntityName)).Scan(&buysSinceFY)
-		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::float8 FROM investment.onboard_transaction WHERE transaction_date >= $1 AND LOWER(transaction_type) IN ('sell','redemption') AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2)`, fyStart.Format("2006-01-02"), nullIfEmpty(req.EntityName)).Scan(&sellsSinceFY)
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::float8 FROM investment.onboard_transaction WHERE transaction_date >= $1 AND LOWER(transaction_type) IN ('buy','purchase','subscription') AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2)`, fyStart.Format(constants.DateFormat), nullIfEmpty(req.EntityName)).Scan(&buysSinceFY)
+		_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::float8 FROM investment.onboard_transaction WHERE transaction_date >= $1 AND LOWER(transaction_type) IN ('sell','redemption') AND ($2::text IS NULL OR COALESCE(entity_name,'') = $2)`, fyStart.Format(constants.DateFormat), nullIfEmpty(req.EntityName)).Scan(&sellsSinceFY)
 		ytdPL := (totalAUM - buysSinceFY) + sellsSinceFY
 
 		// 3) Portfolio XIRR: build cash flows from onboard_transaction (buys negative, sells positive) + terminal value
@@ -98,7 +99,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 4) Liquidity Position: cash (bank_statement + manual approved balances) + sellable MF holdings
 		// Use latest-per-account up to 'yesterday' when aggregating balances to avoid double-counting.
-		yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+		yesterday := time.Now().UTC().AddDate(0, 0, -1).Format(constants.DateFormat)
 
 		// cash from approved bank_statement: pick latest record per account_no (as_of_date <= yesterday)
 		var cashFromStatements float64
@@ -304,7 +305,7 @@ type EntityPerformanceRow struct {
 func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -321,7 +322,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.Limit = 50
 		}
 
-		fyStart := getFinancialYearStart(time.Now()).Format("2006-01-02")
+		fyStart := getFinancialYearStart(time.Now()).Format(constants.DateFormat)
 
 		// per-scheme aggregated YTD P&L approximation: (current_value) - buys_since + sells_since
 		q := `
@@ -387,7 +388,7 @@ type ConsolidatedRiskRow struct {
 func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -457,7 +458,7 @@ type WaterfallRow struct {
 func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -472,11 +473,11 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// default date range: start = financial year start (1 Apr), end = today
 		now := time.Now().UTC()
 		if req.PeriodEnd == "" {
-			req.PeriodEnd = now.Format("2006-01-02")
+			req.PeriodEnd = now.Format(constants.DateFormat)
 		}
 		if req.PeriodStart == "" {
 			fyStart := getFinancialYearStart(now)
-			req.PeriodStart = fyStart.Format("2006-01-02")
+			req.PeriodStart = fyStart.Format(constants.DateFormat)
 		}
 
 		ctx := context.Background()
@@ -582,7 +583,7 @@ type AMCPerfRow struct {
 func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -660,7 +661,7 @@ type TopAssetRow struct {
 func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -762,7 +763,7 @@ func formatPercent(v float64) string {
 func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -935,7 +936,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rows, err = pgxPool.Query(ctx, currentMonthQuery, nullIfEmpty(req.EntityName))
 			} else {
 				// Use transaction history for historical months
-				rows, err = pgxPool.Query(ctx, historicalQuery, nullIfEmpty(req.EntityName), m.EndDate.Format("2006-01-02"))
+				rows, err = pgxPool.Query(ctx, historicalQuery, nullIfEmpty(req.EntityName), m.EndDate.Format(constants.DateFormat))
 			}
 
 			if err != nil {
@@ -957,7 +958,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rows":         outRows,
 			"amc_names":    amcNames,
-			"fy_label":     fmt.Sprintf("FY %d-%d", req.Year, (req.Year+1)%100),
+			"fy_label":     fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100),
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 		})
 	}
@@ -998,7 +999,7 @@ type AUMMovementData struct {
 func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1014,16 +1015,16 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Default period: current financial year
 		if req.PeriodEnd == "" {
-			req.PeriodEnd = now.Format("2006-01-02")
+			req.PeriodEnd = now.Format(constants.DateFormat)
 		}
 		if req.PeriodStart == "" {
 			fyStart := getFinancialYearStart(now)
-			req.PeriodStart = fyStart.Format("2006-01-02")
+			req.PeriodStart = fyStart.Format(constants.DateFormat)
 		}
 
 		// Parse dates
-		periodStart, _ := time.Parse("2006-01-02", req.PeriodStart)
-		// periodEnd, _ := time.Parse("2006-01-02", req.PeriodEnd)
+		periodStart, _ := time.Parse(constants.DateFormat, req.PeriodStart)
+		// periodEnd, _ := time.Parse(constants.DateFormat, req.PeriodEnd)
 
 		// 1. CLOSING AUM: Current market value from portfolio_snapshot
 		// Closing = total_units × current_nav
@@ -1036,7 +1037,7 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 2. OPENING AUM: Units held as of period_start × NAV at that date
 		var openingAUM float64
-		openingDate := periodStart.AddDate(0, 0, -1).Format("2006-01-02")
+		openingDate := periodStart.AddDate(0, 0, -1).Format(constants.DateFormat)
 		_ = pgxPool.QueryRow(ctx, `
 			WITH units_at_start AS (
 				SELECT 
@@ -1206,7 +1207,7 @@ type AUMBreakdownItem struct {
 func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1328,21 +1329,21 @@ type AttributionItem struct {
 // GetPerformanceAttribution returns Brinson-Fachler style performance attribution
 // Shows: Benchmark Return → Allocation Effect → Selection Effect → Portfolio Return
 // Answers: "The market gave 10%. We got 12%. Where did the extra 2% come from?"
-// Request JSON: { "entity_name": "", "year": 2024, "benchmark": "NIFTY 50" }
+// Request JSON: { "entity_name": "", "year": 2024, "benchmark": constants.Nifty50 }
 func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		var req struct {
 			EntityName string `json:"entity_name,omitempty"`
 			Year       int    `json:"year,omitempty"`
-			Benchmark  string `json:"benchmark,omitempty"` // e.g., "NIFTY 50", "NIFTY 100"
+			Benchmark  string `json:"benchmark,omitempty"` // e.g., constants.Nifty50, "NIFTY 100"
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -1356,7 +1357,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if req.Benchmark == "" {
-			req.Benchmark = "NIFTY 50"
+			req.Benchmark = constants.Nifty50
 		}
 
 		// Financial year boundaries
@@ -1593,9 +1594,9 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"selection_effect":   selectionEffect,
 			"other_effects":      otherEffects,
 			"category_breakdown": categoryBreakdown,
-			"financial_year":     fmt.Sprintf("FY %d-%d", req.Year, req.Year+1),
-			"period_start":       fyStart.Format("2006-01-02"),
-			"period_end":         fyEnd.Format("2006-01-02"),
+			"financial_year":     fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1),
+			"period_start":       fyStart.Format(constants.DateFormat),
+			"period_end":         fyEnd.Format(constants.DateFormat),
 			"generated_at":       time.Now().UTC().Format(time.RFC3339),
 		}
 
@@ -1617,7 +1618,7 @@ type HeatmapCell struct {
 func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1760,11 +1761,11 @@ type BenchmarkPoint struct {
 
 // GetPortfolioVsBenchmark returns indexed performance comparison (base 100)
 // Shows portfolio vs benchmark performance over time for the financial year
-// Request JSON: { "entity_name": "", "year": 2024, "benchmark": "NIFTY 50" }
+// Request JSON: { "entity_name": "", "year": 2024, "benchmark": constants.Nifty50 }
 func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -1785,7 +1786,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if req.Benchmark == "" {
-			req.Benchmark = "NIFTY 50"
+			req.Benchmark = constants.Nifty50
 		}
 
 		// Financial year boundaries
@@ -1825,15 +1826,15 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Monthly benchmark returns (simplified - in production, fetch from NSE data)
 		// These represent typical monthly returns for different benchmarks
 		benchmarkMonthlyReturns := map[string][]float64{
-			"NIFTY 50":   {0.8, 1.0, 0.6, 0.9, 1.1, 0.7, 0.5, 0.8, 1.2, 0.9, 0.6, 0.8},
-			"NIFTY 100":  {0.7, 0.9, 0.5, 0.8, 1.0, 0.6, 0.4, 0.7, 1.1, 0.8, 0.5, 0.7},
-			"NIFTY NEXT": {1.0, 1.2, 0.8, 1.1, 1.3, 0.9, 0.7, 1.0, 1.4, 1.1, 0.8, 1.0},
-			"SENSEX":     {0.75, 0.95, 0.55, 0.85, 1.05, 0.65, 0.45, 0.75, 1.15, 0.85, 0.55, 0.75},
+			constants.Nifty50: {0.8, 1.0, 0.6, 0.9, 1.1, 0.7, 0.5, 0.8, 1.2, 0.9, 0.6, 0.8},
+			"NIFTY 100":       {0.7, 0.9, 0.5, 0.8, 1.0, 0.6, 0.4, 0.7, 1.1, 0.8, 0.5, 0.7},
+			"NIFTY NEXT":      {1.0, 1.2, 0.8, 1.1, 1.3, 0.9, 0.7, 1.0, 1.4, 1.1, 0.8, 1.0},
+			"SENSEX":          {0.75, 0.95, 0.55, 0.85, 1.05, 0.65, 0.45, 0.75, 1.15, 0.85, 0.55, 0.75},
 		}
 
 		monthlyReturns := benchmarkMonthlyReturns[req.Benchmark]
 		if monthlyReturns == nil {
-			monthlyReturns = benchmarkMonthlyReturns["NIFTY 50"]
+			monthlyReturns = benchmarkMonthlyReturns[constants.Nifty50]
 		}
 
 		// Calculate monthly portfolio values
@@ -1953,7 +1954,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					portfolioMonthlyReturn = monthlyReturns[i%12] * 0.95 // slight underperformance as fallback
 				}
 			}
-			
+
 			// Portfolio grows by its actual calculated return
 			portfolioIndexed = portfolioIndexed * (1 + portfolioMonthlyReturn/100)
 
@@ -1992,7 +1993,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"alpha":            math.Round(alpha*100) / 100,
 				"outperforming":    portfolioReturn > benchmarkReturn,
 			},
-			"financial_year": fmt.Sprintf("FY %d-%d", req.Year, req.Year+1),
+			"financial_year": fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1),
 			"generated_at":   time.Now().UTC().Format(time.RFC3339),
 		}
 
@@ -2087,7 +2088,7 @@ func fetchNAVFromMFAPI(schemeCode string) (currentNAV, prevNAV float64, err erro
 func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method Not Allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 

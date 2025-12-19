@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -85,8 +87,8 @@ type ReceivableV2 struct {
 const (
 	InvalidRequestFormat       = "Invalid request format"
 	BusinessUnitsNotFound      = "Business units not found in context"
-	ContentTypeJSON            = "Content-Type"
-	ApplicationJSON            = "application/json"
+	ContentTypeJSON            = constants.ContentTypeText
+	ApplicationJSON            = constants.ContentTypeJSON
 	UnauthorizedInvalidSession = "Unauthorized: invalid session"
 )
 
@@ -96,8 +98,8 @@ func respondWithErrorTransactionV2(w http.ResponseWriter, status int, errMsg str
 	w.Header().Set(ContentTypeJSON, ApplicationJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
@@ -257,7 +259,7 @@ func (bp *TransactionBatchProcessor) BatchInsertPayables(ctx context.Context, pa
 	if len(payableIDs) > 0 {
 		var auditValues []string
 		for _, pid := range payableIDs {
-			auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", pid, userName))
+			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
 		}
 		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := bp.pool.Exec(ctx, auditSQL)
@@ -327,7 +329,7 @@ func (bp *TransactionBatchProcessor) BatchInsertReceivables(ctx context.Context,
 	if len(receivableIDs) > 0 {
 		var auditValues []string
 		for _, rid := range receivableIDs {
-			auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", rid, userName))
+			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
 		}
 		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := bp.pool.Exec(ctx, auditSQL)
@@ -351,7 +353,7 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get user session from form or body
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		userName := ""
 		if userID != "" {
 			// Validate session and get userName
@@ -402,10 +404,10 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 				// Duplicate upload detected - return existing batch info (no need to commit as we're only reading)
 				w.Header().Set(ContentTypeJSON, ApplicationJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success":   true,
-					"batch_id":  existingBatchID,
-					"duplicate": true,
-					"message":   "Duplicate upload detected - returning existing batch",
+					constants.ValueSuccess: true,
+					"batch_id":             existingBatchID,
+					"duplicate":            true,
+					"message":              "Duplicate upload detected - returning existing batch",
 				})
 				return
 			}
@@ -422,14 +424,14 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 			FailedRecords:      0,
 		}
 
-		// Get filename for tracking
+		// Get filename for tracking (support either payables or receivables)
 		var fileName string
-		if file, header, err := r.FormFile("payables"); err == nil {
-			fileName = header.Filename
-			file.Close()
-		} else if file, header, err := r.FormFile("receivables"); err == nil {
-			fileName = header.Filename
-			file.Close()
+		for _, field := range []string{"payables", "receivables"} {
+			if file, header, err := r.FormFile(field); err == nil {
+				fileName = header.Filename
+				file.Close()
+				break
+			}
 		}
 		batch.FileName = &fileName
 
@@ -501,13 +503,13 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set(ContentTypeJSON, ApplicationJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":           true,
-			"batch_id":          batch.BatchID,
-			"total_records":     totalRecords,
-			"processed_records": processedRecords,
-			"processed_files":   processedFiles,
-			"processing_time":   processingTime.String(),
-			"message":           fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", totalRecords, processedRecords),
+			constants.ValueSuccess: true,
+			"batch_id":             batch.BatchID,
+			"total_records":        totalRecords,
+			"processed_records":    processedRecords,
+			"processed_files":      processedFiles,
+			"processing_time":      processingTime.String(),
+			"message":              fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", totalRecords, processedRecords),
 		})
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
@@ -20,31 +22,31 @@ import (
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
 func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var userID string
-		ct := r.Header.Get("Content-Type")
-		if strings.HasPrefix(ct, "multipart/form-data") {
+		ct := r.Header.Get(constants.ContentTypeText)
+		if strings.HasPrefix(ct, constants.ContentTypeMultipart) {
 			err := r.ParseMultipartForm(32 << 20)
 			if err != nil {
 				respondWithError(w, http.StatusBadRequest, "Failed to parse form-data")
 				return
 			}
-			userID = r.FormValue("user_id")
-		// } else if strings.HasPrefix(ct, "application/json") {
-		// 	var bodyMap map[string]interface{}
-		// 	_ = json.NewDecoder(r.Body).Decode(&bodyMap)
-		// 	if uid, ok := bodyMap["user_id"].(string); ok {
-		// 		userID = uid
-		// 	}
+			userID = r.FormValue(constants.KeyUserID)
+			// } else if strings.HasPrefix(ct, constants.ContentTypeJSON) {
+			// 	var bodyMap map[string]interface{}
+			// 	_ = json.NewDecoder(r.Body).Decode(&bodyMap)
+			// 	if uid, ok := bodyMap[constants.KeyUserID].(string); ok {
+			// 		userID = uid
+			// 	}
 		}
 		if userID == "" {
 			respondWithError(w, http.StatusBadRequest, "Missing user_id")
@@ -54,15 +56,15 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 		// Get business units from middleware context
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		
+
 		// Get files from multipart form
 		form := r.MultipartForm
 		files := form.File["files"]
 		if len(files) == 0 {
-			respondWithError(w, http.StatusBadRequest, "No files uploaded")
+			respondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 
@@ -71,8 +73,8 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			file, err := fileHeader.Open()
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"error":    "Failed to open file",
+					"filename":           fileHeader.Filename,
+					constants.ValueError: constants.ErrFailedToOpenFile,
 				})
 				continue
 			}
@@ -85,8 +87,8 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				headers, err := reader.Read()
 				if err != nil {
 					results = append(results, map[string]interface{}{
-						"filename": fileHeader.Filename,
-						"error":    "Failed to read CSV headers",
+						"filename":           fileHeader.Filename,
+						constants.ValueError: constants.ErrFailedToReadCSVHeaders,
 					})
 					continue
 				}
@@ -108,8 +110,8 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				xl, err := excelize.OpenReader(file)
 				if err != nil {
 					results = append(results, map[string]interface{}{
-						"filename": fileHeader.Filename,
-						"error":    "Failed to read Excel file",
+						"filename":           fileHeader.Filename,
+						constants.ValueError: "Failed to read Excel file",
 					})
 					continue
 				}
@@ -117,8 +119,8 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				xRows, err := xl.GetRows(sheet)
 				if err != nil || len(xRows) < 1 {
 					results = append(results, map[string]interface{}{
-						"filename": fileHeader.Filename,
-						"error":    "No data in Excel file",
+						"filename":           fileHeader.Filename,
+						constants.ValueError: "No data in Excel file",
 					})
 					continue
 				}
@@ -136,16 +138,16 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				}
 			} else {
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"error":    "Unsupported file type",
+					"filename":           fileHeader.Filename,
+					constants.ValueError: constants.ErrUnsupportedFileType,
 				})
 				continue
 			}
 
 			if len(rowsData) == 0 {
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"error":    "No data to upload",
+					"filename":           fileHeader.Filename,
+					constants.ValueError: constants.ErrNoDataToUpload,
 				})
 				continue
 			}
@@ -166,19 +168,19 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				rows, err := db.Query(query, pq.Array(refIds))
 				if err == nil {
 					for rows.Next() {
-						var system_transaction_id, internal_reference_id, order_type, currency_pair string
-						var booking_amount, total_rate float64
-						var maturity_date string
-						rows.Scan(&system_transaction_id, &internal_reference_id, &order_type, &booking_amount, &maturity_date, &total_rate, &currency_pair)
-						bookingMap[internal_reference_id] = system_transaction_id
+						var systemTransactionId, internal_reference_id, order_type, currency_pair string
+						var bookingAmount, total_rate float64
+						var maturityDate string
+						rows.Scan(&systemTransactionId, &internal_reference_id, &order_type, &bookingAmount, &maturityDate, &total_rate, &currency_pair)
+						bookingMap[internal_reference_id] = systemTransactionId
 						bookingDetailsMap[internal_reference_id] = map[string]interface{}{
-							"order_type":      order_type,
-							"booking_amount":  booking_amount,
-							"maturity_date":   maturity_date,
-							"total_rate":      total_rate,
-							"currency_pair":   currency_pair,
+							"order_type":     order_type,
+							"booking_amount": bookingAmount,
+							"maturity_date":  maturityDate,
+							"total_rate":     total_rate,
+							"currency_pair":  currency_pair,
 						}
-						bookingIdList = append(bookingIdList, system_transaction_id)
+						bookingIdList = append(bookingIdList, systemTransactionId)
 					}
 					rows.Close()
 				}
@@ -189,14 +191,14 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				rows, err := db.Query(query, pq.Array(bookingIdList))
 				if err == nil {
 					for rows.Next() {
-						var booking_id string
-						var running_open_amount float64
-						var ledger_sequence int
-						rows.Scan(&booking_id, &running_open_amount, &ledger_sequence)
-						if lm, ok := ledgerMap[booking_id]; !ok || ledger_sequence > lm["ledger_sequence"].(int) {
-							ledgerMap[booking_id] = map[string]interface{}{
-								"running_open_amount": running_open_amount,
-								"ledger_sequence":      ledger_sequence,
+						var bookingId string
+						var runningOpenAmount float64
+						var ledgerSequence int
+						rows.Scan(&bookingId, &runningOpenAmount, &ledgerSequence)
+						if lm, ok := ledgerMap[bookingId]; !ok || ledgerSequence > lm["ledger_sequence"].(int) {
+							ledgerMap[bookingId] = map[string]interface{}{
+								"running_open_amount": runningOpenAmount,
+								"ledger_sequence":     ledgerSequence,
 							}
 						}
 					}
@@ -248,7 +250,7 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				dealDate := str(row["deal_date"])
 				maturityDate := str(row["maturity_date"])
 				daysToMaturity := calcDaysToMaturity(dealDate, maturityDate, row["days_to_maturity"])
-				status := str(row["status"])
+				status := str(row[constants.KeyStatus])
 				if status == "" {
 					status = "pending"
 				}
@@ -271,16 +273,16 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			}
 			if fileError != nil {
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"error":    fileError.Error(),
+					"filename":           fileHeader.Filename,
+					constants.ValueError: fileError.Error(),
 				})
 				continue
 			}
 			tx, err := db.Begin()
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"error":    "Failed to start DB transaction",
+					"filename":           fileHeader.Filename,
+					constants.ValueError: "Failed to start DB transaction",
 				})
 				continue
 			}
@@ -296,8 +298,8 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 				if err != nil {
 					tx.Rollback()
 					results = append(results, map[string]interface{}{
-						"filename": fileHeader.Filename,
-						"error":    "Failed to insert data: " + err.Error(),
+						"filename":           fileHeader.Filename,
+						constants.ValueError: "Failed to insert data: " + err.Error(),
 					})
 					continue
 				}
@@ -305,8 +307,8 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			err = tx.Commit()
 			if err != nil {
 				results = append(results, map[string]interface{}{
-					"filename": fileHeader.Filename,
-					"error":    "Failed to commit transaction: " + err.Error(),
+					"filename":           fileHeader.Filename,
+					constants.ValueError: constants.ErrTxCommitFailed + err.Error(),
 				})
 				continue
 			}
@@ -318,15 +320,15 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 
 		hasErrors := false
 		for _, r := range results {
-			if r["error"] != nil {
+			if r[constants.ValueError] != nil {
 				hasErrors = true
 				break
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": !hasErrors,
-			"results": results,
+			constants.ValueSuccess: !hasErrors,
+			"results":              results,
 		})
 	}
 }
@@ -360,7 +362,7 @@ func num(v interface{}) float64 {
 	}
 }
 func calcDaysToMaturity(dealDateStr, maturityDateStr string, fallback interface{}) int {
-	layout := "2006-01-02"
+	layout := constants.DateFormat
 	dealDate, err1 := time.Parse(layout, dealDateStr)
 	maturityDate, err2 := time.Parse(layout, maturityDateStr)
 	if err1 == nil && err2 == nil {
@@ -385,17 +387,17 @@ func calcDaysToMaturity(dealDateStr, maturityDateStr string, fallback interface{
 func GetMTMData(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-            UserID string `json:"user_id"`
-        }
-        ct := r.Header.Get("Content-Type")
-        if strings.HasPrefix(ct, "application/json") {
-            _ = json.NewDecoder(r.Body).Decode(&req)
-        }
+			UserID string `json:"user_id"`
+		}
+		ct := r.Header.Get(constants.ContentTypeText)
+		if strings.HasPrefix(ct, constants.ContentTypeJSON) {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
 
 		// Get business units from middleware context
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -423,10 +425,10 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 			}
 			data = append(data, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    data,
+			constants.ValueSuccess: true,
+			"data":                 data,
 		})
 	}
 }

@@ -11,16 +11,18 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
 // // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-// 	w.Header().Set("Content-Type", "application/json")
+// 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 	w.WriteHeader(status)
 // 	json.NewEncoder(w).Encode(map[string]interface{}{
-// 		"success": false,
-// 		"error":   errMsg,
+// 		constants.ValueSuccess: false,
+// 		constants.ValueError:   errMsg,
 // 	})
 // }
 
@@ -95,7 +97,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			values := []interface{}{}
 			i := 1
 			for k, v := range req.HeaderFields {
-				setParts = append(setParts, fmt.Sprintf("%s = $%d", k, i))
+				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
 				values = append(values, v)
 				i++
 			}
@@ -128,7 +130,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			values := []interface{}{}
 			i := 1
 			for k, v := range req.LineItemFields {
-				setParts = append(setParts, fmt.Sprintf("%s = $%d", k, i))
+				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
 				values = append(values, v)
 				i++
 			}
@@ -163,7 +165,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			values := []interface{}{}
 			i := 1
 			for k, v := range req.BucketingFields {
-				setParts = append(setParts, fmt.Sprintf("%s = $%d", k, i))
+				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
 				values = append(values, v)
 				i++
 			}
@@ -198,7 +200,7 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			values := []interface{}{}
 			i := 1
 			for k, v := range req.HedgingFields {
-				setParts = append(setParts, fmt.Sprintf("%s = $%d", k, i))
+				setParts = append(setParts, fmt.Sprintf(constants.FormatSQLColumnArg, k, i))
 				values = append(values, v)
 				i++
 			}
@@ -231,10 +233,10 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No records updated")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"updated": updated,
+			constants.ValueSuccess: true,
+			"updated":              updated,
 		})
 	}
 }
@@ -246,7 +248,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 
@@ -267,7 +269,7 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		// Get business units from context (set by middleware)
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -328,13 +330,13 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 					var pageName, tabName, action string
 					var allowed bool
 					if err := permRows.Scan(&pageName, &tabName, &action, &allowed); err == nil {
-						if pageName != "exposure-bucketing" {
+						if pageName != constants.ExposureBucketing {
 							continue
 						}
-						if exposureBucketingPerms["exposure-bucketing"] == nil {
-							exposureBucketingPerms["exposure-bucketing"] = map[string]interface{}{}
+						if exposureBucketingPerms[constants.ExposureBucketing] == nil {
+							exposureBucketingPerms[constants.ExposureBucketing] = map[string]interface{}{}
 						}
-						perms := exposureBucketingPerms["exposure-bucketing"].(map[string]interface{})
+						perms := exposureBucketingPerms[constants.ExposureBucketing].(map[string]interface{})
 						if tabName == "" {
 							if perms["pagePermissions"] == nil {
 								perms["pagePermissions"] = map[string]interface{}{}
@@ -358,10 +360,10 @@ func GetExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			"buAccessible": buNames,
 			"pageData":     pageData,
 		}
-		if perms, ok := exposureBucketingPerms["exposure-bucketing"]; ok {
-			resp["exposure-bucketing"] = perms
+		if perms, ok := exposureBucketingPerms[constants.ExposureBucketing]; ok {
+			resp[constants.ExposureBucketing] = perms
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -388,7 +390,7 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -419,10 +421,10 @@ func ApproveBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			approved = append(approved, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"Approved": approved,
+			constants.ValueSuccess: true,
+			"Approved":             approved,
 		})
 	}
 }
@@ -449,7 +451,7 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			respondWithError(w, http.StatusUnauthorized, "Invalid session")
+			respondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -480,10 +482,10 @@ func RejectBucketingStatus(db *sql.DB) http.HandlerFunc {
 			}
 			rejected = append(rejected, rowMap)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"Rejected": rejected,
+			constants.ValueSuccess: true,
+			"Rejected":             rejected,
 		})
 	}
 }

@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -160,7 +162,7 @@ func parseTransactionsCSV(r io.Reader) ([]TxCSVRow, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid date %s: %v", dtStr, err)
 		}
-		dt, err := time.Parse("2006-01-02", normalizedDate)
+		dt, err := time.Parse(constants.DateFormat, normalizedDate)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse normalized date %s: %v", normalizedDate, err)
 		}
@@ -197,9 +199,9 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		// resolve user email from active sessions
@@ -211,7 +213,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 		log.Printf("[bulk] user %s (%s)", userID, userEmail)
@@ -220,7 +222,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pgxPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 		if err != nil {
 			log.Printf("[bulk] tx begin: %v", err)
-			api.RespondWithError(w, 500, "tx begin: "+err.Error())
+			api.RespondWithError(w, 500, constants.ErrTxBegin+err.Error())
 			return
 		}
 		defer func() {
@@ -433,7 +435,6 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if d.Enriched {
 					enrichedCounts["dp"]++
-					continue
 					enrichedDPs[d.DPCode] = true
 				}
 				continue
@@ -476,9 +477,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 				if dm.Enriched {
 					enrichedCounts["demat"]++
-					continue
+					enrichedDemats[dm.DematAccountNumber] = true
 				}
-				enrichedDemats[dm.DematAccountNumber] = true
 				continue
 			}
 			var dematID string
@@ -510,13 +510,13 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				folioMap[f.FolioNumber] = f.FolioID
 				// Create mapping entry
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, f.FolioID, f.FolioNumber); err != nil {
-					log.Printf("[bulk] folio mapping insert failed: %v", err)
-					api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+					log.Printf(constants.ErrBulkFolioMappingInsertFailed, err)
+					api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
 					return
 				}
-				enrichedCounts["scheme"]++
-				continue
+				enrichedCounts["folio"]++
 				enrichedFolios[f.FolioNumber] = true
+				continue
 			}
 			// Resolve amc_name if empty - try to lookup from entity_name or use a default
 			folioAmcName := f.AmcName
@@ -541,14 +541,14 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				folioMap[f.FolioNumber] = existing
 				// Create mapping entry
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, existing, f.FolioNumber); err != nil {
-					log.Printf("[bulk] folio mapping insert failed: %v", err)
-					api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+					log.Printf(constants.ErrBulkFolioMappingInsertFailed, err)
+					api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
 					return
 				}
 				if f.Enriched {
-					continue
 					enrichedCounts["folio"]++
 					enrichedFolios[f.FolioNumber] = true
+					continue
 				}
 				continue
 			}
@@ -560,8 +560,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// Create mapping entry for new folio
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, entity_name, folio_id, folio_number) VALUES ($1, $2, $3, $4)`, batchID, f.EntityName, folioID, f.FolioNumber); err != nil {
-				log.Printf("[bulk] folio mapping insert failed: %v", err)
-				api.RespondWithError(w, 500, "folio mapping failed: "+err.Error())
+				log.Printf(constants.ErrBulkFolioMappingInsertFailed, err)
+				api.RespondWithError(w, 500, constants.ErrBulkFolioMappingFailed+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, folioID, userEmail); err != nil {
@@ -606,8 +606,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					schemeMap[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = existing
 					// Create mapping entry for enriched scheme
 					if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, existing, s.SchemeName); err != nil {
-						log.Printf("[bulk] scheme mapping insert failed: %v", err)
-						api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+						log.Printf(constants.ErrBulkSchemeMappingInsertFailed, err)
+						api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
 						return
 					}
 					continue
@@ -633,8 +633,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				schemeMap[defaultIfEmpty(s.InternalSchemeCode, s.SchemeName)] = existing
 				// Create mapping entry for existing scheme
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, existing, s.SchemeName); err != nil {
-					log.Printf("[bulk] scheme mapping insert failed: %v", err)
-					api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+					log.Printf(constants.ErrBulkSchemeMappingInsertFailed, err)
+					api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
 					return
 				}
 				if s.Enriched {
@@ -660,8 +660,8 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			// Create mapping entry for new scheme
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.portfolio_onboarding_map (batch_id, scheme_id, scheme_name) VALUES ($1, $2, $3)`, batchID, schemeID, s.SchemeName); err != nil {
-				log.Printf("[bulk] scheme mapping insert failed: %v", err)
-				api.RespondWithError(w, 500, "scheme mapping failed: "+err.Error())
+				log.Printf(constants.ErrBulkSchemeMappingInsertFailed, err)
+				api.RespondWithError(w, 500, constants.ErrBulkSchemeMappingFailed+err.Error())
 				return
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, schemeID, userEmail); err != nil {
@@ -678,7 +678,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isEnriched := enrichedAMCs[k]
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'AMC',$3,$4)`, batchID, v, k, isEnriched); err != nil {
 				log.Printf("[bulk] onboard mapping amc failed: %v", err)
-				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
 				return
 			}
 		}
@@ -686,7 +686,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isEnriched := enrichedSchemes[k]
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'SCHEME',$3,$4)`, batchID, v, k, isEnriched); err != nil {
 				log.Printf("[bulk] onboard mapping scheme failed: %v", err)
-				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
 				return
 			}
 		}
@@ -694,7 +694,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isEnriched := enrichedDPs[k]
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DP',$3,$4)`, batchID, v, k, isEnriched); err != nil {
 				log.Printf("[bulk] onboard mapping dp failed: %v", err)
-				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
 				return
 			}
 		}
@@ -702,7 +702,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isEnriched := enrichedDemats[k]
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'DEMAT',$3,$4)`, batchID, v, k, isEnriched); err != nil {
 				log.Printf("[bulk] onboard mapping demat failed: %v", err)
-				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
 				return
 			}
 		}
@@ -710,7 +710,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			isEnriched := enrichedFolios[k]
 			if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_mapping (batch_id, reference_id, reference_type, reference_name, enriched) VALUES ($1,$2,'FOLIO',$3,$4)`, batchID, v, k, isEnriched); err != nil {
 				log.Printf("[bulk] onboard mapping folio failed: %v", err)
-				api.RespondWithError(w, 500, "onboard mapping failed: "+err.Error())
+				api.RespondWithError(w, 500, constants.ErrBulkOnboardMappingFailed+err.Error())
 				return
 			}
 		}
@@ -818,7 +818,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fhArr = txFiles
 			log.Printf("[bulk] found CSV under 'transactions' key")
 		}
-		
+
 		if len(fhArr) > 0 {
 			f, err := fhArr[0].Open()
 			if err != nil {
@@ -935,7 +935,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Insert transaction with resolved IDs and entity_name
-				// Note: Store all values as POSITIVE. Transaction type ('Purchase', 'Sell', etc.) 
+				// Note: Store all values as POSITIVE. Transaction type ('Purchase', 'Sell', etc.)
 				// determines direction in snapshot calculations.
 				if _, err := tx.Exec(ctx, `INSERT INTO investment.onboard_transaction (batch_id, transaction_date, transaction_type, scheme_internal_code, folio_number, demat_acc_number, amount, units, nav, scheme_id, folio_id, demat_id, entity_name, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())`, batchID, tr.TransactionDate, tr.TransactionType, tr.SchemeInternalCode, nullableString(tr.FolioNumber), nullableString(tr.DematAccNumber), tr.Amount, tr.Units, tr.Nav, nullableString(schemeID), nullableString(folioID), nullableString(dematID), nullableString(entityName)); err != nil {
 					log.Printf("[bulk] insert onboard_transaction failed: %v", err)
@@ -945,7 +945,7 @@ func UploadInvestmentBulkk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				counts["transactions"]++
 			}
 			log.Printf("[bulk] inserted %d transactions with entity_name populated (validated against enriched data where available)", counts["transactions"])
-			
+
 			// STRICT VALIDATION: Ensure at least one transaction was inserted
 			if counts["transactions"] == 0 {
 				log.Printf("[bulk] STRICT: no transactions inserted, rolling back batch %s", batchID)
@@ -1113,7 +1113,7 @@ WHERE ts.total_units > 0;
 		// commit
 		if err := tx.Commit(ctx); err != nil {
 			log.Printf("[bulk] commit failed: %v", err)
-			api.RespondWithError(w, 500, "commit failed: "+err.Error())
+			api.RespondWithError(w, 500, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		tx = nil
@@ -1148,17 +1148,17 @@ func NormalizeDate(dateStr string) (string, error) {
 	// Try common layouts first
 	layouts := []string{
 		// ISO formats
-		"2006-01-02",
+		constants.DateFormat,
 		"2006/01/02",
 		"2006.01.02",
 		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
+		constants.DateTimeFormat,
+		constants.DateFormatISO,
 		"2006-01-02T15:04:05Z",
 		"2006-01-02T15:04:05.000Z",
 
 		// DD-MM-YYYY formats
-		"02-01-2006",
+		constants.DateFormatAlt,
 		"02/01/2006",
 		"02.01.2006",
 		"02-01-2006 15:04:05",
@@ -1174,7 +1174,7 @@ func NormalizeDate(dateStr string) (string, error) {
 		"01.02.2006 15:04:05",
 
 		// Text month formats
-		"02-Jan-2006",
+		constants.DateFormatDash,
 		"02-Jan-06",
 		"2-Jan-2006",
 		"2-Jan-06",
@@ -1217,7 +1217,7 @@ func NormalizeDate(dateStr string) (string, error) {
 			if t.Year() < 1900 || t.Year() > 9999 {
 				continue
 			}
-			return t.Format("2006-01-02"), nil
+			return t.Format(constants.DateFormat), nil
 		}
 	}
 
@@ -1237,7 +1237,7 @@ func NormalizeDate(dateStr string) (string, error) {
 				if m, err := strconv.Atoi(dateStr[4:6]); err == nil {
 					if d, err := strconv.Atoi(dateStr[6:8]); err == nil {
 						if y >= 1900 && y <= 9999 {
-							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format("2006-01-02"), nil
+							return time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC).Format(constants.DateFormat), nil
 						}
 					}
 				}
@@ -1265,7 +1265,7 @@ func NormalizeDate(dateStr string) (string, error) {
 				t = base.AddDate(0, 0, int(v))
 			}
 			if t.Year() >= 1900 && t.Year() <= 9999 {
-				return t.Format("2006-01-02"), nil
+				return t.Format(constants.DateFormat), nil
 			}
 		}
 	}
@@ -1304,10 +1304,10 @@ func RefreshPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Support both JSON and form
-		contentType := r.Header.Get("Content-Type")
-		if strings.Contains(contentType, "application/json") {
+		contentType := r.Header.Get(constants.ContentTypeText)
+		if strings.Contains(contentType, constants.ContentTypeJSON) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				api.RespondWithError(w, 400, "invalid JSON: "+err.Error())
+				api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
 				return
 			}
 		} else {
@@ -1483,10 +1483,10 @@ func PostPortfolioSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Support both JSON and form
-		contentType := r.Header.Get("Content-Type")
-		if strings.Contains(contentType, "application/json") {
+		contentType := r.Header.Get(constants.ContentTypeText)
+		if strings.Contains(contentType, constants.ContentTypeJSON) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				api.RespondWithError(w, 400, "invalid JSON: "+err.Error())
+				api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
 				return
 			}
 		} else {

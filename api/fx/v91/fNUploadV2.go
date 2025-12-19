@@ -1509,7 +1509,7 @@ func NormalizeDate(dateStr string) (string, error) {
 		"01.02.2006 15:04:05",
 
 		// Text month formats
-		"02-Jan-2006",
+		constants.DateFormatDash,
 		"02-Jan-06",
 		"2-Jan-2006",
 		"2-Jan-06",

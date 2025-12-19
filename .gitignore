@@ -1,4 +1,5 @@
 */logs/*
 /logs/*
 *.env
-cmd/main.go
+*.DS_Store
+*.pem

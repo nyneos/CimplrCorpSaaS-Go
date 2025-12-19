@@ -1,4 +1,3 @@
-
 package projection
 
 import (
@@ -15,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,7 +36,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("[UploadCashflowProposalSimple] Panic recovered: %v", rec)
-				api.RespondWithError(w, http.StatusInternalServerError, "Internal server error")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrInternalServer)
 			}
 			log.Printf("[UploadCashflowProposalSimple] Finished in %s", time.Since(start))
 		}()
@@ -44,11 +45,11 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Parse multipart form
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		proposalName := strings.TrimSpace(r.FormValue("proposal_name"))
 		recurrenceType := strings.TrimSpace(r.FormValue("proposal_type"))
 		effectiveDate := strings.TrimSpace(r.FormValue("effective_date"))
@@ -59,7 +60,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if effectiveDate == "" {
-			effectiveDate = time.Now().Format("2006-01-02")
+			effectiveDate = time.Now().Format(constants.DateFormat)
 		}
 
 		// Validate session or fallback
@@ -108,7 +109,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -186,7 +187,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		rows.Close()
 
-		eff, _ := time.Parse("2006-01-02", effectiveDate)
+		eff, _ := time.Parse(constants.DateFormat, effectiveDate)
 		projCols := []string{"item_id", "year", "month", "projected_amount"}
 		year := eff.Year()
 
@@ -211,7 +212,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "Monthly":
 				monthly := it.Amount / 12.0
 				for m := 1; m <= 12; m++ {
-					key := fmt.Sprintf("%s-%d-%d", it.ID, year, m)
+					key := fmt.Sprintf(constants.FormatTransactionID, it.ID, year, m)
 					if seen[key] {
 						continue
 					}
@@ -219,7 +220,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					batch = append(batch, []interface{}{it.ID, year, m, monthly})
 					if len(batch) >= cap(batch) {
 						if err := flushBatch(); err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert monthly projections: "+err.Error())
+							api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
 							return
 						}
 					}
@@ -231,7 +232,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if (m-1)%3 == 0 {
 						amount = perQuarter
 					}
-					key := fmt.Sprintf("%s-%d-%d", it.ID, year, m)
+					key := fmt.Sprintf(constants.FormatTransactionID, it.ID, year, m)
 					if seen[key] {
 						continue
 					}
@@ -239,7 +240,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					batch = append(batch, []interface{}{it.ID, year, m, amount})
 					if len(batch) >= cap(batch) {
 						if err := flushBatch(); err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert monthly projections: "+err.Error())
+							api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
 							return
 						}
 					}
@@ -250,7 +251,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if m == 1 {
 						amount = it.Amount
 					}
-					key := fmt.Sprintf("%s-%d-%d", it.ID, year, m)
+					key := fmt.Sprintf(constants.FormatTransactionID, it.ID, year, m)
 					if seen[key] {
 						continue
 					}
@@ -258,7 +259,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					batch = append(batch, []interface{}{it.ID, year, m, amount})
 					if len(batch) >= cap(batch) {
 						if err := flushBatch(); err != nil {
-							api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert monthly projections: "+err.Error())
+							api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToInsertMonthlyProjections+err.Error())
 							return
 						}
 					}
@@ -297,15 +298,15 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
 		resp := map[string]interface{}{
-			"success":       true,
-			"proposal_id":   proposalID,
-			"imported_rows": len(copyRows),
-			"message":       "Proposal, items, projections & audit committed successfully",
+			constants.ValueSuccess: true,
+			"proposal_id":          proposalID,
+			"imported_rows":        len(copyRows),
+			"message":              "Proposal, items, projections & audit committed successfully",
 		}
 		json.NewEncoder(w).Encode(resp)
 		log.Printf("Committed proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
@@ -348,5 +349,5 @@ func parseUploadFile(file multipart.File, ext string) ([][]string, error) {
 		}
 		return rows, nil
 	}
-	return nil, errors.New("unsupported file type")
+	return nil, errors.New(constants.ErrUnsupportedFileType)
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -189,11 +191,11 @@ WHERE h.calendar_id=$1
   AND UPPER(h.status)='ACTIVE'`
 	if effFrom != nil {
 		where += " AND h.holiday_date >= $2"
-		args = append(args, effFrom.Format("2006-01-02"))
+		args = append(args, effFrom.Format(constants.DateFormat))
 	}
 	if effTo != nil {
 		where += fmt.Sprintf(" AND h.holiday_date <= $%d", len(args)+1)
-		args = append(args, effTo.Format("2006-01-02"))
+		args = append(args, effTo.Format(constants.DateFormat))
 	}
 
 	q := `
@@ -228,7 +230,7 @@ func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID     string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, "calendar_id required")
+			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
@@ -240,7 +242,7 @@ func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if user == "" {
-			api.RespondWithError(w, 401, "invalid session")
+			api.RespondWithError(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
@@ -284,7 +286,7 @@ func ExportCalendarICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			filename = cal.CalendarID
 		}
 
-		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+		w.Header().Set(constants.ContentTypeText, "text/calendar; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.ics"`, filename))
 		_, _ = w.Write([]byte(text))
 	}
@@ -298,7 +300,7 @@ func CalendarFeedICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID     string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, "calendar_id required")
+			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 
@@ -330,7 +332,7 @@ func CalendarFeedICS(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+		w.Header().Set(constants.ContentTypeText, "text/calendar; charset=utf-8")
 		_, _ = io.WriteString(w, buildICS(ics))
 	}
 }
@@ -343,7 +345,7 @@ func ShareLinksCalendar(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID     string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.CalendarID) == "" {
-			api.RespondWithError(w, 400, "calendar_id required")
+			api.RespondWithError(w, 400, constants.ErrCalendarIDRequiredUser)
 			return
 		}
 

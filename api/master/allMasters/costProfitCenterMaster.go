@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,7 +61,7 @@ func ifaceToDateString(val interface{}) string {
 
 	switch v := val.(type) {
 	case time.Time:
-		return v.Format("2006-01-02")
+		return v.Format(constants.DateFormat)
 	case string:
 		return v
 	default:
@@ -73,19 +75,19 @@ func NormalizeDate(dateStr string) string {
 	}
 
 	layouts := []string{
-		"2006-01-02",
-		"02-01-2006",
+		constants.DateFormat,
+		constants.DateFormatAlt,
 		"2006/01/02",
 		"02/01/2006",
 		"2006.01.02",
 		"02.01.2006",
 		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
+		constants.DateTimeFormat,
+		constants.DateFormatISO,
 	}
 
 	layouts = append(layouts, []string{
-		"02-Jan-2006",
+		constants.DateFormatDash,
 		"02-Jan-06",
 		"2-Jan-2006",
 		"2-Jan-06",
@@ -94,7 +96,7 @@ func NormalizeDate(dateStr string) string {
 
 	for _, l := range layouts {
 		if t, err := time.Parse(l, dateStr); err == nil {
-			return t.Format("2006-01-02")
+			return t.Format(constants.DateFormat)
 		}
 	}
 
@@ -107,7 +109,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []CostProfitCenterRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -120,7 +122,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -129,7 +131,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, rrow := range req.Rows {
 			if strings.TrimSpace(rrow.CentreCode) == "" || strings.TrimSpace(rrow.CentreName) == "" || strings.TrimSpace(rrow.CentreType) == "" {
-				created = append(created, map[string]interface{}{"success": false, "error": "missing required fields", "centre_code": rrow.CentreCode})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing required fields", "centre_code": rrow.CentreCode})
 				continue
 			}
 
@@ -142,14 +144,14 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					centreLevel = plevel + 1
 					isTop = false
 				} else {
-					created = append(created, map[string]interface{}{"success": false, "error": "parent_centre_code not found", "centre_code": rrow.CentreCode})
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_centre_code not found", "centre_code": rrow.CentreCode})
 					continue
 				}
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				created = append(created, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error()})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error()})
 				continue
 			}
 			committed := false
@@ -169,14 +171,14 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var effectiveFrom, effectiveTo interface{}
 				if rrow.EffectiveFrom != "" {
 					if norm := NormalizeDate(rrow.EffectiveFrom); norm != "" {
-						if tval, err := time.Parse("2006-01-02", norm); err == nil {
+						if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 							effectiveFrom = tval
 						}
 					}
 				}
 				if rrow.EffectiveTo != "" {
 					if norm := NormalizeDate(rrow.EffectiveTo); norm != "" {
-						if tval, err := time.Parse("2006-01-02", norm); err == nil {
+						if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 							effectiveTo = tval
 						}
 					}
@@ -224,11 +226,11 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rrow.SageDeptCode,
 					rrow.SageCostCentreCode,
 				).Scan(&centreID); err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "centre_code": rrow.CentreCode})
 					return
 				}
 				if err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "centre_code": rrow.CentreCode})
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "centre_code": rrow.CentreCode})
 					return
 				}
 
@@ -238,7 +240,7 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							 VALUES ($1, $2)
 							 ON CONFLICT (parent_centre_code, child_centre_code) DO NOTHING`
 					if _, err := tx.Exec(ctx, relQ, rrow.ParentCode, rrow.CentreCode); err != nil {
-						created = append(created, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "centre_code": rrow.CentreCode})
+						created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "centre_code": rrow.CentreCode})
 						return
 					}
 				}
@@ -247,22 +249,22 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQ := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at)
                            VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, centreID, nil, createdBy); err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "centre_id": centreID})
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "centre_id": centreID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					created = append(created, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "centre_id": centreID})
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "centre_id": centreID})
 					return
 				}
 				committed = true
 
 				created = append(created, map[string]interface{}{
-					"success":             true,
-					"centre_id":           centreID,
-					"centre_code":         rrow.CentreCode,
-					"centre_level":        centreLevel,
-					"is_top_level_centre": isTop,
+					constants.ValueSuccess: true,
+					"centre_id":            centreID,
+					"centre_code":          rrow.CentreCode,
+					"centre_level":         centreLevel,
+					"is_top_level_centre":  isTop,
 				})
 			}()
 		}
@@ -282,7 +284,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		updatedBy := ""
@@ -293,7 +295,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -301,12 +303,12 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.CentreID) == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "missing centre_id", "centre_id": row.CentreID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing centre_id", "centre_id": row.CentreID})
 				continue
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error(), "centre_id": row.CentreID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "centre_id": row.CentreID})
 				continue
 			}
 			committed := false
@@ -345,7 +347,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&existingSAPKOSTL, &existingSAPPRCTR, &existingOracleLedger, &existingOracleDept,
 					&existingOraclePC, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost,
 				); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "centre_id": row.CentreID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "centre_id": row.CentreID})
 					return
 				}
 
@@ -355,37 +357,149 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var computedLevel interface{}
 				var computedIsTop interface{}
 
-				for k, v := range row.Fields {
-					switch k {
-					case "centre_code":
+				// build a map of simple handlers to avoid a long switch statement (improves maintainability and Sonar metrics)
+				handlers := map[string]func(interface{}){
+					"centre_code": func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("centre_code=$%d, old_centre_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingCode))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingCode))
 						pos += 2
-					case "centre_name":
+					},
+					"centre_name": func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("centre_name=$%d, old_centre_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingName))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingName))
 						pos += 2
-					case "centre_type":
+					},
+					"centre_type": func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("centre_type=$%d, old_centre_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingType))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingType))
 						pos += 2
-					case "entity_name", "entity_code":
-						// both possible incoming names - map to entity_name
+					},
+					"entity_name": func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("entity_name=$%d, old_entity_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingEntity))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingEntity))
 						pos += 2
-					case "status":
+					},
+					"entity_code": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("entity_name=$%d, old_entity_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingEntity))
+						pos += 2
+					},
+					constants.KeyStatus: func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingStatus))
 						pos += 2
-					case "source":
+					},
+					"source": func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("source=$%d, old_source=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSource))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSource))
 						pos += 2
-					case "erp_ref", "erp_type":
+					},
+					"erp_ref": func(val interface{}) {
 						sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingErp))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingErp))
 						pos += 2
+					},
+					"erp_type": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("erp_type=$%d, old_erp_type=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingErp))
+						pos += 2
+					},
+					"default_currency": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("default_currency=$%d, old_default_currency=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingCurrency))
+						pos += 2
+					},
+					"owner": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("owner=$%d, old_owner=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingOwner))
+						pos += 2
+					},
+					"owner_email": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("owner_email=$%d, old_owner_email=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingOwnerEmail))
+						pos += 2
+					},
+					"tags": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingTags))
+						pos += 2
+					},
+					"external_code": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingExtCode))
+						pos += 2
+					},
+					"segment": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSegment))
+						pos += 2
+					},
+					"sap_kokrs": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("sap_kokrs=$%d, old_sap_kokrs=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSAPKOKRS))
+						pos += 2
+					},
+					"sap_bukrs": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("sap_bukrs=$%d, old_sap_bukrs=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSAPBUKRS))
+						pos += 2
+					},
+					"sap_kostl": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("sap_kostl=$%d, old_sap_kostl=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSAPKOSTL))
+						pos += 2
+					},
+					"sap_prctr": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("sap_prctr=$%d, old_sap_prctr=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSAPPRCTR))
+						pos += 2
+					},
+					"oracle_ledger": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingOracleLedger))
+						pos += 2
+					},
+					"oracle_dept": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("oracle_dept=$%d, old_oracle_dept=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingOracleDept))
+						pos += 2
+					},
+					"oracle_profit_center": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("oracle_profit_center=$%d, old_oracle_profit_center=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingOraclePC))
+						pos += 2
+					},
+					"tally_ledger_name": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("tally_ledger_name=$%d, old_tally_ledger_name=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingTallyName))
+						pos += 2
+					},
+					"tally_ledger_group": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("tally_ledger_group=$%d, old_tally_ledger_group=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingTallyGroup))
+						pos += 2
+					},
+					"sage_department_code": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("sage_department_code=$%d, old_sage_department_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSageDept))
+						pos += 2
+					},
+					"sage_cost_centre_code": func(val interface{}) {
+						sets = append(sets, fmt.Sprintf("sage_cost_centre_code=$%d, old_sage_cost_centre_code=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(val), ifaceToString(existingSageCost))
+						pos += 2
+					},
+				}
+
+				for k, v := range row.Fields {
+					// handle common cases via handlers map
+					if h, ok := handlers[k]; ok {
+						h(v)
+						continue
+					}
+
+					// special handling
+					switch k {
 					case "centre_level":
 						// numeric provided directly
 						sets = append(sets, fmt.Sprintf("centre_level=$%d, old_centre_level=$%d", pos, pos+1))
@@ -404,7 +518,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						} else {
 							var plevel int
 							if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, pcode).Scan(&plevel); err != nil {
-								results = append(results, map[string]interface{}{"success": false, "error": "parent centre not found: " + pcode, "centre_id": row.CentreID})
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent centre not found: " + pcode, "centre_id": row.CentreID})
 								return
 							}
 							computedLevel = plevel + 1
@@ -414,26 +528,12 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("parent_centre_code=$%d, old_parent_centre_code=$%d, centre_level=$%d, old_centre_level=$%d, is_top_level_centre=$%d", pos, pos+1, pos+2, pos+3, pos+4))
 						args = append(args, pcode, ifaceToString(existingParentCode), computedLevel, existingLevel, computedIsTop)
 						pos += 5
-
-					// New fields - add old_* values for tracking changes
-					case "default_currency":
-						sets = append(sets, fmt.Sprintf("default_currency=$%d, old_default_currency=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingCurrency))
-						pos += 2
-					case "owner":
-						sets = append(sets, fmt.Sprintf("owner=$%d, old_owner=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOwner))
-						pos += 2
-					case "owner_email":
-						sets = append(sets, fmt.Sprintf("owner_email=$%d, old_owner_email=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOwnerEmail))
-						pos += 2
 					case "effective_from":
 						// Handle date parsing
 						dateStr := strings.TrimSpace(fmt.Sprint(v))
 						var dateVal interface{}
 						if dateStr != "" {
-							if date, err := time.Parse("2006-01-02", dateStr); err == nil {
+							if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
 								dateVal = date
 							}
 						}
@@ -445,68 +545,12 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						dateStr := strings.TrimSpace(fmt.Sprint(v))
 						var dateVal interface{}
 						if dateStr != "" {
-							if date, err := time.Parse("2006-01-02", dateStr); err == nil {
+							if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
 								dateVal = date
 							}
 						}
 						sets = append(sets, fmt.Sprintf("effective_to=$%d, old_effective_to=$%d", pos, pos+1))
 						args = append(args, dateVal, existingEffTo)
-						pos += 2
-					case "tags":
-						sets = append(sets, fmt.Sprintf("tags=$%d, old_tags=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTags))
-						pos += 2
-					case "external_code":
-						sets = append(sets, fmt.Sprintf("external_code=$%d, old_external_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingExtCode))
-						pos += 2
-					case "segment":
-						sets = append(sets, fmt.Sprintf("segment=$%d, old_segment=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSegment))
-						pos += 2
-					case "sap_kokrs":
-						sets = append(sets, fmt.Sprintf("sap_kokrs=$%d, old_sap_kokrs=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPKOKRS))
-						pos += 2
-					case "sap_bukrs":
-						sets = append(sets, fmt.Sprintf("sap_bukrs=$%d, old_sap_bukrs=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPBUKRS))
-						pos += 2
-					case "sap_kostl":
-						sets = append(sets, fmt.Sprintf("sap_kostl=$%d, old_sap_kostl=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPKOSTL))
-						pos += 2
-					case "sap_prctr":
-						sets = append(sets, fmt.Sprintf("sap_prctr=$%d, old_sap_prctr=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSAPPRCTR))
-						pos += 2
-					case "oracle_ledger":
-						sets = append(sets, fmt.Sprintf("oracle_ledger=$%d, old_oracle_ledger=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleLedger))
-						pos += 2
-					case "oracle_dept":
-						sets = append(sets, fmt.Sprintf("oracle_dept=$%d, old_oracle_dept=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOracleDept))
-						pos += 2
-					case "oracle_profit_center":
-						sets = append(sets, fmt.Sprintf("oracle_profit_center=$%d, old_oracle_profit_center=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingOraclePC))
-						pos += 2
-					case "tally_ledger_name":
-						sets = append(sets, fmt.Sprintf("tally_ledger_name=$%d, old_tally_ledger_name=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyName))
-						pos += 2
-					case "tally_ledger_group":
-						sets = append(sets, fmt.Sprintf("tally_ledger_group=$%d, old_tally_ledger_group=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingTallyGroup))
-						pos += 2
-					case "sage_department_code":
-						sets = append(sets, fmt.Sprintf("sage_department_code=$%d, old_sage_department_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSageDept))
-						pos += 2
-					case "sage_cost_centre_code":
-						sets = append(sets, fmt.Sprintf("sage_cost_centre_code=$%d, old_sage_cost_centre_code=$%d", pos, pos+1))
-						args = append(args, fmt.Sprint(v), ifaceToString(existingSageCost))
 						pos += 2
 					default:
 						// ignore unknown fields
@@ -518,7 +562,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercostprofitcenter SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE centre_id=$%d RETURNING centre_id", pos)
 					args = append(args, row.CentreID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "update failed: " + err.Error(), "centre_id": row.CentreID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "centre_id": row.CentreID})
 						return
 					}
 				}
@@ -529,14 +573,14 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// Get current centre_code for this centre
 					var currentCentreCode string
 					if err := tx.QueryRow(ctx, `SELECT centre_code FROM mastercostprofitcenter WHERE centre_id=$1`, updatedID).Scan(&currentCentreCode); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "failed to get centre code: " + err.Error(), "centre_id": updatedID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to get centre code: " + err.Error(), "centre_id": updatedID})
 						return
 					}
 
 					// remove existing relationships for this child
 					delQ := `DELETE FROM costprofitcenterrelationships WHERE child_centre_code=$1`
 					if _, err := tx.Exec(ctx, delQ, currentCentreCode); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "failed to remove old relationships: " + err.Error(), "centre_id": updatedID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to remove old relationships: " + err.Error(), "centre_id": updatedID})
 						return
 					}
 
@@ -551,7 +595,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if newParentCode != "" {
 						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code) VALUES ($1, $2) ON CONFLICT (parent_centre_code, child_centre_code) DO NOTHING`
 						if _, err := tx.Exec(ctx, relQ, newParentCode, currentCentreCode); err != nil {
-							results = append(results, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "centre_id": updatedID})
+							results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "centre_id": updatedID})
 							return
 						}
 					}
@@ -559,16 +603,16 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				auditQ := `INSERT INTO auditactioncostprofitcenter (centre_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "audit failed: " + err.Error(), "centre_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "centre_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "centre_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "centre_id": updatedID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "centre_id": updatedID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "centre_id": updatedID})
 
 			}()
 		}
@@ -581,7 +625,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -591,7 +635,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
@@ -605,17 +649,17 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
@@ -688,7 +732,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			committed := false
@@ -732,7 +776,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tgtCols = append(tgtCols, t)
 				} else {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrNoMappingForSourceColumn, h))
 					return
 				}
 			}
@@ -870,7 +914,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						relQ := `INSERT INTO costprofitcenterrelationships (parent_centre_code, child_centre_code) VALUES ($1,$2) ON CONFLICT DO NOTHING`
 						if _, err := tx.Exec(ctx, relQ, pc, cc); err != nil {
 							tx.Rollback(ctx)
-							api.RespondWithResult(w, false, "relationship insert failed: "+err.Error())
+							api.RespondWithResult(w, false, constants.ErrBulkRelationshipInsertFailed+err.Error())
 							return
 						}
 
@@ -905,14 +949,14 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }
 
@@ -923,7 +967,7 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -934,7 +978,7 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -964,8 +1008,8 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				out = append(out, map[string]interface{}{"centre_id": id, "centre_code": ifaceToString(code), "centre_name": ifaceToString(name), "centre_type": ifaceToString(typ)})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -975,7 +1019,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -986,7 +1030,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1111,7 +1155,7 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"centre_type":        ifaceToString(centreTypeI),
 					"parent_centre_code": ifaceToString(parentCentreIDI),
 					"entity_name":        ifaceToString(entityNameI),
-					"status":             ifaceToString(statusI),
+					constants.KeyStatus:  ifaceToString(statusI),
 					"source":             ifaceToString(sourceI),
 					"erp_type":           ifaceToString(erpTypeI),
 
@@ -1343,7 +1387,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Level  int    `json:"level"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -1354,7 +1398,7 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1387,8 +1431,8 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"centre_name": name, "centre_id": id, "centre_code": code})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": results})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
 	}
 }
 
@@ -1400,7 +1444,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason    string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		requestedBy := ""
@@ -1411,7 +1455,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.CentreIDs) == 0 {
@@ -1490,7 +1534,7 @@ func DeleteCostProfitCenter(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "queued_count": len(allList)})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "queued_count": len(allList)})
 	}
 }
 
@@ -1503,7 +1547,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1514,7 +1558,7 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		// Fetch relationships and compute descendants, then update audit rows by centre_id
@@ -1602,11 +1646,11 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{"success": success, "updated": updated}
+		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
-			resp["message"] = "No rows updated"
+			resp["message"] = constants.ErrNoRowsUpdated
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -1621,7 +1665,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1632,7 +1676,7 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := context.Background()
@@ -1733,11 +1777,11 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{"success": success, "updated": updated}
+		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
-			resp["message"] = "No rows updated"
+			resp["message"] = constants.ErrNoRowsUpdated
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -1750,7 +1794,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var req struct {
 				UserID string `json:"user_id"`
@@ -1759,7 +1803,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = req.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -1771,12 +1815,12 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 
@@ -1788,7 +1832,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		allowed := map[string]bool{
 			"centre_code": true, "centre_name": true, "centre_type": true,
-			"parent_centre_code": true, "entity_name": true, "status": true, "source": true,
+			"parent_centre_code": true, "entity_name": true, constants.KeyStatus: true, "source": true,
 			"default_currency": true, "erp_type": true, "owner": true, "owner_email": true,
 			"effective_from": true, "effective_to": true, "tags": true,
 			"segment": true, "sap_kokrs": true, "sap_bukrs": true,
@@ -1803,13 +1847,13 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid CSV file")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidCSV)
 				return
 			}
 
@@ -1849,7 +1893,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							vals[j] = nil
 						} else if c == "effective_from" || c == "effective_to" {
 							if norm := NormalizeDate(cell); norm != "" {
-								if t, err := time.Parse("2006-01-02", norm); err == nil {
+								if t, err := time.Parse(constants.DateFormat, norm); err == nil {
 									vals[j] = t
 								} else {
 									vals[j] = norm
@@ -1880,6 +1924,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer tx.Rollback(ctx)
 
 			if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
+				log.Printf("warning: failed to set local statement_timeout: %v", err)
 			}
 
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"mastercostprofitcenter"}, validCols, pgx.CopyFromRows(copyRows))
@@ -1889,7 +1934,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 
@@ -1967,7 +2012,7 @@ func UploadCostProfitCenterSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			batchIDs = append(batchIDs, uuid.New().String())
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{"success": true, "batch_ids": batchIDs})
+		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }
 

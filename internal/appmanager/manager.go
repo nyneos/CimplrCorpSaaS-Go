@@ -294,4 +294,3 @@ func (am *AppManager) GetServiceByName(name string) serviceiface.Service {
 	}
 	return nil
 }
-

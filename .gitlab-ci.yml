@@ -1,0 +1,218 @@
+stages:
+  - sonarqube
+  - sonarqube_quality_gate
+  - sca_scan
+  - secret_scan
+  - build
+  - approve
+  - deploy
+variables:
+  IMAGE_TAG: $CI_JOB_ID
+
+sonarqube:
+  stage: sonarqube
+  script:
+  # -----------------------------
+  # 1️⃣ Create .env file
+  # -----------------------------
+  - echo "Creating .env file..."
+  - echo 'CRYPTO_KEY="3f4c9744c90d004d3e10a0b1fd9b93c75bb34b789395d4a1ff19a9b70de1a179"' >> .env
+  - echo 'USER_JOURNEY_LOGS_PATH="/usr/src/app/frontend_logs/"' >> .env
+
+  # -----------------------------
+  # 2️⃣ Set up Go
+  # -----------------------------
+  - echo "Setting up Go environment..."
+  - if ! command -v go >/dev/null; then
+      echo "Installing Go 1.23.0...";
+      wget -q https://go.dev/dl/go1.23.0.linux-amd64.tar.gz -O /tmp/go.tar.gz &&
+      sudo rm -rf /usr/local/go &&
+      sudo tar -C /usr/local -xzf /tmp/go.tar.gz &&
+      sudo ln -sf /usr/local/go/bin/go /usr/bin/go;
+    fi
+  - go version
+  - go mod tidy
+
+  # -----------------------------
+  # 3️⃣ Run tests & coverage
+  # -----------------------------
+  - echo "Running tests and generating coverage report..."
+  - go test ./... -coverprofile=coverage.out
+  - go tool cover -func=coverage.out
+  - go install github.com/boumenot/gocover-cobertura@latest
+  - $(go env GOPATH)/bin/gocover-cobertura < coverage.out > coverage.xml
+  - ls -lh coverage.out coverage.xml
+
+  # -----------------------------
+  # 4️⃣ Run SonarQube Analysis
+  # -----------------------------
+  - echo "Running SonarQube analysis..."
+  - |
+    if [ "$CI_COMMIT_BRANCH" == "UAT" ] || [ "$CI_COMMIT_BRANCH" == "main" ]; then
+      export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+      export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+      export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+
+      if ! command -v sonar-scanner >/dev/null; then
+        echo "❌ Sonar Scanner not found — please install it under /opt/sonar-scanner"
+        exit 1
+      fi
+
+      sonar-scanner \
+        -Dsonar.projectKey=$SONAR_PROJECT_KEY \
+        -Dsonar.sources=. \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.login=$SONAR_TOKEN \
+        -Dsonar.go.coverage.reportPaths=coverage.xml
+    else
+      echo "Skipping SonarQube analysis for branch $CI_COMMIT_BRANCH"
+    fi
+  only:
+    - main
+    - UAT
+  tags:
+    - cimplruat
+
+quality_gate:
+  stage: sonarqube_quality_gate
+  script:
+    - echo "Installing jq..."
+    - jq --version
+    - echo "Checking SonarQube Quality Gate..."
+    - |
+      echo "host: $SONAR_HOST_URL"
+      echo "SONAR_TOKEN: $SONAR_TOKEN"
+      echo "SONAR_PROJECT_KEY: $SONAR_PROJECT_KEY"
+      API_RESPONSE=$(curl -s -u $SONAR_TOKEN: "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$SONAR_PROJECT_KEY" | jq -r .projectStatus.status) 
+      echo "Full API Response: $API_RESPONSE"
+      if [ "$API_RESPONSE" != "OK" ]; then
+        echo "Quality Gate failed. Aborting pipeline."
+        exit 1
+      fi
+  only:
+   - UAT
+   - main
+  tags:
+    - cimplruat
+
+# sca_scan:
+#   stage: sca_scan
+#   allow_failure: false
+#   script:
+#     - echo "Running OSS (Open Source Software) scan using dep-scan..."
+#     - mkdir -p depscan-reports
+#     # ✅ Corrected syntax — explicit 'dep-scan' command after image name
+#     - docker run --rm -u 0 -v "$PWD":/app ghcr.io/owasp-dep-scan/dep-scan dep-scan -t go -o /app/depscan-reports
+#     - echo "✅ OSS scan completed. Reports saved in depscan-reports/ directory."
+#   artifacts:
+#     paths:
+#       - depscan-reports/
+#     expire_in: 7 days
+#   only:
+#     - dev
+#     - main
+#   tags:
+#     - cimplruat
+
+# secret_scan:
+#   stage: secret_scan
+#   allow_failure: false
+#   variables:
+#     GIT_DEPTH: 0 
+#   script:
+#     - echo "Running Gitleaks scan for secrets..."
+#     - mkdir -p gitleaks-reports
+#     - docker run --rm -v "$PWD":/app zricethezav/gitleaks:latest detect \
+#         --source /app \
+#         --report-path /app/gitleaks-reports/gitleaks-report.json \
+#         --config /app/.gitleaks.toml \
+#         --report-format json
+#     - echo "✅ Gitleaks scan completed. Report saved at gitleaks-reports/gitleaks-report.json"
+#   artifacts:
+#     paths:
+#       - gitleaks-reports/
+#     expire_in: 7 days
+#   only:
+#     - dev
+#     - main
+#   tags:
+#     - cimplruat
+
+   
+build_and_push_image:  
+  stage: build   
+  script:
+    - >
+      if [ "$CI_COMMIT_BRANCH" == "UAT" ]; then
+        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID;
+        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY;
+        export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION;
+      elif [ "$CI_COMMIT_BRANCH" == "main" ]; then
+        export AWS_ACCESS_KEY_ID=$UAT_AWS_ACCESS_KEY_ID;
+        export AWS_SECRET_ACCESS_KEY=$UAT_AWS_SECRET_ACCESS_KEY;
+        export AWS_DEFAULT_REGION=$UAT_AWS_DEFAULT_REGION;
+      fi     
+    - echo $IMAGE_TAG    
+    - aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 309318185333.dkr.ecr.ap-south-1.amazonaws.com
+    - docker build -f Dockerfile -t cimplruat .
+    - docker tag cimplruat:latest 309318185333.dkr.ecr.ap-south-1.amazonaws.com/cimplruat:$IMAGE_TAG
+    - docker push 309318185333.dkr.ecr.ap-south-1.amazonaws.com/cimplruat:$IMAGE_TAG
+    - docker image rm 309318185333.dkr.ecr.ap-south-1.amazonaws.com/cimplruat:$IMAGE_TAG cimplruat:latest
+    - git clone https://root:$aws_infra_access_token@gitlab.cashinvoice.in/root/aws-infra-tradeazy.git  -b cluster-upgrade
+    - envsubst < cimplruat.yaml.tmpl > ./aws-infra-tradeazy/helm-deployments/cimplruat/templates/cimplruat-deployment.yaml
+
+  only:
+    - main
+    - UAT
+
+  artifacts:
+    paths:
+      - ./aws-infra-tradeazy/helm-deployments/
+  tags:
+    - cimplruat
+approve_to_deploy_production:
+    stage: approve
+    script:
+        - echo "deploy to production"   
+    when: manual
+    allow_failure: false 
+    only:
+      - main
+    tags:
+      - cimplruat
+deploy to k8s:
+  stage: deploy
+  script:
+    - >
+      if [ "$CI_COMMIT_BRANCH" == "main" ]; then
+        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID;
+        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY;
+        export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION;
+      elif [ "$CI_COMMIT_BRANCH" == "UAT" ]; then
+        export AWS_ACCESS_KEY_ID=$UAT_AWS_ACCESS_KEY_ID;
+        export AWS_SECRET_ACCESS_KEY=$UAT_AWS_SECRET_ACCESS_KEY;
+        export AWS_DEFAULT_REGION=$UAT_AWS_DEFAULT_REGION;
+      fi
+    - aws --version
+    - helm version --short
+    - |
+      if [ "$CI_COMMIT_BRANCH" == "main" ]; then
+        aws eks --region $AWS_DEFAULT_REGION update-kubeconfig --name cashinvoice-prod-new
+      kubectl get  ns
+      helm upgrade --install cimplr-prod ./aws-infra-tradeazy/helm-deployments/cimplruat -f ./aws-infra-tradeazy/helm-deployments/cimplruat/cimplruat-prod-values.yaml
+      echo "deployed to prod upgrade env....."
+      elif [ "$CI_COMMIT_BRANCH" == "UAT" ]; then
+      #mkdir -p /etc/deploy
+      aws eks --region ap-south-1 update-kubeconfig --name cashinvoice-uat-new
+      cat ./aws-infra-tradeazy/helm-deployments/cimplruat/cimplruat-values.yaml
+      # Create Docker registry secret
+      # Helm deployment
+      helm upgrade --install fundlync-svc ./aws-infra-tradeazy/helm-deployments/cimplruat -f ./aws-infra-tradeazy/helm-deployments/cimplruat/cimplruat-values.yaml -n tradeazy
+      echo "Successfully deployed to EKS uat"
+      fi
+     
+  only:
+    - main
+    - UAT      
+  tags:
+    - cimplruat

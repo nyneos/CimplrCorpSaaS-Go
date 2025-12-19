@@ -11,16 +11,17 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
+
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
-
 
 // helpers used by bulk update flow
 func nullifyEmpty(s string) interface{} {
@@ -143,7 +144,7 @@ func (n *sqlNullTime) Scan(v interface{}) error {
 			n.Valid = false
 			return nil
 		}
-		if parsed, err := time.Parse("2006-01-02", s); err == nil {
+		if parsed, err := time.Parse(constants.DateFormat, s); err == nil {
 			n.Valid = true
 			n.T = parsed
 		} else {
@@ -154,7 +155,7 @@ func (n *sqlNullTime) Scan(v interface{}) error {
 			n.Valid = false
 			return nil
 		}
-		if parsed, err := time.Parse("2006-01-02", t); err == nil {
+		if parsed, err := time.Parse(constants.DateFormat, t); err == nil {
 			n.Valid = true
 			n.T = parsed
 		} else {
@@ -188,7 +189,7 @@ func getAuditInfoPayable(ctx context.Context, pgxPool *pgxpool.Pool, payableID s
 					by = *rbyPtr
 				}
 				if ratPtr != nil {
-					at = ratPtr.Format("2006-01-02 15:04:05")
+					at = ratPtr.Format(constants.DateTimeFormat)
 				}
 				if atype == "CREATE" && createdBy == "" {
 					createdBy = by
@@ -225,7 +226,7 @@ func getAuditInfoReceivable(ctx context.Context, pgxPool *pgxpool.Pool, receivab
 					by = *rbyPtr
 				}
 				if ratPtr != nil {
-					at = ratPtr.Format("2006-01-02 15:04:05")
+					at = ratPtr.Format(constants.DateTimeFormat)
 				}
 				if atype == "CREATE" && createdBy == "" {
 					createdBy = by
@@ -269,15 +270,15 @@ func parseUploadFile(file multipart.File, ext string) ([][]string, error) {
 		}
 		return rows, nil
 	}
-	return nil, errors.New("unsupported file type")
+	return nil, errors.New(constants.ErrUnsupportedFileType)
 }
 
 // Helper: normalize date string to YYYY-MM-DD
 func normalizeDate(dateStr string) string {
-	layouts := []string{"2006-01-02", "02-01-2006", "01/02/2006", "2 Jan 2006", "2006/01/02"}
+	layouts := []string{constants.DateFormat, constants.DateFormatAlt, "01/02/2006", "2 Jan 2006", "2006/01/02"}
 	for _, layout := range layouts {
 		if t, err := time.Parse(layout, dateStr); err == nil {
-			return t.Format("2006-01-02")
+			return t.Format(constants.DateFormat)
 		}
 	}
 	return dateStr // fallback, let DB error if invalid
@@ -288,7 +289,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -298,7 +299,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				http.Error(w, "user_id required in form", http.StatusBadRequest)
 				return
@@ -315,16 +316,16 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			http.Error(w, "User not found in active sessions", http.StatusUnauthorized)
+			http.Error(w, constants.ErrInvalidSession, http.StatusUnauthorized)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, "Failed to parse multipart form", http.StatusBadRequest)
+			http.Error(w, constants.ErrFailedToParseMultipartForm, http.StatusBadRequest)
 			return
 		}
 		if len(r.MultipartForm.File) == 0 {
-			http.Error(w, "No files uploaded", http.StatusBadRequest)
+			http.Error(w, constants.ErrNoFilesUploaded, http.StatusBadRequest)
 			return
 		}
 
@@ -419,7 +420,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						// Bulk insert audit logs
 						var auditValues []string
 						for _, pid := range payableIDs {
-							auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", pid, userName))
+							auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
 						}
 						auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 						_, auditErr := pgxPool.Exec(ctx, auditSQL)
@@ -452,7 +453,7 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						// Bulk insert audit logs
 						var auditValues []string
 						for _, rid := range receivableIDs {
-							auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", rid, userName))
+							auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
 						}
 						auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 						_, auditErr := pgxPool.Exec(ctx, auditSQL)
@@ -467,10 +468,10 @@ func UploadPayRec(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "All transactions uploaded and processed",
+			constants.ValueSuccess: true,
+			"message":              "All transactions uploaded and processed",
 		})
 	}
 }
@@ -532,8 +533,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 1. Fetch all payables (new table tr_payables)
 		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 			return
 		}
 		defer payableRows.Close()
@@ -547,8 +548,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
 			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
 			}
 			// populate old fields safely
@@ -568,12 +569,12 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.OldInvoiceNo = ""
 			}
 			if oldInvoiceDate != nil {
-				p.OldInvoiceDate = oldInvoiceDate.Format("2006-01-02")
+				p.OldInvoiceDate = oldInvoiceDate.Format(constants.DateFormat)
 			} else {
 				p.OldInvoiceDate = ""
 			}
 			if oldDueDate != nil {
-				p.OldDueDate = oldDueDate.Format("2006-01-02")
+				p.OldDueDate = oldDueDate.Format(constants.DateFormat)
 			} else {
 				p.OldDueDate = ""
 			}
@@ -589,11 +590,11 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			p.InvoiceDate = ""
 			if invoiceDate != nil {
-				p.InvoiceDate = invoiceDate.Format("2006-01-02")
+				p.InvoiceDate = invoiceDate.Format(constants.DateFormat)
 			}
 			p.DueDate = ""
 			if dueDate != nil {
-				p.DueDate = dueDate.Format("2006-01-02")
+				p.DueDate = dueDate.Format(constants.DateFormat)
 			}
 			payables = append(payables, p)
 			payableIDs = append(payableIDs, p.PayableID)
@@ -602,8 +603,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 2. Fetch all receivables (new table tr_receivables)
 		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 			return
 		}
 		defer receivableRows.Close()
@@ -617,8 +618,8 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
 			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
 			}
 			if oldEntityPtr != nil {
@@ -637,12 +638,12 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rcv.OldInvoiceNo = ""
 			}
 			if oldInvoiceDate != nil {
-				rcv.OldInvoiceDate = oldInvoiceDate.Format("2006-01-02")
+				rcv.OldInvoiceDate = oldInvoiceDate.Format(constants.DateFormat)
 			} else {
 				rcv.OldInvoiceDate = ""
 			}
 			if oldDueDate != nil {
-				rcv.OldDueDate = oldDueDate.Format("2006-01-02")
+				rcv.OldDueDate = oldDueDate.Format(constants.DateFormat)
 			} else {
 				rcv.OldDueDate = ""
 			}
@@ -658,11 +659,11 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			rcv.InvoiceDate = ""
 			if invoiceDate != nil {
-				rcv.InvoiceDate = invoiceDate.Format("2006-01-02")
+				rcv.InvoiceDate = invoiceDate.Format(constants.DateFormat)
 			}
 			rcv.DueDate = ""
 			if dueDate != nil {
-				rcv.DueDate = dueDate.Format("2006-01-02")
+				rcv.DueDate = dueDate.Format(constants.DateFormat)
 			}
 			receivables = append(receivables, rcv)
 			receivableIDs = append(receivableIDs, rcv.ReceivableID)
@@ -685,19 +686,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if atype == "CREATE" {
 						auditPayableMap[pid]["created_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["created_at"] = requestedAt.Format("2006-01-02 15:04:05")
+							auditPayableMap[pid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditPayableMap[pid]["created_status"] = status
 					} else if atype == "EDIT" {
 						auditPayableMap[pid]["edited_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["edited_at"] = requestedAt.Format("2006-01-02 15:04:05")
+							auditPayableMap[pid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditPayableMap[pid]["edited_status"] = status
 					} else if atype == "DELETE" {
 						auditPayableMap[pid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
-							auditPayableMap[pid]["deleted_at"] = requestedAt.Format("2006-01-02 15:04:05")
+							auditPayableMap[pid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditPayableMap[pid]["deleted_status"] = status
 					}
@@ -741,19 +742,19 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if atype == "CREATE" {
 						auditReceivableMap[rid]["created_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["created_at"] = requestedAt.Format("2006-01-02 15:04:05")
+							auditReceivableMap[rid]["created_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditReceivableMap[rid]["created_status"] = status
 					} else if atype == "EDIT" {
 						auditReceivableMap[rid]["edited_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["edited_at"] = requestedAt.Format("2006-01-02 15:04:05")
+							auditReceivableMap[rid]["edited_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditReceivableMap[rid]["edited_status"] = status
 					} else if atype == "DELETE" {
 						auditReceivableMap[rid]["deleted_by"] = requestedBy
 						if requestedAt != nil {
-							auditReceivableMap[rid]["deleted_at"] = requestedAt.Format("2006-01-02 15:04:05")
+							auditReceivableMap[rid]["deleted_at"] = requestedAt.Format(constants.DateTimeFormat)
 						}
 						auditReceivableMap[rid]["deleted_status"] = status
 					}
@@ -780,9 +781,9 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			constants.ValueSuccess: true,
 			"data": map[string]interface{}{
 				"payables":    payables,
 				"receivables": receivables,
@@ -790,6 +791,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+
 // BulkRequestDeleteTransactions inserts DELETE audit actions for mixed transaction ids (payable or receivable)
 func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -799,7 +801,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason         string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json or missing fields"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSON})
 			return
 		}
 
@@ -811,16 +813,16 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
 
 		txIDsPay := []string{}
 		txIDsRec := []string{}
 		for _, id := range req.TransactionIDs {
-			if strings.HasPrefix(id, "TR-PAY-") {
+			if strings.HasPrefix(id, constants.ErrPrefixPayable) {
 				txIDsPay = append(txIDsPay, id)
-			} else if strings.HasPrefix(id, "TR-REC-") {
+			} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
 				txIDsRec = append(txIDsRec, id)
 			}
 		}
@@ -828,7 +830,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
 			return
 		}
 		committed := false
@@ -859,12 +861,12 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to commit"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to commit"})
 			return
 		}
 		committed = true
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "delete requests created"})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "message": "delete requests created"})
 	}
 }
 
@@ -877,7 +879,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment        string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json or missing fields"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSON})
 			return
 		}
 
@@ -889,7 +891,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
 
@@ -897,9 +899,9 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		payIDs := []string{}
 		recIDs := []string{}
 		for _, id := range req.TransactionIDs {
-			if strings.HasPrefix(id, "TR-PAY-") {
+			if strings.HasPrefix(id, constants.ErrPrefixPayable) {
 				payIDs = append(payIDs, id)
-			} else if strings.HasPrefix(id, "TR-REC-") {
+			} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
 				recIDs = append(recIDs, id)
 			}
 		}
@@ -928,7 +930,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(actionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "no valid actions found for provided ids"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
 			return
 		}
 		commentArg := interface{}(nil)
@@ -942,7 +944,7 @@ func BulkRejectTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// ignore
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rejected_count": len(actionIDs)})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rejected_count": len(actionIDs)})
 	}
 }
 
@@ -955,7 +957,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment        string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.TransactionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json or missing fields"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSON})
 			return
 		}
 
@@ -967,7 +969,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
 
@@ -975,9 +977,9 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		payIDs := []string{}
 		recIDs := []string{}
 		for _, id := range req.TransactionIDs {
-			if strings.HasPrefix(id, "TR-PAY-") {
+			if strings.HasPrefix(id, constants.ErrPrefixPayable) {
 				payIDs = append(payIDs, id)
-			} else if strings.HasPrefix(id, "TR-REC-") {
+			} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
 				recIDs = append(recIDs, id)
 			}
 		}
@@ -999,7 +1001,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(actionIDs) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "no valid actions found for provided ids"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no valid actions found for provided ids"})
 			return
 		}
 		// First, remove PENDING_DELETE_APPROVAL audit actions and collect their target transaction ids
@@ -1054,7 +1056,7 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// ignore
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "approved_count": len(actionIDs)})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "approved_count": len(actionIDs)})
 	}
 }
 
@@ -1066,11 +1068,11 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Items  []map[string]interface{} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid json"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidJSONShort})
 			return
 		}
 		if req.UserID == "" || len(req.Items) == 0 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "user_id and items are required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "user_id and items are required"})
 			return
 		}
 
@@ -1082,13 +1084,13 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "invalid user_id or session"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrInvalidSession})
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to begin tx"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to begin tx"})
 			return
 		}
 		committed := false
@@ -1107,7 +1109,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tRaw, ok := itm["transaction_type"]
 			if !ok {
 				tx.Rollback(ctx)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("item %d missing transaction_type", idx)})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d missing transaction_type", idx)})
 				return
 			}
 			txType := strings.ToUpper(fmt.Sprint(tRaw))
@@ -1136,7 +1138,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if entityName == "" || counterparty == "" || invoiceNumber == "" || currency == "" {
 				tx.Rollback(ctx)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("item %d missing required fields", idx)})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d missing required fields", idx)})
 				return
 			}
 
@@ -1144,12 +1146,12 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			dueDate := normalizeDate(dueDateStr)
 			var invDateVal, dueDateVal interface{}
 			if strings.TrimSpace(invDate) != "" {
-				if t, e := time.Parse("2006-01-02", invDate); e == nil {
+				if t, e := time.Parse(constants.DateFormat, invDate); e == nil {
 					invDateVal = t
 				}
 			}
 			if strings.TrimSpace(dueDate) != "" {
-				if t, e := time.Parse("2006-01-02", dueDate); e == nil {
+				if t, e := time.Parse(constants.DateFormat, dueDate); e == nil {
 					dueDateVal = t
 				}
 			}
@@ -1159,7 +1161,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := `INSERT INTO tr_payables (entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING payable_id`
 				if err := tx.QueryRow(ctx, q, entityName, counterparty, invoiceNumber, invDateVal, dueDateVal, amountF, currency).Scan(&pid); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to insert payable item %d: %v", idx, err)})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to insert payable item %d: %v", idx, err)})
 					return
 				}
 				createdPayables = append(createdPayables, pid)
@@ -1167,7 +1169,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQ := `INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
 				if err := tx.QueryRow(ctx, auditQ, pid, userName).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to create audit for payable %s: %v", pid, err)})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to create audit for payable %s: %v", pid, err)})
 					return
 				}
 				payableActionIDs = append(payableActionIDs, actionID)
@@ -1177,7 +1179,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				q := `INSERT INTO tr_receivables (entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING receivable_id`
 				if err := tx.QueryRow(ctx, q, entityName, counterparty, invoiceNumber, invDateVal, dueDateVal, amountF, currency).Scan(&rid); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to insert receivable item %d: %v", idx, err)})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to insert receivable item %d: %v", idx, err)})
 					return
 				}
 				createdReceivables = append(createdReceivables, rid)
@@ -1185,25 +1187,25 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditQ := `INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',NULL,$2,now()) RETURNING action_id`
 				if err := tx.QueryRow(ctx, auditQ, rid, userName).Scan(&actionID); err != nil {
 					tx.Rollback(ctx)
-					json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err)})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("failed to create audit for receivable %s: %v", rid, err)})
 					return
 				}
 				receivableActionIDs = append(receivableActionIDs, actionID)
 
 			} else {
 				tx.Rollback(ctx)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("item %d unknown transaction_type: %s", idx, txType)})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": fmt.Sprintf("item %d unknown transaction_type: %s", idx, txType)})
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "failed to commit"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to commit"})
 			return
 		}
 		committed = true
 
-		resp := map[string]interface{}{"success": true}
+		resp := map[string]interface{}{constants.ValueSuccess: true}
 		if len(createdPayables) > 0 {
 			resp["created_payables"] = createdPayables
 			resp["payable_action_ids"] = payableActionIDs
@@ -1227,7 +1229,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid json")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if req.UserID == "" || req.ID == "" || len(req.Fields) == 0 {
@@ -1243,7 +1245,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1262,7 +1264,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var actionID string
 
-		if strings.HasPrefix(id, "TR-PAY-") {
+		if strings.HasPrefix(id, constants.ErrPrefixPayable) {
 			// Update single payable using old_ pattern
 			sel := `SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code FROM tr_payables WHERE payable_id=$1 FOR UPDATE`
 			var curEntity, curCounter, curInvoice sqlNullString
@@ -1279,17 +1281,17 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args := []interface{}{}
 			pos := 1
 			addStr := func(col, oldcol string, val interface{}, cur sqlNullString) {
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 				args = append(args, nullifyEmpty(fmt.Sprint(val)))
 				args = append(args, cur.ValueOrZero())
 				pos += 2
 			}
 			addDate := func(col, oldcol string, val interface{}, cur sqlNullTime) {
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 				if val == nil {
 					args = append(args, nil)
 				} else if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
-					if t, e := time.Parse("2006-01-02", normalizeDate(s)); e == nil {
+					if t, e := time.Parse(constants.DateFormat, normalizeDate(s)); e == nil {
 						args = append(args, t)
 					} else {
 						args = append(args, nil)
@@ -1301,7 +1303,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				pos += 2
 			}
 			addFloat := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 				if val == nil {
 					args = append(args, nil)
 				} else {
@@ -1371,7 +1373,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-		} else if strings.HasPrefix(id, "TR-REC-") {
+		} else if strings.HasPrefix(id, constants.ErrPrefixReceivable) {
 			sel := `SELECT entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code FROM tr_receivables WHERE receivable_id=$1 FOR UPDATE`
 			var curEntity, curCounter, curInvoice sqlNullString
 			var curInvoiceDate, curDueDate sqlNullTime
@@ -1387,17 +1389,17 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args := []interface{}{}
 			pos := 1
 			addStr := func(col, oldcol string, val interface{}, cur sqlNullString) {
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 				args = append(args, nullifyEmpty(fmt.Sprint(val)))
 				args = append(args, cur.ValueOrZero())
 				pos += 2
 			}
 			addDate := func(col, oldcol string, val interface{}, cur sqlNullTime) {
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 				if val == nil {
 					args = append(args, nil)
 				} else if s, ok := val.(string); ok && strings.TrimSpace(s) != "" {
-					if t, e := time.Parse("2006-01-02", normalizeDate(s)); e == nil {
+					if t, e := time.Parse(constants.DateFormat, normalizeDate(s)); e == nil {
 						args = append(args, t)
 					} else {
 						args = append(args, nil)
@@ -1409,7 +1411,7 @@ func UpdateTransaction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				pos += 2
 			}
 			addFloat := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 				if val == nil {
 					args = append(args, nil)
 				} else {

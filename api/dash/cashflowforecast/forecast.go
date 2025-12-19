@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -51,7 +53,7 @@ type DailyRow struct {
 }
 
 // Handler: POST /cash/forecast/monthly
-// Body: {"user_id":"<id>", "horizon":90, "entity_name": "..." (optional), "currency":"USD" (optional) }
+// Body: {constants.KeyUserID:"<id>", "horizon":90, "entity_name": "..." (optional), "currency":"USD" (optional) }
 func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	type reqBody struct {
 		UserID     string `json:"user_id"`
@@ -62,12 +64,12 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -85,11 +87,11 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		resp := map[string]interface{}{
-			"success": true,
-			"kpis":    kpis,
-			"rows":    rows,
+			constants.ValueSuccess: true,
+			"kpis":                 kpis,
+			"rows":                 rows,
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -97,7 +99,7 @@ func GetCashflowForecastHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // getStartingBalanceUSD returns the normalized USD starting balance as of the given date (inclusive)
 func getStartingBalanceUSD(pgxPool *pgxpool.Pool, asOf time.Time) (float64, error) {
 	// Use balance_amount (latest entry per account up to asOf date) as requested
-	startDate := asOf.Format("2006-01-02")
+	startDate := asOf.Format(constants.DateFormat)
 	openingQ := `SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) balance_amount, currency_code
         FROM bank_balances_manual
         WHERE as_of_date <= $1
@@ -156,12 +158,12 @@ func GetForecastKPIs(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 	args := []interface{}{startKey, endKey}
 	if entityName != "" {
 		ph := len(args) + 1
-		aggQ += fmt.Sprintf(" AND cpi.entity_name = $%d", ph)
+		aggQ += fmt.Sprintf(constants.QuerryEntityName, ph)
 		args = append(args, entityName)
 	}
 	if currency != "" {
 		ph := len(args) + 1
-		aggQ += fmt.Sprintf(" AND cp.currency_code = $%d", ph)
+		aggQ += fmt.Sprintf(constants.QuerryCurrencyCode, ph)
 		args = append(args, currency)
 	}
 
@@ -222,12 +224,12 @@ func GetForecastRows(pgxPool *pgxpool.Pool, horizon int, entityName, currency st
 	args := []interface{}{startKey, endKey}
 	if entityName != "" {
 		ph := len(args) + 1
-		fetchQ += fmt.Sprintf(" AND cpi.entity_name = $%d", ph)
+		fetchQ += fmt.Sprintf(constants.QuerryEntityName, ph)
 		args = append(args, entityName)
 	}
 	if currency != "" {
 		ph := len(args) + 1
-		fetchQ += fmt.Sprintf(" AND cp.currency_code = $%d", ph)
+		fetchQ += fmt.Sprintf(constants.QuerryCurrencyCode, ph)
 		args = append(args, currency)
 	}
 	fetchGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cpi.category_id, cpi.description, cp.currency_code ORDER BY cpm.year, cpm.month;`
@@ -275,7 +277,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 
 	// 1) find most recent balance date <= today
 	var baseDate time.Time
-	err := pgxPool.QueryRow(context.Background(), `SELECT MAX(as_of_date) FROM bank_balances_manual WHERE as_of_date <= $1`, today.Format("2006-01-02")).Scan(&baseDate)
+	err := pgxPool.QueryRow(context.Background(), `SELECT MAX(as_of_date) FROM bank_balances_manual WHERE as_of_date <= $1`, today.Format(constants.DateFormat)).Scan(&baseDate)
 	if err != nil {
 		return out, fmt.Errorf("find base date: %w", err)
 	}
@@ -288,7 +290,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
         FROM bank_balances_manual
         WHERE as_of_date <= $1
         ORDER BY COALESCE(account_no, iban, nickname), as_of_date DESC, as_of_time DESC`
-	rows, err := pgxPool.Query(context.Background(), openingQ, baseDate.Format("2006-01-02"))
+	rows, err := pgxPool.Query(context.Background(), openingQ, baseDate.Format(constants.DateFormat))
 	if err != nil {
 		return out, fmt.Errorf("opening balances query: %w", err)
 	}
@@ -325,12 +327,12 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 	margs := []interface{}{startKey, endKey}
 	if entityName != "" {
 		ph := len(margs) + 1
-		monthlyQ += fmt.Sprintf(" AND cpi.entity_name = $%d", ph)
+		monthlyQ += fmt.Sprintf(constants.QuerryEntityName, ph)
 		margs = append(margs, entityName)
 	}
 	if currency != "" {
 		ph := len(margs) + 1
-		monthlyQ += fmt.Sprintf(" AND cp.currency_code = $%d", ph)
+		monthlyQ += fmt.Sprintf(constants.QuerryCurrencyCode, ph)
 		margs = append(margs, currency)
 	}
 	monthlyGroup := ` GROUP BY cpm.year, cpm.month, cpi.cashflow_type, cp.currency_code, cpi.start_date ORDER BY cpm.year, cpm.month;`
@@ -367,7 +369,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 			target := time.Date(year, time.Month(month), effDay, 0, 0, 0, 0, time.UTC)
 			// only include if inside our simulation window (baseDate+1 .. end)
 			if !target.Before(baseDate.AddDate(0, 0, 1)) && !target.After(end) {
-				key := target.Format("2006-01-02")
+				key := target.Format(constants.DateFormat)
 				rate := rates[cur]
 				if rate == 0 {
 					rate = 1.0
@@ -388,7 +390,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 				if d.After(end) {
 					break
 				}
-				key := d.Format("2006-01-02")
+				key := d.Format(constants.DateFormat)
 				rate := rates[cur]
 				if rate == 0 {
 					rate = 1.0
@@ -411,7 +413,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 
 	// But we might need the row for baseDate (today) if baseDate == today; we'll handle later
 	for d := simDate; !d.After(end); d = d.AddDate(0, 0, 1) {
-		key := d.Format("2006-01-02")
+		key := d.Format(constants.DateFormat)
 		infl := inflows[key]
 		outf := outflows[key]
 		net := infl - outf
@@ -422,9 +424,9 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 	}
 
 	// Build final output starting from today's row
-	todayKey := today.Format("2006-01-02")
+	todayKey := today.Format(constants.DateFormat)
 	// If baseDate == today, create today's row using baseClosing as closing and compute opening = closing - net(today)
-	if baseDate.Format("2006-01-02") == todayKey {
+	if baseDate.Format(constants.DateFormat) == todayKey {
 		netToday := inflows[todayKey] - outflows[todayKey]
 		openingToday := baseClosingUSD - netToday
 		row := DailyRow{Date: todayKey, OpeningUSD: openingToday, NetFlowUSD: netToday, ClosingUSD: baseClosingUSD}
@@ -444,7 +446,7 @@ func GetForecastDailyRows(pgxPool *pgxpool.Pool, horizon int, entityName, curren
 			// Re-simulate up to today
 			prev := baseClosingUSD
 			for d := baseDate.AddDate(0, 0, 1); !d.After(today); d = d.AddDate(0, 0, 1) {
-				k := d.Format("2006-01-02")
+				k := d.Format(constants.DateFormat)
 				net := inflows[k] - outflows[k]
 				opening := prev
 				closing := opening + net
@@ -478,12 +480,12 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -494,8 +496,8 @@ func GetForecastDailyHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{"success": true, "rows": rows}
-		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -511,12 +513,12 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -527,8 +529,8 @@ func GetForecastKPIsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{"success": true, "kpis": kpis}
-		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{constants.ValueSuccess: true, "kpis": kpis}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -543,12 +545,12 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -559,8 +561,8 @@ func GetForecastRowsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{"success": true, "rows": rows}
-		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{constants.ValueSuccess: true, "rows": rows}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -583,11 +585,11 @@ func GetForecastCategorySums(pgxPool *pgxpool.Pool, horizon int, entityName, cur
 	args := []interface{}{}
 	if entityName != "" {
 		args = append(args, entityName)
-		whereClauses += fmt.Sprintf(" AND cpi.entity_name = $%d", len(args))
+		whereClauses += fmt.Sprintf(constants.QuerryEntityName, len(args))
 	}
 	if currency != "" {
 		args = append(args, currency)
-		whereClauses += fmt.Sprintf(" AND cp.currency_code = $%d", len(args))
+		whereClauses += fmt.Sprintf(constants.QuerryCurrencyCode, len(args))
 	}
 
 	q := baseQ + whereClauses + " GROUP BY cpi.category_id, cpi.cashflow_type, cp.currency_code"
@@ -625,12 +627,12 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -641,8 +643,8 @@ func GetForecastCategorySumsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		resp := map[string]interface{}{"success": true, "category_sums": sums}
-		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]interface{}{constants.ValueSuccess: true, "category_sums": sums}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }

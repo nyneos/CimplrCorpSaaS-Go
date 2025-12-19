@@ -2,23 +2,25 @@ package exposures
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
 	"strings"
-	"fmt"
+
 	"github.com/lib/pq"
 )
 
 // Helper: send JSON error response
 // func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-// 	w.Header().Set("Content-Type", "application/json")
+// 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 // 	w.WriteHeader(status)
 // 	json.NewEncoder(w).Encode(map[string]interface{}{
-// 		"success": false,
-// 		"error":   errMsg,
+// 		constants.ValueSuccess: false,
+// 		constants.ValueError:   errMsg,
 // 	})
 // }
 
@@ -28,20 +30,20 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		ct := r.Header.Get("Content-Type")
-		if strings.HasPrefix(ct, "application/json") {
+		ct := r.Header.Get(constants.ContentTypeText)
+		if strings.HasPrefix(ct, constants.ContentTypeJSON) {
 			_ = json.NewDecoder(r.Body).Decode(&req)
-			// } else if strings.HasPrefix(ct, "multipart/form-data") {
+			// } else if strings.HasPrefix(ct, constants.ContentTypeMultipart) {
 			// 	r.ParseMultipartForm(32 << 20)
-			// 	req.UserID = r.FormValue("user_id")
+			// 	req.UserID = r.FormValue(constants.KeyUserID)
 		}
 		if req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		rows, err := db.Query(`SELECT l.*, h.document_id, f.internal_reference_id FROM exposure_hedge_links l LEFT JOIN exposure_headers h ON l.exposure_header_id = h.exposure_header_id LEFT JOIN forward_bookings f ON l.booking_id = f.system_transaction_id WHERE h.entity = ANY($1) AND l.is_active = TRUE`, pq.Array(buNames))
@@ -74,8 +76,8 @@ func HedgeLinksDetails(db *sql.DB) http.HandlerFunc {
 			data = append(data, rowMap)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    data,
+			constants.ValueSuccess: true,
+			"data":                 data,
 		})
 	}
 }
@@ -86,20 +88,20 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		ct := r.Header.Get("Content-Type")
-		if strings.HasPrefix(ct, "application/json") {
+		ct := r.Header.Get(constants.ContentTypeText)
+		if strings.HasPrefix(ct, constants.ContentTypeJSON) {
 			_ = json.NewDecoder(r.Body).Decode(&req)
-			// } else if strings.HasPrefix(ct, "multipart/form-data") {
+			// } else if strings.HasPrefix(ct, constants.ContentTypeMultipart) {
 			// 	r.ParseMultipartForm(32 << 20)
-			// 	req.UserID = r.FormValue("user_id")
+			// 	req.UserID = r.FormValue(constants.KeyUserID)
 		}
 		if req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		bookRows, err := db.Query(`SELECT system_transaction_id, entity_level_0, order_type, currency_pair, maturity_date, booking_amount, counterparty, total_rate, value_local_currency FROM forward_bookings WHERE processing_status = 'approved' OR processing_status = 'Approved'`)
@@ -148,18 +150,18 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			hedgeRows, err := db.Query(`SELECT booking_id, SUM(hedged_amount) AS linked_amount FROM exposure_hedge_links WHERE booking_id = ANY($1) GROUP BY booking_id`, pq.Array(bookingIds))
 			if err == nil {
 				for hedgeRows.Next() {
-					var booking_id interface{}
-					var linked_amount float64
-					hedgeRows.Scan(&booking_id, &linked_amount)
+					var bookingId interface{}
+					var linkedAmount float64
+					hedgeRows.Scan(&bookingId, &linkedAmount)
 					// Convert booking_id to string for map key
 					var bookingIDStr string
-					switch v := booking_id.(type) {
+					switch v := bookingId.(type) {
 					case string:
 						bookingIDStr = v
 					case []uint8:
 						bookingIDStr = string(v)
 					}
-					hedgeMap[bookingIDStr] = linked_amount
+					hedgeMap[bookingIDStr] = linkedAmount
 				}
 				hedgeRows.Close()
 			}
@@ -237,11 +239,11 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 				"bank":                  bankName,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		// json.NewEncoder(w).Encode(response)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    response,
+			constants.ValueSuccess: true,
+			"data":                 response,
 		})
 	}
 }
@@ -252,20 +254,20 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		ct := r.Header.Get("Content-Type")
-		if strings.HasPrefix(ct, "application/json") {
+		ct := r.Header.Get(constants.ContentTypeText)
+		if strings.HasPrefix(ct, constants.ContentTypeJSON) {
 			_ = json.NewDecoder(r.Body).Decode(&req)
-			// } else if strings.HasPrefix(ct, "multipart/form-data") {
+			// } else if strings.HasPrefix(ct, constants.ContentTypeMultipart) {
 			// 	r.ParseMultipartForm(32 << 20)
-			// 	req.UserID = r.FormValue("user_id")
+			// 	req.UserID = r.FormValue(constants.KeyUserID)
 		}
 		if req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "Please login to continue.")
+			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, "No accessible business units found")
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		headRows, err := db.Query(`SELECT exposure_header_id, entity, exposure_type, currency, value_date, total_open_amount, counterparty_name FROM exposure_headers WHERE approval_status = 'Approved' OR approval_status = 'approved'`)
@@ -320,12 +322,12 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			hedgeRows, err := db.Query(`SELECT exposure_header_id, SUM(hedged_amount) AS hedge_amount FROM exposure_hedge_links WHERE exposure_header_id = ANY($1) GROUP BY exposure_header_id`, pq.Array(headerIds))
 			if err == nil {
 				for hedgeRows.Next() {
-					var exposure_header_id interface{}
-					var hedge_amount float64
-					hedgeRows.Scan(&exposure_header_id, &hedge_amount)
+					var exposureHeaderId interface{}
+					var hedgeAmount float64
+					hedgeRows.Scan(&exposureHeaderId, &hedgeAmount)
 					// normalize key to string
 					var key string
-					switch v := exposure_header_id.(type) {
+					switch v := exposureHeaderId.(type) {
 					case string:
 						key = v
 					case []uint8:
@@ -334,7 +336,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 						key = fmt.Sprintf("%v", v)
 					}
 					if key != "" {
-						hedgeMap[key] = hedge_amount
+						hedgeMap[key] = hedgeAmount
 					}
 				}
 				hedgeRows.Close()
@@ -388,13 +390,14 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    response,
+			constants.ValueSuccess: true,
+			"data":                 response,
 		})
 	}
 }
+
 // Handler: LinkExposureHedge - upsert exposure_hedge_links and log to forward_booking_ledger
 func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -448,8 +451,8 @@ func LinkExposureHedge(db *sql.DB) http.HandlerFunc {
 		// Log to forward_booking_ledger
 		ledgerQuery := `INSERT INTO forward_booking_ledger (booking_id, action_type, action_id, action_date, amount_changed, running_open_amount, user_id) VALUES ($1, 'UTILIZATION', $2, CURRENT_DATE, $3, $4, $5)`
 		_, _ = db.Exec(ledgerQuery, req.BookingID, req.ExposureHeaderID, req.HedgedAmount, newOpenAmount, req.UserID)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "link": linkMap})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "link": linkMap})
 	}
 }
 
@@ -462,6 +465,3 @@ func containsString(arr []string, s string) bool {
 	}
 	return false
 }
-
-
-

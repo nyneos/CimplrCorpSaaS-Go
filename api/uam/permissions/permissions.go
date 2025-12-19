@@ -2,6 +2,7 @@ package permissions
 
 import (
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -81,14 +82,14 @@ func GetRolePermissionsJsonByRoleName(db *sql.DB) http.HandlerFunc {
 			"roleName": req.RoleName,
 			"pages":    json.RawMessage(jsonResult),
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
@@ -138,7 +139,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			if ppRaw, ok := pageObj["pagePermissions"]; ok {
 				if pp, ok := ppRaw.(map[string]interface{}); ok {
 					for action, allowedRaw := range pp {
-						key := fmt.Sprintf("%s||%s||%s", page, "", action)
+						key := fmt.Sprintf(constants.FormatPipelineTripleAlt, page, "", action)
 						if _, exists := permSet[key]; exists {
 							continue
 						}
@@ -157,7 +158,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 					for tab, tabObjRaw := range tabs {
 						if tabObj, ok := tabObjRaw.(map[string]interface{}); ok {
 							for action, allowedRaw := range tabObj {
-								key := fmt.Sprintf("%s||%s||%s", page, tab, action)
+								key := fmt.Sprintf(constants.FormatPipelineTripleAlt, page, tab, action)
 								if _, exists := permSet[key]; exists {
 									continue
 								}
@@ -218,7 +219,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		// 		SELECT page_name, NULLIF(tab_name, ''), action FROM input_data
 		// 	)
 		// `, pq.Array(pageNames), pq.Array(nullStringToText(tabNames)), pq.Array(actions))
-				rows, err := tx.Query(`
+		rows, err := tx.Query(`
     WITH input_data AS (
         SELECT 
             UNNEST($1::text[]) AS page_name,
@@ -256,7 +257,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			var page, action string
 			var tab sql.NullString
 			rows.Scan(&id, &page, &tab, &action)
-			key := fmt.Sprintf("%s||%s||%s", page, tab.String, action)
+			key := fmt.Sprintf(constants.FormatPipelineTripleAlt, page, tab.String, action)
 			permissionIdMap[key] = id
 		}
 
@@ -270,7 +271,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			if p.Key.Tab.Valid {
 				tabVal = p.Key.Tab.String
 			}
-			key := fmt.Sprintf("%s||%s||%s", p.Key.Page, tabVal, p.Key.Action)
+			key := fmt.Sprintf(constants.FormatPipelineTripleAlt, p.Key.Page, tabVal, p.Key.Action)
 			if pid, ok := permissionIdMap[key]; ok {
 				roleIDs = append(roleIDs, roleID)
 				permIDs = append(permIDs, pid)
@@ -297,11 +298,11 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(); err != nil {
-			respondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]any{
 			"success": true,
 			"count":   len(perms),
@@ -467,7 +468,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -537,7 +538,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			// "user_id":           req.UserID,
@@ -554,16 +555,9 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			// Prefer userID from context if available
-			if ctxUserID, ok := userID.(string); ok && ctxUserID != "" {
-				req.UserID = ctxUserID
-			}
-		} else {
-			// If body is not valid, still try to get userID from context
-			if ctxUserID, ok := userID.(string); ok && ctxUserID != "" {
-				req.UserID = ctxUserID
-			}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if ctxUserID, ok := userID.(string); ok && ctxUserID != "" {
+			req.UserID = ctxUserID
 		}
 		if req.UserID == "" {
 			respondWithError(w, http.StatusBadRequest, "user_id required")
@@ -596,7 +590,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			// "user_id":    req.UserID,
@@ -733,23 +727,23 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 // 			return
 // 		}
 
-// 		pages := make(map[string]bool, len(allPages))
-// 		for _, page := range allPages {
-// 			pages[page] = false
-// 		}
-// 		for _, row := range results {
-// 			if strings.EqualFold(row.Action, "hasAccess") && row.Allowed {
-// 				pages[strings.ToLower(row.PageName)] = true
-// 			}
-// 		}
-// 		resp := map[string]interface{}{
-// 			"success": true,
-// 			"pages":   pages,
-// 		}
-// 		w.Header().Set("Content-Type", "application/json")
-// 		json.NewEncoder(w).Encode(resp)
-// 	}
-// }
+//			pages := make(map[string]bool, len(allPages))
+//			for _, page := range allPages {
+//				pages[page] = false
+//			}
+//			for _, row := range results {
+//				if strings.EqualFold(row.Action, "hasAccess") && row.Allowed {
+//					pages[strings.ToLower(row.PageName)] = true
+//				}
+//			}
+//			resp := map[string]interface{}{
+//				"success": true,
+//				"pages":   pages,
+//			}
+//			w.Header().Set(constants.ContentTypeText , constants.ContentTypeJSON )
+//			json.NewEncoder(w).Encode(resp)
+//		}
+//	}
 func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -804,13 +798,10 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			pages[page] = true
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"pages":   pages,
 		})
 	}
 }
-
-
-

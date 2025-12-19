@@ -3,6 +3,7 @@ package redemption
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -51,7 +52,7 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateRedemptionConfirmationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -81,14 +82,14 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -154,12 +155,12 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, confirmID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -196,12 +197,12 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -213,7 +214,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -223,11 +224,11 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, row := range req.Rows {
 			// Validate
 			if strings.TrimSpace(row.RedemptionID) == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "redemption_id is required"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_id is required"})
 				continue
 			}
 			if row.ActualNAV <= 0 || row.ActualUnits <= 0 || row.GrossProceeds <= 0 {
-				results = append(results, map[string]interface{}{"success": false, "error": "actual_nav, actual_units, and gross_proceeds must be > 0"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "actual_nav, actual_units, and gross_proceeds must be > 0"})
 				continue
 			}
 
@@ -241,7 +242,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "TX begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -284,7 +285,7 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING redemption_confirm_id
 			`, row.RedemptionID, row.ActualNAV, row.ActualUnits, row.GrossProceeds,
 				row.ExitLoad, row.TDS, row.NetCredited, nullIfZeroFloat(row.STTCharges), row.ResolutionVariance, row.ResolutionComment, nullIfZeroFloat(row.VarianceProceeds), nullIfZeroFloat(row.FinalRealisedCapitalGainLoss), status).Scan(&confirmID); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Insert failed: " + err.Error()})
 				continue
 			}
 
@@ -292,17 +293,17 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 			`, confirmID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Audit insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Commit failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
 				continue
 			}
 
 			results = append(results, map[string]interface{}{
-				"success":               true,
+				constants.ValueSuccess:  true,
 				"redemption_confirm_id": confirmID,
 				"redemption_id":         row.RedemptionID,
 			})
@@ -320,7 +321,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateRedemptionConfirmationRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.RedemptionConfirmID) == "" {
@@ -328,7 +329,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -340,14 +341,14 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -378,7 +379,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"exit_load":                        4,
 			"tds":                              5,
 			"net_credited":                     6,
-			"status":                           7,
+			constants.KeyStatus:                7,
 			"stt_charges":                      8,
 			"resolution_variance":              9,
 			"resolution_comment":               10,
@@ -394,7 +395,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			lk := strings.ToLower(k)
 			if idx, ok := fieldPairs[lk]; ok {
 				oldField := "old_" + lk
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", lk, pos, oldField, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
 				pos += 2
 			}
@@ -408,7 +409,7 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.redemption_confirmation SET %s, updated_at=now() WHERE redemption_confirm_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.RedemptionConfirmID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -417,12 +418,12 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 		`, req.RedemptionConfirmID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -448,7 +449,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -460,7 +461,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid or inactive session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -469,13 +470,13 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, row := range req.Rows {
 			if row.RedemptionConfirmID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "redemption_confirm_id missing"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "redemption_confirm_id missing"})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "tx begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -490,7 +491,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9], &oldVals[10], &oldVals[11], &oldVals[12],
 			); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "fetch failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "fetch failed: " + err.Error()})
 				continue
 			}
 
@@ -502,7 +503,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"exit_load":                        4,
 				"tds":                              5,
 				"net_credited":                     6,
-				"status":                           7,
+				constants.KeyStatus:                7,
 				"stt_charges":                      8,
 				"resolution_variance":              9,
 				"resolution_comment":               10,
@@ -518,14 +519,14 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				lk := strings.ToLower(k)
 				if idx, ok := fieldPairs[lk]; ok {
 					oldField := "old_" + lk
-					sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", lk, pos, oldField, pos+1))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 					args = append(args, v, oldVals[idx])
 					pos += 2
 				}
 			}
 
 			if len(sets) == 0 {
-				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "No valid fields"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: "No valid fields"})
 				continue
 			}
 
@@ -533,7 +534,7 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, row.RedemptionConfirmID)
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "update failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
 				continue
 			}
 
@@ -541,16 +542,16 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 			`, row.RedemptionConfirmID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "audit insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "redemption_confirm_id": row.RedemptionConfirmID, "error": "commit failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "redemption_confirm_id": row.RedemptionConfirmID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
 				continue
 			}
 
-			results = append(results, map[string]interface{}{"success": true, "redemption_confirm_id": row.RedemptionConfirmID, "requested": userEmail})
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_confirm_id": row.RedemptionConfirmID, "requested": userEmail})
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
@@ -569,7 +570,7 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason               string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.RedemptionConfirmIDs) == 0 {
@@ -585,14 +586,14 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -602,13 +603,13 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionredemptionconfirmation (redemption_confirm_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
 			`, id, req.Reason, requestedBy); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.RedemptionConfirmIDs})
@@ -627,7 +628,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			Comment              string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -638,14 +639,14 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -658,7 +659,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -689,7 +690,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
-			api.RespondWithPayload(w, false, "No approvable actions found", map[string]any{
+			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
 				"approved_action_ids":              []string{},
 				"deleted_redemption_confirmations": []string{},
 			})
@@ -836,7 +837,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -879,7 +880,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			Comment              string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -890,14 +891,14 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -910,7 +911,7 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 		`
 		rows, err := tx.Query(ctx, sel, req.RedemptionConfirmIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -954,12 +955,12 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -1108,7 +1109,7 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1125,7 +1126,7 @@ func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1174,7 +1175,7 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1202,7 +1203,7 @@ func GetApprovedRedemptionConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc 
 				"resolution_comment":               resolutionComment,
 				"variance_proceeds":                varianceProceeds,
 				"final_realised_capital_gain_loss": finalRealised,
-				"status":                           status,
+				constants.KeyStatus:                status,
 			})
 		}
 
@@ -1287,7 +1288,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 
 	rows, err := tx.Query(ctx, fetchQ, redemptionConfirmationIDs)
 	if err != nil {
-		return nil, fmt.Errorf("fetch confirmations failed: %w", err)
+		return nil, fmt.Errorf("Fetch confirmations failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -1679,7 +1680,7 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RedemptionConfirmationIDs []string `json:"redemption_confirmation_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.RedemptionConfirmationIDs) == 0 {
@@ -1695,7 +1696,7 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if confirmedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 

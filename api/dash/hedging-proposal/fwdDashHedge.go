@@ -13,6 +13,8 @@ import (
 
 	"CimplrCorpSaas/api"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -32,11 +34,11 @@ var rates = map[string]float64{
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
@@ -64,13 +66,13 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -91,7 +93,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(fb.processing_status) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -179,7 +181,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
 	}
 }
@@ -194,7 +196,7 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -208,7 +210,7 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 			  AND (processing_status = 'Approved' OR processing_status = 'approved')
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()

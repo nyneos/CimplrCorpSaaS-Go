@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -90,7 +92,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		if err := rows.Scan(&stagingID, &transactionType, &rawPayload); err != nil {
 			errorMsg := fmt.Sprintf("Failed to scan staging record ID %s: %v", stagingID, err)
 			scanErrors = append(scanErrors, errorMsg)
-			log.Printf("ERROR: %s", errorMsg)
+			log.Printf(constants.FormatSQLError, errorMsg)
 			continue // Continue processing other records but track errors
 		}
 
@@ -98,7 +100,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 		if err := json.Unmarshal(rawPayload, &rawData); err != nil {
 			errorMsg := fmt.Sprintf("Failed to unmarshal payload for staging ID %s: %v", stagingID, err)
 			scanErrors = append(scanErrors, errorMsg)
-			log.Printf("ERROR: %s", errorMsg)
+			log.Printf(constants.FormatSQLError, errorMsg)
 			continue
 		}
 
@@ -252,7 +254,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 	if len(payableIDs) > 0 {
 		var auditValues []string
 		for _, pid := range payableIDs {
-			auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", pid, userName))
+			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
 		}
 		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := pool.Exec(ctx, auditSQL)
@@ -265,7 +267,7 @@ func ProcessStagingTransactionsToCanonicalV2(pool *pgxpool.Pool, batchID uuid.UU
 	if len(receivableIDs) > 0 {
 		var auditValues []string
 		for _, rid := range receivableIDs {
-			auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", rid, userName))
+			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
 		}
 		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := pool.Exec(ctx, auditSQL)
@@ -341,22 +343,22 @@ func convertTransactionValueByDataType(value interface{}, fieldName string) inte
 	case "invoice_date", "due_date", "old_invoice_date", "old_due_date":
 		// Try to parse various date formats
 		layouts := []string{
-			"2006-01-02",
-			"02-01-2006",
+			constants.DateFormat,
+			constants.DateFormatAlt,
 			"01/02/2006",
 			"2 Jan 2006",
 			"2006/01/02",
-			"2006-01-02 15:04:05",
+			constants.DateTimeFormat,
 			"02-01-2006 15:04:05",
 		}
 
 		for _, layout := range layouts {
 			if t, err := time.Parse(layout, strVal); err == nil {
-				return t.Format("2006-01-02") // Return as date string
+				return t.Format(constants.DateFormat) // Return as date string
 			}
 		}
 		// If no date format matched, return current date as fallback
-		return time.Now().Format("2006-01-02")
+		return time.Now().Format(constants.DateFormat)
 	case "entity_name", "counterparty_name", "invoice_number", "currency_code",
 		"old_entity_name", "old_counterparty_name", "old_invoice_number", "old_currency_code":
 		return strVal
@@ -458,12 +460,12 @@ func getDateFromTransactionData(data map[string]interface{}, fieldNames []string
 		if val, exists := data[fieldName]; exists {
 			if strVal, ok := val.(string); ok && strVal != "" {
 				layouts := []string{
-					"2006-01-02",
-					"02-01-2006",
+					constants.DateFormat,
+					constants.DateFormatAlt,
 					"01/02/2006",
 					"2 Jan 2006",
 					"2006/01/02",
-					"2006-01-02 15:04:05",
+					constants.DateTimeFormat,
 				}
 
 				for _, layout := range layouts {
@@ -565,7 +567,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 		if err := rows.Scan(&stagingID, &transactionType, &rawPayload); err != nil {
 			errorMsg := fmt.Sprintf("Failed to scan staging record %s: %v", stagingID, err)
 			processingErrors = append(processingErrors, errorMsg)
-			log.Printf("ERROR: %s", errorMsg)
+			log.Printf(constants.FormatSQLError, errorMsg)
 			continue
 		}
 
@@ -573,7 +575,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 		if err := json.Unmarshal(rawPayload, &rawData); err != nil {
 			errorMsg := fmt.Sprintf("Failed to unmarshal payload for staging ID %s: %v", stagingID, err)
 			processingErrors = append(processingErrors, errorMsg)
-			log.Printf("ERROR: %s", errorMsg)
+			log.Printf(constants.FormatSQLError, errorMsg)
 			continue
 		}
 
@@ -728,7 +730,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 	if len(payableIDs) > 0 {
 		var auditValues []string
 		for _, pid := range payableIDs {
-			auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", pid, userName))
+			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, pid, userName))
 		}
 		auditSQL := "INSERT INTO auditactionpayable (payable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := tx.Exec(ctx, auditSQL)
@@ -741,7 +743,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 	if len(receivableIDs) > 0 {
 		var auditValues []string
 		for _, rid := range receivableIDs {
-			auditValues = append(auditValues, fmt.Sprintf("('%s','CREATE','PENDING_APPROVAL',NULL,'%s',now())", rid, userName))
+			auditValues = append(auditValues, fmt.Sprintf(constants.FormatInsertAuditLog, rid, userName))
 		}
 		auditSQL := "INSERT INTO auditactionreceivable (receivable_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES " + strings.Join(auditValues, ",")
 		_, auditErr := tx.Exec(ctx, auditSQL)

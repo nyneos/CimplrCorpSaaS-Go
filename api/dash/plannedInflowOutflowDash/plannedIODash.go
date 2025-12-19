@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,7 +62,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var body reqBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Missing or invalid user_id in body"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingUserID})
 			return
 		}
 		ctx := context.Background()
@@ -98,7 +100,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := pgxPool.Query(ctx, entityQ, dr.Start, dr.End)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 				return
 			}
 
@@ -155,7 +157,7 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows2, err := pgxPool.Query(ctx, cashflowQ, dr.Start, dr.End)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 				return
 			}
 
@@ -198,8 +200,8 @@ func GetPlannedIODash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				Cashflows: cashflows,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": out})
 	}
 }
 

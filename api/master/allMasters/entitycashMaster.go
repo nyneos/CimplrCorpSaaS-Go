@@ -19,6 +19,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -54,7 +56,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CashEntityBulkRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		// Get created_by from session
@@ -67,7 +69,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -115,11 +117,11 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entity.IsDeleted,
 			).Scan(&newEntityID)
 			if err != nil {
-				inserted = append(inserted, map[string]interface{}{"success": false, "error": err.Error(), "entity_name": entity.EntityName})
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_name": entity.EntityName})
 				continue
 			}
 			entityIDs[entity.EntityName] = newEntityID
-			inserted = append(inserted, map[string]interface{}{"success": true, "entity_id": newEntityID, "entity_name": entity.EntityName})
+			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "entity_id": newEntityID, "entity_name": entity.EntityName})
 			// Insert audit action
 			auditQuery := `INSERT INTO auditactionentity (
 				entity_id, actiontype, processing_status, reason, requested_by, requested_at
@@ -132,62 +134,62 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				createdBy,
 			); auditErr != nil {
 				inserted = append(inserted, map[string]interface{}{
-					"success":     false,
-					"error":       "Entity created but audit log failed: " + auditErr.Error(),
-					"entity_id":   newEntityID,
-					"entity_name": entity.EntityName,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Entity created but audit log failed: " + auditErr.Error(),
+					"entity_id":            newEntityID,
+					"entity_name":          entity.EntityName,
 				})
 			}
 		}
 		// Sync relationships
-relationshipsAdded := []map[string]interface{}{}
-for _, entity := range req.Entities {
-	// Skip if parent is empty (top-level entity)
-	if strings.TrimSpace(entity.ParentEntityName) == "" {
-		continue
-	}
+		relationshipsAdded := []map[string]interface{}{}
+		for _, entity := range req.Entities {
+			// Skip if parent is empty (top-level entity)
+			if strings.TrimSpace(entity.ParentEntityName) == "" {
+				continue
+			}
 
-	parentName := entity.ParentEntityName
-	childName := entity.EntityName
+			parentName := entity.ParentEntityName
+			childName := entity.EntityName
 
-	var exists int
-	err := pgxPool.QueryRow(r.Context(),
-		`SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2`,
-		parentName, childName,
-	).Scan(&exists)
+			var exists int
+			err := pgxPool.QueryRow(r.Context(),
+				`SELECT 1 FROM cashentityrelationships WHERE parent_entity_name = $1 AND child_entity_name = $2`,
+				parentName, childName,
+			).Scan(&exists)
 
-	if err == pgx.ErrNoRows {
-		relQuery := `
+			if err == pgx.ErrNoRows {
+				relQuery := `
 			INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status)
 			VALUES ($1, $2, 'Active')
 			RETURNING relationship_id
 		`
-		var relID int
-		relErr := pgxPool.QueryRow(r.Context(), relQuery, parentName, childName).Scan(&relID)
-		if relErr == nil {
-			relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
-				"success":            true,
-				"relationship_id":    relID,
-				"parent_entity_name": parentName,
-				"child_entity_name":  childName,
-			})
-		} else {
-			relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
-				"success":            false,
-				"error":              relErr.Error(),
-				"parent_entity_name": parentName,
-				"child_entity_name":  childName,
-			})
+				var relID int
+				relErr := pgxPool.QueryRow(r.Context(), relQuery, parentName, childName).Scan(&relID)
+				if relErr == nil {
+					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
+						constants.ValueSuccess: true,
+						"relationship_id":      relID,
+						"parent_entity_name":   parentName,
+						"child_entity_name":    childName,
+					})
+				} else {
+					relationshipsAdded = append(relationshipsAdded, map[string]interface{}{
+						constants.ValueSuccess: false,
+						constants.ValueError:   relErr.Error(),
+						"parent_entity_name":   parentName,
+						"child_entity_name":    childName,
+					})
+				}
+			}
 		}
-	}
-}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
-			"entities":           inserted,
-			"relationshipsAdded": len(relationshipsAdded),
-			"details":            relationshipsAdded,
+			constants.ValueSuccess: true,
+			"entities":             inserted,
+			"relationshipsAdded":   len(relationshipsAdded),
+			"details":              relationshipsAdded,
 		})
 	}
 }
@@ -226,7 +228,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, entityQuery)
 		if err != nil {
-			http.Error(w, "query failed: "+err.Error(), 500)
+			http.Error(w, constants.ErrQueryFailed+err.Error(), 500)
 			return
 		}
 		defer rows.Close()
@@ -321,14 +323,14 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"reason":                         reason.String,
 				"checker_at": func() string {
 					if checkerAt.Valid {
-						return checkerAt.Time.Format("2006-01-02 15:04:05")
+						return checkerAt.Time.Format(constants.DateTimeFormat)
 					}
 					return ""
 				}(),
 				"created_by": reqBy.String,
 				"created_at": func() string {
 					if reqAt.Valid {
-						return reqAt.Time.Format("2006-01-02 15:04:05")
+						return reqAt.Time.Format(constants.DateTimeFormat)
 					}
 					return ""
 				}(),
@@ -367,7 +369,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if ent, ok := entityMap[eid.String]; ok {
 						ts := ""
 						if rat.Valid {
-							ts = rat.Time.Format("2006-01-02 15:04:05")
+							ts = rat.Time.Format(constants.DateTimeFormat)
 						}
 						switch atype.String {
 						case "CREATE":
@@ -469,7 +471,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// === 7️⃣ Return compressed JSON
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
@@ -482,6 +484,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		log.Printf("✅ Hierarchy built (%d entities, %d roots) in %v", len(entityMap), len(top), time.Since(start))
 	}
 }
+
 // Bulk update handler for entity cash master
 func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -495,7 +498,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid JSON"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
 			return
 		}
 		// Get updated_by from session
@@ -509,20 +512,20 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if updatedBy == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "Invalid user_id or session"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
 			return
 		}
 		var results []map[string]interface{}
 		relationshipsAdded := []map[string]interface{}{}
 		for _, entity := range req.Entities {
 			if entity.EntityID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "Missing entity_id"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Missing entity_id"})
 				continue
 			}
 			ctx := r.Context()
 			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Failed to start transaction: " + txErr.Error(), "entity_id": entity.EntityID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + txErr.Error(), "entity_id": entity.EntityID})
 				continue
 			}
 			committed := false
@@ -532,7 +535,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						tx.Rollback(ctx)
 					}
 					if p := recover(); p != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "panic: " + fmt.Sprint(p), "entity_id": entity.EntityID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "panic: " + fmt.Sprint(p), "entity_id": entity.EntityID})
 					}
 				}()
 
@@ -542,7 +545,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var exIsTopLevel, exIsDeleted *bool
 				sel := `SELECT entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, is_top_level_entity, is_deleted FROM masterentitycash WHERE entity_id=$1 FOR UPDATE`
 				if err := tx.QueryRow(ctx, sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityName, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Failed to fetch existing entity: " + err.Error(), "entity_id": entity.EntityID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing entity: " + err.Error(), "entity_id": entity.EntityID})
 					return
 				}
 
@@ -765,7 +768,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE masterentitycash SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE entity_id=$%d RETURNING entity_id", pos)
 					args = append(args, entity.EntityID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedEntityID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": err.Error(), "entity_id": entity.EntityID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_id": entity.EntityID})
 						return
 					}
 				} else {
@@ -777,7 +780,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					entity_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
 				if _, err := tx.Exec(ctx, auditQuery, updatedEntityID, "EDIT", "PENDING_EDIT_APPROVAL", entity.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Entity updated but audit log failed: " + err.Error(), "entity_id": updatedEntityID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Entity updated but audit log failed: " + err.Error(), "entity_id": updatedEntityID})
 					return
 				}
 
@@ -792,26 +795,26 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							var relID int
 							relErr := pgxPool.QueryRow(ctx, relQuery, parentId, updatedEntityID).Scan(&relID)
 							if relErr == nil {
-								relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_name": parentId, "child_entity_name": updatedEntityID})
+								relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "relationship_id": relID, "parent_entity_name": parentId, "child_entity_name": updatedEntityID})
 							}
 						}
 					}
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "Transaction commit failed: " + err.Error(), "entity_id": updatedEntityID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Transaction commit failed: " + err.Error(), "entity_id": updatedEntityID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "entity_id": updatedEntityID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "entity_id": updatedEntityID})
 			}()
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":            true,
-			"results":            results,
-			"relationshipsAdded": len(relationshipsAdded),
-			"details":            relationshipsAdded,
+			constants.ValueSuccess: true,
+			"results":              results,
+			"relationshipsAdded":   len(relationshipsAdded),
+			"details":              relationshipsAdded,
 		})
 	}
 }
@@ -839,7 +842,7 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		// Fetch all relationships
@@ -905,11 +908,11 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditErrors = append(auditErrors, eid+":"+auditErr.Error())
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(auditErrors) == 0 && len(updated) > 0
 		resp := map[string]interface{}{
-			"success": success,
-			"updated": updated,
+			constants.ValueSuccess: success,
+			"updated":              updated,
 		}
 		if len(auditErrors) > 0 {
 			resp["audit_errors"] = auditErrors
@@ -943,7 +946,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := r.Context()
@@ -1003,11 +1006,11 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
 		resp := map[string]interface{}{
-			"success": success,
-			"updated": updated,
+			constants.ValueSuccess: success,
+			"updated":              updated,
 		}
 		if !success {
 			resp["message"] = "No entities found to reject"
@@ -1038,7 +1041,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := r.Context()
@@ -1104,8 +1107,8 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					var entityID string
 					if err := rows.Scan(&entityID); err == nil {
 						allUpdated = append(allUpdated, map[string]interface{}{
-							"entity_id": entityID,
-							"status":    "Marked Deleted",
+							"entity_id":         entityID,
+							constants.KeyStatus: "Marked Deleted",
 						})
 					}
 				}
@@ -1121,9 +1124,9 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					var actionID, entityID string
 					if err := auditRows.Scan(&actionID, &entityID); err == nil {
 						allUpdated = append(allUpdated, map[string]interface{}{
-							"entity_id": entityID,
-							"action_id": actionID,
-							"status":    "Delete Approved",
+							"entity_id":         entityID,
+							"action_id":         actionID,
+							constants.KeyStatus: "Delete Approved",
 						})
 					}
 				}
@@ -1139,22 +1142,22 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					var actionID, entityID string
 					if err := rows.Scan(&actionID, &entityID); err == nil {
 						allUpdated = append(allUpdated, map[string]interface{}{
-							"entity_id": entityID,
-							"action_id": actionID,
-							"status":    "Approved",
+							"entity_id":         entityID,
+							"action_id":         actionID,
+							constants.KeyStatus: "Approved",
 						})
 					}
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(allUpdated) > 0 && anyError == nil
 		resp := map[string]interface{}{
-			"success": success,
-			"updated": allUpdated,
+			constants.ValueSuccess: success,
+			"updated":              allUpdated,
 		}
 		if anyError != nil {
-			resp["error"] = anyError.Error()
+			resp[constants.ValueError] = anyError.Error()
 		}
 		if !success {
 			resp["message"] = "No entities found to approve"
@@ -1165,7 +1168,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		// Parse request
 		var req struct {
@@ -1175,8 +1178,8 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "Missing or invalid user_id/level",
+				constants.ValueSuccess: false,
+				constants.ValueError:   "Missing or invalid user_id/level",
 			})
 			return
 		}
@@ -1193,8 +1196,8 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if !validUser {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "Invalid user_id or session",
+				constants.ValueSuccess: false,
+				constants.ValueError:   constants.ErrInvalidSessionCapitalized,
 			})
 			return
 		}
@@ -1221,8 +1224,8 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
+				constants.ValueSuccess: false,
+				constants.ValueError:   err.Error(),
 			})
 			return
 		}
@@ -1234,8 +1237,8 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(&name, &id); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"error":   err.Error(),
+					constants.ValueSuccess: false,
+					constants.ValueError:   err.Error(),
 				})
 				return
 			}
@@ -1249,16 +1252,16 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := rows.Err(); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   err.Error(),
+				constants.ValueSuccess: false,
+				constants.ValueError:   err.Error(),
 			})
 			return
 		}
 
 		// Success response
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
+			constants.ValueSuccess: true,
+			"results":              results,
 		})
 	}
 }
@@ -1270,7 +1273,7 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		ctx := r.Context()
@@ -1307,7 +1310,7 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"entity_short_name": entityShortName,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if anyError != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
 			return
@@ -1316,8 +1319,8 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = make([]map[string]interface{}, 0)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
+			constants.ValueSuccess: true,
+			"results":              results,
 		})
 	}
 }
@@ -1327,7 +1330,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -1337,7 +1340,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
 				return
@@ -1351,17 +1354,17 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
@@ -1420,7 +1423,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1464,7 +1467,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					tgtCols = append(tgtCols, t)
 				} else {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("No mapping for source column: %s", h))
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf(constants.ErrNoMappingForSourceColumn, h))
 					return
 				}
 			}
@@ -1523,7 +1526,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						var relID int
 						err2 := tx.QueryRow(ctx, `INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status) VALUES ($1, $2, 'Active') RETURNING relationship_id`, parent, eid).Scan(&relID)
 						if err2 == nil {
-							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{"success": true, "relationship_id": relID, "parent_entity_name": parent, "child_entity_name": eid})
+							relationshipsAdded = append(relationshipsAdded, map[string]interface{}{constants.ValueSuccess: true, "relationship_id": relID, "parent_entity_name": parent, "child_entity_name": eid})
 						}
 					}
 				}
@@ -1531,14 +1534,14 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "batch_ids": batchIDs, "relationships_added": len(relationshipsAdded), "relationship_details": relationshipsAdded})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs, "relationships_added": len(relationshipsAdded), "relationship_details": relationshipsAdded})
 	}
 }
 
@@ -1560,7 +1563,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		// 1) identify user
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var body struct {
 				UserID string `json:"user_id"`
@@ -1569,7 +1572,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = body.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		userName := ""
@@ -1580,7 +1583,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1631,7 +1634,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 3) start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer func() {
@@ -1673,7 +1676,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			copyRows = append(copyRows, row)
 		}
 		rowsCopied := len(copyRows)
-		skipped := 0 
+		skipped := 0
 		tStart := time.Now()
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_me"}, copyCols, pgx.CopyFromRows(copyRows)); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
@@ -1760,7 +1763,7 @@ AND (
 	m.parent_entity_name IS DISTINCT FROM t.parent_entity_name
 );
 `); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 		log.Printf("[UploadEntitySimple] update elapsed=%v", time.Since(t2))
@@ -1816,30 +1819,30 @@ FROM masterentitycash m
 WHERE m.entity_name IN (SELECT entity_name FROM tmp_me)
 ON CONFLICT DO NOTHING;
 `, userName); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 		log.Printf("[UploadEntitySimple] audit elapsed=%v", time.Since(t5))
 
 		// commit
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		tx = nil
 
 		totalDur := time.Since(startOverall)
 		resp := map[string]interface{}{
-			"success":     true,
-			"file":        fh.Filename,
-			"rows":        rowsCopied,
-			"skipped":     skipped,
-			"duration_ms": totalDur.Milliseconds(),
-			"batch_id":    uuid.New().String(),
+			constants.ValueSuccess: true,
+			"file":                 fh.Filename,
+			"rows":                 rowsCopied,
+			"skipped":              skipped,
+			"duration_ms":          totalDur.Milliseconds(),
+			"batch_id":             uuid.New().String(),
 		}
 		log.Printf("[UploadEntitySimple] finished rows=%d skipped=%d total_ms=%d", rowsCopied, skipped, totalDur.Milliseconds())
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }

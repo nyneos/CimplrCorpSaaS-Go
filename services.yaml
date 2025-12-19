@@ -53,4 +53,3 @@ services:
     start_order: 13
     config:
       batch_size: 1000
-

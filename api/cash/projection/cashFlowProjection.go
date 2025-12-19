@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"log"
-	
+
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -55,12 +57,12 @@ func ifaceToTimeString(v interface{}) string {
 	}
 	switch t := v.(type) {
 	case time.Time:
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	case *time.Time:
 		if t == nil {
 			return ""
 		}
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	case *string:
 		if t == nil {
 			return ""
@@ -93,7 +95,6 @@ func Capitalize(s string) string {
 	return strings.ToUpper(first) + strings.ToLower(rest)
 }
 
-
 // DeleteCashFlowProposal inserts DELETE audit actions for proposals (bulk)
 func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +104,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 		requestedBy := ""
@@ -114,7 +115,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
@@ -129,7 +130,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -152,7 +153,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Commit failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -169,7 +170,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -180,14 +181,14 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -252,7 +253,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Commit failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -269,7 +270,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -280,7 +281,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
@@ -295,7 +296,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -393,7 +394,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Commit failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		committed = true
@@ -413,22 +414,22 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"header"`
 			Projections []struct {
 				Entry struct {
-					Description    string  `json:"description,omitempty"`
-					Type           string  `json:"type"`
-					CategoryName   string  `json:"categoryName"`
-					Entity         string  `json:"entity"`
-					Department     string  `json:"department"`
+					Description      string  `json:"description,omitempty"`
+					Type             string  `json:"type"`
+					CategoryName     string  `json:"categoryName"`
+					Entity           string  `json:"entity"`
+					Department       string  `json:"department"`
 					CounterpartyName string  `json:"counterparty_name,omitempty"`
-					ExpectedAmount float64 `json:"expectedAmount"`
-					Recurring      bool    `json:"recurring"`
-					Frequency      string  `json:"frequency"`
+					ExpectedAmount   float64 `json:"expectedAmount"`
+					Recurring        bool    `json:"recurring"`
+					Frequency        string  `json:"frequency"`
 				} `json:"entry"`
 				Projection map[string]interface{} `json:"projection"`
 			} `json:"projections"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -440,7 +441,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if len(req.Projections) == 0 {
@@ -453,7 +454,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		committed := false
@@ -475,7 +476,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		effDate := strings.TrimSpace(req.Header.EffectiveDate)
 		if effDate == "" {
-			effDate = time.Now().Format("2006-01-02")
+			effDate = time.Now().Format(constants.DateFormat)
 		}
 		recurrenceType := strings.TrimSpace(req.Header.ProjectionType)
 
@@ -633,7 +634,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Failed to commit transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 		committed = true
@@ -641,7 +642,6 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithResult(w, true, fmt.Sprintf("Successfully imported %d projections", created))
 	}
 }
-
 
 func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -655,7 +655,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -668,7 +668,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -887,7 +887,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"currency":       item.CurrencyCode,
 					"type":           item.CashflowType,
 					"proposal_name":  item.ProposalName,
-					"effective_date": item.EffectiveDate.Format("2006-01-02"),
+					"effective_date": item.EffectiveDate.Format(constants.DateFormat),
 					"categoryName":   item.CategoryID,
 					"entity":         item.EntityName,
 					"department":     item.DepartmentID,
@@ -916,7 +916,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Return JSON response
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	}
@@ -929,7 +929,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ProposalID string `json:"proposal_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		valid := false
@@ -940,7 +940,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		if strings.TrimSpace(req.ProposalID) == "" {
@@ -1114,12 +1114,12 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(items) == 0 {
 			resp := map[string]interface{}{
-				"success":     true,
-				"header":      header,
-				"projections": []interface{}{},
-				"actions":     actions,
+				constants.ValueSuccess: true,
+				"header":               header,
+				"projections":          []interface{}{},
+				"actions":              actions,
 			}
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -1155,9 +1155,9 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_ = projRows.Err()
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		enc := json.NewEncoder(w)
-		w.Write([]byte(`{"success":true,"header":`))
+		w.Write([]byte(`{constants.ValueSuccess:true,"header":`))
 		if err := enc.Encode(header); err != nil {
 			return
 		}
@@ -1225,14 +1225,13 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-
 func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -1244,7 +1243,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1311,10 +1310,10 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"header":  out,
+			constants.ValueSuccess: true,
+			"header":               out,
 		})
 	}
 }
@@ -1329,14 +1328,14 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID      string                   `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "Failed to start transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1351,7 +1350,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Proposal not found: "+err.Error())
 			return
 		}
-		
+
 		var newEffDate, oldEffDate interface{}
 		effDateStr := ifaceToString(req.Header["effective_date"])
 		if effDateStr == "" {
@@ -1359,7 +1358,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			newEffDate = effDateStr
 		}
-		oldEffDateStr := curEffDate.Format("2006-01-02")
+		oldEffDateStr := curEffDate.Format(constants.DateFormat)
 		if oldEffDateStr == "" {
 			oldEffDate = nil
 		} else {
@@ -1501,7 +1500,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "Failed to commit transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 

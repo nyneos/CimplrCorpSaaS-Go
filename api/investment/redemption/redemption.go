@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -120,12 +122,12 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req GetPortfolioRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
 		if strings.TrimSpace(req.EntityName) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
 			return
 		}
 
@@ -199,7 +201,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, aggQuery, req.EntityName)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -209,7 +211,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var entityName, folioNumber, dematAcc, schemeID, schemeName, isin, folioIDStr, dematIDStr string
 			var units, avgNav, totalInvested float64
 			if err := rows.Scan(&entityName, &folioNumber, &dematAcc, &schemeID, &schemeName, &isin, &folioIDStr, &dematIDStr, &units, &avgNav, &totalInvested); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
 
@@ -237,7 +239,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var currentNav float64
 			var totalInvestedSnapshot float64
 			var snapshotNav sql.NullFloat64
-			
+
 			// Try fetching snapshot by folio_id/demat_id first, fallback to folio_number/demat_acc_number
 			err := pgxPool.QueryRow(ctx, `
 				SELECT COALESCE(current_nav,0), COALESCE(total_invested_amount,0)
@@ -377,13 +379,13 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CalculateRedemptionRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
 		// Validate required fields
 		if strings.TrimSpace(req.EntityName) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
 			return
 		}
 		if strings.TrimSpace(req.SchemeID) == "" {
@@ -538,31 +540,31 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			avgNav = weightedNavNum / sumPurchaseUnits
 		}
 
-	// Get folio_id or demat_id from master tables for snapshot lookup
-	var folioID, dematID sql.NullString
-	if req.FolioNumber != nil && *req.FolioNumber != "" {
-		_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 LIMIT 1`, *req.FolioNumber).Scan(&folioID)
-	}
-	if req.DematAccNumber != nil && *req.DematAccNumber != "" {
-		_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 LIMIT 1`, *req.DematAccNumber).Scan(&dematID)
-	}
+		// Get folio_id or demat_id from master tables for snapshot lookup
+		var folioID, dematID sql.NullString
+		if req.FolioNumber != nil && *req.FolioNumber != "" {
+			_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 LIMIT 1`, *req.FolioNumber).Scan(&folioID)
+		}
+		if req.DematAccNumber != nil && *req.DematAccNumber != "" {
+			_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 LIMIT 1`, *req.DematAccNumber).Scan(&dematID)
+		}
 
-	// Fetch current NAV from latest portfolio_snapshot with fallback to folio_number/demat_acc_number
-	var currentNAV float64
-	var schemeName string
-	var tmpNav sql.NullFloat64
-	var tmpInvest sql.NullFloat64
-	
-	folioNumberStr := ""
-	if req.FolioNumber != nil {
-		folioNumberStr = *req.FolioNumber
-	}
-	dematAccStr := ""
-	if req.DematAccNumber != nil {
-		dematAccStr = *req.DematAccNumber
-	}
-	
-	if err := pgxPool.QueryRow(ctx, `
+		// Fetch current NAV from latest portfolio_snapshot with fallback to folio_number/demat_acc_number
+		var currentNAV float64
+		var schemeName string
+		var tmpNav sql.NullFloat64
+		var tmpInvest sql.NullFloat64
+
+		folioNumberStr := ""
+		if req.FolioNumber != nil {
+			folioNumberStr = *req.FolioNumber
+		}
+		dematAccStr := ""
+		if req.DematAccNumber != nil {
+			dematAccStr = *req.DematAccNumber
+		}
+
+		if err := pgxPool.QueryRow(ctx, `
 		SELECT COALESCE(current_nav,0), COALESCE(total_invested_amount,0) 
 		FROM investment.portfolio_snapshot
 		WHERE entity_name=$1 AND scheme_id=$2 
@@ -570,21 +572,21 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				OR (folio_number IS NOT NULL AND folio_number=$5) OR (demat_acc_number IS NOT NULL AND demat_acc_number=$6))
 		ORDER BY created_at DESC LIMIT 1
 	`, req.EntityName, req.SchemeID, folioID, dematID, nullIfEmptyString(folioNumberStr), nullIfEmptyString(dematAccStr)).Scan(&tmpNav, &tmpInvest); err == nil {
-		if tmpNav.Valid && tmpNav.Float64 > 0 {
-			currentNAV = tmpNav.Float64
+			if tmpNav.Valid && tmpNav.Float64 > 0 {
+				currentNAV = tmpNav.Float64
+			} else {
+				currentNAV = avgNav
+			}
 		} else {
 			currentNAV = avgNav
+		} // try to lookup scheme name from masterscheme
+		if err := pgxPool.QueryRow(ctx, `SELECT COALESCE(scheme_name,'') FROM investment.masterscheme WHERE scheme_id=$1 OR internal_scheme_code=$1 OR isin=$1 LIMIT 1`, req.SchemeID).Scan(&schemeName); err != nil {
+			schemeName = ""
 		}
-	} else {
-		currentNAV = avgNav
-	}	// try to lookup scheme name from masterscheme
-	if err := pgxPool.QueryRow(ctx, `SELECT COALESCE(scheme_name,'') FROM investment.masterscheme WHERE scheme_id=$1 OR internal_scheme_code=$1 OR isin=$1 LIMIT 1`, req.SchemeID).Scan(&schemeName); err != nil {
-		schemeName = ""
-	}
 
-	// Calculate blocked units from pending/approved redemption initiations
-	var blockedUnits float64
-	blockedQuery := `
+		// Calculate blocked units from pending/approved redemption initiations
+		var blockedUnits float64
+		blockedQuery := `
 		SELECT COALESCE(SUM(ri.by_units), 0)
 		FROM investment.redemption_initiation ri
 		LEFT JOIN investment.auditactionredemption aar ON aar.redemption_id = ri.redemption_id
@@ -599,51 +601,51 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 			AND aar.processing_status IN ('PENDING_APPROVAL', 'APPROVED')
 	`
-	if err := pgxPool.QueryRow(ctx, blockedQuery, req.EntityName, req.SchemeID, 
-		folioID, nullIfEmptyString(folioNumberStr), 
-		dematID, nullIfEmptyString(dematAccStr)).Scan(&blockedUnits); err != nil {
-		blockedUnits = 0
-	}
+		if err := pgxPool.QueryRow(ctx, blockedQuery, req.EntityName, req.SchemeID,
+			folioID, nullIfEmptyString(folioNumberStr),
+			dematID, nullIfEmptyString(dematAccStr)).Scan(&blockedUnits); err != nil {
+			blockedUnits = 0
+		}
 
-	// Calculate available units
-	availableUnits := totalUnits - blockedUnits
-	if availableUnits < 0 {
-		availableUnits = 0
-	}
+		// Calculate available units
+		availableUnits := totalUnits - blockedUnits
+		if availableUnits < 0 {
+			availableUnits = 0
+		}
 
-	// Calculate redemption units based on input (now that we have currentNAV and totalUnits)
-	var redemptionUnits float64
-	if req.Units != nil {
-		redemptionUnits = *req.Units
-	} else if req.Amount != nil {
-		if currentNAV <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Current NAV is zero or invalid, cannot calculate units from amount")
+		// Calculate redemption units based on input (now that we have currentNAV and totalUnits)
+		var redemptionUnits float64
+		if req.Units != nil {
+			redemptionUnits = *req.Units
+		} else if req.Amount != nil {
+			if currentNAV <= 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "Current NAV is zero or invalid, cannot calculate units from amount")
+				return
+			}
+			redemptionUnits = *req.Amount / currentNAV
+		} else if req.Percent != nil {
+			if *req.Percent <= 0 || *req.Percent > 100 {
+				api.RespondWithError(w, http.StatusBadRequest, "Percent must be between 0 and 100")
+				return
+			}
+			redemptionUnits = totalUnits * (*req.Percent / 100.0)
+		}
+
+		// Validate redemption units
+		if redemptionUnits <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "Redemption units must be positive")
 			return
 		}
-		redemptionUnits = *req.Amount / currentNAV
-	} else if req.Percent != nil {
-		if *req.Percent <= 0 || *req.Percent > 100 {
-			api.RespondWithError(w, http.StatusBadRequest, "Percent must be between 0 and 100")
+		if redemptionUnits > totalUnits {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed total holding (%.6f)", redemptionUnits, totalUnits))
 			return
 		}
-		redemptionUnits = totalUnits * (*req.Percent / 100.0)
-	}
 
-	// Validate redemption units
-	if redemptionUnits <= 0 {
-		api.RespondWithError(w, http.StatusBadRequest, "Redemption units must be positive")
-		return
-	}
-	if redemptionUnits > totalUnits {
-		api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed total holding (%.6f)", redemptionUnits, totalUnits))
-		return
-	}
-	
-	// CRITICAL: Check against available units (total - blocked)
-	if redemptionUnits > availableUnits {
-		api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed available units (%.6f). %.6f units are blocked in pending/approved redemptions.", redemptionUnits, availableUnits, blockedUnits))
-		return
-	}
+		// CRITICAL: Check against available units (total - blocked)
+		if redemptionUnits > availableUnits {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Redemption units (%.6f) exceed available units (%.6f). %.6f units are blocked in pending/approved redemptions.", redemptionUnits, availableUnits, blockedUnits))
+			return
+		}
 
 		if sellRows.Err() != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Sell rows error: "+sellRows.Err().Error())

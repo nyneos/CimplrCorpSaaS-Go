@@ -13,6 +13,8 @@ import (
 	"CimplrCorpSaas/internal/jobs"
 	"CimplrCorpSaas/internal/logger"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -37,16 +39,16 @@ type NAVSyncData struct {
 func UpdateNAVHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		// Initialize response
 		response := NAVSyncResponse{
 			Success: false,
-			Status:  "error",
+			Status:  constants.ValueError,
 			Data: NAVSyncData{
 				LastSynced: time.Now().Format("02-01-2006 15:04"),
 			},
@@ -93,7 +95,7 @@ func UpdateNAVHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Update response with success data
 		response.Success = true
-		response.Status = "success"
+		response.Status = constants.ValueSuccess
 		response.Data.RecordsProcessed = recordsProcessed
 		response.Data.RecordsInserted = recordsProcessed
 		response.Data.RecordsUpdated = 0
@@ -407,13 +409,13 @@ func parseDate(input string) *string {
 	if input == "" {
 		return nil
 	}
-	layout := "02-Jan-2006"
+	layout := constants.DateFormatDash
 	t, err := time.Parse(layout, input)
 	if err != nil {
 		return nil
 	}
 	// Format as YYYY-MM-DD for PostgreSQL compatibility
-	formatted := t.Format("2006-01-02")
+	formatted := t.Format(constants.DateFormat)
 	return &formatted
 }
 

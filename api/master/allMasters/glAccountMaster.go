@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,20 +26,20 @@ func normalizeDateLocal(dateStr string) string {
 	}
 
 	layouts := []string{
-		"2006-01-02",
-		"02-01-2006",
+		constants.DateFormat,
+		constants.DateFormatAlt,
 		"2006/01/02",
 		"02/01/2006",
 		"2006.01.02",
 		"02.01.2006",
 		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
+		constants.DateTimeFormat,
+		constants.DateFormatISO,
 	}
-	layouts = append(layouts, []string{"02-Jan-2006", "02-Jan-06", "2-Jan-2006", "2-Jan-06", "02-Jan-2006 15:04:05"}...)
+	layouts = append(layouts, []string{constants.DateFormatDash, "02-Jan-06", "2-Jan-2006", "2-Jan-06", "02-Jan-2006 15:04:05"}...)
 	for _, l := range layouts {
 		if t, err := time.Parse(l, dateStr); err == nil {
-			return t.Format("2006-01-02")
+			return t.Format(constants.DateFormat)
 		}
 	}
 	return ""
@@ -89,7 +91,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Level  int    `json:"level"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -100,7 +102,7 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -133,8 +135,8 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"gl_account_name": name, "gl_account_id": id, "gl_account_code": code})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "results": results})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
 	}
 }
 
@@ -145,7 +147,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []GLAccountRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		createdBy := ""
@@ -156,14 +158,14 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer func() {
@@ -185,7 +187,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for i, rrow := range req.Rows {
 			if strings.TrimSpace(rrow.GLAccountCode) == "" || strings.TrimSpace(rrow.GLAccountName) == "" || strings.TrimSpace(rrow.GLAccountType) == "" || strings.TrimSpace(rrow.Source) == "" {
-				created = append(created, map[string]interface{}{"success": false, "error": "missing required fields", "gl_account_code": rrow.GLAccountCode})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing required fields", "gl_account_code": rrow.GLAccountCode})
 				continue
 			}
 			sp := fmt.Sprintf("sp_%d", i)
@@ -198,14 +200,14 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var effectiveTo interface{}
 			if rrow.EffectiveFrom != "" {
 				if norm := NormalizeDate(rrow.EffectiveFrom); norm != "" {
-					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 						effectiveFrom = tval
 					}
 				}
 			}
 			if rrow.EffectiveTo != "" {
 				if norm := NormalizeDate(rrow.EffectiveTo); norm != "" {
-					if tval, err := time.Parse("2006-01-02", norm); err == nil {
+					if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 						effectiveTo = tval
 					}
 				}
@@ -257,14 +259,14 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nil,
 			).Scan(&id); err != nil {
 				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{"success": false, "error": err.Error(), "gl_account_code": rrow.GLAccountCode})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "gl_account_code": rrow.GLAccountCode})
 				continue
 			}
 
 			auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 			if _, err := tx.Exec(ctx, auditQ, id, nil, createdBy); err != nil {
 				tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-				created = append(created, map[string]interface{}{"success": false, "error": "audit insert failed: " + err.Error(), "gl_account_id": id})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditInsertFailed + err.Error(), "gl_account_id": id})
 				continue
 			}
 
@@ -276,7 +278,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			codeToID[strings.TrimSpace(rrow.GLAccountCode)] = id
 			inserted = append(inserted, insertInfo{ID: id, Code: strings.TrimSpace(rrow.GLAccountCode), Parent: strings.TrimSpace(rrow.ParentGLAccountCode), Level: 0, IsTop: false})
-			created = append(created, map[string]interface{}{"success": true, "gl_account_id": id, "gl_account_code": rrow.GLAccountCode})
+			created = append(created, map[string]interface{}{constants.ValueSuccess: true, "gl_account_id": id, "gl_account_code": rrow.GLAccountCode})
 		}
 
 		for _, info := range inserted {
@@ -294,7 +296,7 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`
 			if _, err := tx.Exec(ctx, relQ, parentID, info.ID); err != nil {
-				created = append(created, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "gl_account_id": info.ID})
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "gl_account_id": info.ID})
 				continue
 			}
 
@@ -307,13 +309,13 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		tx = nil
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": created})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": created})
 	}
 }
 
@@ -325,7 +327,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -336,7 +338,7 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -413,12 +415,12 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"id":   id,
 				"name": ifaceToString(nameI),
 				"data": map[string]interface{}{
-					"gl_account_id":   id,
-					"gl_account_code": ifaceToString(codeI),
-					"gl_account_name": ifaceToString(nameI),
-					"gl_account_type": ifaceToString(typeI),
-					"status":          ifaceToString(statusI),
-					"source":          ifaceToString(sourceI),
+					"gl_account_id":     id,
+					"gl_account_code":   ifaceToString(codeI),
+					"gl_account_name":   ifaceToString(nameI),
+					"gl_account_type":   ifaceToString(typeI),
+					constants.KeyStatus: ifaceToString(statusI),
+					"source":            ifaceToString(sourceI),
 
 					"old_gl_account_code": ifaceToString(oldCodeI),
 					"old_gl_account_name": ifaceToString(oldNameI),
@@ -636,7 +638,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		valid := false
@@ -647,7 +649,7 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := r.Context()
@@ -681,8 +683,8 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "rows": out})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": out})
 	}
 }
 
@@ -697,7 +699,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		updatedBy := ""
@@ -708,7 +710,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -716,12 +718,12 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.GLAccountID) == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "missing gl_account_id", "gl_account_id": row.GLAccountID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing gl_account_id", "gl_account_id": row.GLAccountID})
 				continue
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "begin failed: " + err.Error(), "gl_account_id": row.GLAccountID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "gl_account_id": row.GLAccountID})
 				continue
 			}
 			committed := false
@@ -745,7 +747,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				sel := `SELECT gl_account_code, gl_account_name, gl_account_type, parent_gl_code, status, source, gl_account_level, is_top_level_gl_account, default_currency, tags, external_code, segment, sap_bukrs, sap_ktopl, sap_saknr, sap_ktoks, oracle_ledger, oracle_coa, oracle_balancing_seg, oracle_natural_account, tally_ledger_name, tally_ledger_group, sage_department, sage_cost_centre, effective_from, effective_to FROM masterglaccount WHERE gl_account_id=$1 FOR UPDATE`
 
 				if err := tx.QueryRow(ctx, sel, row.GLAccountID).Scan(&existingCode, &existingName, &existingType, &existingParentCode, &existingStatus, &existingSource, &existingLevel, &existingIsTop, &existingDefaultCurrency, &existingTags, &existingExtCode, &existingSegment, &existingSapBukrs, &existingSapKtopl, &existingSapSaknr, &existingSapKtoks, &existingOracleLedger, &existingOracleCoa, &existingOracleBal, &existingOracleNat, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost, &existingEffFrom, &existingEffTo); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "fetch failed: " + err.Error(), "gl_account_id": row.GLAccountID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "gl_account_id": row.GLAccountID})
 					return
 				}
 
@@ -770,7 +772,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("gl_account_type=$%d, old_gl_account_type=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingType))
 						pos += 2
-					case "status":
+					case constants.KeyStatus:
 						sets = append(sets, fmt.Sprintf("status=$%d, old_status=$%d", pos, pos+1))
 						args = append(args, fmt.Sprint(v), ifaceToString(existingStatus))
 						pos += 2
@@ -800,7 +802,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							var pid string
 							var plevel int
 							if err := pgxPool.QueryRow(ctx, `SELECT gl_account_id, gl_account_level FROM masterglaccount WHERE gl_account_code=$1`, pcode).Scan(&pid, &plevel); err != nil {
-								results = append(results, map[string]interface{}{"success": false, "error": "parent gl account not found: " + pcode, "gl_account_id": row.GLAccountID})
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent gl account not found: " + pcode, "gl_account_id": row.GLAccountID})
 								return
 							}
 							newParentID = pid
@@ -819,7 +821,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						dateStr := strings.TrimSpace(fmt.Sprint(v))
 						var dateVal interface{}
 						if dateStr != "" {
-							if date, err := time.Parse("2006-01-02", dateStr); err == nil {
+							if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
 								dateVal = date
 							}
 						}
@@ -830,7 +832,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						dateStr := strings.TrimSpace(fmt.Sprint(v))
 						var dateVal interface{}
 						if dateStr != "" {
-							if date, err := time.Parse("2006-01-02", dateStr); err == nil {
+							if date, err := time.Parse(constants.DateFormat, dateStr); err == nil {
 								dateVal = date
 							}
 						}
@@ -907,7 +909,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE masterglaccount SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE gl_account_id=$%d RETURNING gl_account_id", pos)
 					args = append(args, row.GLAccountID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "update failed: " + err.Error(), "gl_account_id": row.GLAccountID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "gl_account_id": row.GLAccountID})
 						return
 					}
 				}
@@ -915,28 +917,28 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if newParentID != nil {
 					relQ := `INSERT INTO glaccountrelationships (parent_gl_account_id, child_gl_account_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM glaccountrelationships WHERE parent_gl_account_id=$1 AND child_gl_account_id=$2)`
 					if _, err := tx.Exec(ctx, relQ, newParentID, updatedID); err != nil {
-						results = append(results, map[string]interface{}{"success": false, "error": "relationship insert failed: " + err.Error(), "gl_account_id": updatedID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrBulkRelationshipInsertFailed + err.Error(), "gl_account_id": updatedID})
 						return
 					}
 				}
 
 				auditQ := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL', $2, $3, now())`
 				if _, err := tx.Exec(ctx, auditQ, updatedID, row.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "audit failed: " + err.Error(), "gl_account_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "audit failed: " + err.Error(), "gl_account_id": updatedID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{"success": false, "error": "commit failed: " + err.Error(), "gl_account_id": updatedID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "gl_account_id": updatedID})
 					return
 				}
 				committed = true
-				results = append(results, map[string]interface{}{"success": true, "gl_account_id": updatedID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: true, "gl_account_id": updatedID})
 			}()
 		}
 		overall := true
 		for _, r := range results {
-			if ok, exists := r["success"]; exists {
+			if ok, exists := r[constants.ValueSuccess]; exists {
 				if b, okb := ok.(bool); okb {
 					if !b {
 						overall = false
@@ -951,8 +953,8 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": overall, "rows": results})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: overall, "rows": results})
 	}
 }
 
@@ -964,7 +966,7 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason       string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -976,7 +978,7 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -1033,7 +1035,7 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "queued_count": len(allList)})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "queued_count": len(allList)})
 	}
 }
 
@@ -1045,7 +1047,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment      string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1056,7 +1058,7 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := context.Background()
@@ -1120,11 +1122,11 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{"success": success, "updated": updated}
+		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
-			resp["message"] = "No rows updated"
+			resp["message"] = constants.ErrNoRowsUpdated
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -1138,7 +1140,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment      string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1149,7 +1151,7 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 		ctx := context.Background()
@@ -1224,11 +1226,11 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
-		resp := map[string]interface{}{"success": success, "updated": updated}
+		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {
-			resp["message"] = "No rows updated"
+			resp["message"] = constants.ErrNoRowsUpdated
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -1239,7 +1241,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Step 1: Get user ID and name
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var req struct {
 				UserID string `json:"user_id"`
@@ -1248,7 +1250,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = req.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -1260,18 +1262,18 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		// Step 2: Parse uploaded file(s)
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 
@@ -1331,7 +1333,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Begin transaction
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			defer tx.Rollback(ctx)
@@ -1352,7 +1354,7 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								s := fmt.Sprint(v)
 								if norm := normalizeDateLocal(s); norm != "" {
 									// try parse to time and store time.Time (consistent with other masters)
-									if tval, err := time.Parse("2006-01-02", norm); err == nil {
+									if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 										row[idx] = tval
 									} else {
 										row[idx] = norm
@@ -1488,15 +1490,15 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]any{
-			"success":   true,
-			"batch_ids": batchIDs,
+			constants.ValueSuccess: true,
+			"batch_ids":            batchIDs,
 		})
 	}
 }
@@ -1506,7 +1508,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Get user
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var req struct {
 				UserID string `json:"user_id"`
@@ -1515,7 +1517,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = req.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		userName := ""
@@ -1526,17 +1528,17 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "User not found in active sessions")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No files uploaded")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFilesUploaded)
 			return
 		}
 
@@ -1545,7 +1547,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Allowed columns (subset from masterglaccount DDL). Unknown headers are ignored.
 		allowed := map[string]bool{
 			"gl_account_code": true, "gl_account_name": true, "gl_account_type": true,
-			"status": true, "source": true, "parent_gl_code": true,
+			constants.KeyStatus: true, "source": true, "parent_gl_code": true,
 			"effective_from": true, "effective_to": true,
 			"tags": true, "account_class": true, "default_currency": true,
 			"external_code": true, "segment": true, "erp_type": true,
@@ -1633,7 +1635,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							if v := row[idx]; v != nil {
 								s := fmt.Sprint(v)
 								if norm := normalizeDateLocal(s); norm != "" {
-									if tval, err := time.Parse("2006-01-02", norm); err == nil {
+									if tval, err := time.Parse(constants.DateFormat, norm); err == nil {
 										row[idx] = tval
 									} else {
 										row[idx] = norm
@@ -1648,7 +1650,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Begin tx and insert directly into masterglaccount (no staging table)
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to start transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1708,7 +1710,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							// normalize dates if this is a date column
 							if col == "effective_from" || col == "effective_to" || col == "eff_from" || col == "eff_to" || col == "effectivefrom" || col == "effectiveto" {
 								if norm := normalizeDateLocal(cell); norm != "" {
-									if tval, perr := time.Parse("2006-01-02", norm); perr == nil {
+									if tval, perr := time.Parse(constants.DateFormat, norm); perr == nil {
 										vals[j] = tval
 									} else {
 										vals[j] = norm
@@ -1770,7 +1772,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Commit tx now to free locks; run heavyweight sync and audit asynchronously to avoid blocking the client
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
@@ -1846,7 +1848,7 @@ func UploadGLAccountSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}(newCodes)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"success": true, "batch_ids": batchIDs})
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]any{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,7 +42,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var req BatchApprovalRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, 400, "Invalid JSON: "+err.Error())
+			api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -71,7 +72,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, 401, "Invalid user session")
+			api.RespondWithError(w, 401, constants.ErrInvalidSession)
 			return
 		}
 
@@ -166,7 +167,7 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, "Failed to commit transaction: "+err.Error())
+			api.RespondWithError(w, 500, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -279,7 +280,7 @@ func processBatchAuditAMC(ctx context.Context, tx pgx.Tx, batchID, action, userE
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactionamc (amc_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
 					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, amcID, userEmail, "Auto-approved enriched entity")
+				`, amcID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
 				if err != nil {
 					return nil, err
 				}
@@ -389,7 +390,7 @@ func processBatchAuditScheme(ctx context.Context, tx pgx.Tx, batchID, action, us
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
 					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, schemeID, userEmail, "Auto-approved enriched entity")
+				`, schemeID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
 				if err != nil {
 					return nil, err
 				}
@@ -493,7 +494,7 @@ func processBatchAuditDP(ctx context.Context, tx pgx.Tx, batchID, action, userEm
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
 					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, dpID, userEmail, "Auto-approved enriched entity")
+				`, dpID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
 				if err != nil {
 					return nil, err
 				}
@@ -599,7 +600,7 @@ func processBatchAuditDemat(ctx context.Context, tx pgx.Tx, batchID, action, use
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
 					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, dematID, userEmail, "Auto-approved enriched entity")
+				`, dematID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
 				if err != nil {
 					return nil, err
 				}
@@ -705,7 +706,7 @@ func processBatchAuditFolio(ctx context.Context, tx pgx.Tx, batchID, action, use
 				_, err = tx.Exec(ctx, `
 					INSERT INTO investment.auditactionfolio (folio_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment)
 					VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-				`, folioID, userEmail, "Auto-approved enriched entity")
+				`, folioID, userEmail, constants.ErrAutoApprovedEnrichedEntity)
 				if err != nil {
 					return nil, err
 				}

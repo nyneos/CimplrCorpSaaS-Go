@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -34,11 +36,11 @@ var rates = map[string]float64{
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
@@ -47,13 +49,13 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -91,7 +93,7 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 				"color":    colors[idx],
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(topCurrencies)
 	}
 }
@@ -101,21 +103,21 @@ func GetForwardBookingsMaturingTodayCount(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT COUNT(*) FROM forward_bookings WHERE entity_level_0 = ANY($1) AND maturity_date = CURRENT_DATE AND (processing_status = 'Approved' OR processing_status = 'approved')`
 		var count sql.NullInt64
 		err := db.QueryRowContext(r.Context(), query, pq.Array(buNames)).Scan(&count)
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		result := int64(0)
 		if count.Valid {
 			result = count.Int64
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]int64{"maturingTodayCount": result})
 	}
 }
@@ -124,7 +126,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `
@@ -137,14 +139,14 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
 		var todaySum, yesterdaySum float64
-		todayStr := time.Now().Format("2006-01-02")
-		yesterdayStr := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+		todayStr := time.Now().Format(constants.DateFormat)
+		yesterdayStr := time.Now().AddDate(0, 0, -1).Format(constants.DateFormat)
 
 		for rows.Next() {
 			var amount sql.NullFloat64
@@ -167,9 +169,9 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			usdValue := math.Abs(amount.Float64) * rate
 
 			if txnDate.Valid {
-				if txnDate.Time.Format("2006-01-02") == todayStr {
+				if txnDate.Time.Format(constants.DateFormat) == todayStr {
 					todaySum += usdValue
-				} else if txnDate.Time.Format("2006-01-02") == yesterdayStr {
+				} else if txnDate.Time.Format(constants.DateFormat) == yesterdayStr {
 					yesterdaySum += usdValue
 				}
 			}
@@ -190,7 +192,7 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 			}
 			return fmt.Sprintf("$%.0f", amt)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]string{
 			"todayBookingAmountSumUsd":     formatAmount(todaySum),
 			"yesterdayBookingAmountSumUsd": formatAmount(yesterdaySum),
@@ -202,7 +204,7 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		query := `
@@ -225,16 +227,16 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
 
 		// Prepare date calculations
 		now := time.Now()
-		today := now.Format("2006-01-02")
-		tomorrow := now.Add(24 * time.Hour).Format("2006-01-02")
-		nextWeek := now.Add(7 * 24 * time.Hour).Format("2006-01-02")
+		today := now.Format(constants.DateFormat)
+		tomorrow := now.Add(24 * time.Hour).Format(constants.DateFormat)
+		nextWeek := now.Add(7 * 24 * time.Hour).Format(constants.DateFormat)
 
 		// Initialize categories for Today, Tomorrow, and Next Week
 		categories := map[string]map[string]float64{
@@ -266,11 +268,11 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 			amountUsd := math.Abs(amount) * rate
 
 			// Categorize based on maturity_date
-			if maturityDate.Format("2006-01-02") == today {
+			if maturityDate.Format(constants.DateFormat) == today {
 				categories["Today"][currencyPair] += amountUsd
-			} else if maturityDate.Format("2006-01-02") == tomorrow {
+			} else if maturityDate.Format(constants.DateFormat) == tomorrow {
 				categories["Tomorrow"][currencyPair] += amountUsd
-			} else if maturityDate.Format("2006-01-02") <= nextWeek {
+			} else if maturityDate.Format(constants.DateFormat) <= nextWeek {
 				categories["Next Week"][currencyPair] += amountUsd
 			}
 		}
@@ -309,7 +311,7 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Send the response as JSON
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"items": items,
 		})

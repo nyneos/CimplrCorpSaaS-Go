@@ -1,6 +1,7 @@
 package api
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -45,7 +46,7 @@ func getPtrString(s *string) string {
 // getPtrTime returns formatted time for non-nil pointer
 func getPtrTime(t *time.Time) string {
 	if t != nil {
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	}
 	return ""
 }
@@ -53,7 +54,7 @@ func getPtrTime(t *time.Time) string {
 // Helper to determine overall success for bulk operations
 func IsBulkSuccess(results []map[string]interface{}) bool {
 	for _, r := range results {
-		if success, ok := r["success"].(bool); !ok || !success {
+		if success, ok := r[constants.ValueSuccess].(bool); !ok || !success {
 			return false
 		}
 	}
@@ -63,32 +64,32 @@ func IsBulkSuccess(results []map[string]interface{}) bool {
 // Error response helper
 func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
 // RespondWithResult sends a consistent JSON response for success or error
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if success {
 		log.Println("[INFO] RespondWithResult success")
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
 	} else {
 		log.Println("[ERROR] RespondWithResult", errMsg)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errMsg})
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
 	}
 }
 
 // RespondWithPayload sends a consistent JSON response and includes an arbitrary payload
 func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payload interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	resp := map[string]interface{}{"success": success}
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	resp := map[string]interface{}{constants.ValueSuccess: success}
 	if !success && errMsg != "" {
-		resp["error"] = errMsg
+		resp[constants.ValueError] = errMsg
 		log.Println("[ERROR] RespondWithPayload", errMsg)
 	}
 	if payload != nil {
@@ -98,7 +99,6 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	}
 	json.NewEncoder(w).Encode(resp)
 }
-
 
 // LogInfo logs an informational message (wrapper for consistent logging)
 func LogInfo(msg string, args ...interface{}) {

@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -122,7 +123,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			CreatedAt:    createdAt,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -137,7 +138,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		settingKey := r.URL.Query().Get("setting_key")
 		if settingKey == "" {
-			http.Error(w, "setting_key parameter is required", http.StatusBadRequest)
+			http.Error(w, constants.ErrSettingKeyRequired, http.StatusBadRequest)
 			return
 		}
 
@@ -221,7 +222,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, "Setting not found", http.StatusNotFound)
+			http.Error(w, constants.ErrSettingNotFound, http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -236,7 +237,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Setting updated successfully",
@@ -310,7 +311,7 @@ func GetSettings(pool *pgxpool.Pool) http.HandlerFunc {
 			settings = append(settings, setting)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"count":   len(settings),
@@ -324,7 +325,7 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		settingKey := r.URL.Query().Get("setting_key")
 		if settingKey == "" {
-			http.Error(w, "setting_key parameter is required", http.StatusBadRequest)
+			http.Error(w, constants.ErrSettingKeyRequired, http.StatusBadRequest)
 			return
 		}
 
@@ -351,7 +352,7 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, "Setting not found", http.StatusNotFound)
+			http.Error(w, constants.ErrSettingNotFound, http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -360,7 +361,7 @@ func GetSettingByKey(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    setting,
@@ -373,7 +374,7 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		settingKey := r.URL.Query().Get("setting_key")
 		if settingKey == "" {
-			http.Error(w, "setting_key parameter is required", http.StatusBadRequest)
+			http.Error(w, constants.ErrSettingKeyRequired, http.StatusBadRequest)
 			return
 		}
 
@@ -389,7 +390,7 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		err := pool.QueryRow(ctx, query, strings.ToUpper(settingKey)).Scan(&settingID)
 
 		if err == sql.ErrNoRows {
-			http.Error(w, "Setting not found", http.StatusNotFound)
+			http.Error(w, constants.ErrSettingNotFound, http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -398,7 +399,7 @@ func DeleteSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Setting deactivated successfully",

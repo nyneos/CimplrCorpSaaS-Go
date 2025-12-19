@@ -34,10 +34,13 @@ func StartCashService(db *sql.DB) {
 	// Category Master APIs
 	mux.Handle("/cash/category/create", bankstatement.CreateTransactionCategoryHandler(db))
 	mux.Handle("/cash/category/list", bankstatement.ListTransactionCategoriesHandler(db))
+	mux.Handle("/cash/category/user-list", bankstatement.ListCategoriesForUserHandler(db))
 	mux.Handle("/cash/category/scope/create", bankstatement.CreateRuleScopeHandler(db))
 	mux.Handle("/cash/category/rule/create", bankstatement.CreateCategoryRuleHandler(db))
 	mux.Handle("/cash/category/rule-component/create", bankstatement.CreateCategoryRuleComponentHandler(db))
 	mux.Handle("/cash/category/delete", bankstatement.DeleteMultipleTransactionCategoriesHandler(db))
+	mux.Handle("/cash/transactions/map-category", bankstatement.MapTransactionsToCategoryHandler(db))
+	mux.Handle("/cash/transactions/categorize-uncategorized", bankstatement.CategorizeUncategorizedTransactionsHandler(db))
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", bankstatement.GetAllBankStatementsHandler(db))
 	mux.Handle("/cash/bank-statements/v2/transactions", bankstatement.GetBankStatementTransactionsHandler(db))
@@ -46,6 +49,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/v2/reject", bankstatement.RejectBankStatementHandler(db))
 	mux.Handle("/cash/bank-statements/v2/delete", bankstatement.DeleteBankStatementHandler(db))
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db))
 	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
@@ -80,7 +84,6 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config/bulk-approve", api.BusinessUnitMiddleware(db)(sweepconfig.BulkApproveSweepConfigurations(pgxPool)))
 	mux.Handle("/cash/sweep-config/bulk-reject", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRejectSweepConfigurations(pgxPool)))
 	mux.Handle("/cash/sweep-config/request-delete", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRequestDeleteSweepConfigurations(pgxPool)))
-
 	// Cash flow projection routes
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))

@@ -3,6 +3,7 @@ package accountingworkbench
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,11 +30,11 @@ func GenerateAndSaveJournalEntries(ctx context.Context, pool *pgxpool.Pool, acti
 		FROM investment.accounting_activity
 		WHERE activity_id = $1 AND status = 'APPROVED'
 	`, activityID).Scan(&activityType, &activitySubtype)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to fetch activity: %w", err)
 	}
-	
+
 	// Auto-populate subtype for CORPORATE_ACTION from action_type
 	if activityType == "CORPORATE_ACTION" && (activitySubtype == nil || *activitySubtype == "") {
 		var actionType string
@@ -75,11 +76,11 @@ func GenerateAndSaveJournalEntriesInTx(ctx context.Context, tx DBExecutor, activ
 		FROM investment.accounting_activity
 		WHERE activity_id = $1 AND status = 'APPROVED'
 	`, activityID).Scan(&activityType, &activitySubtype)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to fetch activity: %w", err)
 	}
-	
+
 	// Auto-populate subtype for CORPORATE_ACTION from action_type
 	if activityType == "CORPORATE_ACTION" && (activitySubtype == nil || *activitySubtype == "") {
 		var actionType string
@@ -115,7 +116,7 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	// Start transaction for journal entry generation
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction failed: %w", err)
+		return fmt.Errorf(constants.ErrBeginTransactionFailed, err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -135,21 +136,21 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 		var mtmID, schemeID string
 		var folioID, dematID *string
 		var currNav, prevNav, units, unrealizedGL float64
-		
+
 		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
 			return fmt.Errorf("scan MTM data failed: %w", err)
 		}
 
 		// Prepare data map
 		data := map[string]interface{}{
-			"mtm_id":                mtmID,
-			"scheme_id":             schemeID,
-			"folio_id":              folioID,
-			"demat_id":              dematID,
-			"market_nav":            currNav,
-			"cost_nav":              prevNav,
-			"total_units":           units,
-			"unrealized_gain_loss":  unrealizedGL,
+			"mtm_id":               mtmID,
+			"scheme_id":            schemeID,
+			"folio_id":             folioID,
+			"demat_id":             dematID,
+			"market_nav":           currNav,
+			"cost_nav":             prevNav,
+			"total_units":          units,
+			"unrealized_gain_loss": unrealizedGL,
 		}
 
 		// Generate journal entry
@@ -175,7 +176,7 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 func generateDividendJournal(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction failed: %w", err)
+		return fmt.Errorf(constants.ErrBeginTransactionFailed, err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -195,7 +196,7 @@ func generateDividendJournal(ctx context.Context, pool *pgxpool.Pool, settings *
 		var folioID *string
 		var dividendAmount float64
 		var reinvestUnits *float64
-		
+
 		if err := rows.Scan(&dividendID, &schemeID, &folioID, &dividendAmount, &reinvestUnits, &transactionType); err != nil {
 			return fmt.Errorf("scan Dividend data failed: %w", err)
 		}
@@ -207,12 +208,12 @@ func generateDividendJournal(ctx context.Context, pool *pgxpool.Pool, settings *
 		}
 
 		data := map[string]interface{}{
-			"dividend_id":       dividendID,
-			"scheme_id":         schemeID,
-			"folio_id":          folioIDStr,
-			"dividend_amount":   dividendAmount,
-			"reinvest_units":    reinvestUnits,
-			"transaction_type":  transactionType,
+			"dividend_id":      dividendID,
+			"scheme_id":        schemeID,
+			"folio_id":         folioIDStr,
+			"dividend_amount":  dividendAmount,
+			"reinvest_units":   reinvestUnits,
+			"transaction_type": transactionType,
 		}
 
 		je, err := GenerateJournalEntryForDividend(ctx, tx, settings, activityID, data)
@@ -236,7 +237,7 @@ func generateDividendJournal(ctx context.Context, pool *pgxpool.Pool, settings *
 func generateCorporateActionJournal(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID, subtype string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction failed: %w", err)
+		return fmt.Errorf(constants.ErrBeginTransactionFailed, err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -256,7 +257,7 @@ func generateCorporateActionJournal(ctx context.Context, pool *pgxpool.Pool, set
 		var caID, actionType, sourceSchemeID string
 		var targetSchemeID, newSchemeName *string
 		var ratioNew, ratioOld, conversionRatio, bonusUnits *float64
-		
+
 		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &newSchemeName, &ratioNew, &ratioOld, &conversionRatio, &bonusUnits); err != nil {
 			return fmt.Errorf("scan Corporate Action data failed: %w", err)
 		}
@@ -297,7 +298,7 @@ func generateCorporateActionJournal(ctx context.Context, pool *pgxpool.Pool, set
 func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *SettingsCache, activityID string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction failed: %w", err)
+		return fmt.Errorf(constants.ErrBeginTransactionFailed, err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -318,20 +319,20 @@ func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	for rows.Next() {
 		var fvoID, schemeID, justification string
 		var marketNav, overrideNav, variance, variancePct, unitsAffected float64
-		
+
 		if err := rows.Scan(&fvoID, &schemeID, &marketNav, &overrideNav, &variance, &variancePct, &unitsAffected, &justification); err != nil {
 			return fmt.Errorf("scan FVO data failed: %w", err)
 		}
 
 		data := map[string]interface{}{
-			"fvo_id":          fvoID,
-			"scheme_id":       schemeID,
-			"market_nav":      marketNav,
-			"override_nav":    overrideNav,
-			"variance":        variance,
-			"variance_pct":    variancePct,
-			"units_affected":  unitsAffected,
-			"justification":   justification,
+			"fvo_id":         fvoID,
+			"scheme_id":      schemeID,
+			"market_nav":     marketNav,
+			"override_nav":   overrideNav,
+			"variance":       variance,
+			"variance_pct":   variancePct,
+			"units_affected": unitsAffected,
+			"justification":  justification,
 		}
 
 		je, err := GenerateJournalEntryForFVO(ctx, tx, settings, activityID, data)
@@ -374,21 +375,21 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		var mtmID, schemeID string
 		var folioID, dematID *string
 		var currNav, prevNav, units, unrealizedGL float64
-		
+
 		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan MTM data failed: %w", err)
 		}
 
 		mtmRecords = append(mtmRecords, map[string]interface{}{
-			"mtm_id":                mtmID,
-			"scheme_id":             schemeID,
-			"folio_id":              folioID,
-			"demat_id":              dematID,
-			"market_nav":            currNav,
-			"cost_nav":              prevNav,
-			"total_units":           units,
-			"unrealized_gain_loss":  unrealizedGL,
+			"mtm_id":               mtmID,
+			"scheme_id":            schemeID,
+			"folio_id":             folioID,
+			"demat_id":             dematID,
+			"market_nav":           currNav,
+			"cost_nav":             prevNav,
+			"total_units":          units,
+			"unrealized_gain_loss": unrealizedGL,
 		})
 	}
 	rows.Close()
@@ -431,7 +432,7 @@ func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, settings *S
 		var folioID *string
 		var dividendAmount float64
 		var reinvestUnits *float64
-		
+
 		if err := rows.Scan(&dividendID, &schemeID, &folioID, &dividendAmount, &reinvestUnits, &transactionType); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan Dividend data failed: %w", err)
@@ -444,12 +445,12 @@ func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, settings *S
 		}
 
 		dividendRecords = append(dividendRecords, map[string]interface{}{
-			"dividend_id":       dividendID,
-			"scheme_id":         schemeID,
-			"folio_id":          folioIDStr,
-			"dividend_amount":   dividendAmount,
-			"reinvest_units":    reinvestUnits,
-			"transaction_type":  transactionType,
+			"dividend_id":      dividendID,
+			"scheme_id":        schemeID,
+			"folio_id":         folioIDStr,
+			"dividend_amount":  dividendAmount,
+			"reinvest_units":   reinvestUnits,
+			"transaction_type": transactionType,
 		})
 	}
 	rows.Close()
@@ -497,7 +498,7 @@ func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, sett
 		var caID, actionType, sourceSchemeID string
 		var targetSchemeID, newSchemeName *string
 		var ratioNew, ratioOld, conversionRatio, bonusUnits *float64
-		
+
 		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &newSchemeName, &ratioNew, &ratioOld, &conversionRatio, &bonusUnits); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan Corporate Action data failed: %w", err)
@@ -562,21 +563,21 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 	for rows.Next() {
 		var fvoID, schemeID, justification string
 		var marketNav, overrideNav, variance, variancePct, unitsAffected float64
-		
+
 		if err := rows.Scan(&fvoID, &schemeID, &marketNav, &overrideNav, &variance, &variancePct, &unitsAffected, &justification); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan FVO data failed: %w", err)
 		}
 
 		fvoRecords = append(fvoRecords, map[string]interface{}{
-			"fvo_id":          fvoID,
-			"scheme_id":       schemeID,
-			"market_nav":      marketNav,
-			"override_nav":    overrideNav,
-			"variance":        variance,
-			"variance_pct":    variancePct,
-			"units_affected":  unitsAffected,
-			"justification":   justification,
+			"fvo_id":         fvoID,
+			"scheme_id":      schemeID,
+			"market_nav":     marketNav,
+			"override_nav":   overrideNav,
+			"variance":       variance,
+			"variance_pct":   variancePct,
+			"units_affected": unitsAffected,
+			"justification":  justification,
 		})
 	}
 	rows.Close()
@@ -590,7 +591,7 @@ func generateFVOJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 	for _, data := range fvoRecords {
 		fvoID := data["fvo_id"].(string)
 		log.Printf("[DEBUG FVO] Processing fvo_id: %s", fvoID)
-		
+
 		je, err := GenerateJournalEntryForFVO(ctx, tx, settings, activityID, data)
 		if err != nil {
 			log.Printf("[DEBUG FVO] GenerateJournalEntryForFVO failed: %v", err)
@@ -637,7 +638,7 @@ func CreateActivitySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateActivityRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
@@ -659,14 +660,14 @@ func CreateActivitySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -706,12 +707,12 @@ func CreateActivitySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -740,7 +741,7 @@ func CreateActivityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -776,7 +777,7 @@ func CreateActivityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "TX begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{"success": false, "error": constants.ErrTxBeginFailedCapitalized + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -808,12 +809,12 @@ func CreateActivityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 			`, activityID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Audit insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{"success": false, "error": constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "Commit failed: " + err.Error()})
+				results = append(results, map[string]interface{}{"success": false, "error": constants.ErrCommitFailedCapitalized + err.Error()})
 				continue
 			}
 
@@ -835,7 +836,7 @@ func UpdateActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateActivityRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.ActivityID) == "" {
@@ -855,14 +856,14 @@ func UpdateActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -924,12 +925,12 @@ func UpdateActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3, now())
 		`, req.ActivityID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -952,7 +953,7 @@ func DeleteActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason      string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.ActivityIDs) == 0 {
@@ -968,14 +969,14 @@ func DeleteActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -985,13 +986,13 @@ func DeleteActivity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
 			`, id, req.Reason, requestedBy); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.ActivityIDs})
@@ -1010,7 +1011,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1021,14 +1022,14 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1041,7 +1042,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.ActivityIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1123,21 +1124,21 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-		// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
-		// If journal generation fails, entire approval rolls back
-		log.Printf("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
-		for _, actID := range toApproveActivityIDs {
-			log.Printf("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
-			if err := GenerateAndSaveJournalEntriesInTx(ctx, tx, actID); err != nil {
-				log.Printf("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
-				api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("journal generation failed for activity %s: %v", actID, err))
-				return
+			// Generate journal entries WITHIN SAME TRANSACTION (atomic operation)
+			// If journal generation fails, entire approval rolls back
+			log.Printf("[DEBUG APPROVAL] Starting journal generation for %d activities", len(toApproveActivityIDs))
+			for _, actID := range toApproveActivityIDs {
+				log.Printf("[DEBUG APPROVAL] Generating journal for activity: %s (tx type: %T)", actID, tx)
+				if err := GenerateAndSaveJournalEntriesInTx(ctx, tx, actID); err != nil {
+					log.Printf("[DEBUG APPROVAL] Journal generation failed for %s: %v", actID, err)
+					api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("journal generation failed for activity %s: %v", actID, err))
+					return
+				}
+				log.Printf("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
 			}
-			log.Printf("[DEBUG APPROVAL] Journal generation completed for activity: %s", actID)
 		}
-	}
-	
-	if len(toDeleteActionIDs) > 0 {
+
+		if len(toDeleteActionIDs) > 0 {
 			if _, err := tx.Exec(ctx, `
 				UPDATE investment.auditactionaccountingactivity
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
@@ -1157,7 +1158,7 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -1180,7 +1181,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -1191,14 +1192,14 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1211,7 +1212,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.ActivityIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1260,7 +1261,7 @@ func BulkRejectActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -1457,7 +1458,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1474,7 +1475,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1516,7 +1517,7 @@ func GetApprovedActivities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1562,7 +1563,7 @@ func GetJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Build query with optional filter
 		whereClause := "WHERE je.is_deleted = false"
 		args := []interface{}{}
-		
+
 		if req.EntityName != "" {
 			whereClause += " AND je.entity_name = $1"
 			args = append(args, req.EntityName)
@@ -1617,14 +1618,14 @@ func GetJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 
 		fields := rows.FieldDescriptions()
 		out := make([]map[string]interface{}, 0, 100)
-		
+
 		for rows.Next() {
 			vals, _ := rows.Values()
 			rec := make(map[string]interface{}, len(fields))

@@ -1,6 +1,5 @@
 package fundplanning
 
-//TODO : Soft Delete for Fund Plans
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
@@ -12,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -42,12 +43,12 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CostProfitCenter    string `json:"costprofit_center,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "invalid JSON")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id required")
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 		if req.HorizonDays == 0 {
@@ -76,7 +77,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -91,7 +92,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IncludePayables {
 			primaryField := ""
 			if req.IncludeCounterparty {
-				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
+				primaryField = constants.QuerryCounterpartyName
 			} else if req.IncludeType {
 				primaryField = "'Vendor Payment'"
 			} else {
@@ -137,7 +138,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IncludeReceivables {
 			primaryField := ""
 			if req.IncludeCounterparty {
-				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
+				primaryField = constants.QuerryCounterpartyName
 			} else if req.IncludeType {
 				primaryField = "'Collection'"
 			} else {
@@ -197,19 +198,19 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				schemaCache.hasCpiDept = hasCpiDept
 				schemaCache.expires = time.Now().Add(5 * time.Minute)
 			}
-			primaryField := "'Generic'"
+			primaryField := constants.QuerryGeneric
 			joinCounterparty := false
 			if req.IncludeCounterparty {
 				if hasCpiCounterparty || hasCpCounterparty {
 					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'Generic')"
 					joinCounterparty = true
 				} else {
-					primaryField = "'Generic'"
+					primaryField = constants.QuerryGeneric
 				}
 			} else if req.IncludeType {
 				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
 			} else {
-				primaryField = "'Generic'"
+				primaryField = constants.QuerryGeneric
 			}
 			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
 				SELECT 
@@ -280,7 +281,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, finalQ, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -306,7 +307,7 @@ func GetFundPlanning(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				costProfitCenter = req.CostProfitCenter
 			}
 			res = append(res, Row{
-				Date:             dt.Format("2006-01-02"),
+				Date:             dt.Format(constants.DateFormat),
 				Direction:        dir,
 				Currency:         curr,
 				Primary:          primary,
@@ -386,12 +387,12 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CostProfitCenter    string `json:"costprofit_center,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "invalid JSON")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id required")
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 		if req.HorizonDays == 0 {
@@ -420,7 +421,7 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -435,7 +436,7 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IncludePayables {
 			primaryField := ""
 			if req.IncludeCounterparty {
-				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
+				primaryField = constants.QuerryCounterpartyName
 			} else if req.IncludeType {
 				primaryField = "'Vendor Payment'"
 			} else {
@@ -481,7 +482,7 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.IncludeReceivables {
 			primaryField := ""
 			if req.IncludeCounterparty {
-				primaryField = "COALESCE(m.counterparty_name, 'Generic')"
+				primaryField = constants.QuerryCounterpartyName
 			} else if req.IncludeType {
 				primaryField = "'Collection'"
 			} else {
@@ -541,19 +542,19 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				schemaCache.hasCpiDept = hasCpiDept
 				schemaCache.expires = time.Now().Add(5 * time.Minute)
 			}
-			primaryField := "'Generic'"
+			primaryField := constants.QuerryGeneric
 			joinCounterparty := false
 			if req.IncludeCounterparty {
 				if hasCpiCounterparty || hasCpCounterparty {
 					primaryField = "COALESCE(NULLIF(m.counterparty_name, ''), 'Generic')"
 					joinCounterparty = true
 				} else {
-					primaryField = "'Generic'"
+					primaryField = constants.QuerryGeneric
 				}
 			} else if req.IncludeType {
 				primaryField = "COALESCE(CASE WHEN cpi.cashflow_type = 'Inflow' THEN 'Collection' WHEN cpi.cashflow_type = 'Outflow' THEN 'Vendor Payment' ELSE NULL END, 'Generic')"
 			} else {
-				primaryField = "'Generic'"
+				primaryField = constants.QuerryGeneric
 			}
 			q := `SELECT dt, direction, currency, primary_name, amount, costprofit_center, source_ref FROM (
 				SELECT
@@ -614,7 +615,7 @@ func GetFundPlanningEnhanced(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, finalQ, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -698,7 +699,7 @@ func groupFundPlanningData(rawData []RawRow, includeCounterparty, includeType bo
 
 		// Create group key
 		groupKey := fmt.Sprintf("%s-%s-%s-%s-%s",
-			row.Date.Format("2006-01-02"),
+			row.Date.Format(constants.DateFormat),
 			row.Direction,
 			row.Currency,
 			primaryKey,
@@ -730,7 +731,7 @@ func groupFundPlanningData(rawData []RawRow, includeCounterparty, includeType bo
 		// Add line to group
 		line := FundPlanningLine{
 			LineID:             row.SourceRef,
-			Date:               row.Date.Format("2006-01-02"),
+			Date:               row.Date.Format(constants.DateFormat),
 			Type:               row.Direction,
 			SourceRef:          row.SourceRef,
 			CounterpartyOrType: primaryValue,
@@ -760,7 +761,7 @@ func getCategoryFromDirection(direction string) string {
 	if direction == "inflow" {
 		return "Collections"
 	}
-	return "Vendor Payment"
+	return constants.VendorPayment
 }
 
 func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []BankAccountInfo {
@@ -787,7 +788,7 @@ func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []Bank
 
 	rows, err := pgxPool.Query(ctx, query)
 	if err != nil {
-		api.LogError("getAvailableBankAccounts query failed", map[string]interface{}{"error": err.Error()})
+		api.LogError("getAvailableBankAccounts query failed", map[string]interface{}{constants.ValueError: err.Error()})
 		return []BankAccountInfo{}
 	}
 	defer rows.Close()
@@ -796,7 +797,7 @@ func getAvailableBankAccounts(ctx context.Context, pgxPool *pgxpool.Pool) []Bank
 	for rows.Next() {
 		var id, name, currency, usage, bankName string
 		if err := rows.Scan(&id, &name, &currency, &usage, &bankName); err != nil {
-			api.LogError("getAvailableBankAccounts scan failed", map[string]interface{}{"error": err.Error()})
+			api.LogError("getAvailableBankAccounts scan failed", map[string]interface{}{constants.ValueError: err.Error()})
 			continue
 		}
 		accounts = append(accounts, BankAccountInfo{
@@ -830,7 +831,7 @@ func suggestAccountsForGroup(group *FundPlanningGroup, bankAccounts []BankAccoun
 
 		// Direction allowed (+20)
 		if (group.Direction == "inflow" && (account.Usage == "Collection" || account.Usage == "Operational")) ||
-			(group.Direction == "outflow" && (account.Usage == "Operational" || account.Usage == "Vendor Payment")) {
+			(group.Direction == "outflow" && (account.Usage == "Operational" || account.Usage == constants.VendorPayment)) {
 			score += 20
 			confidence += 20
 			reasons = append(reasons, fmt.Sprintf("Direction allowed (%s) +20", group.Direction))
@@ -838,7 +839,7 @@ func suggestAccountsForGroup(group *FundPlanningGroup, bankAccounts []BankAccoun
 
 		// Usage alignment (+15)
 		if (group.Direction == "inflow" && account.Usage == "Collection") ||
-			(group.Direction == "outflow" && account.Usage == "Vendor Payment") {
+			(group.Direction == "outflow" && account.Usage == constants.VendorPayment) {
 			score += 15
 			confidence += 15
 			reasons = append(reasons, fmt.Sprintf("Usage aligns (%s) +15", account.Usage))
@@ -863,7 +864,7 @@ func suggestAccountsForGroup(group *FundPlanningGroup, bankAccounts []BankAccoun
 		if group.Direction == "inflow" && account.Usage != "Collection" && account.Usage != "Operational" {
 			warnings = append(warnings, fmt.Sprintf("Account usage '%s' may not be suitable for inflow transactions", account.Usage))
 		}
-		if group.Direction == "outflow" && account.Usage != "Vendor Payment" && account.Usage != "Operational" {
+		if group.Direction == "outflow" && account.Usage != constants.VendorPayment && account.Usage != "Operational" {
 			warnings = append(warnings, fmt.Sprintf("Account usage '%s' may not be suitable for outflow transactions", account.Usage))
 		}
 
@@ -955,7 +956,7 @@ func GetApprovedBankAccountsForFundPlanning(pgxPool *pgxpool.Pool) http.HandlerF
 		}
 		if r.Method == http.MethodPost {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				api.RespondWithResult(w, false, "invalid JSON")
+				api.RespondWithResult(w, false, constants.ErrInvalidJSONShort)
 				return
 			}
 		}
@@ -986,7 +987,7 @@ func GetApprovedBankAccountsForFundPlanning(pgxPool *pgxpool.Pool) http.HandlerF
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -998,7 +999,7 @@ func GetApprovedBankAccountsForFundPlanning(pgxPool *pgxpool.Pool) http.HandlerF
 			var usage, accountName, bankName, connCutoff, connTz, currency sql.NullString
 
 			if err := rows.Scan(&usage, &accountNo, &accountName, &bankName, &connCutoff, &connTz, &currency); err != nil {
-				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
+				api.LogError(constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
 				continue
 			}
 
@@ -1070,17 +1071,17 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req CreateFundPlanRequest
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		// Log the parsed request for debugging
 		api.LogInfo("CreateFundPlan request parsed", map[string]interface{}{
-			"plan_id":     req.PlanID,
-			"user_id":     req.UserID,
-			"entity_name": req.EntityName,
-			"horizon":     req.Horizon,
-			"num_groups":  len(req.Groups),
+			"plan_id":           req.PlanID,
+			constants.KeyUserID: req.UserID,
+			"entity_name":       req.EntityName,
+			"horizon":           req.Horizon,
+			"num_groups":        len(req.Groups),
 		})
 
 		for i, group := range req.Groups {
@@ -1095,15 +1096,15 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate required fields
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if req.PlanID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
 			return
 		}
 		if req.EntityName == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_name is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrEntityNameRequired)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -1124,14 +1125,14 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		// Start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1147,7 +1148,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Check if all groups were processed successfully
 		allSuccess := true
 		for _, result := range results {
-			if success, ok := result["success"].(bool); !ok || !success {
+			if success, ok := result[constants.ValueSuccess].(bool); !ok || !success {
 				allSuccess = false
 				break
 			}
@@ -1155,7 +1156,7 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if allSuccess {
 			if err = tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 				return
 			}
 		} else {
@@ -1169,14 +1170,14 @@ func CreateFundPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // processGroupCreation handles creation of a single fund plan group with all its components
 func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityName string, horizon int, group FundPlanGroupRequest, userEmail string) map[string]interface{} {
 	result := map[string]interface{}{
-		"group_id": group.GroupID,
-		"success":  false,
+		"group_id":             group.GroupID,
+		constants.ValueSuccess: false,
 	}
 
 	// Parse group metadata from group_id
 	direction, currency, primaryKey, primaryValue, err := parseGroupID(group.GroupID)
 	if err != nil {
-		result["error"] = fmt.Sprintf("failed to parse group_id %s: %s", group.GroupID, err.Error())
+		result[constants.ValueError] = fmt.Sprintf("failed to parse group_id %s: %s", group.GroupID, err.Error())
 		return result
 	}
 
@@ -1197,7 +1198,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 			allocationDetails = append(allocationDetails, fmt.Sprintf("Account %d: %s = %.2f", i+1, allocation.AccountID, allocation.AllocatedAmount))
 		}
 
-		result["error"] = fmt.Sprintf("sum of allocated amounts (%.2f) does not match group total amount (%.2f). Difference: %.2f. Allocations: [%s]",
+		result[constants.ValueError] = fmt.Sprintf("sum of allocated amounts (%.2f) does not match group total amount (%.2f). Difference: %.2f. Allocations: [%s]",
 			totalAllocated, group.TotalAmount, difference, strings.Join(allocationDetails, ", "))
 		return result
 	}
@@ -1209,7 +1210,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 
 	_, err = tx.Exec(ctx, insertGroupQuery, group.GroupID, planID, direction, currency, primaryKey, primaryValue, group.TotalAmount, entityName, horizon)
 	if err != nil {
-		result["error"] = fmt.Sprintf("failed to insert group: %s", err.Error())
+		result[constants.ValueError] = fmt.Sprintf("failed to insert group: %s", err.Error())
 		return result
 	}
 
@@ -1243,7 +1244,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 			allocatedAmount)
 
 		if err != nil {
-			result["error"] = fmt.Sprintf("failed to insert line %s: %s", line.LineID, err.Error())
+			result[constants.ValueError] = fmt.Sprintf("failed to insert line %s: %s", line.LineID, err.Error())
 			return result
 		}
 	}
@@ -1256,7 +1257,7 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 
 		_, err = tx.Exec(ctx, insertAllocationQuery, group.GroupID, allocation.AccountID, allocation.AllocatedAmount)
 		if err != nil {
-			result["error"] = fmt.Sprintf("failed to insert allocation for account %s: %s", allocation.AccountID, err.Error())
+			result[constants.ValueError] = fmt.Sprintf("failed to insert allocation for account %s: %s", allocation.AccountID, err.Error())
 			return result
 		}
 	}
@@ -1270,11 +1271,11 @@ func processGroupCreation(ctx context.Context, tx pgx.Tx, planID string, entityN
 	var actionID string
 	err = tx.QueryRow(ctx, insertAuditQuery, group.GroupID, userEmail).Scan(&actionID)
 	if err != nil {
-		result["error"] = fmt.Sprintf("failed to create audit action: %s", err.Error())
+		result[constants.ValueError] = fmt.Sprintf("failed to create audit action: %s", err.Error())
 		return result
 	}
 
-	result["success"] = true
+	result[constants.ValueSuccess] = true
 	result["action_id"] = actionID
 	result["message"] = "Fund plan group created successfully"
 	return result
@@ -1320,12 +1321,12 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -1338,7 +1339,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1378,7 +1379,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1398,7 +1399,7 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
 
 			if err != nil {
-				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
+				api.LogError(constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
 				continue
 			}
 
@@ -1419,10 +1420,10 @@ func GetFundPlanSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if requestedAt.Valid {
-				plan["requested_at"] = requestedAt.Time.Format("2006-01-02 15:04:05")
+				plan["requested_at"] = requestedAt.Time.Format(constants.DateTimeFormat)
 			}
 			if checkerAt.Valid {
-				plan["checker_at"] = checkerAt.Time.Format("2006-01-02 15:04:05")
+				plan["checker_at"] = checkerAt.Time.Format(constants.DateTimeFormat)
 			}
 
 			results = append(results, plan)
@@ -1442,17 +1443,17 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
 		if req.PlanID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
 			return
 		}
 
@@ -1465,7 +1466,7 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
@@ -1503,7 +1504,7 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, req.PlanID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1524,7 +1525,7 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason)
 
 			if err != nil {
-				api.LogError("scan failed", map[string]interface{}{"error": err.Error()})
+				api.LogError(constants.ErrScanFailed, map[string]interface{}{constants.ValueError: err.Error()})
 				continue
 			}
 
@@ -1554,10 +1555,10 @@ func GetFundPlanDetails(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if requestedAt.Valid {
-				group["requested_at"] = requestedAt.Time.Format("2006-01-02 15:04:05")
+				group["requested_at"] = requestedAt.Time.Format(constants.DateTimeFormat)
 			}
 			if checkerAt.Valid {
-				group["checker_at"] = checkerAt.Time.Format("2006-01-02 15:04:05")
+				group["checker_at"] = checkerAt.Time.Format(constants.DateTimeFormat)
 			}
 
 			groups = append(groups, group)
@@ -1590,16 +1591,16 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if req.PlanID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
 			return
 		}
 
@@ -1612,13 +1613,13 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1634,7 +1635,7 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, getGroupsQuery, req.PlanID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to get groups: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToGetGroups+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1644,7 +1645,7 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var groupID string
 			err := rows.Scan(&groupID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan group ID: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToScanGroupID+err.Error())
 				return
 			}
 			groupIDs = append(groupIDs, groupID)
@@ -1675,7 +1676,7 @@ func BulkApproveFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rowsAffected := cmdTag.RowsAffected()
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -1702,16 +1703,16 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if req.PlanID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
 			return
 		}
 
@@ -1724,13 +1725,13 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1746,7 +1747,7 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, getGroupsQuery, req.PlanID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to get groups: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToGetGroups+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1756,7 +1757,7 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var groupID string
 			err := rows.Scan(&groupID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan group ID: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToScanGroupID+err.Error())
 				return
 			}
 			groupIDs = append(groupIDs, groupID)
@@ -1787,7 +1788,7 @@ func BulkRejectFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rowsAffected := cmdTag.RowsAffected()
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 
@@ -1814,16 +1815,16 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if req.PlanID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "plan_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrPlanIDRequired)
 			return
 		}
 
@@ -1836,13 +1837,13 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid user_id or session")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSession)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to start transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -1864,7 +1865,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := tx.Query(ctx, getGroupsQuery, req.PlanID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to get groups: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToGetGroups+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1874,7 +1875,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var groupID string
 			err := rows.Scan(&groupID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to scan group ID: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToScanGroupID+err.Error())
 				return
 			}
 			groupIDs = append(groupIDs, groupID)
@@ -1904,7 +1905,7 @@ func BulkRequestDeleteFundPlans(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit transaction: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed+err.Error())
 			return
 		}
 

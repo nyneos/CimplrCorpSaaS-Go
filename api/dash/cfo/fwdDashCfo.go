@@ -11,16 +11,18 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	log.Println("[ERROR]", errMsg)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": false,
-		"error":   errMsg,
+		constants.ValueSuccess: false,
+		constants.ValueError:   errMsg,
 	})
 }
 
@@ -30,12 +32,12 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		rows, err := db.Query(`
@@ -58,7 +60,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
       AND LOWER(fb.processing_status) = 'approved'
 `, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -87,7 +89,7 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 		if totalAmount > 0 {
 			avgMaturity = int(weightedSum/totalAmount + 0.5)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"avgForwardMaturity": avgMaturity})
 	}
 }
@@ -98,13 +100,13 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -127,7 +129,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(fb.processing_status) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -157,7 +159,7 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"buyForwardsUSD":  format2f(buyTotal),
 			"sellForwardsUSD": format2f(sellTotal),
@@ -172,7 +174,7 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		var buName string
@@ -189,7 +191,7 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, "No entity found for given business unit")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		// json.NewEncoder(w).Encode(map[string]interface{}{"defaultCurrency": defaultCurrency})
 		json.NewEncoder(w).Encode(map[string]any{"defaultCurrency": defaultCurrency})
 	}
@@ -202,16 +204,16 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 			// Route: dash/cfo/fwd/bu-maturity-currency-summary
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
-		now := time.Now().Format("2006-01-02")
+		now := time.Now().Format(constants.DateFormat)
 		var count int
 		err := db.QueryRow("SELECT COUNT(*) FROM forward_bookings WHERE maturity_date > $1 AND entity_level_0 = ANY($2)  AND (processing_status = 'Approved' OR processing_status = 'approved')", now, pq.Array(buNames)).Scan(&count)
 		if err != nil {
@@ -219,7 +221,7 @@ func GetActiveForwardsCount(db *sql.DB) http.HandlerFunc {
 			return
 			// Route: dash/cfo/fwd/active-forwards-count
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"ActiveForward": count})
 	}
 }
@@ -230,19 +232,19 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
 		now := time.Now()
-		sevenDaysAgo := now.AddDate(0, 0, -7).Format("2006-01-02")
-		nowStr := now.Format("2006-01-02")
+		sevenDaysAgo := now.AddDate(0, 0, -7).Format(constants.DateFormat)
+		nowStr := now.Format(constants.DateFormat)
 
 		rows, err := db.Query(`
 			SELECT 
@@ -350,7 +352,7 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 			"BANKS": banks,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(response)
 	}
 }
@@ -376,13 +378,13 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -402,7 +404,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(fb.processing_status) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -423,7 +425,7 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			totalUsd += usdAmount
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"totalUsdSum": format2f(totalUsd),
 		})
@@ -436,13 +438,13 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -529,7 +531,7 @@ func GetOpenAmountToBookingRatioDashboard(db *sql.DB) http.HandlerFunc {
 			ratio = openUsd / totalUsd
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"openToBookingRatio": format2f(ratio),
 			"openAmountUsd":      format2f(openUsd),
@@ -544,13 +546,13 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -570,7 +572,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(fb.processing_status) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -603,7 +605,7 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
 	}
 }
@@ -614,13 +616,13 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -641,7 +643,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(fb.processing_status) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -729,7 +731,7 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
 	}
 }
@@ -741,12 +743,12 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		rows, err := db.Query(`SELECT fb.quote_currency, COUNT(fr.rollover_id) AS rollover_count FROM forward_bookings fb LEFT JOIN forward_rollovers fr ON fr.booking_id = fb.system_transaction_id WHERE fb.entity_level_0 = ANY($1)  AND (fb.processing_status = 'Approved' OR fb.processing_status = 'approved') GROUP BY fb.quote_currency`, pq.Array(buNames))
@@ -774,7 +776,7 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 		}
 		// Add total at the top
 		data = append([]map[string]string{{"label": "Total Rollovers:", "value": fmt.Sprintf("%d", total)}}, data...)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(data)
 	}
 }
@@ -785,13 +787,13 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -877,7 +879,7 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(forwardsData)
 	}
 }
@@ -886,7 +888,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -909,7 +911,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			  AND LOWER(fb.processing_status) = 'approved'
 		`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -979,7 +981,7 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(response)
 	}
 }
@@ -989,12 +991,12 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 		rows, err := db.Query(`SELECT bank_margin, quote_currency FROM forward_bookings WHERE entity_level_0 = ANY($1) AND bank_margin IS NOT NULL AND (processing_status = 'Approved' OR processing_status = 'approved')`, pq.Array(buNames))
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "DB error")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		defer rows.Close()
@@ -1012,7 +1014,7 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 			}
 			totalBankMargin += margin * rate
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]float64{"totalBankmargin": totalBankMargin})
 	}
 }
@@ -1022,7 +1024,7 @@ func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, "No accessible business units found")
+			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
 
@@ -1065,7 +1067,7 @@ func GetOpenAmountToBookingRatioSimple(db *sql.DB) http.HandlerFunc {
 			ratio = math.Abs(totalOpen) / math.Abs(totalBooking) * 100
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"ratio": fmt.Sprintf("%.3f", ratio),
 		})

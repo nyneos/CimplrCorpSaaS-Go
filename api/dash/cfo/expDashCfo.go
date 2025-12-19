@@ -12,6 +12,8 @@ import (
 
 	"CimplrCorpSaas/api"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -31,7 +33,7 @@ var rates = map[string]float64{
 
 // Helper to get user_id from context
 func getUserID(r *http.Request) string {
-	val := r.Context().Value("user_id")
+	val := r.Context().Value(constants.KeyUserID)
 	if id, ok := val.(string); ok {
 		return id
 	}
@@ -48,13 +50,13 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -87,13 +89,13 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'PO' OR exposure_type = 'creditors' OR exposure_type = 'grn') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -130,13 +132,13 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE (exposure_type = 'SO' OR exposure_type = 'LC' OR exposure_type = 'debitors') AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -173,13 +175,13 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -216,13 +218,13 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT entity, currency, total_open_amount FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -281,13 +283,13 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_open_amount, currency, value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -355,7 +357,7 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 		// }
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT total_original_amount AS amount, currency, value_date, ABS(CAST(value_date AS date) - CURRENT_DATE) AS days_to_maturity FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
@@ -386,7 +388,7 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 		if totalAmount > 0 {
 			avgMaturity = int(math.Round(weightedSum / totalAmount))
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]int{"avgExposureMaturity": avgMaturity})
 	}
 }
@@ -396,13 +398,13 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusForbidden)
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
 		query := `SELECT value_date FROM exposure_headers WHERE value_date IS NOT NULL AND entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
-			http.Error(w, "Failed to query", http.StatusInternalServerError)
+			http.Error(w, constants.ErrFailedToQuery, http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -421,7 +423,7 @@ func GetMaturityExpiryCount7DaysFromHeaders(db *sql.DB) http.HandlerFunc {
 				count7++
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]int{"value": count7})
 	}
 }

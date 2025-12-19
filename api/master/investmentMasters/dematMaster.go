@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,7 +61,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		userID := r.FormValue("user_id")
+		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var tmp struct {
 				UserID string `json:"user_id"`
@@ -68,7 +70,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = tmp.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 		userName := ""
@@ -84,7 +86,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse form: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -101,7 +103,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"depository_participant":     true,
 			"client_id":                  true,
 			"default_settlement_account": true,
-			"status":                     true,
+			constants.KeyStatus:          true,
 			// source auto-populated
 		}
 
@@ -110,13 +112,13 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, fh := range files {
 			f, err := fh.Open()
 			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "Failed to open file")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToOpenFile)
 				return
 			}
 			records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 			f.Close()
 			if err != nil || len(records) < 2 {
-				api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidOrEmptyFile)
 				return
 			}
 
@@ -168,7 +170,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 				return
 			}
 			committed := false
@@ -202,13 +204,13 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM investment.masterdemataccount
 					WHERE demat_account_number = ANY($2)
 				`, userName, dematNumbers); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 				return
 			}
 			committed = true
@@ -224,7 +226,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateDematRequestSingle
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		// required fields
@@ -245,7 +247,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
@@ -261,7 +263,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "TX begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -293,12 +295,12 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, dematID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
 
@@ -318,11 +320,11 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreateDematBulkRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.Rows) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rows provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsProvided)
 			return
 		}
 
@@ -334,7 +336,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -349,14 +351,14 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			settle := strings.TrimSpace(row.DefaultSettlementAccount)
 			if name == "" || dpid == "" || dep == "" || dacc == "" || settle == "" {
 				results = append(results, map[string]interface{}{
-					"success": false, "error": "Missing required fields",
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingRequiredFieldsUser,
 				})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "error": "TX begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxBeginFailed + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -368,7 +370,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE entity_name=$1 AND demat_account_number=$2 AND COALESCE(is_deleted,false)=false LIMIT 1
 			`, name, dacc).Scan(&exists)
 			if err == nil {
-				results = append(results, map[string]interface{}{"success": false, "entity": name, "error": "Duplicate demat (entity+demat_account_number)"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Duplicate demat (entity+demat_account_number)"})
 				continue
 			}
 
@@ -380,7 +382,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual')
 				RETURNING demat_id
 			`, name, dpid, dep, dacc, row.DepositoryParticipant, row.ClientID, settle, defaultIfEmpty(row.Status, "Active")).Scan(&dematID); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "entity": name, "error": "Insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Insert failed: " + err.Error()})
 				continue
 			}
 
@@ -388,16 +390,16 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 			`, dematID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": dematID, "error": "Audit insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": dematID, "error": "Commit failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: constants.ErrCommitFailedCapitalized + err.Error()})
 				continue
 			}
 
-			results = append(results, map[string]interface{}{"success": true, "demat_id": dematID, "entity_name": name})
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "demat_id": dematID, "entity_name": name})
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
@@ -408,7 +410,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateDematRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if strings.TrimSpace(req.DematID) == "" {
@@ -416,7 +418,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.Fields) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "no fields to update")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFieldsToUpdateUser)
 			return
 		}
 
@@ -428,14 +430,14 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -464,7 +466,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"depository_participant":     4,
 			"client_id":                  5,
 			"default_settlement_account": 6,
-			"status":                     7,
+			constants.KeyStatus:          7,
 		}
 
 		var sets []string
@@ -488,7 +490,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				oldField := "old_" + lk
-				sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", lk, pos, oldField, pos+1))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 				args = append(args, v, oldVals[idx])
 				pos += 2
 			}
@@ -502,7 +504,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.masterdemataccount SET %s WHERE demat_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.DematID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -511,12 +513,12 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.DematID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -537,7 +539,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON body")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
@@ -549,7 +551,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid or inactive session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -558,13 +560,13 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for _, row := range req.Rows {
 			if row.DematID == "" {
-				results = append(results, map[string]interface{}{"success": false, "error": "demat_id missing"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "demat_id missing"})
 				continue
 			}
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "tx begin failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -579,7 +581,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
 			); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "fetch failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: "fetch failed: " + err.Error()})
 				continue
 			}
 
@@ -591,7 +593,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"depository_participant":     4,
 				"client_id":                  5,
 				"default_settlement_account": 6,
-				"status":                     7,
+				constants.KeyStatus:          7,
 			}
 
 			var sets []string
@@ -607,20 +609,20 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							var exists int
 							err := tx.QueryRow(ctx, `SELECT 1 FROM investment.masterdemataccount WHERE demat_account_number=$1 AND COALESCE(is_deleted,false)=false AND demat_id <> $2 LIMIT 1`, newVal, row.DematID).Scan(&exists)
 							if err == nil {
-								results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "demat_account_number already exists: " + newVal})
+								results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: "demat_account_number already exists: " + newVal})
 								continue
 							}
 						}
 					}
 					oldField := "old_" + lk
-					sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", lk, pos, oldField, pos+1))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, lk, pos, oldField, pos+1))
 					args = append(args, v, oldVals[idx])
 					pos += 2
 				}
 			}
 
 			if len(sets) == 0 {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "No valid fields"})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: "No valid fields"})
 				continue
 			}
 
@@ -628,7 +630,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, row.DematID)
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "update failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
 				continue
 			}
 
@@ -636,16 +638,16 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 			`, row.DematID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "audit insert failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				results = append(results, map[string]interface{}{"success": false, "demat_id": row.DematID, "error": "commit failed: " + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrCommitFailed + err.Error()})
 				continue
 			}
 
-			results = append(results, map[string]interface{}{"success": true, "demat_id": row.DematID, "requested": userEmail})
+			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "demat_id": row.DematID, "requested": userEmail})
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
@@ -660,7 +662,7 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		if len(req.DematIDs) == 0 {
@@ -676,14 +678,14 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "Invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
 
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -699,7 +701,7 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.DematIDs})
@@ -714,7 +716,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -725,14 +727,14 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -745,7 +747,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -774,7 +776,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(toApprove) == 0 && len(toDeleteActionIDs) == 0 {
-			api.RespondWithPayload(w, false, "No approvable actions found", map[string]any{
+			api.RespondWithPayload(w, false, constants.ErrNoApprovableActions, map[string]any{
 				"approved_action_ids": []string{},
 				"deleted_demats":      []string{},
 			})
@@ -812,7 +814,7 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -831,7 +833,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 		checkerBy := ""
@@ -842,14 +844,14 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, "invalid session")
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "tx begin failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -862,7 +864,7 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -906,12 +908,12 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -995,7 +997,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1012,7 +1014,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if vals[i] == nil {
 					rec[name] = ""
 				} else if t, ok := vals[i].(time.Time); ok {
-					rec[name] = t.Format("2006-01-02 15:04:05")
+					rec[name] = t.Format(constants.DateTimeFormat)
 				} else {
 					rec[name] = vals[i]
 				}
@@ -1021,7 +1023,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Rows scan failed: "+rows.Err().Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
 			return
 		}
 
@@ -1060,7 +1062,7 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()

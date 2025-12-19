@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	// "github.com/jackc/pgx/v5"
+	"CimplrCorpSaas/api/constants"
 )
 
 // Handler for /dash/liquidity/total-cash-balance-by-entity
@@ -19,12 +20,12 @@ type UserRequest struct {
 func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req UserRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		// You can use req.UserID for filtering if needed
@@ -33,7 +34,7 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(balances)
 	}
 }
@@ -42,12 +43,12 @@ func TotalCashBalanceByEntityHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req UserRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		// You can use req.UserID for filtering if needed
@@ -56,7 +57,7 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]float64{"liquidity_coverage_ratio": ratio})
 	}
 }
@@ -65,7 +66,7 @@ func LiquidityCoverageRatioHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -74,7 +75,7 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Currency   string `json:"currency,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		// You can use req.UserID for session/middleware; now accept optional filters
@@ -83,7 +84,7 @@ func EntityCurrencyWiseCashHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(data)
 	}
 }
@@ -198,7 +199,7 @@ type EntityCurrencyCash struct {
 
 func entitycurrencywiseCash(pgxPool *pgxpool.Pool, entityFilter, currencyFilter string) ([]EntityCurrencyCash, error) {
 	results := make([]EntityCurrencyCash, 0) // ensures JSON [] instead of null
-	today := time.Now().UTC().Format("2006-01-02")
+	today := time.Now().UTC().Format(constants.DateFormat)
 
 	fetchQuery := `SELECT me.entity_name, t.currency_code, 
 		COALESCE(SUM(t.balance_amount),0)::float8 as total_balance
@@ -279,12 +280,12 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -295,7 +296,7 @@ func KpiCardsHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(kpi)
 	}
 }
@@ -309,12 +310,12 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var req reqBody
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidRequestBody, http.StatusBadRequest)
 			return
 		}
 		if req.Horizon <= 0 {
@@ -325,7 +326,7 @@ func DetailedDailyCashFlowHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(rows)
 	}
 }
@@ -349,7 +350,7 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 	var k KPICards
 	// 1) Total cash balance: sum of latest balance_amount per account as of today
 	today := time.Now().UTC()
-	dateToday := today.Format("2006-01-02")
+	dateToday := today.Format(constants.DateFormat)
 
 	// Use DISTINCT ON to pick latest record per account identifier and sum balance_amount
 	// We'll fetch per-account latest balances and convert to USD in Go
@@ -395,8 +396,8 @@ func GetKpiCards(pgxPool *pgxpool.Pool, horizon int, entityName string, currency
 	// 2) Liquidity coverage: sum inflows / sum outflows over horizon using approved payables/receivables
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
-	startDate := start.Format("2006-01-02")
-	endDate := end.Format("2006-01-02")
+	startDate := start.Format(constants.DateFormat)
+	endDate := end.Format(constants.DateFormat)
 
 	// Apply optional filters to inflow/outflow queries
 	inflowQuery := `SELECT COALESCE(SUM(invoice_amount),0)::float8, COALESCE(currency_code,'USD') FROM tr_receivables r
@@ -521,8 +522,8 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 	today := time.Now().UTC()
 	start := today
 	end := today.AddDate(0, 0, horizon-1)
-	startDate := start.Format("2006-01-02")
-	endDate := end.Format("2006-01-02")
+	startDate := start.Format(constants.DateFormat)
+	endDate := end.Format(constants.DateFormat)
 
 	// Opening balance: latest balance_amount per account as of start date
 	openingQuery := `SELECT DISTINCT ON (COALESCE(account_no, iban, nickname)) balance_amount, currency_code
@@ -599,7 +600,7 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 		if rate == 0 {
 			rate = 1.0
 		}
-		inflowsMap[d.Format("2006-01-02")] += amt * rate
+		inflowsMap[d.Format(constants.DateFormat)] += amt * rate
 	}
 
 	// Aggregated outflows per date (payables due_date)
@@ -638,7 +639,7 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 		if rate == 0 {
 			rate = 1.0
 		}
-		outflowsMap[d.Format("2006-01-02")] += amt * rate
+		outflowsMap[d.Format(constants.DateFormat)] += amt * rate
 	}
 
 	// Iterate dates and compute rows
@@ -646,7 +647,7 @@ func DetailedDailyCashFlowRows(pgxPool *pgxpool.Pool, horizon int, entityName st
 	opening := openingBalance
 	for i := 0; i < horizon; i++ {
 		date := start.AddDate(0, 0, i)
-		ds := date.Format("2006-01-02")
+		ds := date.Format(constants.DateFormat)
 		inflow := inflowsMap[ds]
 		outflow := outflowsMap[ds]
 		net := inflow - outflow

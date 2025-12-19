@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"log"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/extrame/xls"
+	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -27,6 +29,18 @@ var (
 	ErrAccountNotFound       = errors.New("bank account not found in master data")
 	ErrAccountNumberMissing  = errors.New("account number not found in file header")
 	ErrStatementPeriodExists = errors.New("a statement for this period already exists for this account")
+)
+var (
+	acNoHeader                      = "A/C No:"
+	slNoHeader                      = "Sl. No."
+	tranIDHeader                    = "Tran. Id"
+	valueDateHeader                 = "Value Date"
+	transactionDateHeader           = "Transaction Date"
+	transactionRemarksHeader        = "Transaction Remarks"
+	withdrawalAmtHeader             = "Withdrawal Amt (INR)"
+	depositAmtHeader                = "Deposit Amt (INR)"
+	balanceHeader                   = "Balance (INR)"
+	missingUserIDOrBankStatementIDs = "Missing user_id or bank_statement_ids"
 )
 
 // categoryRuleComponent represents a single rule component used for
@@ -100,7 +114,7 @@ func matchCategoryForTransaction(rules []categoryRuleComponent, description stri
 		if rule.ComponentType == "NARRATION_LOGIC" && rule.MatchType.Valid && rule.MatchValue.Valid {
 			val := strings.ToLower(rule.MatchValue.String)
 			switch rule.MatchType.String {
-			case "CONTAINS":
+			case "CONTAINS", "ILIKE":
 				if strings.Contains(descLower, val) {
 					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
 				}
@@ -116,10 +130,7 @@ func matchCategoryForTransaction(rules []categoryRuleComponent, description stri
 				if strings.HasSuffix(descLower, val) {
 					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
 				}
-			case "ILIKE":
-				if strings.Contains(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
+
 			case "REGEX":
 				// Regex not implemented in original logic
 			}
@@ -187,14 +198,14 @@ func parseDate(s string) (time.Time, error) {
 		return time.Time{}, errors.New("empty date string")
 	}
 	layouts := []string{
-		"02/01/2006", "02-Jan-2006", "02/Jan/2006", "02/01/06 15:04", "02/01/06 3:04", "02/01/06 15:04:05", "02/01/06 3:04:05",
-		"02/Jan/2006", "02-Jan-2006", // for 29/Aug/2025 and 29-Aug-2025
+		"02/01/2006", constants.DateFormatDash, constants.DateFormatSlash, "02/01/06 15:04", "02/01/06 3:04", "02/01/06 15:04:05", "02/01/06 3:04:05",
+		constants.DateFormatSlash, constants.DateFormatDash, // for 29/Aug/2025 and 29-Aug-2025
 		"2/1/2006", "2-Jan-2006", "2/Jan/2006", "2/1/06", "2/1/06 15:04", "2/1/06 3:04", "2/1/06 15:04:05", "2/1/06 3:04:05",
-		"2006-01-02", "2006/01/02", "2006.01.02", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006",
+		constants.DateFormat, "2006/01/02", "2006.01.02", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006",
 		"02/01/06", "2/1/06", "02-01-06", "2-1-06", "2006/1/2", "2006-1-2",
-		"02-Jan-06", "02-Jan-2006", "02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",
+		"02-Jan-06", constants.DateFormatDash, "02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",
 		"02-Jan-06 15:04:05", "02-Jan-2006 15:04:05", "02-Jan-06 3:04:05", "02-Jan-2006 3:04:05",
-		"02/Jan/06", "02/Jan/2006", "02/Jan/06 15:04", "02/Jan/2006 15:04", "02/Jan/06 3:04", "02/Jan/2006 3:04",
+		"02/Jan/06", constants.DateFormatSlash, "02/Jan/06 15:04", "02/Jan/2006 15:04", "02/Jan/06 3:04", "02/Jan/2006 3:04",
 		"02/Jan/06 15:04:05", "02/Jan/2006 15:04:05", "02/Jan/06 3:04:05", "02/Jan/2006 3:04:05",
 	}
 	// Try all layouts
@@ -293,10 +304,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// 3. Extract account number, entity id, and name from header
 	var accountNumber, entityID, accountName string
 	if isCSV {
-		// For CSV, try to find account number in the first 20 rows, look for "A/C No:" or "Account Number"
+		// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
 		for i := 0; i < 20 && i < len(rows); i++ {
 			for j, cell := range rows[i] {
-				if (cell == "A/C No:" || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
+				if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
 					accountNumber = rows[i][j+1]
 				}
 				if (cell == "Name:" || strings.EqualFold(cell, "Account Name")) && j+1 < len(rows[i]) {
@@ -309,7 +320,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Find header row
 			for i, row := range rows {
 				for _, cell := range row {
-					if cell == "Sl. No." {
+					if cell == slNoHeader {
 						// Data starts after this
 						if i+1 < len(rows) && len(rows[i+1]) > 0 {
 							// Try to get account number from a known column if present
@@ -323,7 +334,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	} else {
 		for i := 0; i < 20 && i < len(rows); i++ {
 			for j, cell := range rows[i] {
-				if cell == "A/C No:" && j+1 < len(rows[i]) {
+				if cell == acNoHeader && j+1 < len(rows[i]) {
 					accountNumber = rows[i][j+1]
 				}
 				if cell == "Name:" && j+1 < len(rows[i]) {
@@ -360,7 +371,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// For CSV, header is usually: Sl. No., Date, Description, Chq / Ref number, Value Date, Withdrawal, Deposit, Balance, CR/DR
 		for i, row := range rows {
 			for _, cell := range row {
-				if cell == "Sl. No." {
+				if cell == slNoHeader {
 					txnHeaderIdx = i
 					break
 				}
@@ -378,16 +389,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			colIdx[col] = idx
 		}
 		// Required columns for CSV
-		required := []string{"Sl. No.", "Date", "Description", "Value Date", "Withdrawal", "Deposit", "Balance"}
+		required := []string{slNoHeader, "Date", "Description", valueDateHeader, "Withdrawal", "Deposit", "Balance"}
 		for _, col := range required {
 			if _, ok := colIdx[col]; !ok {
-				return nil, fmt.Errorf("required column '%s' not found in header", col)
+				return nil, fmt.Errorf(constants.ErrRequiredColumnNotFound, col)
 			}
 		}
 	} else {
 		for i, row := range rows {
 			for _, cell := range row {
-				if cell == "Tran. Id" || cell == "Tran Id" {
+				if cell == tranIDHeader || cell == "Tran Id" {
 					txnHeaderIdx = i
 					break
 				}
@@ -404,10 +415,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		for idx, col := range headerRow {
 			colIdx[col] = idx
 		}
-		required := []string{"Tran. Id", "Value Date", "Transaction Date", "Transaction Remarks", "Withdrawal Amt (INR)", "Deposit Amt (INR)", "Balance (INR)"}
+		required := []string{tranIDHeader, valueDateHeader, transactionDateHeader, transactionRemarksHeader, withdrawalAmtHeader, depositAmtHeader, balanceHeader}
 		for _, col := range required {
 			if _, ok := colIdx[col]; !ok {
-				return nil, fmt.Errorf("required column '%s' not found in header", col)
+				return nil, fmt.Errorf(constants.ErrRequiredColumnNotFound, col)
 			}
 		}
 	}
@@ -480,16 +491,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 		if isCSV {
 			// CSV: Sl. No., Date, Description, Chq / Ref number, Value Date, Withdrawal, Deposit, Balance, CR/DR
-			if len(row) == 0 || (colIdx["Sl. No."] >= len(row)) || strings.TrimSpace(row[colIdx["Sl. No."]]) == "" {
+			if len(row) == 0 || (colIdx[slNoHeader] >= len(row)) || strings.TrimSpace(row[colIdx[slNoHeader]]) == "" {
 				continue
 			}
-			valueDate, _ = parseDate(row[colIdx["Value Date"]])
+			valueDate, _ = parseDate(row[colIdx[valueDateHeader]])
 			transactionDate, _ = parseDate(row[colIdx["Date"]])
 			// Filter out rows with invalid dates (e.g., 01-01-1 or zero date)
-			if valueDate.IsZero() || transactionDate.IsZero() || row[colIdx["Value Date"]] == "01-01-1" || row[colIdx["Date"]] == "01-01-1" {
+			if valueDate.IsZero() || transactionDate.IsZero() || row[colIdx[valueDateHeader]] == constants.DateFormatCustom || row[colIdx["Date"]] == constants.DateFormatCustom {
 				continue
 			}
-			tranID = sql.NullString{String: row[colIdx["Sl. No."]], Valid: row[colIdx["Sl. No."]] != ""}
+			tranID = sql.NullString{String: row[colIdx[slNoHeader]], Valid: row[colIdx[slNoHeader]] != ""}
 			description = row[colIdx["Description"]]
 			withdrawalStr := cleanAmount(row[colIdx["Withdrawal"]])
 			depositStr := cleanAmount(row[colIdx["Deposit"]])
@@ -512,26 +523,26 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		} else {
 			// Excel/XLS: Tran. Id, Value Date, Transaction Date, Transaction Remarks, Withdrawal Amt (INR), Deposit Amt (INR), Balance (INR)
-			if len(row) == 0 || (colIdx["Tran. Id"] >= len(row)) || strings.TrimSpace(row[colIdx["Tran. Id"]]) == "" {
+			if len(row) == 0 || (colIdx[tranIDHeader] >= len(row)) || strings.TrimSpace(row[colIdx[tranIDHeader]]) == "" {
 				continue
 			}
-			valueDate, _ = parseDate(row[colIdx["Value Date"]])
-			transactionDate, _ = parseDate(row[colIdx["Transaction Date"]])
+			valueDate, _ = parseDate(row[colIdx[valueDateHeader]])
+			transactionDate, _ = parseDate(row[colIdx[transactionDateHeader]])
 			// If either date is zero, try to parse with fallback logic
-			if valueDate.IsZero() && row[colIdx["Value Date"]] != "" {
-				valueDate, _ = parseDate(strings.Split(row[colIdx["Value Date"]], " ")[0])
+			if valueDate.IsZero() && row[colIdx[valueDateHeader]] != "" {
+				valueDate, _ = parseDate(strings.Split(row[colIdx[valueDateHeader]], " ")[0])
 			}
-			if transactionDate.IsZero() && row[colIdx["Transaction Date"]] != "" {
-				transactionDate, _ = parseDate(strings.Split(row[colIdx["Transaction Date"]], " ")[0])
+			if transactionDate.IsZero() && row[colIdx[transactionDateHeader]] != "" {
+				transactionDate, _ = parseDate(strings.Split(row[colIdx[transactionDateHeader]], " ")[0])
 			}
 			// Filter out rows with invalid dates (e.g., 01-01-1 or zero date)
-			if valueDate.IsZero() || transactionDate.IsZero() || row[colIdx["Value Date"]] == "01-01-1" || row[colIdx["Transaction Date"]] == "01-01-1" {
+			if valueDate.IsZero() || transactionDate.IsZero() || row[colIdx[valueDateHeader]] == constants.DateFormatCustom || row[colIdx[transactionDateHeader]] == constants.DateFormatCustom {
 				continue
 			}
-			tranID = sql.NullString{String: row[colIdx["Tran. Id"]], Valid: row[colIdx["Tran. Id"]] != ""}
-			description = row[colIdx["Transaction Remarks"]]
-			withdrawalStr := cleanAmount(row[colIdx["Withdrawal Amt (INR)"]])
-			depositStr := cleanAmount(row[colIdx["Deposit Amt (INR)"]])
+			tranID = sql.NullString{String: row[colIdx[tranIDHeader]], Valid: row[colIdx[tranIDHeader]] != ""}
+			description = row[colIdx[transactionRemarksHeader]]
+			withdrawalStr := cleanAmount(row[colIdx[withdrawalAmtHeader]])
+			depositStr := cleanAmount(row[colIdx[depositAmtHeader]])
 			if withdrawalStr != "" && depositStr == "" {
 				withdrawal.Valid = true
 				fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
@@ -544,9 +555,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				withdrawal.Valid = false
 				deposit.Valid = false
 			}
-			balance = sql.NullFloat64{Valid: row[colIdx["Balance (INR)"]] != ""}
+			balance = sql.NullFloat64{Valid: row[colIdx[balanceHeader]] != ""}
 			if balance.Valid {
-				balanceStr := cleanAmount(row[colIdx["Balance (INR)"]])
+				balanceStr := cleanAmount(row[colIdx[balanceHeader]])
 				fmt.Sscanf(balanceStr, "%f", &balance.Float64)
 			}
 		}
@@ -750,15 +761,58 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	kpiCats := []map[string]interface{}{}
 	foundCategories := []map[string]interface{}{}
 	foundCategoryIDs := map[int64]bool{}
+	totalTxns := len(transactions)
+	groupedTxns := 0
+	ungroupedTxns := 0
+
+	categoryTxns := map[int64][]map[string]interface{}{}
+
+	for i, t := range transactions {
+		if t.CategoryID.Valid {
+			groupedTxns++
+			catID := t.CategoryID.Int64
+			categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
+				"index":             i,
+				"tran_id":           t.TranID.String,
+				"value_date":        t.ValueDate,
+				"transaction_date":  t.TransactionDate,
+				"description":       t.Description,
+				"withdrawal_amount": t.WithdrawalAmount.Float64,
+				"deposit_amount":    t.DepositAmount.Float64,
+				"balance":           t.Balance.Float64,
+				"category_id":       catID,
+			})
+		} else {
+			ungroupedTxns++
+		}
+	}
+
 	for catID, count := range categoryCount {
+		var catName string
+		for _, rule := range rules {
+			if rule.CategoryID == catID {
+				catName = rule.CategoryName
+				break
+			}
+		}
 		kpiCats = append(kpiCats, map[string]interface{}{
-			"category_id": catID,
-			"count":       count,
-			"debit_sum":   debitSum[catID],
-			"credit_sum":  creditSum[catID],
+			"category_id":   catID,
+			"category_name": catName,
+			"count":         count,
+			"debit_sum":     debitSum[catID],
+			"credit_sum":    creditSum[catID],
+			"transactions":  categoryTxns[catID],
 		})
 		foundCategoryIDs[catID] = true
 	}
+
+	groupedPct := 0.0
+	ungroupedPct := 0.0
+	if totalTxns > 0 {
+		groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
+		ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
+	}
+
 	// Add category names/types for found categories
 	for _, rule := range rules {
 		if foundCategoryIDs[rule.CategoryID] {
@@ -781,6 +835,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"transactions_uploaded_count":     uploadedCount,
 		"transactions_under_review_count": len(reviewTransactions),
 		"transactions_under_review":       reviewTransactions,
+		"grouped_transaction_count":       groupedTxns,
+		"ungrouped_transaction_count":     ungroupedTxns,
+		"grouped_transaction_percent":     groupedPct,
+		"ungrouped_transaction_percent":   ungroupedPct,
 	}
 	return result, nil
 }
@@ -789,7 +847,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -817,7 +875,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 										ORDER BY s.uploaded_at DESC
 						`)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -858,7 +916,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				"is_delete_pending_approval": isDeletePending,
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    resp,
@@ -867,58 +925,152 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 
 	// 2. Get all transactions for a bank statement (POST, req: user_id, bank_statement_id)
 }
+
 func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
 		var body struct {
 			UserID          string `json:"user_id"`
 			BankStatementID string `json:"bank_statement_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || body.BankStatementID == "" {
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+			body.UserID == "" || body.BankStatementID == "" {
 			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
 			return
 		}
+
 		rows, err := db.Query(`
-			SELECT t.transaction_id, e.entity_name, t.tran_id, t.value_date, t.transaction_date, t.description, t.withdrawal_amount, t.deposit_amount, t.balance
+			SELECT
+				t.transaction_id,
+				e.entity_name,
+				t.tran_id,
+				t.value_date,
+				t.transaction_date,
+				t.description,
+				t.withdrawal_amount,
+				t.deposit_amount,
+				t.balance,
+				c.category_name,
+				COALESCE(t.misclassified_flag, false) AS misclassified_flag
 			FROM cimplrcorpsaas.bank_statement_transactions t
-			JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
-			JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+			JOIN cimplrcorpsaas.bank_statements s
+				ON t.bank_statement_id = s.bank_statement_id
+			JOIN public.masterentitycash e
+				ON s.entity_id = e.entity_id
+			LEFT JOIN cimplrcorpsaas.transaction_categories c
+				ON t.category_id = c.category_id
 			WHERE t.bank_statement_id = $1
 			ORDER BY t.value_date
 		`, body.BankStatementID)
+
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
+
 		resp := []map[string]interface{}{}
+
 		for rows.Next() {
-			var tid int64
-			var entityName, tranID, desc string
-			var vdate, tdate time.Time
-			var withdrawal, deposit, balance sql.NullFloat64
-			if err := rows.Scan(&tid, &entityName, &tranID, &vdate, &tdate, &desc, &withdrawal, &deposit, &balance); err != nil {
+			var (
+				tid           int64
+				entityName    string
+				tranID        sql.NullString
+				desc          string
+				category      sql.NullString
+				vdate         time.Time
+				tdate         time.Time
+				withdrawal    sql.NullFloat64
+				deposit       sql.NullFloat64
+				balance       sql.NullFloat64
+				misclassified bool
+			)
+
+			if err := rows.Scan(
+				&tid,
+				&entityName,
+				&tranID,
+				&vdate,
+				&tdate,
+				&desc,
+				&withdrawal,
+				&deposit,
+				&balance,
+				&category,
+				&misclassified,
+			); err != nil {
 				continue
 			}
+
+			categoryName := category.String
+			if !category.Valid || categoryName == "" {
+				categoryName = "Uncategorized"
+			}
+
 			resp = append(resp, map[string]interface{}{
-				"transaction_id":    tid,
-				"entity_name":       entityName,
-				"tran_id":           tranID,
-				"value_date":        vdate,
-				"transaction_date":  tdate,
-				"description":       desc,
-				"withdrawal_amount": withdrawal.Float64,
-				"deposit_amount":    deposit.Float64,
-				"balance":           balance.Float64,
+				"transaction_id":     tid,
+				"entity_name":        entityName,
+				"tran_id":            tranID.String,
+				"value_date":         vdate,
+				"transaction_date":   tdate,
+				"description":        desc,
+				"withdrawal_amount":  withdrawal.Float64,
+				"deposit_amount":     deposit.Float64,
+				"balance":            balance.Float64,
+				"category_name":      categoryName,
+				"misclassified_flag": misclassified,
 			})
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    resp,
+		})
+	})
+}
+
+// MarkBankStatementTransactionsMisclassifiedHandler sets misclassified_flag = true
+// for the provided list of transaction IDs.
+func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var body struct {
+			UserID         string  `json:"user_id"`
+			TransactionIDs []int64 `json:"transaction_ids"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.TransactionIDs) == 0 {
+			http.Error(w, "Missing user_id or transaction_ids", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+		res, err := db.ExecContext(ctx, `
+			UPDATE cimplrcorpsaas.bank_statement_transactions
+			SET misclassified_flag = true
+			WHERE transaction_id = ANY($1)
+		`, pq.Array(body.TransactionIDs))
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		rowsAffected, _ := res.RowsAffected()
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"updated_count": rowsAffected,
 		})
 	})
 }
@@ -930,7 +1082,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -957,7 +1109,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				http.Error(w, "bank_statement_id not found", http.StatusNotFound)
 				return
 			}
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -979,7 +1131,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			ORDER BY value_date, transaction_date, transaction_id
 		`, body.BankStatementID)
 		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -989,6 +1141,10 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		creditSum := map[int64]float64{}
 		uncategorized := []map[string]interface{}{}
 		transactionsCount := 0
+		totalTxns := 0
+		groupedTxns := 0
+		ungroupedTxns := 0
+		categoryTxns := map[int64][]map[string]interface{}{}
 		for rows.Next() {
 			var transactionID int64
 			var tranID sql.NullString
@@ -1002,6 +1158,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				continue
 			}
 			transactionsCount++
+			totalTxns++
 
 			// Re-evaluate category for this transaction using the same logic as
 			// the upload flow so that new/updated rules are applied.
@@ -1029,6 +1186,19 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				if deposit.Valid {
 					creditSum[newCategoryID.Int64] += deposit.Float64
 				}
+				groupedTxns++
+				catID := newCategoryID.Int64
+				categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
+					"transaction_id":    transactionID,
+					"tran_id":           tranID.String,
+					"value_date":        valueDate,
+					"transaction_date":  transactionDate,
+					"description":       description,
+					"withdrawal_amount": withdrawal.Float64,
+					"deposit_amount":    deposit.Float64,
+					"balance":           balance.Float64,
+					"category_id":       catID,
+				})
 			} else {
 				uncategorized = append(uncategorized, map[string]interface{}{
 					"tran_id":     tranID.String,
@@ -1036,6 +1206,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 					"value_date":  valueDate,
 					"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
 				})
+				ungroupedTxns++
 			}
 		}
 
@@ -1044,11 +1215,20 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		foundCategories := []map[string]interface{}{}
 		foundCategoryIDs := map[int64]bool{}
 		for catID, count := range categoryCount {
+			var catName string
+			for _, rule := range rules {
+				if rule.CategoryID == catID {
+					catName = rule.CategoryName
+					break
+				}
+			}
 			kpiCats = append(kpiCats, map[string]interface{}{
-				"category_id": catID,
-				"count":       count,
-				"debit_sum":   debitSum[catID],
-				"credit_sum":  creditSum[catID],
+				"category_id":   catID,
+				"category_name": catName,
+				"count":         count,
+				"debit_sum":     debitSum[catID],
+				"credit_sum":    creditSum[catID],
+				"transactions":  categoryTxns[catID],
 			})
 			foundCategoryIDs[catID] = true
 		}
@@ -1063,6 +1243,12 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			}
 		}
 
+		groupedPct := 0.0
+		ungroupedPct := 0.0
+		if totalTxns > 0 {
+			groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
+			ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
+		}
 		result := map[string]interface{}{
 			"pages_processed":                 1,
 			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
@@ -1074,9 +1260,13 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			"transactions_uploaded_count":     transactionsCount,
 			"transactions_under_review_count": 0,
 			"transactions_under_review":       []map[string]interface{}{},
+			"grouped_transaction_count":       groupedTxns,
+			"ungrouped_transaction_count":     ungroupedTxns,
+			"grouped_transaction_percent":     groupedPct,
+			"ungrouped_transaction_percent":   ungroupedPct,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Bank statement summary recomputed successfully",
@@ -1089,7 +1279,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -1098,7 +1288,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 			Comment          string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
-			http.Error(w, "Missing user_id or bank_statement_ids", http.StatusBadRequest)
+			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
 			return
 		}
 		results := make([]map[string]interface{}, 0)
@@ -1339,7 +1529,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 				})
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"results": results,
@@ -1351,7 +1541,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 func RejectBankStatementHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -1360,7 +1550,7 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 			Comment          string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
-			http.Error(w, "Missing user_id or bank_statement_ids", http.StatusBadRequest)
+			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
 			return
 		}
 		results := make([]map[string]interface{}, 0)
@@ -1380,7 +1570,7 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 				"message":           "Bank statement rejected",
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"results": results,
@@ -1392,7 +1582,7 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -1401,7 +1591,7 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 			Comment          string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
-			http.Error(w, "Missing user_id or bank_statement_ids", http.StatusBadRequest)
+			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
 			return
 		}
 		results := make([]map[string]interface{}, 0)
@@ -1425,7 +1615,7 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 				"message":           "Delete request submitted for approval",
 			})
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"results": results,
@@ -1436,7 +1626,7 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 
 func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
 		if r.Method != http.MethodPost {
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1578,7 +1768,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	var accountNumber, entityID, accountName string
 	for i := 0; i < 20 && i < len(rows); i++ {
 		for j, cell := range rows[i] {
-			if cell == "A/C No:" && j+1 < len(rows[i]) {
+			if cell == acNoHeader && j+1 < len(rows[i]) {
 				accountNumber = rows[i][j+1]
 			}
 			if cell == "Name:" && j+1 < len(rows[i]) {
@@ -1614,7 +1804,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	var txnHeaderIdx int = -1
 	for i, row := range rows {
 		for _, cell := range row {
-			if cell == "Tran. Id" || cell == "Tran Id" {
+			if cell == tranIDHeader || cell == "Tran Id" {
 				txnHeaderIdx = i
 				goto foundTxnHeader
 			}
@@ -1633,10 +1823,10 @@ foundTxnHeader:
 	}
 
 	// Required columns
-	required := []string{"Tran. Id", "Value Date", "Transaction Date", "Transaction Remarks", "Withdrawal Amt (INR)", "Deposit Amt (INR)", "Balance (INR)"}
+	required := []string{tranIDHeader, valueDateHeader, transactionDateHeader, transactionRemarksHeader, withdrawalAmtHeader, depositAmtHeader, balanceHeader}
 	for _, col := range required {
 		if _, ok := colIdx[col]; !ok {
-			return fmt.Errorf("required column '%s' not found in header", col)
+			return fmt.Errorf(constants.ErrRequiredColumnNotFound, col)
 		}
 	}
 
@@ -1645,20 +1835,20 @@ foundTxnHeader:
 	var lastValidValueDate time.Time
 	for i, row := range rows[txnHeaderIdx+1:] {
 		// Skip rows with no transaction ID or all columns empty
-		if len(row) == 0 || (colIdx["Tran. Id"] >= len(row)) || strings.TrimSpace(row[colIdx["Tran. Id"]]) == "" {
+		if len(row) == 0 || (colIdx[tranIDHeader] >= len(row)) || strings.TrimSpace(row[colIdx[tranIDHeader]]) == "" {
 			continue
 		}
 		// Defensive: fill missing columns with empty string
 		for len(row) < len(headerRow) {
 			row = append(row, "")
 		}
-		tranID := sql.NullString{String: row[colIdx["Tran. Id"]], Valid: row[colIdx["Tran. Id"]] != ""}
-		valueDate, _ := time.Parse("02/Jan/2006", row[colIdx["Value Date"]])
-		transactionDate, _ := time.Parse("02/Jan/2006", row[colIdx["Transaction Date"]])
-		description := row[colIdx["Transaction Remarks"]]
+		tranID := sql.NullString{String: row[colIdx[tranIDHeader]], Valid: row[colIdx[tranIDHeader]] != ""}
+		valueDate, _ := time.Parse(constants.DateFormatSlash, row[colIdx[valueDateHeader]])
+		transactionDate, _ := time.Parse(constants.DateFormatSlash, row[colIdx[transactionDateHeader]])
+		description := row[colIdx[transactionRemarksHeader]]
 		var withdrawal, deposit sql.NullFloat64
-		withdrawalStr := cleanAmount(row[colIdx["Withdrawal Amt (INR)"]])
-		depositStr := cleanAmount(row[colIdx["Deposit Amt (INR)"]])
+		withdrawalStr := cleanAmount(row[colIdx[withdrawalAmtHeader]])
+		depositStr := cleanAmount(row[colIdx[depositAmtHeader]])
 		if withdrawalStr != "" && depositStr == "" {
 			withdrawal.Valid = true
 			fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
@@ -1671,9 +1861,9 @@ foundTxnHeader:
 			withdrawal.Valid = false
 			deposit.Valid = false
 		}
-		balance := sql.NullFloat64{Valid: row[colIdx["Balance (INR)"]] != ""}
+		balance := sql.NullFloat64{Valid: row[colIdx[balanceHeader]] != ""}
 		if balance.Valid {
-			balanceStr := cleanAmount(row[colIdx["Balance (INR)"]])
+			balanceStr := cleanAmount(row[colIdx[balanceHeader]])
 			fmt.Sscanf(balanceStr, "%f", &balance.Float64)
 		}
 		if i == 0 {
@@ -1888,7 +2078,7 @@ func buildTxnKey(accountNumber string, transactionDate time.Time, description st
 	}
 	return fmt.Sprintf("%s|%s|%s|%s|%s",
 		strings.TrimSpace(strings.ToUpper(accountNumber)),
-		transactionDate.Format("2006-01-02"),
+		transactionDate.Format(constants.DateFormat),
 		strings.TrimSpace(strings.ToLower(description)),
 		wStr,
 		dStr,

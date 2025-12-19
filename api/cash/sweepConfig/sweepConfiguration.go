@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,11 +35,11 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason        string   `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "invalid json: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id required")
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -50,7 +52,7 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -98,7 +100,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "invalid json: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" || req.SweepID == "" {
@@ -114,7 +116,7 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -145,13 +147,13 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		pos := 1
 
 		addStrField := func(col, oldcol string, val interface{}, cur sqlNullString) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			args = append(args, nullifyEmpty(fmt.Sprint(val)))
 			args = append(args, cur.ValueOrZero())
 			pos += 2
 		}
 		addFloatField := func(col, oldcol string, val interface{}, cur sqlNullFloat) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			if val == nil {
 				args = append(args, nil)
 			} else {
@@ -225,7 +227,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithResult(w, false, "Invalid JSON: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 		if req.UserID == "" {
@@ -242,7 +244,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !valid {
-			api.RespondWithResult(w, false, "Invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
@@ -250,7 +252,7 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		base := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY created_at DESC, sweep_id`
 		rows, err := pgxPool.Query(ctx, base)
 		if err != nil {
-			api.RespondWithResult(w, false, "DB error: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -379,7 +381,7 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.SweepIDs) == 0 {
-			api.RespondWithResult(w, false, "invalid json or missing fields")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := ""
@@ -390,7 +392,7 @@ func BulkApproveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -463,7 +465,7 @@ func BulkRejectSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.SweepIDs) == 0 {
-			api.RespondWithResult(w, false, "invalid json or missing fields")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		checkerBy := ""
@@ -474,7 +476,7 @@ func BulkRejectSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 
@@ -527,7 +529,7 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.SweepIDs) == 0 {
-			api.RespondWithResult(w, false, "invalid json or missing fields")
+			api.RespondWithResult(w, false, constants.ErrInvalidJSON)
 			return
 		}
 		requestedBy := ""
@@ -538,7 +540,7 @@ func BulkRequestDeleteSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithResult(w, false, "invalid user_id or session")
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
 			return
 		}
 

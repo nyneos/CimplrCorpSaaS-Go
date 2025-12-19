@@ -18,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/xuri/excelize/v2"
 )
 
@@ -46,12 +48,12 @@ func ifaceToTimeString(v interface{}) string {
 	}
 	switch t := v.(type) {
 	case time.Time:
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	case *time.Time:
 		if t == nil {
 			return ""
 		}
-		return t.Format("2006-01-02 15:04:05")
+		return t.Format(constants.DateTimeFormat)
 	case string:
 		return t
 	case *string:
@@ -87,7 +89,7 @@ func parseBankStatementFile(file multipart.File, ext string) ([][]string, error)
 		}
 		return rows, nil
 	}
-	return nil, errors.New("unsupported file type")
+	return nil, errors.New(constants.ErrUnsupportedFileType)
 }
 
 func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -98,7 +100,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return ""
 		}
 		layouts := []string{
-			"2006-01-02",
+			constants.DateFormat,
 			"02/01/06",
 			"02/01/2006",
 			"02-01-2006",
@@ -108,7 +110,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"2006.01.02",
 			"02.01.2006",
 			"01.02.2006",
-			"02-Jan-2006",
+			constants.DateFormatDash,
 			"02-Jan-06",
 			"2006/1/2",
 			"2/1/2006",
@@ -118,7 +120,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		for _, layout := range layouts {
 			if t, err := time.Parse(layout, dateStr); err == nil {
-				return t.Format("2006-01-02")
+				return t.Format(constants.DateFormat)
 			}
 		}
 		// Try to handle 2-digit year (e.g., 10/12/25, 10-12-25, 10.12.25)
@@ -144,8 +146,8 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				try := year + "-" + month + "-" + day
-				if t, err := time.Parse("2006-01-02", try); err == nil {
-					return t.Format("2006-01-02")
+				if t, err := time.Parse(constants.DateFormat, try); err == nil {
+					return t.Format(constants.DateFormat)
 				}
 			}
 		}
@@ -155,7 +157,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		userID := ""
-		if r.Header.Get("Content-Type") == "application/json" {
+		if r.Header.Get(constants.ContentTypeText) == constants.ContentTypeJSON {
 			var req struct {
 				UserID string `json:"user_id"`
 			}
@@ -165,7 +167,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			userID = req.UserID
 		} else {
-			userID = r.FormValue("user_id")
+			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
 				api.RespondWithPayload(w, false, "user_id required in form", nil)
 				return
@@ -181,17 +183,17 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithPayload(w, false, "User not found in active sessions", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidSession, nil)
 			return
 		}
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithPayload(w, false, "Failed to parse multipart form", nil)
+			api.RespondWithPayload(w, false, constants.ErrFailedToParseMultipartForm, nil)
 			return
 		}
 		files := r.MultipartForm.File["file"]
 		if len(files) == 0 {
-			api.RespondWithPayload(w, false, "No files uploaded", nil)
+			api.RespondWithPayload(w, false, constants.ErrNoFilesUploaded, nil)
 			return
 		}
 		batchIDs := make([]string, 0, len(files))
@@ -725,7 +727,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment          string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "Invalid JSON", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		checkerBy := ""
@@ -737,13 +739,13 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithPayload(w, false, "Invalid user_id or session", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to start transaction: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -823,7 +825,7 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true
@@ -838,7 +840,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "Invalid JSON", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		checkerBy := ""
@@ -850,13 +852,13 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if checkerBy == "" {
-			api.RespondWithPayload(w, false, "Invalid user_id or session", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to start transaction: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -923,7 +925,7 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true
@@ -939,7 +941,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "Invalid JSON", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		requestedBy := ""
@@ -951,7 +953,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithPayload(w, false, "Invalid user_id or session", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 		if len(req.IDs) == 0 {
@@ -961,7 +963,7 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithPayload(w, false, "failed to start transaction: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrTxStartFailed+err.Error(), nil)
 			return
 		}
 		committed := false
@@ -984,11 +986,11 @@ func BulkDeleteBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		committed = true
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"success": true})
+		api.RespondWithPayload(w, true, "", map[string]interface{}{constants.ValueSuccess: true})
 	}
 }
 
@@ -1428,7 +1430,7 @@ func CreateBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if createdBy == "" {
-			api.RespondWithPayload(w, false, "Invalid user_id or session", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
 
@@ -1576,7 +1578,7 @@ func CreateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		// convert map to expected bulk shape and set user id in body
-		combined := map[string]interface{}{"user_id": req.UserID, "reason": topReason, "rows": []map[string]interface{}{req.Row}}
+		combined := map[string]interface{}{constants.KeyUserID: req.UserID, "reason": topReason, "rows": []map[string]interface{}{req.Row}}
 		cb, _ := json.Marshal(combined)
 		r.Body = io.NopCloser(strings.NewReader(string(cb)))
 		CreateBankStatements(pgxPool)(w, r)
@@ -1596,7 +1598,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason          string                 `json:"reason,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid JSON", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidJSONShort, nil)
 			return
 		}
 		if strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.BankStatementID) == "" {
@@ -1614,7 +1616,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if requestedBy == "" {
-			api.RespondWithPayload(w, false, "invalid user_id or session", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidSession, nil)
 			return
 		}
 
@@ -1687,7 +1689,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		pos := 1
 
 		addStrField := func(col, oldcol string, val interface{}, cur *string) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			if val == nil {
 				args = append(args, nil)
 			} else {
@@ -1697,7 +1699,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos += 2
 		}
 		addTimeField := func(col, oldcol string, val interface{}, cur *time.Time) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			if val == nil {
 				args = append(args, nil)
 			} else {
@@ -1707,7 +1709,7 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos += 2
 		}
 		addFloatField := func(col, oldcol string, val interface{}, cur *float64) {
-			sets = append(sets, fmt.Sprintf("%s=$%d, %s=$%d", col, pos, oldcol, pos+1))
+			sets = append(sets, fmt.Sprintf(constants.FormatSQLSetPair, col, pos, oldcol, pos+1))
 			if val == nil {
 				args = append(args, nil)
 			} else {
@@ -1733,8 +1735,8 @@ func UpdateBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				addTimeField("transactiondate", "old_transactiondate", v, curTransactionDate)
 			case "description":
 				addStrField("description", "old_description", v, curDescription)
-			case "status":
-				addStrField("status", "old_status", v, curStatus)
+			case constants.KeyStatus:
+				addStrField(constants.KeyStatus, "old_status", v, curStatus)
 			case "accountholdername":
 				addStrField("accountholdername", "old_accountholdername", v, curAccHolder)
 			case "branchname":

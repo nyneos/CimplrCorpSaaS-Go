@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
+
 	"github.com/lib/pq"
 )
 
@@ -20,19 +22,19 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 		rows, err := db.Query(`SELECT h.entity AS business_unit, h.currency, h.exposure_type, h.total_open_amount, b.month_1, b.month_2, b.month_3, b.month_4, b.month_4_6, b.month_6plus FROM exposure_headers h JOIN exposure_bucketing b ON h.exposure_header_id = b.exposure_header_id WHERE h.entity = ANY($1) AND (h.approval_status = 'Approved' OR h.approval_status = 'approved') AND (b.status_bucketing = 'Approved' OR b.status_bucketing = 'approved')`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "DB error"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDB})
 			return
 		}
 		defer rows.Close()
@@ -111,7 +113,7 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 				}
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(response)
 	}
 }
@@ -123,14 +125,14 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "user_id required"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
 
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "No accessible business units found"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
 
@@ -144,7 +146,7 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 		`, pq.Array(buNames))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "DB error"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDB})
 			return
 		}
 		defer rows.Close()

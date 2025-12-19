@@ -1,6 +1,7 @@
 package categorywisedata
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,19 +41,34 @@ type EntityBreakdownRow struct {
 }
 
 type TransactionRow struct {
-	TxID        string  `json:"txId"`
-	Date        string  `json:"date"`
-	Category    string  `json:"category,omitempty"`
-	SubCategory string  `json:"subCategory,omitempty"`
-	Entity      string  `json:"entity"`
-	Bank        string  `json:"bank"`
-	Account     string  `json:"account"`
-	Amount      float64 `json:"amount"`
-	Direction   string  `json:"direction"`
-	Narration   string  `json:"narration,omitempty"`
+	TxID          string  `json:"txId"`
+	Date          string  `json:"date"`
+	Category      string  `json:"category,omitempty"`
+	SubCategory   string  `json:"subCategory,omitempty"`
+	Entity        string  `json:"entity"`
+	Bank          string  `json:"bank"`
+	Account       string  `json:"account"`
+	Amount        float64 `json:"amount"`
+	Direction     string  `json:"direction"`
+	Narration     string  `json:"narration,omitempty"`
+	Misclassified bool    `json:"misclassified_flag,omitempty"`
+}
+
+type BankBalanceKPI struct {
+	Bank  string  `json:"bank"`
+	Total float64 `json:"total"`
+}
+
+type LowestBalanceAccount struct {
+	Bank     string  `json:"bank"`
+	Account  string  `json:"account"`
+	Balance  float64 `json:"balance"`
+	Currency string  `json:"currency"`
+	AsOfDate string  `json:"as_of_date"`
 }
 
 func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
+
 	// numeric mask wide enough to avoid overflow display
 	const wideNumMask = "FM9999999999999999999999999999990.00"
 
@@ -70,7 +86,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil || days <= 0 {
 			days = 30
 		}
-		fromDate := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
+		fromDate := time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
 
 		var args []interface{}
 		arg := 1
@@ -153,82 +169,68 @@ ORDER BY inflow DESC, outflow DESC;
 
 		entitySQL := `
 SELECT 
-	x.entity_id,
-	x.entity_name,
-	x.bank_name,
-	x.account_number,
-	x.inflow,
-	x.outflow,
-	COALESCE(stmts.transactions_json, '[]') AS transactions_json
+  x.entity_id,
+  x.entity_name,
+  x.bank_name,
+  x.account_number,
+  x.inflow,
+  x.outflow,
+  COALESCE(stmts.transactions_json, '[]') AS transactions_json
 FROM (
-	SELECT 
-		bs.entity_id,
-		me.entity_name,
-		COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
-		bs.account_number,
-		SUM(COALESCE(t.deposit_amount,0)) AS inflow,
-		SUM(COALESCE(t.withdrawal_amount,0)) AS outflow
-	FROM cimplrcorpsaas.bank_statement_transactions t
-	JOIN cimplrcorpsaas.bank_statements bs
-		ON t.bank_statement_id = bs.bank_statement_id
-	LEFT JOIN public.masterbankaccount mba
-		ON mba.account_number = bs.account_number
-	LEFT JOIN public.masterbank mb
-		ON mb.bank_id = mba.bank_id
-	LEFT JOIN public.masterentitycash me
-		ON bs.entity_id = me.entity_id
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) ap ON ap.bankstatementid = bs.bank_statement_id
-	   AND ap.processing_status = 'APPROVED'
+  SELECT 
+    bs.entity_id,
+    me.entity_name,
+    COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
+    bs.account_number,
+    SUM(COALESCE(t.deposit_amount,0)) AS inflow,
+    SUM(COALESCE(t.withdrawal_amount,0)) AS outflow
+  FROM cimplrcorpsaas.bank_statement_transactions t
+  JOIN cimplrcorpsaas.bank_statements bs
+    ON t.bank_statement_id = bs.bank_statement_id
+  LEFT JOIN public.masterbankaccount mba
+    ON mba.account_number = bs.account_number
+  LEFT JOIN public.masterbank mb
+    ON mb.bank_id = mba.bank_id
+  LEFT JOIN public.masterentitycash me
+    ON bs.entity_id = me.entity_id
+  JOIN (
+    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+    FROM cimplrcorpsaas.auditactionbankstatement
+    ORDER BY bankstatementid, requested_at DESC
+  ) ap ON ap.bankstatementid = bs.bank_statement_id
+     AND ap.processing_status = 'APPROVED'
 ` + whereClause + `
-	GROUP BY 
-		bs.entity_id,
-		me.entity_name,
-		COALESCE(mba.bank_name, mb.bank_name),
-		bs.account_number
+  GROUP BY 
+    bs.entity_id,
+    me.entity_name,
+    COALESCE(mba.bank_name, mb.bank_name),
+    bs.account_number
 ) x
 LEFT JOIN LATERAL (
-	SELECT json_agg(
-		json_build_object(
-			'date', to_char(COALESCE(tx.transaction_date, tx.value_date), 'YYYY-MM-DD'),
-			'opening_balance', COALESCE(to_char((tx.balance - COALESCE(tx.deposit_amount,0) + COALESCE(tx.withdrawal_amount,0)), '` + wideNumMask + `'), '0.00'),
-			'inflow', COALESCE(to_char(COALESCE(tx.deposit_amount,0), '` + wideNumMask + `'), '0.00'),
-			'outflow', COALESCE(to_char(COALESCE(tx.withdrawal_amount,0), '` + wideNumMask + `'), '0.00'),
-			'closing_balance', COALESCE(to_char(COALESCE(tx.balance,0), '` + wideNumMask + `'), '0.00'),
-			'narration', COALESCE(tx.description, ''),
-			'category', COALESCE(tc.category_name, '')
-		) ORDER BY COALESCE(tx.transaction_date, tx.value_date), tx.transaction_id
-	) AS transactions_json
-	FROM cimplrcorpsaas.bank_statements bs2
-	JOIN cimplrcorpsaas.bank_statement_transactions tx
-		ON tx.bank_statement_id = bs2.bank_statement_id
-	LEFT JOIN cimplrcorpsaas.transaction_categories tc
-		ON tx.category_id = tc.category_id
-	JOIN (
-		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-		FROM cimplrcorpsaas.auditactionbankstatement
-		ORDER BY bankstatementid, requested_at DESC
-	) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
-	   AND ap2.processing_status = 'APPROVED'
-	WHERE bs2.account_number = x.account_number
-	-- also apply the same date & bank/entity/currency filters to the transactions
-	AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
-` + func() string {
-			// We need to append any additional filters (entity/bank/currency) to the lateral transaction WHERE.
-			// The outer whereClause used placeholders starting from $1; our args match those placeholders.
-			// Re-use the same filters except the leading date filter which is already present.
-
-			// entity filter -> bs.entity_id = $2 etc. But in this lateral scope bs2 is the bank_statements table.
-			// We'll append the filters for entity, bank and currency if present by matching placeholders by position.
-			// Build by checking presence of entity/bank/currency values from the outer closure — but we can't access them here.
-			// Instead we simply reuse the same additional conditions via placeholders if they exist.
-			// Constructed earlier: filters included date as first param. If there are more args, include them here.
-			// We know args slice length; if len(args) > 1, include matching conditions in the same order.
-			return ""
-		}() + `
+  SELECT json_agg(
+    json_build_object(
+      'date', to_char(COALESCE(tx.transaction_date, tx.value_date), 'YYYY-MM-DD'),
+      'opening_balance', COALESCE(to_char((tx.balance - COALESCE(tx.deposit_amount,0) + COALESCE(tx.withdrawal_amount,0)), '` + wideNumMask + `'), '0.00'),
+      'inflow', COALESCE(to_char(COALESCE(tx.deposit_amount,0), '` + wideNumMask + `'), '0.00'),
+      'outflow', COALESCE(to_char(COALESCE(tx.withdrawal_amount,0), '` + wideNumMask + `'), '0.00'),
+      'closing_balance', COALESCE(to_char(COALESCE(tx.balance,0), '` + wideNumMask + `'), '0.00'),
+      'narration', COALESCE(tx.description, ''),
+      'category', CASE WHEN tx.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(tc.category_name, '') END
+    ) ORDER BY COALESCE(tx.transaction_date, tx.value_date), tx.transaction_id
+  ) AS transactions_json
+  FROM cimplrcorpsaas.bank_statements bs2
+  JOIN cimplrcorpsaas.bank_statement_transactions tx
+    ON tx.bank_statement_id = bs2.bank_statement_id
+  LEFT JOIN cimplrcorpsaas.transaction_categories tc
+    ON tx.category_id = tc.category_id
+  JOIN (
+    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+    FROM cimplrcorpsaas.auditactionbankstatement
+    ORDER BY bankstatementid, requested_at DESC
+  ) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
+     AND ap2.processing_status = 'APPROVED'
+  WHERE bs2.account_number = x.account_number
+    AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
 ) stmts ON TRUE
 ORDER BY x.entity_name, x.bank_name, x.account_number;
 `
@@ -274,38 +276,39 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		/* ---------------- Transactions list (flat) ---------------- */
 		txnSQL := `
-SELECT
-	t.transaction_id::text,
-	to_char(COALESCE(t.transaction_date, t.value_date), 'YYYY-MM-DD') AS dt,
-	COALESCE(tc.category_name, '') AS category,
-	COALESCE(tc.description, '') AS subcategory,
-	me.entity_name,
-	COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
-	bs.account_number,
-	(COALESCE(t.deposit_amount,0) - COALESCE(t.withdrawal_amount,0))::numeric::float8 AS amount,
-	CASE WHEN COALESCE(t.deposit_amount,0) > COALESCE(t.withdrawal_amount,0) THEN 'INFLOW' ELSE 'OUTFLOW' END AS direction,
-	COALESCE(t.description, '')
-FROM cimplrcorpsaas.bank_statement_transactions t
-JOIN cimplrcorpsaas.bank_statements bs
-	ON t.bank_statement_id = bs.bank_statement_id
-LEFT JOIN cimplrcorpsaas.transaction_categories tc
-	ON t.category_id = tc.category_id
-LEFT JOIN public.masterbankaccount mba
-	ON mba.account_number = bs.account_number
-LEFT JOIN public.masterbank mb
-	ON mb.bank_id = mba.bank_id
-LEFT JOIN public.masterentitycash me
-	ON bs.entity_id = me.entity_id
-JOIN (
-	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-	FROM cimplrcorpsaas.auditactionbankstatement
-	ORDER BY bankstatementid, requested_at DESC
-) ap ON ap.bankstatementid = bs.bank_statement_id
-   AND ap.processing_status = 'APPROVED'
-` + whereClause + `
-ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
-LIMIT 2000;
-`
+	SELECT
+		t.transaction_id::text,
+		to_char(COALESCE(t.transaction_date, t.value_date), 'YYYY-MM-DD') AS dt,
+		COALESCE(tc.category_name, '') AS category,
+		COALESCE(tc.description, '') AS subcategory,
+		me.entity_name,
+		COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
+		bs.account_number,
+		(COALESCE(t.deposit_amount,0) - COALESCE(t.withdrawal_amount,0))::numeric::float8 AS amount,
+		CASE WHEN COALESCE(t.deposit_amount,0) > COALESCE(t.withdrawal_amount,0) THEN 'INFLOW' ELSE 'OUTFLOW' END AS direction,
+		COALESCE(t.description, ''),
+		COALESCE(t.misclassified_flag, false) AS misclassified_flag
+	FROM cimplrcorpsaas.bank_statement_transactions t
+	JOIN cimplrcorpsaas.bank_statements bs
+		ON t.bank_statement_id = bs.bank_statement_id
+	LEFT JOIN cimplrcorpsaas.transaction_categories tc
+		ON t.category_id = tc.category_id
+	LEFT JOIN public.masterbankaccount mba
+		ON mba.account_number = bs.account_number
+	LEFT JOIN public.masterbank mb
+		ON mb.bank_id = mba.bank_id
+	LEFT JOIN public.masterentitycash me
+		ON bs.entity_id = me.entity_id
+	JOIN (
+		SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+		FROM cimplrcorpsaas.auditactionbankstatement
+		ORDER BY bankstatementid, requested_at DESC
+		) ap ON ap.bankstatementid = bs.bank_statement_id
+	   AND ap.processing_status = 'APPROVED'
+	` + whereClause + `
+	ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
+	LIMIT 2000;
+	`
 
 		txnRows, err := pgxPool.Query(ctx, txnSQL, args...)
 		if err != nil {
@@ -328,19 +331,189 @@ LIMIT 2000;
 				&tr.Amount,
 				&tr.Direction,
 				&tr.Narration,
+				&tr.Misclassified,
 			); err == nil {
 				txns = append(txns, tr)
 			}
 		}
 
-		resp := map[string]interface{}{
-			"success":      true,
-			"categories":   categories,
-			"entities":     entities,
-			"transactions": txns,
+		/* ---------------- Realtime KPIs (bank_balances_manual) ---------------- */
+		kpiArgs := []interface{}{}
+		kArg := 1
+		var kpiFilters []string
+
+		// limit to recent data by horizon
+		kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.as_of_date, CURRENT_DATE) >= $%d::date", kArg))
+		kpiArgs = append(kpiArgs, fromDate)
+		kArg++
+
+		if bankF != "" {
+			kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.bank_name, '') = $%d", kArg))
+			kpiArgs = append(kpiArgs, bankF)
+			kArg++
+		}
+		if currencyF != "" {
+			kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.currency_code, '') = $%d", kArg))
+			kpiArgs = append(kpiArgs, currencyF)
+			kArg++
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		kpiWhere := ""
+		if len(kpiFilters) > 0 {
+			kpiWhere = "WHERE " + strings.Join(kpiFilters, " AND ")
+		}
+
+		highestSQL := `
+	WITH approved AS (
+	  SELECT DISTINCT ON (balance_id) balance_id, processing_status
+	  FROM public.auditactionbankbalances
+	  ORDER BY balance_id, requested_at DESC
+	)
+	SELECT
+	  COALESCE(b.bank_name, 'Unknown') AS bank,
+	  SUM(COALESCE(b.balance_amount, b.closing_balance, 0)) AS total
+	FROM public.bank_balances_manual b
+	JOIN approved ap
+	  ON ap.balance_id = b.balance_id
+	 AND ap.processing_status = 'APPROVED'
+	` + kpiWhere + `
+	GROUP BY COALESCE(b.bank_name, 'Unknown')
+	ORDER BY total DESC
+	LIMIT 1;
+	`
+
+		var highestBank *BankBalanceKPI
+		highestRows, err := pgxPool.Query(ctx, highestSQL, kpiArgs...)
+		if err != nil {
+			http.Error(w, "error querying highest contributing bank: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer highestRows.Close()
+		if highestRows.Next() {
+			var bank string
+			var total float64
+			if err := highestRows.Scan(&bank, &total); err == nil {
+				highestBank = &BankBalanceKPI{Bank: bank, Total: total}
+			}
+		}
+
+		lowestSQL := `
+	WITH approved AS (
+	  SELECT DISTINCT ON (balance_id) balance_id, processing_status
+	  FROM public.auditactionbankbalances
+	  ORDER BY balance_id, requested_at DESC
+	)
+	SELECT
+	  COALESCE(b.bank_name, 'Unknown') AS bank,
+	  COALESCE(b.account_no, '') AS account,
+	  COALESCE(b.balance_amount, b.closing_balance, 0) AS balance,
+	  COALESCE(b.currency_code, '') AS currency_code,
+	  COALESCE(to_char(b.as_of_date, 'YYYY-MM-DD'), '') AS as_of_date
+	FROM public.bank_balances_manual b
+	JOIN approved ap
+	  ON ap.balance_id = b.balance_id
+	 AND ap.processing_status = 'APPROVED'
+	` + kpiWhere + `
+	ORDER BY balance ASC
+	LIMIT 1;
+	`
+
+		var lowestAcct *LowestBalanceAccount
+		lowestRows, err := pgxPool.Query(ctx, lowestSQL, kpiArgs...)
+		if err != nil {
+			http.Error(w, "error querying lowest balance account: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer lowestRows.Close()
+		if lowestRows.Next() {
+			var bank, acct, currency, asOf string
+			var balance float64
+			if err := lowestRows.Scan(&bank, &acct, &balance, &currency, &asOf); err == nil {
+				lowestAcct = &LowestBalanceAccount{
+					Bank:     bank,
+					Account:  acct,
+					Balance:  balance,
+					Currency: currency,
+					AsOfDate: asOf,
+				}
+			}
+		}
+
+		/* ---------------- Misclassified transactions section ---------------- */
+		misclassifiedSQL := `
+SELECT
+	t.transaction_id::text,
+	to_char(COALESCE(t.transaction_date, t.value_date), 'YYYY-MM-DD') AS dt,
+	COALESCE(tc.category_name, '') AS category,
+	COALESCE(tc.description, '') AS subcategory,
+	me.entity_name,
+	COALESCE(mba.bank_name, mb.bank_name) AS bank_name,
+	bs.account_number,
+	(COALESCE(t.deposit_amount,0) - COALESCE(t.withdrawal_amount,0))::numeric::float8 AS amount,
+	CASE WHEN COALESCE(t.deposit_amount,0) > COALESCE(t.withdrawal_amount,0) THEN 'INFLOW' ELSE 'OUTFLOW' END AS direction,
+	COALESCE(t.description, ''),
+	COALESCE(t.misclassified_flag, false) AS misclassified_flag
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements bs
+	ON t.bank_statement_id = bs.bank_statement_id
+LEFT JOIN cimplrcorpsaas.transaction_categories tc
+	ON t.category_id = tc.category_id
+LEFT JOIN public.masterbankaccount mba
+	ON mba.account_number = bs.account_number
+LEFT JOIN public.masterbank mb
+	ON mb.bank_id = mba.bank_id
+LEFT JOIN public.masterentitycash me
+	ON bs.entity_id = me.entity_id
+JOIN (
+	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+	FROM cimplrcorpsaas.auditactionbankstatement
+	ORDER BY bankstatementid, requested_at DESC
+) ap ON ap.bankstatementid = bs.bank_statement_id
+   AND ap.processing_status = 'APPROVED'
+` + whereClause + `
+AND COALESCE(t.misclassified_flag, false) = true
+ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
+LIMIT 2000;
+`
+
+		misclassifiedRows, err := pgxPool.Query(ctx, misclassifiedSQL, args...)
+		if err != nil {
+			http.Error(w, "error querying misclassified transactions: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer misclassifiedRows.Close()
+
+		var misclassifiedTxns []TransactionRow
+		for misclassifiedRows.Next() {
+			var tr TransactionRow
+			if err := misclassifiedRows.Scan(
+				&tr.TxID,
+				&tr.Date,
+				&tr.Category,
+				&tr.SubCategory,
+				&tr.Entity,
+				&tr.Bank,
+				&tr.Account,
+				&tr.Amount,
+				&tr.Direction,
+				&tr.Narration,
+				&tr.Misclassified,
+			); err == nil {
+				misclassifiedTxns = append(misclassifiedTxns, tr)
+			}
+		}
+
+		resp := map[string]interface{}{
+			"success":                    true,
+			"categories":                 categories,
+			"entities":                   entities,
+			"transactions":               txns,
+			"misclassified_transactions": misclassifiedTxns,
+			"highest_contributing_bank":  highestBank,
+			"lowest_balance_account":     lowestAcct,
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
