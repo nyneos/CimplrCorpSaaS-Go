@@ -73,7 +73,7 @@ func writeFKConflict(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
-		"message": "Bank Statement Transactions exist in system delete them first",
+		"message": "Bank Statement Transactions with this category exists in the system. Please delete them first",
 	})
 }
 
