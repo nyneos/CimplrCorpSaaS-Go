@@ -58,6 +58,16 @@ type ruleQueryerLocal interface {
 	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
 }
 
+func isFKViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23503" {
+		return true
+	}
+	return false
+}
+
 // loadCategoryRuleComponentsLocal mirrors the rule loader used during upload/recompute without depending on the upload file.
 func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string) ([]categoryRuleComponent, error) {
 	const q = `
@@ -847,6 +857,11 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		if len(ruleIDs) > 0 {
 			_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id = ANY($1)`, pq.Array(ruleIDs))
 			if err != nil {
+				if isFKViolation(err) {
+					tx.Rollback()
+					http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+					return
+				}
 				tx.Rollback()
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
@@ -856,6 +871,11 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		// 3. Delete all rules for this category
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
+			if isFKViolation(err) {
+				tx.Rollback()
+				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				return
+			}
 			tx.Rollback()
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -873,6 +893,11 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		// 5. Delete the category itself
 		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
+			if isFKViolation(err) {
+				tx.Rollback()
+				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				return
+			}
 			tx.Rollback()
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
