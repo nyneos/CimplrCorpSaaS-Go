@@ -68,6 +68,15 @@ func isFKViolation(err error) bool {
 	return false
 }
 
+func writeFKConflict(w http.ResponseWriter) {
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"message": "Bank Statement Transactions exist in system delete them first",
+	})
+}
+
 // loadCategoryRuleComponentsLocal mirrors the rule loader used during upload/recompute without depending on the upload file.
 func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string) ([]categoryRuleComponent, error) {
 	const q = `
@@ -514,7 +523,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			if err != nil {
 				if isFKViolation(err) {
 					tx.Rollback()
-					http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+					writeFKConflict(w)
 					return
 				}
 				tx.Rollback()
@@ -528,7 +537,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()
-				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				writeFKConflict(w)
 				return
 			}
 			tx.Rollback()
@@ -550,7 +559,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()
-				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				writeFKConflict(w)
 				return
 			}
 			tx.Rollback()
