@@ -150,7 +150,7 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					spot = 1.0
 				}
 				dayWise = append(dayWise, map[string]interface{}{
-					"date":              day.Format("2006-01-02"),
+					"date":              day.Format(constants.DateFormat),
 					"entity":            entityName,
 					"bank":              bankName,
 					"accountNumber":     accountNo,
@@ -315,7 +315,7 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				dayWise = append(dayWise, map[string]interface{}{
-					"date":              day.Format("2006-01-02"),
+					"date":              day.Format(constants.DateFormat),
 					"entity":            entity,
 					"bank":              bank,
 					"accountNumber":     accountNo,
@@ -522,7 +522,7 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				inr := math.Round((bal*spot)*100) / 100
 
 				dayWise = append(dayWise, map[string]interface{}{
-					"date":              day.Format("2006-01-02"),
+					"date":              day.Format(constants.DateFormat),
 					"entity":            entity,
 					"bank":              bank,
 					"accountNumber":     accountNo,

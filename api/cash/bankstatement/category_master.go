@@ -176,7 +176,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback()
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
@@ -252,7 +252,7 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback()
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
@@ -378,7 +378,7 @@ func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback()
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
@@ -495,7 +495,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback()
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
@@ -579,6 +579,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		})
 	})
 }
+
 // --- Category CRUD ---
 func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -854,7 +855,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		defer func() {
 			if p := recover(); p != nil {
 				tx.Rollback()
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
 
@@ -882,7 +883,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 			if err != nil {
 				if isFKViolation(err) {
 					tx.Rollback()
-					http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+					http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 					return
 				}
 				tx.Rollback()
@@ -896,7 +897,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()
-				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 				return
 			}
 			tx.Rollback()
@@ -918,7 +919,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()
-				http.Error(w, "Bank Statement Transactions exist in system delete them first", http.StatusBadRequest)
+				http.Error(w, constants.ErrBankStatementAlreadyExists, http.StatusBadRequest)
 				return
 			}
 			tx.Rollback()

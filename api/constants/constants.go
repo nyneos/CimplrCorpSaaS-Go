@@ -56,6 +56,7 @@ const (
 	ErrMTMInsertFailed                = "MTM insert failed: "
 	ErrSettingKeyRequired             = "setting_key parameter is required"
 	ErrSettingNotFound                = "Setting not found"
+	ErrBankStatementAlreadyExists     = "Bank Statement Transactions exist in system delete them first"
 )
 
 // Additional common messages used across handlers
