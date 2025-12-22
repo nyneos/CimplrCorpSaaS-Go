@@ -6,4 +6,8 @@ const (
 	DefaultNavURL         = "https://www.amfiindia.com/spages/NAVAll.txt"
 	DefaultSchemeSchedule = "* 9 * * *"
 	BatchSize             = 1000
+
+	// Sweep Configuration Constants
+	DefaultSweepSchedule = "*/1 * * * *" // Run every minute to check cutoff times
+	SweepBatchSize       = 100
 )

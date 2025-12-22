@@ -53,3 +53,5 @@ services:
     start_order: 13
     config:
       batch_size: 1000
+      sweep_schedule: "*/1 * * * *"
+      sweep_batch_size: 100
