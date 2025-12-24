@@ -48,6 +48,27 @@ func (s *CronService) Start() error {
 	logger.GlobalLogger.LogAudit("Cron service started with AMFI downloader")
 	log.Println("Cron service started — AMFI Downloader scheduled")
 
+	// Start the Sweep Scheduler
+	sweepConfig := NewDefaultSweepConfig()
+
+	// Override sweep config from services.yaml if provided
+	if s.config != nil {
+		if sweepSchedule, ok := s.config["sweep_schedule"].(string); ok && sweepSchedule != "" {
+			sweepConfig.Schedule = sweepSchedule
+		}
+		if sweepBatchSize, ok := s.config["sweep_batch_size"].(int); ok && sweepBatchSize > 0 {
+			sweepConfig.BatchSize = sweepBatchSize
+		}
+	}
+
+	err = RunSweepScheduler(sweepConfig, s.db)
+	if err != nil {
+		return fmt.Errorf("failed to start sweep scheduler: %v", err)
+	}
+
+	logger.GlobalLogger.LogAudit("Sweep scheduler started")
+	log.Println("Cron service started — Sweep Scheduler scheduled")
+
 	return nil
 }
 

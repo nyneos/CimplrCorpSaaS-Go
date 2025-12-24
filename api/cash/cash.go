@@ -84,6 +84,12 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config/bulk-approve", api.BusinessUnitMiddleware(db)(sweepconfig.BulkApproveSweepConfigurations(pgxPool)))
 	mux.Handle("/cash/sweep-config/bulk-reject", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRejectSweepConfigurations(pgxPool)))
 	mux.Handle("/cash/sweep-config/request-delete", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRequestDeleteSweepConfigurations(pgxPool)))
+
+	// Sweep execution and monitoring routes
+	mux.Handle("/cash/sweep-config/execution-logs", api.BusinessUnitMiddleware(db)(sweepconfig.GetSweepExecutionLogs(pgxPool)))
+	mux.Handle("/cash/sweep-config/statistics", api.BusinessUnitMiddleware(db)(sweepconfig.GetSweepStatistics(pgxPool)))
+	mux.Handle("/cash/sweep-config/manual-trigger", api.BusinessUnitMiddleware(db)(sweepconfig.ManualTriggerSweep(pgxPool)))
+
 	// Cash flow projection routes
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))
