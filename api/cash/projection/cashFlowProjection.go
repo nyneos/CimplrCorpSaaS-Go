@@ -1157,7 +1157,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		enc := json.NewEncoder(w)
-		w.Write([]byte(`{constants.ValueSuccess:true,"header":`))
+		w.Write([]byte(`{"success":true,"header":`))
 		if err := enc.Encode(header); err != nil {
 			return
 		}

@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -813,13 +815,91 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-		var body CategoryRuleComponent
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleID == 0 || body.ComponentType == "" {
+		
+		var requestBody struct {
+			CategoryRuleComponent
+			Components []CategoryRuleComponent `json:"components,omitempty"`
+		}
+		
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		
+		// If components array is provided, use bulk insert
+		if len(requestBody.Components) > 0 {
+			// Validate all components first
+			for i, comp := range requestBody.Components {
+				if comp.RuleID == 0 || comp.ComponentType == "" {
+					http.Error(w, "Missing or invalid fields in component at index "+string(rune(i+'0')), http.StatusBadRequest)
+					return
+				}
+			}
+			
+			tx, err := db.Begin()
+			if err != nil {
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer func() {
+				if p := recover(); p != nil {
+					tx.Rollback()
+					http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
+				}
+			}()
+			
+			// Build multi-row INSERT with RETURNING component_id
+			placeholders := make([]string, 0, len(requestBody.Components))
+			args := make([]interface{}, 0, len(requestBody.Components)*9)
+			for i, comp := range requestBody.Components {
+				base := i*9
+				placeholders = append(placeholders, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
+				args = append(args, comp.RuleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
+			}
+			query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
+			rows, err := tx.Query(query, args...)
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			var componentIDs []int64
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					tx.Rollback()
+					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				componentIDs = append(componentIDs, id)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				tx.Rollback()
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			rows.Close()
+			if err := tx.Commit(); err != nil {
+				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data":    map[string]interface{}{"component_ids": componentIDs},
+			})
+			return
+		}
+		
+		// Single component insert (backward compatible)
+		if requestBody.RuleID == 0 || requestBody.ComponentType == "" {
 			http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
 			return
 		}
 		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, body.RuleID, body.ComponentType, body.MatchType, body.MatchValue, body.AmountOperator, body.AmountValue, body.TxnFlow, body.CurrencyCode, body.IsActive).Scan(&id)
+		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, requestBody.RuleID, requestBody.ComponentType, requestBody.MatchType, requestBody.MatchValue, requestBody.AmountOperator, requestBody.AmountValue, requestBody.TxnFlow, requestBody.CurrencyCode, requestBody.IsActive).Scan(&id)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -831,6 +911,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		})
 	})
 }
+
 
 // DeleteTransactionCategoryHandler deletes a category and cascades deletes for rules, rule scopes, and rule components
 func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
