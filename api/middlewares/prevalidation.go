@@ -7,9 +7,11 @@ import (
 	"CimplrCorpSaas/internal/validation"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -63,6 +65,18 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// Step 4: Single database query for user + business unit + root entity
 			validationResult, err := validation.PreValidateRequest(ctx, db, userID)
 			if err != nil {
+				// If validation failure is due to no business units/root entity, return a friendly 200-style response
+				le := strings.ToLower(err.Error())
+				if err == http.ErrMissingFile || strings.Contains(le, "no business") || strings.Contains(le, "no entity") || strings.Contains(le, "no accessible") {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						constants.ValueSuccess: false,
+						"error":                "No accessible business units found for this user",
+						"code":                 "NO_ACCESS_ENTITIES",
+						"help":                 "Contact your administrator to grant access to business units or set up entities for your account.",
+					})
+					return
+				}
 				api.RespondWithError(w, http.StatusUnauthorized, "Validation failed: "+err.Error())
 				return
 			}
@@ -70,6 +84,13 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// Step 5: Resolve entity hierarchy using recursive CTEs
 			entityIDs, entityNames, err := resolveEntityHierarchy(ctx, db, validationResult.RootEntityID)
 			if err != nil {
+				// Known case: no accessible entities found -> resolveEntityHierarchy returns http.ErrMissingFile
+				if err == http.ErrMissingFile {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					// Return a known-user-level response (HTTP 200) with a clear message
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": "No accessible business units found"})
+					return
+				}
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to resolve entity hierarchy: "+err.Error())
 				return
 			}
@@ -137,7 +158,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			log.Printf("\nApproved Folios (%d):\n", len(folios))
 			for i, f := range folios {
 				if i < 5 || i >= len(folios)-2 {
-					log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"]) 
+					log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 				} else if i == 5 {
 					log.Printf("  ... (%d more) ...\n", len(folios)-7)
 				}
@@ -683,11 +704,11 @@ func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 		var dematID, dpID, dpParticipant, dematNumber, entityName, defaultAccount string
 		if err := rows.Scan(&dematID, &dpID, &dpParticipant, &dematNumber, &entityName, &defaultAccount); err == nil {
 			demats = append(demats, map[string]string{
-				"demat_id":                  dematID,
-				"dp_id":                     dpID,
-				"depository_participant":    dpParticipant,
-				"demat_account_number":      dematNumber,
-				"entity_name":               entityName,
+				"demat_id":                   dematID,
+				"dp_id":                      dpID,
+				"depository_participant":     dpParticipant,
+				"demat_account_number":       dematNumber,
+				"entity_name":                entityName,
 				"default_settlement_account": defaultAccount,
 			})
 		}
