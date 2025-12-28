@@ -18,6 +18,94 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// getUserFriendlyGLAccountError returns a user-friendly error message and HTTP status code
+func getUserFriendlyGLAccountError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := err.Error()
+	errLower := strings.ToLower(errMsg)
+
+	// Unique constraint violations
+	if strings.Contains(errLower, "unique_gl_account_code_not_deleted") {
+		return "GL Account code already exists and is not deleted. Please use a different code.", http.StatusOK
+	}
+	if strings.Contains(errLower, "unique_gl_account_name_not_deleted") {
+		return "GL Account name already exists and is not deleted. Please use a different name.", http.StatusOK
+	}
+	if strings.Contains(errLower, "uq_parent_child_gl") {
+		return "This parent-child GL account relationship already exists.", http.StatusOK
+	}
+
+	// Check constraints
+	if strings.Contains(errLower, "masterglaccount_type_check") {
+		return "GL Account type must be one of: Asset, Liability, Equity, Income, Expense.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterglaccount_status_check") {
+		return "Status must be either 'Active' or 'Inactive'.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterglaccount_source_check") {
+		return "Source must be one of: ERP, Manual, Upload.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterglaccount_old_type_check") {
+		return "Old GL Account type must be one of: Asset, Liability, Equity, Income, Expense.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterglaccount_old_status_check") {
+		return "Old status must be either 'Active' or 'Inactive'.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterglaccount_old_source_check") {
+		return "Old source must be one of: ERP, Manual, Upload.", http.StatusOK
+	}
+
+	// Audit action check constraints
+	if strings.Contains(errLower, "auditactionglaccount_actiontype_check") {
+		return "Action type must be one of: CREATE, EDIT, DELETE.", http.StatusOK
+	}
+	if strings.Contains(errLower, "auditactionglaccount_processing_status_check") {
+		return "Processing status must be one of: PENDING_APPROVAL, PENDING_EDIT_APPROVAL, PENDING_DELETE_APPROVAL, APPROVED, REJECTED, CANCELLED.", http.StatusOK
+	}
+
+	// Foreign key violations
+	if strings.Contains(errLower, "foreign key") || strings.Contains(errLower, "fk_") || strings.Contains(errLower, "_fkey") {
+		if strings.Contains(errLower, "parent_gl_account_id") {
+			return "Parent GL Account does not exist or has been deleted.", http.StatusOK
+		}
+		if strings.Contains(errLower, "child_gl_account_id") {
+			return "Child GL Account does not exist or has been deleted.", http.StatusOK
+		}
+		return "Referenced record does not exist. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations
+	if strings.Contains(errLower, "not null") || strings.Contains(errLower, "null value") {
+		if strings.Contains(errLower, "gl_account_code") {
+			return "GL Account code is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "gl_account_name") {
+			return "GL Account name is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "gl_account_type") {
+			return "GL Account type is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "status") {
+			return "Status is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "source") {
+			return "Source is required.", http.StatusOK
+		}
+		return "A required field is missing. Please check your input.", http.StatusOK
+	}
+
+	// Connection errors
+	if strings.Contains(errLower, "connection") || strings.Contains(errLower, "timeout") {
+		return fmt.Sprintf("%s: Database connection issue. Please try again.", context), http.StatusServiceUnavailable
+	}
+
+	// Default error
+	return fmt.Sprintf("%s: %s", context, errMsg), http.StatusInternalServerError
+}
+
 // normalizeDateLocal mirrors the NormalizeDate implementations used elsewhere in masters.
 func normalizeDateLocal(dateStr string) string {
 	dateStr = strings.TrimSpace(dateStr)
@@ -124,7 +212,13 @@ func FindParentGLAccountAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(context.Background(), q, parentLevel)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to fetch parent GL accounts")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -163,9 +257,22 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		if len(currCodes) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, "No accessible currencies found for request")
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to start transaction")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer func() {
@@ -190,10 +297,43 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing required fields", "gl_account_code": rrow.GLAccountCode})
 				continue
 			}
+
+			// Validate currency
+			if rrow.DefaultCurrency != "" && !api.IsCurrencyAllowed(ctx, rrow.DefaultCurrency) {
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + rrow.DefaultCurrency, "gl_account_code": rrow.GLAccountCode})
+				continue
+			}
+
+			// Validate parent GL account exists in approved GL accounts
+			if rrow.ParentGLAccountCode != "" {
+				var parentExists bool
+				parentCheckQ := `SELECT EXISTS(
+					SELECT 1 FROM masterglaccount m
+					LEFT JOIN LATERAL (
+						SELECT processing_status FROM auditactionglaccount
+						WHERE gl_account_id = m.gl_account_id
+						ORDER BY requested_at DESC LIMIT 1
+					) a ON TRUE
+					WHERE m.gl_account_code = $1
+					AND UPPER(a.processing_status) = 'APPROVED'
+					AND UPPER(m.status) = 'ACTIVE'
+				)`
+				if err := tx.QueryRow(ctx, parentCheckQ, rrow.ParentGLAccountCode).Scan(&parentExists); err != nil || !parentExists {
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_gl_code not found or not approved: " + rrow.ParentGLAccountCode, "gl_account_code": rrow.GLAccountCode})
+					continue
+				}
+			}
+
 			sp := fmt.Sprintf("sp_%d", i)
 			if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to create savepoint: "+err.Error())
+				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to create savepoint")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			var effectiveFrom interface{}
@@ -272,7 +412,13 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to release savepoint: "+err.Error())
+				errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to release savepoint")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 
@@ -309,7 +455,13 @@ func CreateGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to save GL accounts")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		tx = nil
@@ -343,6 +495,14 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		if len(currCodes) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": []map[string]interface{}{}})
+			return
+		}
+
 		mainQ := `
 			SELECT 
 				m.gl_account_id, m.gl_account_code, m.gl_account_name, m.gl_account_type, m.status, m.source,
@@ -364,11 +524,18 @@ func GetGLAccountNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) l ON TRUE
+			WHERE (m.default_currency IS NULL OR m.default_currency = ANY($1))
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 
-		rows, err := pgxPool.Query(ctx, mainQ)
+		rows, err := pgxPool.Query(ctx, mainQ, currCodes)
 		if err != nil {
-			api.RespondWithResult(w, false, err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to fetch GL accounts")
+			if statusCode == http.StatusOK {
+				api.RespondWithResult(w, false, errMsg)
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -652,7 +819,16 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+
 		ctx := r.Context()
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		if len(currCodes) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			return
+		}
+
 		q := `
             WITH latest AS (
                 SELECT DISTINCT ON (gl_account_id) gl_account_id, processing_status
@@ -663,10 +839,17 @@ func GetApprovedActiveGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
             FROM masterglaccount m
             JOIN latest l ON l.gl_account_id = m.gl_account_id
             WHERE UPPER(l.processing_status) = 'APPROVED' AND UPPER(m.status) = 'ACTIVE'
+				AND (m.default_currency IS NULL OR m.default_currency = ANY($1))
         `
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, currCodes)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to fetch approved GL accounts")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -714,7 +897,7 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.GLAccountID) == "" {
@@ -749,6 +932,37 @@ func UpdateAndSyncGLAccounts(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := tx.QueryRow(ctx, sel, row.GLAccountID).Scan(&existingCode, &existingName, &existingType, &existingParentCode, &existingStatus, &existingSource, &existingLevel, &existingIsTop, &existingDefaultCurrency, &existingTags, &existingExtCode, &existingSegment, &existingSapBukrs, &existingSapKtopl, &existingSapSaknr, &existingSapKtoks, &existingOracleLedger, &existingOracleCoa, &existingOracleBal, &existingOracleNat, &existingTallyName, &existingTallyGroup, &existingSageDept, &existingSageCost, &existingEffFrom, &existingEffTo); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "gl_account_id": row.GLAccountID})
 					return
+				}
+
+				// Validate currency if being updated
+				if val, ok := row.Fields["default_currency"]; ok {
+					if valStr := fmt.Sprint(val); valStr != "" && !api.IsCurrencyAllowed(ctx, valStr) {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + valStr, "gl_account_id": row.GLAccountID})
+						return
+					}
+				}
+
+				// Validate parent GL code if being updated
+				if val, ok := row.Fields["parent_gl_account_code"]; ok {
+					parentCode := strings.TrimSpace(fmt.Sprint(val))
+					if parentCode != "" {
+						var parentExists bool
+						parentCheckQ := `SELECT EXISTS(
+							SELECT 1 FROM masterglaccount m
+							LEFT JOIN LATERAL (
+								SELECT processing_status FROM auditactionglaccount
+								WHERE gl_account_id = m.gl_account_id
+								ORDER BY requested_at DESC LIMIT 1
+							) a ON TRUE
+							WHERE m.gl_account_code = $1
+							AND UPPER(a.processing_status) = 'APPROVED'
+							AND UPPER(m.status) = 'ACTIVE'
+						)`
+						if err := tx.QueryRow(ctx, parentCheckQ, parentCode).Scan(&parentExists); err != nil || !parentExists {
+							results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_gl_code not found or not approved: " + parentCode, "gl_account_id": row.GLAccountID})
+							return
+						}
+					}
 				}
 
 				var sets []string
@@ -1032,7 +1246,13 @@ func DeleteGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := `INSERT INTO auditactionglaccount (gl_account_id, actiontype, processing_status, reason, requested_by, requested_at)
 			  SELECT gid, 'DELETE', 'PENDING_DELETE_APPROVAL', $1, $2, now() FROM unnest($3::text[]) AS gid`
 		if _, err := pgxPool.Exec(ctx, q, body.Reason, requestedBy, allList); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to queue GL accounts for deletion")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "queued_count": len(allList)})
@@ -1109,7 +1329,13 @@ func BulkRejectGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `UPDATE auditactionglaccount SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id`
 		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to reject GL account actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows2.Close()
@@ -1201,7 +1427,13 @@ func BulkApproveGLAccountActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `UPDATE auditactionglaccount SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE gl_account_id = ANY($3) RETURNING action_id, gl_account_id, actiontype`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyGLAccountError(err, "Failed to approve GL account actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -1263,6 +1495,12 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if userName == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		if len(currCodes) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, "No accessible currencies found for request")
 			return
 		}
 
@@ -1370,6 +1608,27 @@ func UploadGLAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err = tx.CopyFrom(ctx, pgx.Identifier{"input_glaccount_table"}, columns, pgx.CopyFromRows(copyRows)); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
 				return
+			}
+
+			// Validate staged data for currency authorization
+			var hasCurrency bool
+			for _, col := range columns {
+				if col == "default_currency" {
+					hasCurrency = true
+					break
+				}
+			}
+			if hasCurrency {
+				var invalidCurr string
+				checkCurrQ := `SELECT default_currency FROM input_glaccount_table WHERE upload_batch_id = $1 AND default_currency IS NOT NULL AND default_currency != '' AND NOT (UPPER(TRIM(default_currency)) = ANY($2)) LIMIT 1`
+				currCodesUpper := make([]string, len(currCodes))
+				for i, c := range currCodes {
+					currCodesUpper[i] = strings.ToUpper(strings.TrimSpace(c))
+				}
+				if err := tx.QueryRow(ctx, checkCurrQ, batchID, currCodesUpper).Scan(&invalidCurr); err == nil {
+					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized default_currency in upload: "+invalidCurr)
+					return
+				}
 			}
 
 			// Step 4: Map columns dynamically

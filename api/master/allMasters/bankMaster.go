@@ -2,7 +2,7 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +19,71 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
+
+// getUserFriendlyBankError converts database errors to user-friendly messages
+// Returns (error message, HTTP status code)
+// Known/expected errors return 200 with error message, unexpected errors return 500/503
+func getUserFriendlyBankError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errStr := err.Error()
+
+	// Duplicate bank name - Known error, return 200 for frontend to show message
+	if strings.Contains(errStr, "unique_bank_name_not_deleted") {
+		return "Bank name already exists. Please use a different name.", http.StatusOK
+	}
+
+	// Generic duplicate key - Known error, return 200
+	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique") {
+		return "This bank already exists in the system.", http.StatusOK
+	}
+
+	// Foreign key violations - Known error, return 200
+	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
+		return "Invalid reference. The related record does not exist.", http.StatusOK
+	}
+
+	// Check constraint violations - Known error, return 200
+	if strings.Contains(errStr, "check constraint") {
+		if strings.Contains(errStr, "actiontype_check") {
+			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
+		}
+		if strings.Contains(errStr, "processing_status_check") {
+			return "Invalid processing status.", http.StatusOK
+		}
+		return "Invalid data provided. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations - Known error, return 200
+	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
+		if strings.Contains(errStr, "bank_name") {
+			return "Bank name is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "country_of_headquarters") {
+			return "Country of headquarters is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "connectivity_type") {
+			return "Connectivity type is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "active_status") {
+			return "Active status is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Connection errors - SERVER ERROR (503 Service Unavailable)
+	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
+		return "Database connection error. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Return original error with context - SERVER ERROR (500)
+	if context != "" {
+		return context + ": " + errStr, http.StatusInternalServerError
+	}
+	return errStr, http.StatusInternalServerError
+}
 
 type BankMasterRequest struct {
 	BankName              string `json:"bank_name"`
@@ -42,35 +107,34 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req BankMasterRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		userID := req.UserID
-		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing user_id in body")
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "User session not found or Name missing")
+		createdBy := session.Name
+		// Validate required fields
+		if req.BankName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("bank_name"))
 			return
 		}
-		// Basic validation (add more as needed)
-		if req.BankName == "" || req.CountryOfHeadquarters == "" || req.ConnectivityType == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "Missing required bank details")
+		if req.CountryOfHeadquarters == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("country_of_headquarters"))
+			return
+		}
+		if req.ConnectivityType == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("connectivity_type"))
 			return
 		}
 		ctx := r.Context()
 		tx, txErr := pgxPool.Begin(ctx)
 		if txErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+txErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		var bankID string
@@ -100,7 +164,18 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&bankID)
 		if err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyBankError(err, "")
+			if statusCode == http.StatusOK {
+				// Known error - return 200 with success: false
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					constants.ValueSuccess: false,
+					"error":                errMsg,
+				})
+			} else {
+				// Unknown/server error - return error status code
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		auditQuery := `INSERT INTO auditactionbank (
@@ -115,11 +190,11 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 		if auditErr != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, "Bank created but audit log failed: "+auditErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditLogFailed)
 			return
 		}
 		if commitErr := tx.Commit(ctx); commitErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction commit failed: "+commitErr.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionCommitFailed)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -134,18 +209,27 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		query := `
 			SELECT m.bank_id, m.bank_name, m.bank_short_name, m.swift_bic_code, m.country_of_headquarters, m.connectivity_type, m.active_status,
-			       m.contact_person_name, m.contact_person_email, m.contact_person_phone, m.address_line1, m.address_line2, m.city,
-			       m.state_province, m.postal_code,
-			       m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
-			       m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
-			       m.old_state_province, m.old_postal_code
+				   m.contact_person_name, m.contact_person_email, m.contact_person_phone, m.address_line1, m.address_line2, m.city,
+				   m.state_province, m.postal_code,
+				   m.old_bank_name, m.old_bank_short_name, m.old_swift_bic_code, m.old_country_of_headquarters, m.old_connectivity_type, m.old_active_status,
+				   m.old_contact_person_name, m.old_contact_person_email, m.old_contact_person_phone, m.old_address_line1, m.old_address_line2, m.old_city,
+				   m.old_state_province, m.old_postal_code
 			FROM masterbank m
+			LEFT JOIN LATERAL (
+				SELECT requested_at, checker_at
+				FROM auditactionbank a
+				WHERE a.bank_id = m.bank_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) l ON TRUE
 			WHERE COALESCE(m.is_deleted, false) = false
-		`
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
+	`
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to retrieve banks")
+			api.RespondWithError(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -171,7 +255,8 @@ func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldBankName, &oldBankShortName, &oldSwiftBicCode, &oldCountryOfHQ, &oldConnectivityType, &oldActiveStatus,
 				&oldContactPersonName, &oldContactPersonEmail, &oldContactPersonPhone, &oldAddressLine1, &oldAddressLine2, &oldCity, &oldStateProvince, &oldPostalCode,
 			); err != nil {
-				anyError = err
+				errMsg, _ := getUserFriendlyBankError(err, "")
+				anyError = fmt.Errorf("Failed to process data: %v", errMsg)
 				break
 			}
 
@@ -449,7 +534,8 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to retrieve banks")
+			api.RespondWithError(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -510,19 +596,13 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Fetch user name from active sessions
-		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		userName := session.Name
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
@@ -586,7 +666,8 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				errMsg, statusCode := getUserFriendlyBankError(err, "Transaction failed")
+				api.RespondWithError(w, statusCode, errMsg)
 				return
 			}
 			committed := false
@@ -599,11 +680,10 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// stage
 			_, err = tx.CopyFrom(ctx, pgx.Identifier{"input_bank_table"}, columns, pgx.CopyFromRows(copyRows))
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				errMsg, statusCode := getUserFriendlyBankError(err, "Failed to stage data")
+				api.RespondWithError(w, statusCode, errMsg)
 				return
-			}
-
-			// read mapping
+			} // read mapping
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_bank`)
 			if err != nil {
 				tx.Rollback(ctx)
@@ -656,7 +736,8 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				errMsg, statusCode := getUserFriendlyBankError(err, "Insert failed")
+				api.RespondWithError(w, statusCode, errMsg)
 				return
 			}
 			var newIDs []string
@@ -672,14 +753,16 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditSQL := `INSERT INTO auditactionbank (bank_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT bank_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterbank WHERE bank_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					errMsg, statusCode := getUserFriendlyBankError(err, "Audit log failed")
+					api.RespondWithError(w, statusCode, errMsg)
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				errMsg, statusCode := getUserFriendlyBankError(err, "Transaction commit failed")
+				api.RespondWithError(w, statusCode, errMsg)
 				return
 			}
 			committed = true
@@ -688,9 +771,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
-}
-
-// Bulk update handler for bank master
+} // Bulk update handler for bank master
 func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -701,28 +782,23 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"banks"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		userID := req.UserID
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		updatedBy := session.Name
 		var results []map[string]interface{}
 		ctx := r.Context()
 		for _, bank := range req.Banks {
 			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + txErr.Error(), "bank_id": bank.BankID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTransactionFailed, "bank_id": bank.BankID})
 				continue
 			}
 			committed := false
@@ -742,7 +818,8 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var exAddr1, exAddr2, exCity, exState, exPostal *string
 				sel := `SELECT bank_name, bank_short_name, swift_bic_code, country_of_headquarters, connectivity_type, active_status, contact_person_name, contact_person_email, contact_person_phone, address_line1, address_line2, city, state_province, postal_code FROM masterbank WHERE bank_id=$1 FOR UPDATE`
 				if err := tx.QueryRow(ctx, sel, bank.BankID).Scan(&exBankName, &exBankShortName, &exSwift, &exCountry, &exConnectivity, &exActive, &exContactName, &exContactEmail, &exContactPhone, &exAddr1, &exAddr2, &exCity, &exState, &exPostal); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing bank: " + err.Error(), "bank_id": bank.BankID})
+					errMsg, _ := getUserFriendlyBankError(err, "Bank not found")
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "bank_id": bank.BankID})
 					return
 				}
 
@@ -888,7 +965,8 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE masterbank SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE bank_id=$%d RETURNING bank_id", pos)
 					args = append(args, bank.BankID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedBankID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "bank_id": bank.BankID})
+						errMsg, _ := getUserFriendlyBankError(err, "Update failed")
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "bank_id": bank.BankID})
 						return
 					}
 				} else {
@@ -900,12 +978,14 @@ func UpdateBankMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bank_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
 				if _, err := tx.Exec(ctx, auditQuery, updatedBankID, "EDIT", "PENDING_EDIT_APPROVAL", nil, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Bank updated but audit log failed: " + err.Error(), "bank_id": updatedBankID})
+					errMsg, _ := getUserFriendlyBankError(err, "Audit log failed")
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "bank_id": updatedBankID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Transaction commit failed: " + err.Error(), "bank_id": updatedBankID})
+					errMsg, _ := getUserFriendlyBankError(err, "Transaction commit failed")
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "bank_id": updatedBankID})
 					return
 				}
 				committed = true
@@ -929,22 +1009,18 @@ func BulkDeleteBankAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BankIDs []string `json:"bank_ids"`
 			Reason  string   `json:"reason"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BankIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		requestedBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		requestedBy := session.Name
 		var results []string
 		for _, bankID := range req.BankIDs {
 			query := `INSERT INTO auditactionbank (
@@ -972,26 +1048,23 @@ func BulkRejectBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BankIDs []string `json:"bank_ids"`
 			Comment string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide bank_ids")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BankIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
 		query := `UPDATE auditactionbank SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) RETURNING action_id,bank_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to reject audit actions")
+			api.RespondWithError(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
@@ -1017,22 +1090,18 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BankIDs []string `json:"bank_ids"`
 			Comment string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.BankIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide bank_ids")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BankIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given bank_ids
 		delQuery := `DELETE FROM auditactionbank WHERE bank_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, bank_id`
 		delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.BankIDs))
@@ -1057,7 +1126,8 @@ func BulkApproveBankAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `UPDATE auditactionbank SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE bank_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,bank_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.BankIDs))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyBankError(err, "Failed to approve audit actions")
+			api.RespondWithError(w, statusCode, errMsg)
 			return
 		}
 		defer rows.Close()
