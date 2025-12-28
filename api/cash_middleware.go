@@ -100,44 +100,44 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 				return
 			}
 
-		// Find root entity id in masterentitycash for this business unit
-		// Try exact match first, then case-insensitive match
-		var rootEntityId string
-		query := `SELECT entity_id FROM masterentitycash 
+			// Find root entity id in masterentitycash for this business unit
+			// Try exact match first, then case-insensitive match
+			var rootEntityId string
+			query := `SELECT entity_id FROM masterentitycash 
 			WHERE entity_name = $1 
 			AND (is_deleted = false OR is_deleted IS NULL) 
 			AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')`
-		
-		err := pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
-		
-		// If exact match fails, try case-insensitive and trimmed match
-		if err != nil {
-			LogError("Exact match failed for userBu: %s, trying case-insensitive match", userBu)
-			query = `SELECT entity_id FROM masterentitycash 
+
+			err := pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
+
+			// If exact match fails, try case-insensitive and trimmed match
+			if err != nil {
+				LogError("Exact match failed for userBu: %s, trying case-insensitive match", userBu)
+				query = `SELECT entity_id FROM masterentitycash 
 				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')
 				LIMIT 1`
-			err = pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
-		}
-		
-		// If still not found, try in masterentity as fallback
-		if err != nil {
-			LogError("Entity not found in masterentitycash for userBu: %s, checking masterentity", userBu)
-			query = `SELECT entity_id FROM masterentity 
+				err = pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
+			}
+
+			// If still not found, try in masterentity as fallback
+			if err != nil {
+				LogError("Entity not found in masterentitycash for userBu: %s, checking masterentity", userBu)
+				query = `SELECT entity_id FROM masterentity 
 				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
 				AND (is_deleted = false OR is_deleted IS NULL)
 				LIMIT 1`
-			err = pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
-		}
-		
-		if err != nil {
-			LogError("Business unit entity not found in any table for userBu: %s (error: %v)", userBu, err)
-			RespondWithPayload(w, false, "Business unit entity not found. Please ensure your business unit is properly configured in the system.", nil)
-			return
-		}
-		
-		LogError("Found entity_id: %s for userBu: %s", rootEntityId, userBu)			// Find all descendant business units using recursive CTE over cashentityrelationships
+				err = pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
+			}
+
+			if err != nil {
+				LogError("Business unit entity not found in any table for userBu: %s (error: %v)", userBu, err)
+				RespondWithPayload(w, false, "Business unit entity not found. Please ensure your business unit is properly configured in the system.", nil)
+				return
+			}
+
+			LogError("Found entity_id: %s for userBu: %s", rootEntityId, userBu) // Find all descendant business units using recursive CTE over cashentityrelationships
 			buRows, buErr := pgxPool.Query(r.Context(), `
              WITH RECURSIVE descendants AS (
     -- Start from the root entity

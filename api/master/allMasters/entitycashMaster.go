@@ -1489,7 +1489,7 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		
+
 		// Get user's accessible entities from context (hierarchy-based filtering)
 		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
 		if len(accessibleEntityIDs) == 0 {
@@ -1916,7 +1916,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 3) start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to start transaction")
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})

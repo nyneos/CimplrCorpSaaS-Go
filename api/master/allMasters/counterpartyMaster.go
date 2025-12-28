@@ -39,7 +39,7 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, "duplicate key") {
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
 		return "This counterparty already exists in the system.", http.StatusOK
 	}
 
@@ -47,7 +47,7 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	if strings.Contains(errStr, "mastercounterpartybanks_counterparty_fkey") {
 		return "Invalid counterparty. The counterparty does not exist.", http.StatusOK
 	}
-	
+
 	// Generic foreign key violations - Known error, return 200
 	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
 		return "Invalid reference. The related record does not exist.", http.StatusOK

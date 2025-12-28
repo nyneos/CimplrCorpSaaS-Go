@@ -9,34 +9,19 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+
+	// "log"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PreValidationMiddleware is a unified middleware that replaces 9 separate middlewares
-// It performs validation in a single optimized database query
-//
-// Replaces:
-// - SessionMiddleware
-// - EntityContextMiddleware
-// - CurrencyMiddleware
-// - BankVerificationMiddleware
-// - CashFlowCategoryMiddleware
-// - AMCVerificationMiddleware
-// - AccountVerificationMiddleware
-// - DPVerificationMiddleware
-// - SchemeVerificationMiddleware
-//
-// Performance: 15-20 DB queries → 1 DB query (10-15× faster)
 func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
-			// Step 1: Read and buffer the body (so handlers can read it later)
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to read request body")
@@ -45,27 +30,22 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			r.Body.Close()
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-			// Step 2: Extract user_id from the buffered body
 			userID, err := validation.ExtractUserID(r)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 
-			// Restore body for extraction function
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-			// Step 3: Validate session (in-memory, no DB)
 			session := validation.ValidateSession(userID)
 			if session == nil {
 				api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 				return
 			}
 
-			// Step 4: Single database query for user + business unit + root entity
 			validationResult, err := validation.PreValidateRequest(ctx, db, userID)
 			if err != nil {
-				// If validation failure is due to no business units/root entity, return a friendly 200-style response
 				le := strings.ToLower(err.Error())
 				if err == http.ErrMissingFile || strings.Contains(le, "no business") || strings.Contains(le, "no entity") || strings.Contains(le, "no accessible") {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -81,13 +61,10 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Step 5: Resolve entity hierarchy using recursive CTEs
 			entityIDs, entityNames, err := resolveEntityHierarchy(ctx, db, validationResult.RootEntityID)
 			if err != nil {
-				// Known case: no accessible entities found -> resolveEntityHierarchy returns http.ErrMissingFile
 				if err == http.ErrMissingFile {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					// Return a known-user-level response (HTTP 200) with a clear message
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": "No accessible business units found"})
 					return
 				}
@@ -95,84 +72,73 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Step 6: Load approved banks
 			banks, _ := loadApprovedBanks(ctx, db)
 
-			// Step 7: Load approved currencies
 			currencies, _ := loadApprovedCurrencies(ctx, db)
 
-			// Step 7.5: Load approved cash flow categories
 			cashFlowCategories, _ := loadApprovedCashFlowCategories(ctx, db)
 
-			// Step 7.6: Load approved AMCs
 			amcs, _ := loadApprovedAMCs(ctx, db)
 
-			// Step 7.7: Load approved Schemes
 			schemes, _ := loadApprovedSchemes(ctx, db)
 
-			// Step 7.8: Load approved DPs
 			dps, _ := loadApprovedDPs(ctx, db)
 
-			// Step 7.9: Load approved Bank Accounts
 			bankAccounts, _ := loadApprovedBankAccounts(ctx, db)
 
-			// Step 7.10: Load approved Folios
 			folios, _ := loadApprovedFolios(ctx, db)
 
-			// Step 7.11: Load approved Demats
 			demats, _ := loadApprovedDemats(ctx, db)
 
-			// Debug logging for all loaded data
-			log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-			log.Printf("User ID: %s\n", userID)
-			log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-			log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
-			log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
-			for i, name := range entityNames {
-				log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
-			}
-			log.Printf("\nApproved AMCs (%d):\n", len(amcs))
-			for i, amc := range amcs {
-				if i < 5 || i >= len(amcs)-2 {
-					log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
-				} else if i == 5 {
-					log.Printf("  ... (%d more) ...\n", len(amcs)-7)
-				}
-			}
-			log.Printf("\nApproved Schemes (%d):\n", len(schemes))
-			if len(schemes) > 0 {
-				log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
-				if len(schemes) > 1 {
-					log.Printf("  ... (%d more) ...\n", len(schemes)-1)
-				}
-			}
-			log.Printf("\nApproved DPs (%d):\n", len(dps))
-			for i, dp := range dps {
-				log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
-			}
-			log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
-			for i, acc := range bankAccounts {
-				log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
-					i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
-			}
-			log.Printf("\nApproved Folios (%d):\n", len(folios))
-			for i, f := range folios {
-				if i < 5 || i >= len(folios)-2 {
-					log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
-				} else if i == 5 {
-					log.Printf("  ... (%d more) ...\n", len(folios)-7)
-				}
-			}
-			log.Printf("\nApproved Demats (%d):\n", len(demats))
-			for i, d := range demats {
-				log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
-				if i >= 20 {
-					break
-				}
-			}
-			log.Printf("=========================================\n\n")
+			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
+			// log.Printf("User ID: %s\n", userID)
+			// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+			// log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
+			// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+			// for i, name := range entityNames {
+			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+			// }
+			// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
+			// for i, amc := range amcs {
+			// 	if i < 5 || i >= len(amcs)-2 {
+			// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
+			// 	} else if i == 5 {
+			// 		log.Printf("  ... (%d more) ...\n", len(amcs)-7)
+			// 	}
+			// }
+			// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
+			// if len(schemes) > 0 {
+			// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
+			// 	if len(schemes) > 1 {
+			// 		log.Printf("  ... (%d more) ...\n", len(schemes)-1)
+			// 	}
+			// }
+			// log.Printf("\nApproved DPs (%d):\n", len(dps))
+			// for i, dp := range dps {
+			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
+			// }
+			// log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+			// for i, acc := range bankAccounts {
+			// 	log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
+			// 		i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
+			// }
+			// log.Printf("\nApproved Folios (%d):\n", len(folios))
+			// for i, f := range folios {
+			// 	if i < 5 || i >= len(folios)-2 {
+			// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
+			// 	} else if i == 5 {
+			// 		log.Printf("  ... (%d more) ...\n", len(folios)-7)
+			// 	}
+			// }
+			// log.Printf("\nApproved Demats (%d):\n", len(demats))
+			// for i, d := range demats {
+			// 	log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
+			// 	if i >= 20 {
+			// 		break
+			// 	}
+			// }
+			// log.Printf("=========================================\n\n")
 
-			// Step 8: Attach all validated data to context for handlers to use
 			ctx = context.WithValue(ctx, "user_id", userID)
 			ctx = context.WithValue(ctx, "session", session)
 			ctx = context.WithValue(ctx, "business_unit", validationResult.BusinessUnit)
@@ -189,16 +155,12 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, "ApprovedBankAccounts", bankAccounts)
 			ctx = context.WithValue(ctx, "ApprovedFolios", folios)
 			ctx = context.WithValue(ctx, "ApprovedDemats", demats)
-			// Step 9: Restore body one more time for the handler
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-			// Pass to handler with enriched context
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
-
-// GetUserIDFromContext retrieves user_id from request context
 func GetUserIDFromContext(ctx context.Context) string {
 	if userID, ok := ctx.Value("user_id").(string); ok {
 		return userID
@@ -206,7 +168,6 @@ func GetUserIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// GetSessionFromContext retrieves the validated session from request context
 func GetSessionFromContext(ctx context.Context) *auth.UserSession {
 	if session, ok := ctx.Value("session").(*auth.UserSession); ok {
 		return session
@@ -214,7 +175,6 @@ func GetSessionFromContext(ctx context.Context) *auth.UserSession {
 	return nil
 }
 
-// GetBusinessUnitFromContext retrieves business_unit from request context
 func GetBusinessUnitFromContext(ctx context.Context) string {
 	if bu, ok := ctx.Value("business_unit").(string); ok {
 		return bu
@@ -222,7 +182,6 @@ func GetBusinessUnitFromContext(ctx context.Context) string {
 	return ""
 }
 
-// GetRootEntityFromContext retrieves root entity ID and name from request context
 func GetRootEntityFromContext(ctx context.Context) (id string, name string) {
 	if entityID, ok := ctx.Value("root_entity_id").(string); ok {
 		id = entityID
@@ -233,14 +192,11 @@ func GetRootEntityFromContext(ctx context.Context) (id string, name string) {
 	return id, name
 }
 
-// resolveEntityHierarchy queries both entity tables to build the complete entity hierarchy
-// Returns arrays of entity IDs and entity names accessible to this root entity
 func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId string) ([]string, []string, error) {
 	var buEntityIDs []string
 	var buNames []string
-	entityMap := make(map[string]bool) // For deduplication
+	entityMap := make(map[string]bool)
 
-	// Query 1: masterentitycash with cashentityrelationships (uses entity_name in JOINs)
 	query1 := `
 	WITH RECURSIVE descendants AS (
 		SELECT entity_id, entity_name
@@ -270,7 +226,6 @@ func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId 
 		}
 	}
 
-	// Query 2: masterEntity with entityRelationships (uses entity_id in JOINs)
 	query2 := `
 	WITH RECURSIVE descendants AS (
 		SELECT entity_id, entity_name
@@ -300,7 +255,6 @@ func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId 
 		}
 	}
 
-	// Error only if both queries failed completely
 	if len(buNames) == 0 {
 		return nil, nil, http.ErrMissingFile
 	}
@@ -308,7 +262,6 @@ func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId 
 	return buEntityIDs, buNames, nil
 }
 
-// loadApprovedBanks retrieves all approved active banks
 func loadApprovedBanks(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -351,7 +304,6 @@ func loadApprovedBanks(ctx context.Context, db *pgxpool.Pool) ([]map[string]stri
 	return banks, nil
 }
 
-// loadApprovedCurrencies retrieves all approved active currencies
 func loadApprovedCurrencies(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -393,7 +345,6 @@ func loadApprovedCurrencies(ctx context.Context, db *pgxpool.Pool) ([]map[string
 	return currencies, nil
 }
 
-// loadApprovedCashFlowCategories retrieves all approved active cash flow categories
 func loadApprovedCashFlowCategories(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -436,7 +387,6 @@ func loadApprovedCashFlowCategories(ctx context.Context, db *pgxpool.Pool) ([]ma
 	return categories, nil
 }
 
-// loadApprovedAMCs retrieves all approved active AMCs
 func loadApprovedAMCs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -479,7 +429,6 @@ func loadApprovedAMCs(ctx context.Context, db *pgxpool.Pool) ([]map[string]strin
 	return amcs, nil
 }
 
-// loadApprovedSchemes retrieves all approved active schemes
 func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -526,7 +475,6 @@ func loadApprovedSchemes(ctx context.Context, db *pgxpool.Pool) ([]map[string]st
 	return schemes, nil
 }
 
-// loadApprovedDPs retrieves all approved active DPs
 func loadApprovedDPs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -571,7 +519,6 @@ func loadApprovedDPs(ctx context.Context, db *pgxpool.Pool) ([]map[string]string
 	return dps, nil
 }
 
-// loadApprovedBankAccounts retrieves all approved active bank accounts
 func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -621,7 +568,6 @@ func loadApprovedBankAccounts(ctx context.Context, db *pgxpool.Pool) ([]map[stri
 	return bankAccounts, nil
 }
 
-// loadApprovedFolios retrieves all approved active folios
 func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (
@@ -668,7 +614,6 @@ func loadApprovedFolios(ctx context.Context, db *pgxpool.Pool) ([]map[string]str
 	return folios, nil
 }
 
-// loadApprovedDemats retrieves all approved active demat accounts
 func loadApprovedDemats(ctx context.Context, db *pgxpool.Pool) ([]map[string]string, error) {
 	query := `
 		WITH latest_approved AS (

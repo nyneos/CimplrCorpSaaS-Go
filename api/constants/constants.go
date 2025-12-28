@@ -100,7 +100,8 @@ const (
 
 // DB / SQL error templates
 const (
-	ErrTxStartFailed  = "failed to start transaction: "
+	// ErrTxStartFailed  = "failed to start transaction: "
+	ErrTxStartFailed  = "Failed to start transaction,"
 	ErrTxCommitFailed = "failed to commit transaction: "
 	ErrCommitFailed   = "commit failed: "
 	// ErrQueryFailed         = "query failed: "
@@ -140,6 +141,7 @@ const (
 	ErrCommitFailedCapitalized   = "Commit failed: "
 	ErrTxBeginFailedCapitalized  = "tx begin failed: "
 	ErrBeginTransactionFailed    = "begin transaction failed: %w"
+	ErrDuplicateKey              = "duplicate key"
 )
 
 // Date formats
@@ -173,8 +175,13 @@ const (
 	ErrBulkOnboardMappingFailed         = "onboard mapping failed: "
 	ErrBulkRelationshipInsertFailed     = "relationship insert failed: "
 	// ErrEntityNotFound                   = "Entity not found"
-	ErrAuthServiceUnavailable = "Auth service unavailable"
-	ErrNoRowsUpdated          = "No rows updated"
+	ErrAuthServiceUnavailable             = "Auth service unavailable"
+	ErrNoRowsUpdated                      = "No rows updated"
+	ErrFailedToFetchCategoryRelationships = "Failed to fetch category relationships"
+	ErrAlreadyExists                      = "already exists"
+	ErrAMCNotFoundOrNotApprovedActive     = "AMC not found or not approved/active: "
+	ErrUnableToUpdateParentAccountBalance = "Unable to update parent account balance"
+	ErrUnableToLogSweepExecution          = "Unable to log sweep execution"
 )
 const (
 	StatusCodeAwaitingApproval = "Awaiting-Approval"
@@ -199,6 +206,8 @@ const (
 	QuerryCurrencyCode     = " AND cp.currency_code = $%d"
 	QuerryFplCurrency      = " AND fpl.currency = $%d"
 	QuerryFilterGroup      = " AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d"
+	QuerryBankName         = "(b.bank_name IS NULL OR b.bank_name = ANY($%d))"
+	QuerryCurrency         = "(a.currency IS NULL OR a.currency = ANY($%d))"
 )
 
 var (

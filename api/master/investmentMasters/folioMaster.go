@@ -33,7 +33,7 @@ func getUserFriendlyFolioError(err error, context string) (string, int) {
 		strings.Contains(errMsg, "entity_name") && strings.Contains(errMsg, "amc_name") && strings.Contains(errMsg, "folio_number") {
 		return "Folio number already exists for this entity and AMC combination. Please use a different folio number.", http.StatusOK
 	}
-	if strings.Contains(errMsg, "duplicate key") {
+	if strings.Contains(errMsg, constants.ErrDuplicateKey) {
 		return "This folio already exists in the system.", http.StatusOK
 	}
 
@@ -216,7 +216,7 @@ func UploadFolio(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				if !amcFound {
-					api.RespondWithError(w, 400, "AMC not found or not approved/active: "+amcName)
+					api.RespondWithError(w, 400, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
 					return
 				}
 
@@ -844,7 +844,7 @@ func CreateFolioSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !amcFound {
-			api.RespondWithError(w, http.StatusBadRequest, "AMC not found or not approved/active: "+req.AMCName)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AMCName)
 			return
 		}
 

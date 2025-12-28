@@ -33,7 +33,7 @@ func getUserFriendlyDematError(err error, context string) (string, int) {
 
 	// Unique constraint: entity_name + demat_account_number
 	if strings.Contains(lower, "unique_entity_demat_not_deleted") ||
-		(strings.Contains(lower, "duplicate key") && strings.Contains(lower, "entity_name") && strings.Contains(lower, "demat_account_number")) {
+		(strings.Contains(lower, constants.ErrDuplicateKey) && strings.Contains(lower, "entity_name") && strings.Contains(lower, "demat_account_number")) {
 		return "A demat account with this entity and account number already exists.", http.StatusOK
 	}
 
@@ -180,7 +180,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get context-based access controls
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 
@@ -366,7 +366,7 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM investment.masterdemataccount
 					WHERE demat_account_number = ANY($2)
 				`, userName, dematNumbers); err != nil {
-					msg, status := getUserFriendlyDematError(err, "creating audit record")
+					msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 					api.RespondWithError(w, status, msg)
 					return
 				}
@@ -502,7 +502,7 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, dematID, userEmail); err != nil {
-			msg, status := getUserFriendlyDematError(err, "creating audit record")
+			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -643,7 +643,7 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 			`, dematID, userEmail); err != nil {
-				msg, _ := getUserFriendlyDematError(err, "creating audit record")
+				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: msg})
 				continue
 			}
@@ -769,7 +769,7 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.DematID, req.Reason, userEmail); err != nil {
-			msg, status := getUserFriendlyDematError(err, "creating audit record")
+			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -897,7 +897,7 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 			`, row.DematID, row.Reason, userEmail); err != nil {
-				msg, _ := getUserFriendlyDematError(err, "creating audit record")
+				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
 				continue
 			}
@@ -1195,7 +1195,7 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get context-based filtering
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 
@@ -1332,7 +1332,7 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get context-based filtering
 		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
 		if len(approvedEntities) == 0 {
-			api.RespondWithError(w, http.StatusForbidden, "No accessible entities")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 

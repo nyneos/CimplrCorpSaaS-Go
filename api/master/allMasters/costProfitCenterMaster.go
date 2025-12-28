@@ -45,7 +45,7 @@ func getUserFriendlyCostProfitCenterError(err error, context string) (string, in
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique") {
+	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
 		return "This cost/profit centre already exists in the system.", http.StatusOK
 	}
 
@@ -435,7 +435,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				errMsg, _ := getUserFriendlyCostProfitCenterError(err, "Failed to start transaction")
+				errMsg, _ := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "centre_id": row.CentreID})
 				continue
 			}
@@ -899,7 +899,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to start transaction")
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
@@ -1042,22 +1042,22 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-		relQuery := fmt.Sprintf("SELECT %s, %s FROM input_costprofitcenter WHERE upload_batch_id=$1", childSrcCol, parentSrcCol)
-		relRows, err := tx.Query(ctx, relQuery, batchID)
-		if err != nil {
-			tx.Rollback(ctx)
-			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to read relationship inputs")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
+			relQuery := fmt.Sprintf("SELECT %s, %s FROM input_costprofitcenter WHERE upload_batch_id=$1", childSrcCol, parentSrcCol)
+			relRows, err := tx.Query(ctx, relQuery, batchID)
+			if err != nil {
+				tx.Rollback(ctx)
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to read relationship inputs")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
 			}
-			return
-		}
-		defer relRows.Close()
+			defer relRows.Close()
 
-for relRows.Next() {
+			for relRows.Next() {
 				var childCode, parentCode interface{}
 				if err := relRows.Scan(&childCode, &parentCode); err == nil {
 					cc := strings.TrimSpace(ifaceToString(childCode))
@@ -1124,23 +1124,23 @@ for relRows.Next() {
 				if _, err := tx.Exec(ctx, auditSQL, userEmail, centreIDs); err != nil {
 					api.RespondWithResult(w, false, "Failed to insert audit actions: "+err.Error())
 					return
+				}
 			}
+
+			if err := tx.Commit(ctx); err != nil {
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to commit upload transaction")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
+			}
+			committed = true
 		}
 
-		if err := tx.Commit(ctx); err != nil {
-			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to commit upload transaction")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
-		}
-		committed = true
-	}
-
-w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_ids": batchIDs})
 	}
 }
@@ -1916,22 +1916,22 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-	// Update audit rows to REJECTED and return affected rows
-	query := `UPDATE auditactioncostprofitcenter SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id`
-	rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
-	if err != nil {
-		errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
-		if statusCode == http.StatusOK {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-		} else {
-			api.RespondWithError(w, statusCode, errMsg)
+		// Update audit rows to REJECTED and return affected rows
+		query := `UPDATE auditactioncostprofitcenter SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id`
+		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
-		return
-	}
-	defer rows2.Close()
+		defer rows2.Close()
 
-var updated []map[string]interface{}
+		var updated []map[string]interface{}
 		for rows2.Next() {
 			var actionID, centreID string
 			if err := rows2.Scan(&actionID, &centreID); err == nil {
@@ -2040,22 +2040,22 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-	// Update audit rows to APPROVED and return affected rows including action type
-	query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id, actiontype`
-	rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
-	if err != nil {
-		errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
-		if statusCode == http.StatusOK {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-		} else {
-			api.RespondWithError(w, statusCode, errMsg)
+		// Update audit rows to APPROVED and return affected rows including action type
+		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id, actiontype`
+		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
-		return
-	}
-	defer rows.Close()
+		defer rows.Close()
 
-var updated []map[string]interface{}
+		var updated []map[string]interface{}
 		var deleteIDs []string
 		for rows.Next() {
 			var actionID, centreID, actionType string
@@ -2067,22 +2067,22 @@ var updated []map[string]interface{}
 			}
 		}
 
-	// Set is_deleted=true for approved DELETE actions
-	if len(deleteIDs) > 0 {
-		updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
-		if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
-			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
+		// Set is_deleted=true for approved DELETE actions
+		if len(deleteIDs) > 0 {
+			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
+			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
+				return
 			}
-			return
 		}
-	}
 
-w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		success := len(updated) > 0
 		resp := map[string]interface{}{constants.ValueSuccess: success, "updated": updated}
 		if !success {

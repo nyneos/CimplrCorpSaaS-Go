@@ -36,7 +36,7 @@ func getUserFriendlyBankError(err error, context string) (string, int) {
 	}
 
 	// Generic duplicate key - Known error, return 200
-	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique") {
+	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
 		return "This bank already exists in the system.", http.StatusOK
 	}
 

@@ -122,19 +122,19 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate entity - user must have access to this entity
 		if !api.IsEntityAllowed(ctx, req.EntityID) {
-			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to create bank accounts for entity '"+req.EntityID+"'. Please contact your administrator.")
+			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to create bank accounts for entity '"+req.EntityID+constants.ErrBankAccountUpdateFailed)
 			return
 		}
 
 		// Validate bank - user must have access to this bank
 		if strings.TrimSpace(req.BankName) != "" && !api.IsBankAllowed(ctx, req.BankName) {
-			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use bank '"+req.BankName+"'. Please contact your administrator.")
+			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use bank '"+req.BankName+constants.ErrBankAccountUpdateFailed)
 			return
 		}
 
 		// Validate currency - user must have access to this currency
 		if strings.TrimSpace(req.Currency) != "" && !api.IsCurrencyAllowed(ctx, req.Currency) {
-			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use currency '"+req.Currency+"'. Please contact your administrator.")
+			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use currency '"+req.Currency+constants.ErrBankAccountUpdateFailed)
 			return
 		}
 
@@ -986,12 +986,12 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 			argIdx++
 		}
 		if len(bankNames) > 0 {
-			filters = append(filters, fmt.Sprintf("(b.bank_name IS NULL OR b.bank_name = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
 			args = append(args, bankNames)
 			argIdx++
 		}
 		if len(currCodes) > 0 {
-			filters = append(filters, fmt.Sprintf("(a.currency IS NULL OR a.currency = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
 			args = append(args, currCodes)
 		}
 
@@ -1548,12 +1548,12 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argIdx := 1
 
 		if len(bankNames) > 0 {
-			filters = append(filters, fmt.Sprintf("(b.bank_name IS NULL OR b.bank_name = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
 			args = append(args, bankNames)
 			argIdx++
 		}
 		if len(currCodes) > 0 {
-			filters = append(filters, fmt.Sprintf("(a.currency IS NULL OR a.currency = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
 			args = append(args, currCodes)
 		}
 
@@ -1774,12 +1774,12 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 		if len(bankNames) > 0 {
-			filters = append(filters, fmt.Sprintf("(b.bank_name IS NULL OR b.bank_name = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
 			args = append(args, bankNames)
 			argIdx++
 		}
 		if len(currCodes) > 0 {
-			filters = append(filters, fmt.Sprintf("(a.currency IS NULL OR a.currency = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
 			args = append(args, currCodes)
 		}
 
@@ -2237,16 +2237,16 @@ WHERE COALESCE(a.is_deleted, false) = false`
 		args = append(args, entityIDs)
 		argIdx++ // Filter by bank - optional
 		if len(bankNames) > 0 {
-			filters = append(filters, fmt.Sprintf("(b.bank_name IS NULL OR b.bank_name = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
 			args = append(args, bankNames)
 			argIdx++
 		}
 
 		// Filter by currency - optional
 		if len(currCodes) > 0 {
-			filters = append(filters, fmt.Sprintf("(a.currency IS NULL OR a.currency = ANY($%d))", argIdx))
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
 			args = append(args, currCodes)
-		} else {
+			argIdx++
 		}
 
 		if len(filters) > 0 {

@@ -2,8 +2,8 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	middlewares "CimplrCorpSaas/api/middlewares"
 	exposures "CimplrCorpSaas/api/fx/exposures"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1031,7 +1031,7 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to start transaction")
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
@@ -1392,7 +1392,7 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to start transaction")
+				errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
 				if statusCode == http.StatusOK {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})

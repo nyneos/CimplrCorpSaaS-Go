@@ -28,10 +28,10 @@ func getUserFriendlyDPError(err error, context string) (string, int) {
 
 	// Unique constraint violations (HTTP 200 - user errors)
 	if strings.Contains(errMsg, "unique_dp_code_not_deleted") ||
-	   strings.Contains(errMsg, "dp_code") && strings.Contains(errMsg, "already exists") {
+		strings.Contains(errMsg, "dp_code") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
 		return "DP code already exists. Please use a different code.", http.StatusOK
 	}
-	if strings.Contains(errMsg, "duplicate key") {
+	if strings.Contains(errMsg, constants.ErrDuplicateKey) {
 		return "This DP already exists in the system.", http.StatusOK
 	}
 

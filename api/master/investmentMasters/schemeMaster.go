@@ -27,23 +27,23 @@ func getUserFriendlySchemeError(err error, context string) (string, int) {
 	errMsg := err.Error()
 
 	// Unique constraint violations (HTTP 200 - user errors)
-	if strings.Contains(errMsg, "unique_scheme_isin_not_deleted") || 
-	   strings.Contains(errMsg, "ISIN already exists") {
+	if strings.Contains(errMsg, "unique_scheme_isin_not_deleted") ||
+		strings.Contains(errMsg, "ISIN already exists") {
 		return "Scheme with this ISIN already exists. Please use a different ISIN.", http.StatusOK
 	}
 	if strings.Contains(errMsg, "unique_scheme_name_not_deleted") ||
-	   strings.Contains(errMsg, "scheme_name") && strings.Contains(errMsg, "already exists") {
+		strings.Contains(errMsg, "scheme_name") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
 		return "Scheme name already exists. Please use a different name.", http.StatusOK
 	}
 	if strings.Contains(errMsg, "unique_internal_scheme_code_not_deleted") ||
-	   strings.Contains(errMsg, "internal_scheme_code") && strings.Contains(errMsg, "already exists") {
+		strings.Contains(errMsg, "internal_scheme_code") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
 		return "Internal scheme code already exists. Please use a different code.", http.StatusOK
 	}
 	if strings.Contains(errMsg, "unique_amfi_scheme_code_not_deleted") ||
-	   strings.Contains(errMsg, "amfi_scheme_code") && strings.Contains(errMsg, "already exists") {
+		strings.Contains(errMsg, "amfi_scheme_code") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
 		return "AMFI scheme code already exists. Please use a different code.", http.StatusOK
 	}
-	if strings.Contains(errMsg, "duplicate key") {
+	if strings.Contains(errMsg, constants.ErrDuplicateKey) {
 		return "This scheme already exists in the system.", http.StatusOK
 	}
 
@@ -60,11 +60,11 @@ func getUserFriendlySchemeError(err error, context string) (string, int) {
 
 	// Check constraint violations (HTTP 200 - user errors)
 	if strings.Contains(errMsg, "masterscheme_status_ck") ||
-	   strings.Contains(errMsg, "invalid input value") && strings.Contains(errMsg, "status") {
+		strings.Contains(errMsg, "invalid input value") && strings.Contains(errMsg, "status") {
 		return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
 	}
 	if strings.Contains(errMsg, "masterscheme_source_ck") ||
-	   strings.Contains(errMsg, "invalid input value") && strings.Contains(errMsg, "source") {
+		strings.Contains(errMsg, "invalid input value") && strings.Contains(errMsg, "source") {
 		return "Invalid source. Must be 'AMFI', 'Manual', or 'Upload'.", http.StatusOK
 	}
 	if strings.Contains(errMsg, "actiontype_check") {
@@ -90,9 +90,9 @@ func getUserFriendlySchemeError(err error, context string) (string, int) {
 
 	// Connection/timeout errors (HTTP 503 - server errors, retry-able)
 	if strings.Contains(errMsg, "connection refused") ||
-	   strings.Contains(errMsg, "connection reset") ||
-	   strings.Contains(errMsg, "timeout") ||
-	   strings.Contains(errMsg, "no connection") {
+		strings.Contains(errMsg, "connection reset") ||
+		strings.Contains(errMsg, "timeout") ||
+		strings.Contains(errMsg, "no connection") {
 		return "Database connection error. Please try again.", http.StatusServiceUnavailable
 	}
 
@@ -423,7 +423,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if !found {
-			api.RespondWithError(w, http.StatusBadRequest, "AMC not found or not approved/active: "+req.AmcName)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AmcName)
 			return
 		}
 
@@ -576,7 +576,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 					if !found {
-						api.RespondWithError(w, http.StatusBadRequest, "AMC not found or not approved/active: "+amcName)
+						api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
 						return
 					}
 				}
@@ -1208,7 +1208,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if !found {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: "AMC not found or not approved/active: " + row.AmcName,
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrAMCNotFoundOrNotApprovedActive + row.AmcName,
 				})
 				continue
 			}
@@ -1384,7 +1384,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 						if !found {
 							results = append(results, map[string]interface{}{
-								constants.ValueSuccess: false, constants.ValueError: "AMC not found or not approved/active: " + fmt.Sprint(v),
+								constants.ValueSuccess: false, constants.ValueError: constants.ErrAMCNotFoundOrNotApprovedActive + fmt.Sprint(v),
 							})
 							continue
 						}
