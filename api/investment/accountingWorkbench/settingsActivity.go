@@ -72,7 +72,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
-			http.Error(w, "Failed to start transaction", http.StatusInternalServerError)
+			http.Error(w, constants.ErrTxStartFailed, http.StatusInternalServerError)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -96,7 +96,7 @@ func CreateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&settingID, &createdAt, &updatedAt)
 
 		if err != nil {
-			if strings.Contains(err.Error(), "duplicate key") {
+			if strings.Contains(err.Error(), constants.ErrDuplicateKey) {
 				http.Error(w, "Setting with this key already exists", http.StatusConflict)
 				return
 			}
@@ -152,7 +152,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			log.Printf("Error starting transaction: %v", err)
-			http.Error(w, "Failed to start transaction", http.StatusInternalServerError)
+			http.Error(w, constants.ErrTxStartFailed, http.StatusInternalServerError)
 			return
 		}
 		defer tx.Rollback(ctx)

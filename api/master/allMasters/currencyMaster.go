@@ -2,7 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -16,6 +16,85 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
+
+// getUserFriendlyCurrencyError converts database errors into user-friendly messages
+func getUserFriendlyCurrencyError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := strings.ToLower(err.Error())
+
+	// Unique constraint violations
+	if strings.Contains(errMsg, "unique") || strings.Contains(errMsg, "duplicate") {
+		if strings.Contains(errMsg, "currency_code") || strings.Contains(errMsg, "mastercurrency_currency_code_key") {
+			return "Currency code already exists. Please use a different code.", http.StatusOK
+		}
+		return "This currency already exists in the system.", http.StatusOK
+	}
+
+	// Check constraint violations
+	if strings.Contains(errMsg, "check constraint") || strings.Contains(errMsg, "violates check") {
+		if strings.Contains(errMsg, "decimal_places") {
+			return "Decimal places must be between 0 and 4.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "old_decimal_places") {
+			return "Old decimal places value is invalid (must be 0-4).", http.StatusOK
+		}
+		if strings.Contains(errMsg, "actiontype") {
+			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "processing_status") {
+			return "Invalid processing status. Must be PENDING_APPROVAL, PENDING_EDIT_APPROVAL, PENDING_DELETE_APPROVAL, APPROVED, REJECTED, or CANCELLED.", http.StatusOK
+		}
+		return "Data validation failed. Please check your input values.", http.StatusOK
+	}
+
+	// Foreign key violations
+	if strings.Contains(errMsg, "foreign key") || strings.Contains(errMsg, "violates foreign key constraint") {
+		if strings.Contains(errMsg, "currency_id") {
+			return "Currency does not exist or has been deleted.", http.StatusOK
+		}
+		return "Referenced record does not exist.", http.StatusOK
+	}
+
+	// NOT NULL violations
+	if strings.Contains(errMsg, "null value") || strings.Contains(errMsg, "violates not-null constraint") {
+		if strings.Contains(errMsg, "currency_code") {
+			return "Currency code is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "currency_name") {
+			return "Currency name is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "country") {
+			return "Country is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "decimal_places") {
+			return "Decimal places is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "status") {
+			return "Status is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "actiontype") {
+			return "Action type is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "processing_status") {
+			return "Processing status is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Connection/timeout errors
+	if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "network") {
+		return "Database connection issue. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Default with context
+	if context != "" {
+		return context + ": " + err.Error(), http.StatusInternalServerError
+	}
+	return err.Error(), http.StatusInternalServerError
+}
 
 type CurrencyMasterRequest struct {
 	Status        string `json:"status"`
@@ -44,28 +123,55 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Currency []CurrencyMasterRequest `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		userID := req.UserID
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		createdBy := session.Name
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
-			if len(cur.CurrencyCode) != 3 || cur.CurrencyName == "" || cur.Country == "" || cur.DecimalPlaces < 0 || cur.DecimalPlaces > 4 || cur.Status == "" {
+			if len(cur.CurrencyCode) != 3 {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Invalid currency details",
+					constants.ValueError:   constants.FormatFieldError("currency_code", "must be exactly 3 characters"),
+					"currency_code":        cur.CurrencyCode,
+				})
+				continue
+			}
+			if cur.CurrencyName == "" {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.FormatMissingFieldError("currency_name"),
+					"currency_code":        cur.CurrencyCode,
+				})
+				continue
+			}
+			if cur.Country == "" {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.FormatMissingFieldError("country"),
+					"currency_code":        cur.CurrencyCode,
+				})
+				continue
+			}
+			if cur.DecimalPlaces < 0 || cur.DecimalPlaces > 4 {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.FormatFieldError("decimal_places", "must be between 0 and 4"),
+					"currency_code":        cur.CurrencyCode,
+				})
+				continue
+			}
+			if cur.Status == "" {
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   constants.FormatMissingFieldError("status"),
 					"currency_code":        cur.CurrencyCode,
 				})
 				continue
@@ -75,7 +181,7 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if txErr != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrTxStartFailed + txErr.Error(),
+					constants.ValueError:   constants.ErrTransactionFailed,
 					"currency_code":        cur.CurrencyCode,
 				})
 				continue
@@ -94,9 +200,13 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&currencyID)
 			if err != nil {
 				tx.Rollback(ctx)
+				errMsg := constants.ErrCurrencyCreateFailed
+				if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+					errMsg = constants.FormatError(constants.ErrCurrencyAlreadyExists, cur.CurrencyCode)
+				}
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
+					constants.ValueError:   errMsg,
 					"currency_code":        cur.CurrencyCode,
 				})
 				continue
@@ -115,7 +225,7 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Currency created but audit log failed: " + auditErr.Error(),
+					constants.ValueError:   constants.ErrAuditLogFailed,
 					"currency_id":          currencyID,
 					"currency_code":        cur.CurrencyCode,
 				})
@@ -124,7 +234,7 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if commitErr := tx.Commit(ctx); commitErr != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Transaction commit failed: " + commitErr.Error(),
+					constants.ValueError:   constants.ErrTransactionCommitFailed,
 					"currency_id":          currencyID,
 					"currency_code":        cur.CurrencyCode,
 				})
@@ -170,32 +280,38 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE currency_id = m.currency_id
 				ORDER BY requested_at DESC
 				LIMIT 1
-			) a ON TRUE
-			ORDER BY a.checker_at DESC NULLS LAST, a.requested_at DESC NULLS LAST
-		`
+		) a ON TRUE
+		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC;
+	`
 
-		rows, err := pgxPool.Query(ctx, query)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-			return
+	rows, err := pgxPool.Query(ctx, query)
+	if err != nil {
+		errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
+		if statusCode == http.StatusOK {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+		} else {
+			api.RespondWithError(w, statusCode, errMsg)
 		}
-		defer rows.Close()
+		return
+	}
+	defer rows.Close()
 
-		var currencies []map[string]interface{}
-		var anyError error
+	var currencies []map[string]interface{}
+	var anyError error
 
-		for rows.Next() {
-			var (
-				currencyID, currencyCode, currencyName, country, symbol, status, oldStatus string
-				decimalPlaces, oldDecimalPlaces                                            int
-				latestRequestedAt                                                          *time.Time
-			)
+	for rows.Next() {
+		var (
+			currencyID, currencyCode, currencyName, country, symbol, status, oldStatus string
+			decimalPlaces, oldDecimalPlaces                                            int
+			latestRequestedAt                                                          *time.Time
+		)
 			err := rows.Scan(
 				&currencyID, &currencyCode, &currencyName, &country, &symbol,
 				&decimalPlaces, &status, &oldDecimalPlaces, &oldStatus, &latestRequestedAt,
 			)
 			if err != nil {
-				anyError = err
+				anyError = fmt.Errorf("%s: %v", constants.ErrDatabaseScanFailed, err)
 				break
 			}
 
@@ -307,28 +423,23 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"currency"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		userID := req.UserID
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		updatedBy := session.Name
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
 			ctx := r.Context()
 			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTxStartFailed + txErr.Error(), "currency_id": cur.CurrencyID})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTransactionFailed, "currency_id": cur.CurrencyID})
 				continue
 			}
 			committed := false
@@ -347,7 +458,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var exStatus *string
 				sel := `SELECT decimal_places, status FROM mastercurrency WHERE currency_id=$1 FOR UPDATE`
 				if err := tx.QueryRow(ctx, sel, cur.CurrencyID).Scan(&exDecimal, &exStatus); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing currency: " + err.Error(), "currency_id": cur.CurrencyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCurrencyNotFound, "currency_id": cur.CurrencyID})
 					return
 				}
 
@@ -418,7 +529,7 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercurrency SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE currency_id=$%d RETURNING currency_id, currency_code", pos)
 					args = append(args, cur.CurrencyID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&currencyID, &currencyCode); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "currency_id": cur.CurrencyID})
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCurrencyUpdateFailed, "currency_id": cur.CurrencyID})
 						return
 					}
 				} else {
@@ -429,12 +540,12 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					currency_id, actiontype, processing_status, reason, requested_by, requested_at
 				) VALUES ($1, $2, $3, $4, $5, now())`
 				if _, err := tx.Exec(ctx, auditQuery, currencyID, "EDIT", "PENDING_EDIT_APPROVAL", cur.Reason, updatedBy); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Currency updated but audit log failed: " + err.Error(), "currency_id": currencyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrAuditLogFailed, "currency_id": currencyID})
 					return
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Transaction commit failed: " + err.Error(), "currency_id": currencyID})
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrTransactionCommitFailed, "currency_id": currencyID})
 					return
 				}
 				committed = true
@@ -456,26 +567,28 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CurrencyIDs []string `json:"currency_ids"`
 			Comment     string   `json:"comment"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide currency_ids")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.CurrencyIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
 		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to reject currency actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -493,72 +606,6 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// BulkApproveAuditActions sets processing_status to APPROVED for multiple actions
-// func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
-// 	return func(w http.ResponseWriter, r *http.Request) {
-// 		var req struct {
-// 			UserID      string   `json:"user_id"`
-// 			CurrencyIDs []string `json:"currency_ids"`
-// 			Comment     string   `json:"comment"`
-// 		}
-// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
-// 			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide currency_ids")
-// 			return
-// 		}
-// 		sessions := auth.GetActiveSessions()
-// 		checkerBy := ""
-// 		for _, s := range sessions {
-// 			if s.UserID == req.UserID {
-// 				checkerBy = s.Name
-// 				break
-// 			}
-// 		}
-// 		if checkerBy == "" {
-// 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
-// 			return
-// 		}
-// 		// First, delete records with processing_status = 'PENDING_DELETE_APPROVAL' for the given action_ids
-// 	delQuery := `DELETE FROM auditactioncurrency WHERE currency_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, currency_id`
-// 	delRows, delErr := pgxPool.Query(r.Context(), delQuery, pq.Array(req.CurrencyIDs))
-// 		var deleted []string
-// 		var currencyIDsToDelete []string
-// 		if delErr == nil {
-// 			defer delRows.Close()
-// 			for delRows.Next() {
-// 				var id, currencyID string
-// 				delRows.Scan(&id, &currencyID)
-// 				deleted = append(deleted, id, currencyID)
-// 				currencyIDsToDelete = append(currencyIDsToDelete, currencyID)
-// 			}
-// 		}
-// 		// Delete corresponding currencies from mastercurrency
-// 		if len(currencyIDsToDelete) > 0 {
-// 			// soft-delete: mark rows as deleted
-// 			_, _ = pgxPool.Exec(r.Context(), `UPDATE mastercurrency SET is_deleted = true WHERE currency_id = ANY($1)`, pq.Array(currencyIDsToDelete))
-// 		}
-
-//			// Then, approve the rest
-//		query := `UPDATE auditactioncurrency SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id,currency_id`
-//		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
-//			if err != nil {
-//				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
-//				return
-//			}
-//			defer rows.Close()
-//			var updated []string
-//			for rows.Next() {
-//				var id, currencyID string
-//				rows.Scan(&id, &currencyID)
-//				updated = append(updated, id, currencyID)
-//			}
-//			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-//			json.NewEncoder(w).Encode(map[string]interface{}{
-//				constants.ValueSuccess: true,
-//				"updated": updated,
-//				"deleted": deleted,
-//			})
-//		}
-//	}
 func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -568,24 +615,18 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Step 1: Validate input ---
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields: provide currency_ids")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.CurrencyIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
 
-		// --- Step 2: Verify session ---
-		sessions := auth.GetActiveSessions()
-		checkerBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		// --- Step 2: Get pre-validated context values ---
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
 
 		ctx := r.Context()
 
@@ -614,7 +655,7 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(currencyIDsToDelete) > 0 {
 			delCurQuery := `DELETE FROM mastercurrency WHERE currency_id = ANY($1)`
 			if _, err := pgxPool.Exec(ctx, delCurQuery, pq.Array(currencyIDsToDelete)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to delete from mastercurrency: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDatabaseDeleteFailed)
 				return
 			}
 		}
@@ -632,7 +673,13 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, approveQuery, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to approve audit actions: "+err.Error())
+			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to approve currency actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -662,22 +709,18 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CurrencyIDs []string `json:"currency_ids"`
 			Reason      string   `json:"reason"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.CurrencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.CurrencyIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMissingRequiredField)
 			return
 		}
-		sessions := auth.GetActiveSessions()
-		requestedBy := ""
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		// Get pre-validated context values
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		requestedBy := session.Name
 		ctx := r.Context()
 		var results []string
 		for _, currencyID := range req.CurrencyIDs {
@@ -716,7 +759,13 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch active currency codes")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -749,3 +798,5 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+
+// Helper functions for type conversion

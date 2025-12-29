@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -100,17 +101,43 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 			}
 
 			// Find root entity id in masterentitycash for this business unit
+			// Try exact match first, then case-insensitive match
 			var rootEntityId string
-			if err := pgxPool.QueryRow(r.Context(),
-				"SELECT entity_id FROM masterentitycash WHERE entity_name = $1 AND (is_deleted = false OR is_deleted IS NULL) AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')",
-				userBu,
-			).Scan(&rootEntityId); err != nil {
-				LogError("Business unit entity not found for userBu: %s", userBu)
-				RespondWithPayload(w, false, "Business unit entity not found", nil)
+			query := `SELECT entity_id FROM masterentitycash 
+			WHERE entity_name = $1 
+			AND (is_deleted = false OR is_deleted IS NULL) 
+			AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')`
+
+			err := pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
+
+			// If exact match fails, try case-insensitive and trimmed match
+			if err != nil {
+				LogError("Exact match failed for userBu: %s, trying case-insensitive match", userBu)
+				query = `SELECT entity_id FROM masterentitycash 
+				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
+				AND (is_deleted = false OR is_deleted IS NULL) 
+				AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')
+				LIMIT 1`
+				err = pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
+			}
+
+			// If still not found, try in masterentity as fallback
+			if err != nil {
+				LogError("Entity not found in masterentitycash for userBu: %s, checking masterentity", userBu)
+				query = `SELECT entity_id FROM masterentity 
+				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
+				AND (is_deleted = false OR is_deleted IS NULL)
+				LIMIT 1`
+				err = pgxPool.QueryRow(r.Context(), query, userBu).Scan(&rootEntityId)
+			}
+
+			if err != nil {
+				LogError("Business unit entity not found in any table for userBu: %s (error: %v)", userBu, err)
+				RespondWithPayload(w, false, "Business unit entity not found. Please ensure your business unit is properly configured in the system.", nil)
 				return
 			}
 
-			// Find all descendant business units using recursive CTE over cashentityrelationships
+			LogError("Found entity_id: %s for userBu: %s", rootEntityId, userBu) // Find all descendant business units using recursive CTE over cashentityrelationships
 			buRows, buErr := pgxPool.Query(r.Context(), `
              WITH RECURSIVE descendants AS (
     -- Start from the root entity
@@ -132,15 +159,15 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 
     UNION ALL
     
-    -- Recursive step: fetch children
+    -- Recursive step: fetch children (cashentityrelationships uses entity_name, NOT entity_id!)
     SELECT 
         child.entity_id,
         child.entity_name
     FROM masterentitycash child
     INNER JOIN cashentityrelationships er 
-        ON child.entity_id = er.child_entity_id
+        ON child.entity_name = er.child_entity_name
     INNER JOIN descendants d 
-        ON er.parent_entity_id = d.entity_id
+        ON er.parent_entity_name = d.entity_name
     INNER JOIN LATERAL (
         SELECT aa.processing_status
         FROM auditactionentity aa
@@ -158,8 +185,8 @@ FROM descendants;
 
             `, rootEntityId)
 			if buErr != nil {
-				LogError("No accessible business units found for rootEntityId: %s", rootEntityId)
-				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
+				LogError("Descendants query execution failed for rootEntityId: %s, error: %v", rootEntityId, buErr)
+				RespondWithPayload(w, false, fmt.Sprintf("Failed to fetch descendants: %v", buErr), nil)
 				return
 			}
 			defer buRows.Close()

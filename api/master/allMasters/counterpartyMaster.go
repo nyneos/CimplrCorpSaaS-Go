@@ -2,7 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +17,84 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// getUserFriendlyCounterpartyError converts database errors to user-friendly messages
+// Returns (error message, HTTP status code)
+// Known/expected errors return 200 with error message, unexpected errors return 500/503
+func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errStr := err.Error()
+
+	// Duplicate counterparty name - Known error, return 200 for frontend to show message
+	if strings.Contains(errStr, "unique_counterparty_name_not_deleted") {
+		return "Counterparty name already exists. Please use a different name.", http.StatusOK
+	}
+
+	// Duplicate counterparty code - Known error, return 200
+	if strings.Contains(errStr, "unique_counterparty_code_not_deleted") {
+		return "Counterparty code already exists. Please use a different code.", http.StatusOK
+	}
+
+	// Generic duplicate key - Known error, return 200
+	if strings.Contains(errStr, constants.ErrDuplicateKey) {
+		return "This counterparty already exists in the system.", http.StatusOK
+	}
+
+	// Foreign key violation - Known error, return 200
+	if strings.Contains(errStr, "mastercounterpartybanks_counterparty_fkey") {
+		return "Invalid counterparty. The counterparty does not exist.", http.StatusOK
+	}
+
+	// Generic foreign key violations - Known error, return 200
+	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
+		return "Invalid reference. The related record does not exist.", http.StatusOK
+	}
+
+	// Check constraint violations - Known error, return 200
+	if strings.Contains(errStr, "check constraint") {
+		if strings.Contains(errStr, "actiontype_check") {
+			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
+		}
+		if strings.Contains(errStr, "processing_status_check") {
+			return "Invalid processing status.", http.StatusOK
+		}
+		return "Invalid data provided. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations - Known error, return 200
+	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
+		if strings.Contains(errStr, "counterparty_name") {
+			return "Counterparty name is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "counterparty_code") {
+			return "Counterparty code is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "counterparty_type") {
+			return "Counterparty type is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "country") {
+			return "Country is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "currency") {
+			return "Currency is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Connection errors - SERVER ERROR (503 Service Unavailable)
+	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
+		return "Database connection error. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Return original error with context - SERVER ERROR (500)
+	if context != "" {
+		return context + ": " + errStr, http.StatusInternalServerError
+	}
+	return errStr, http.StatusInternalServerError
+}
 
 // Minimal request shape for counterparty create/sync
 type CounterpartyRequest struct {
@@ -65,22 +143,16 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []CounterpartyRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
-		// validate session and get created_by
-		createdBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
-		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		createdBy := session.Name
 
 		ctx := r.Context()
 		created := make([]map[string]interface{}, 0)
@@ -88,6 +160,29 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for _, rrow := range req.Rows {
 			if rrow.CounterpartyName == "" || rrow.CounterpartyCode == "" || rrow.CounterpartyType == "" {
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "missing required fields", "counterparty_name": rrow.CounterpartyName})
+				continue
+			}
+
+			// Validate banks before transaction
+			shouldSkip := false
+			for _, b := range rrow.Banks {
+				if strings.TrimSpace(b.BankName) != "" && !api.IsBankAllowed(ctx, b.BankName) {
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized bank: " + b.BankName, "counterparty_name": rrow.CounterpartyName})
+					shouldSkip = true
+					break
+				}
+				if strings.TrimSpace(b.Currency) != "" && !api.IsCurrencyAllowed(ctx, b.Currency) {
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized currency: " + b.Currency, "counterparty_name": rrow.CounterpartyName})
+					shouldSkip = true
+					break
+				}
+				if strings.TrimSpace(b.Category) != "" && !api.IsCashFlowCategoryAllowed(ctx, b.Category) {
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized category: " + b.Category, "counterparty_name": rrow.CounterpartyName})
+					shouldSkip = true
+					break
+				}
+			}
+			if shouldSkip {
 				continue
 			}
 
@@ -121,7 +216,8 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
 			if _, err := tx.Exec(ctx, q, id, rrow.InputMethod, rrow.CounterpartyName, rrow.CounterpartyCode, rrow.CounterpartyType, rrow.Address, rrow.Status, rrow.Country, rrow.Contact, rrow.Email, effFrom, effTo, rrow.Tags); err != nil {
 				tx.Rollback(ctx)
-				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "counterparty_name": rrow.CounterpartyName})
+				errMsg, _ := getUserFriendlyCounterpartyError(err, "Failed to create counterparty")
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "counterparty_name": rrow.CounterpartyName})
 				continue
 			}
 
@@ -165,7 +261,8 @@ func CreateCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bankQ := `INSERT INTO mastercounterpartybanks (bank_id, counterparty_id, bank, country, branch, account, swift, rel, currency, category, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`
 				if _, err := tx.Exec(ctx, bankQ, bankID, id, b.BankName, b.Country, branch, account, swift, rel, b.Currency, category, status); err != nil {
 					tx.Rollback(ctx)
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "bank insert failed: " + err.Error(), "counterparty_name": rrow.CounterpartyName})
+					errMsg, _ := getUserFriendlyCounterpartyError(err, "Bank information error")
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "counterparty_name": rrow.CounterpartyName})
 					goto nextRow
 				}
 				bankResults = append(bankResults, map[string]interface{}{constants.ValueSuccess: true, "bank_id": bankID})
@@ -211,19 +308,13 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		// validate session
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -239,6 +330,7 @@ func GetCounterpartyNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   l.processing_status, l.requested_by, l.requested_at, l.actiontype, l.action_id, l.checker_by, l.checker_at, l.checker_comment, l.reason
 			FROM mastercounterparty m
 			LEFT JOIN latest l ON l.counterparty_id = m.counterparty_id
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, mainQ)
@@ -415,24 +507,53 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "counterparty_id required")
 			return
 		}
-		// validate session
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
-		q := `SELECT bank_id, bank, old_bank, country, old_country, branch, old_branch, account, old_account, swift, old_swift, rel, old_rel, currency, old_currency, category, old_category, status, old_status FROM mastercounterpartybanks WHERE counterparty_id = $1`
-		rows, err := pgxPool.Query(ctx, q, req.CounterpartyID)
+
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
+
+		baseQ := `SELECT bank_id, bank, old_bank, country, old_country, branch, old_branch, account, old_account, swift, old_swift, rel, old_rel, currency, old_currency, category, old_category, status, old_status FROM mastercounterpartybanks WHERE counterparty_id = $1`
+
+		filters := []string{}
+		args := []interface{}{req.CounterpartyID}
+		argIdx := 2
+
+		if len(bankNames) > 0 {
+			filters = append(filters, fmt.Sprintf("(bank IS NULL OR bank = ANY($%d))", argIdx))
+			args = append(args, bankNames)
+			argIdx++
+		}
+		if len(currCodes) > 0 {
+			filters = append(filters, fmt.Sprintf("(currency IS NULL OR currency = ANY($%d))", argIdx))
+			args = append(args, currCodes)
+			argIdx++
+		}
+		if len(categories) > 0 {
+			filters = append(filters, fmt.Sprintf("(category IS NULL OR category = ANY($%d))", argIdx))
+			args = append(args, categories)
+		}
+
+		if len(filters) > 0 {
+			baseQ += " AND " + strings.Join(filters, " AND ")
+		}
+
+		rows, err := pgxPool.Query(ctx, baseQ, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyCounterpartyError(err, "Query failed")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -467,7 +588,13 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "row iteration failed: "+err.Error())
+			errMsg, statusCode := getUserFriendlyCounterpartyError(err, "Failed to process data")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 
@@ -482,18 +609,13 @@ func GetApprovedActiveCounterparties(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
@@ -545,20 +667,16 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		updatedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		updatedBy := session.Name
 
 		ctx := r.Context()
 		results := []map[string]interface{}{}
@@ -666,7 +784,8 @@ func UpdateCounterpartyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercounterparty SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE counterparty_id=$%d RETURNING counterparty_id", pos)
 					args = append(args, row.CounterpartyID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "counterparty_id": row.CounterpartyID})
+						errMsg, _ := getUserFriendlyCounterpartyError(err, "Update failed")
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "counterparty_id": row.CounterpartyID})
 						return
 					}
 				}
@@ -721,20 +840,16 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		updatedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		updatedBy := session.Name
 
 		ctx := r.Context()
 		results := []map[string]interface{}{}
@@ -817,7 +932,8 @@ func UpdateCounterpartyBanksBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					q := "UPDATE mastercounterpartybanks SET " + strings.Join(sets, ", ") + fmt.Sprintf(" WHERE bank_id=$%d RETURNING bank_id", pos)
 					args = append(args, row.BankID)
 					if err := tx.QueryRow(ctx, q, args...).Scan(&updatedBankID); err != nil {
-						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrUpdateFailed + err.Error(), "bank_id": row.BankID})
+						errMsg, _ := getUserFriendlyCounterpartyError(err, "Bank update failed")
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "bank_id": row.BankID})
 						return
 					}
 				}
@@ -853,21 +969,16 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason          string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
-		requestedBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == body.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		requestedBy := session.Name
 
 		if len(body.CounterpartyIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "counterparty_ids required")
@@ -877,7 +988,7 @@ func DeleteCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		committed := false
@@ -915,25 +1026,21 @@ func BulkRejectCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment         string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1019,25 +1126,21 @@ func BulkApproveCounterpartyActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment         string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		checkerBy := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
 
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1142,7 +1245,6 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusBadRequest, "user_id required in body")
 				return
 			}
-			userID = req.UserID
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
@@ -1150,17 +1252,12 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		userName := session.Name
 
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseMultipartForm)
@@ -1222,7 +1319,7 @@ func UploadCounterparty(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 				return
 			}
 			committed := false
@@ -1329,17 +1426,12 @@ func UploadCounterpartySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		userName := session.Name
 
 		// === Step 2: Parse uploaded CSV ===
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -1512,17 +1604,12 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		userName := session.Name
 
 		// --- counterparty_id (from form, required) ---
 		counterpartyID := strings.TrimSpace(r.FormValue("counterparty_id"))
@@ -1642,6 +1729,64 @@ func UploadCounterpartyBankSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"mastercounterpartybanks"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
 				return
+			}
+
+			// Validate banks, currencies, categories after staging
+			if slices.Contains(validCols, "bank") {
+				var invalidBanks []string
+				bankQ := `SELECT DISTINCT UPPER(TRIM(bank)) FROM mastercounterpartybanks WHERE counterparty_id = $1 AND UPPER(TRIM(bank)) != '' AND UPPER(TRIM(bank)) != ALL($2)`
+				bankRows, berr := tx.Query(ctx, bankQ, counterpartyID, api.GetBankNamesFromCtx(ctx))
+				if berr == nil {
+					for bankRows.Next() {
+						var b string
+						if bankRows.Scan(&b) == nil {
+							invalidBanks = append(invalidBanks, b)
+						}
+					}
+					bankRows.Close()
+					if len(invalidBanks) > 0 {
+						api.RespondWithError(w, http.StatusBadRequest, "Invalid or unauthorized banks: "+strings.Join(invalidBanks, ", "))
+						return
+					}
+				}
+			}
+
+			if slices.Contains(validCols, "currency") {
+				var invalidCurrs []string
+				currQ := `SELECT DISTINCT UPPER(TRIM(currency)) FROM mastercounterpartybanks WHERE counterparty_id = $1 AND UPPER(TRIM(currency)) != '' AND UPPER(TRIM(currency)) != ALL($2)`
+				currRows, cerr := tx.Query(ctx, currQ, counterpartyID, api.GetCurrencyCodesFromCtx(ctx))
+				if cerr == nil {
+					for currRows.Next() {
+						var c string
+						if currRows.Scan(&c) == nil {
+							invalidCurrs = append(invalidCurrs, c)
+						}
+					}
+					currRows.Close()
+					if len(invalidCurrs) > 0 {
+						api.RespondWithError(w, http.StatusBadRequest, "Invalid or unauthorized currencies: "+strings.Join(invalidCurrs, ", "))
+						return
+					}
+				}
+			}
+
+			if slices.Contains(validCols, "category") {
+				var invalidCategories []string
+				catQ := `SELECT DISTINCT UPPER(TRIM(category)) FROM mastercounterpartybanks WHERE counterparty_id = $1 AND UPPER(TRIM(category)) != '' AND UPPER(TRIM(category)) != ALL($2)`
+				catRows, caterr := tx.Query(ctx, catQ, counterpartyID, api.GetCashFlowCategoryNamesFromCtx(ctx))
+				if caterr == nil {
+					for catRows.Next() {
+						var cat string
+						if catRows.Scan(&cat) == nil {
+							invalidCategories = append(invalidCategories, cat)
+						}
+					}
+					catRows.Close()
+					if len(invalidCategories) > 0 {
+						api.RespondWithError(w, http.StatusBadRequest, "Invalid or unauthorized categories: "+strings.Join(invalidCategories, ", "))
+						return
+					}
+				}
 			}
 
 			auditSQL := `

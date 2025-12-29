@@ -17,6 +17,89 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// getUserFriendlySchemeError converts database errors into user-friendly messages
+// Returns (user-friendly message, HTTP status code)
+func getUserFriendlySchemeError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := err.Error()
+
+	// Unique constraint violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "unique_scheme_isin_not_deleted") ||
+		strings.Contains(errMsg, "ISIN already exists") {
+		return "Scheme with this ISIN already exists. Please use a different ISIN.", http.StatusOK
+	}
+	if strings.Contains(errMsg, "unique_scheme_name_not_deleted") ||
+		strings.Contains(errMsg, "scheme_name") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
+		return "Scheme name already exists. Please use a different name.", http.StatusOK
+	}
+	if strings.Contains(errMsg, "unique_internal_scheme_code_not_deleted") ||
+		strings.Contains(errMsg, "internal_scheme_code") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
+		return "Internal scheme code already exists. Please use a different code.", http.StatusOK
+	}
+	if strings.Contains(errMsg, "unique_amfi_scheme_code_not_deleted") ||
+		strings.Contains(errMsg, "amfi_scheme_code") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
+		return "AMFI scheme code already exists. Please use a different code.", http.StatusOK
+	}
+	if strings.Contains(errMsg, constants.ErrDuplicateKey) {
+		return "This scheme already exists in the system.", http.StatusOK
+	}
+
+	// Foreign key violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "foreign key") || strings.Contains(errMsg, "fk_") {
+		if strings.Contains(errMsg, "amc") {
+			return "Cannot perform this operation. AMC reference is invalid or has been deleted.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "scheme") {
+			return "Cannot perform this operation. Scheme is referenced by other records (folios, transactions).", http.StatusOK
+		}
+		return "Cannot perform this operation. Referenced data is invalid or missing.", http.StatusOK
+	}
+
+	// Check constraint violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "masterscheme_status_ck") ||
+		strings.Contains(errMsg, "invalid input value") && strings.Contains(errMsg, "status") {
+		return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
+	}
+	if strings.Contains(errMsg, "masterscheme_source_ck") ||
+		strings.Contains(errMsg, "invalid input value") && strings.Contains(errMsg, "source") {
+		return "Invalid source. Must be 'AMFI', 'Manual', or 'Upload'.", http.StatusOK
+	}
+	if strings.Contains(errMsg, "actiontype_check") {
+		return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
+	}
+	if strings.Contains(errMsg, "processing_status_check") {
+		return "Invalid processing status.", http.StatusOK
+	}
+
+	// Not-null constraint violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "not-null") || strings.Contains(errMsg, "null value") {
+		if strings.Contains(errMsg, "scheme_name") {
+			return "Scheme name is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "amc_name") {
+			return "AMC name is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "internal_scheme_code") {
+			return "Internal scheme code is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Connection/timeout errors (HTTP 503 - server errors, retry-able)
+	if strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "connection reset") ||
+		strings.Contains(errMsg, "timeout") ||
+		strings.Contains(errMsg, "no connection") {
+		return "Database connection error. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Unknown errors (HTTP 500 - server errors)
+	return context + ": " + errMsg, http.StatusInternalServerError
+}
+
 // ---------------------------
 // Types
 // ---------------------------
@@ -113,7 +196,8 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// parse multipart
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrFailedToParseForm)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -187,15 +271,18 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for k := range amcSet {
 				amcNames = append(amcNames, k)
 			}
-			// Validate AMC(s) - for upload we require they are approved
+			// Validate AMC(s) from context - for upload we require they are approved and active
+			approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
 			for _, an := range amcNames {
-				ok, err := isAMCApproved(ctx, pgxPool, an)
-				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAMCValidationFailedUser+err.Error())
-					return
+				found := false
+				for _, amc := range approvedAMCs {
+					if strings.EqualFold(amc["amc_name"], an) {
+						found = true
+						break
+					}
 				}
-				if !ok {
-					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("AMC not found or not approved: %s", an))
+				if !found {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("AMC not found or not approved/active: %s", an))
 					return
 				}
 			}
@@ -230,7 +317,8 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// transaction: COPY -> set source -> audit insert
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+				msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailed)
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			committed := false
@@ -243,7 +331,8 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "masterscheme"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+				msg, status := getUserFriendlySchemeError(err, "COPY failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 
@@ -254,7 +343,8 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SET source = 'Upload'
 					WHERE isin = ANY($1)
 				`, isinList); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to set source: "+err.Error())
+					msg, status := getUserFriendlySchemeError(err, "Failed to set source")
+					api.RespondWithError(w, status, msg)
 					return
 				}
 			}
@@ -268,13 +358,15 @@ func UploadSchemeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE isin = ANY($2)
 				`, userName, isinList)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+					msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
+					api.RespondWithError(w, status, msg)
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailedCapitalized)
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			committed = true
@@ -321,21 +413,24 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// validate AMC is approved
-		ok, err := isAMCApproved(ctx, pgxPool, req.AmcName)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAMCValidationFailedUser+err.Error())
-			return
+		// validate AMC is approved and active from context
+		approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
+		found := false
+		for _, amc := range approvedAMCs {
+			if strings.EqualFold(amc["amc_name"], req.AmcName) {
+				found = true
+				break
+			}
 		}
-		if !ok {
-			api.RespondWithError(w, http.StatusBadRequest, "AMC not found or not approved: "+req.AmcName)
+		if !found {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+req.AmcName)
 			return
 		}
 
 		// check ISIN uniqueness (non-deleted) only if ISIN is provided
 		if strings.TrimSpace(req.ISIN) != "" {
 			var tmp int
-			err = pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.ISIN).Scan(&tmp)
+			err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.ISIN).Scan(&tmp)
 			if err == nil {
 				api.RespondWithError(w, http.StatusBadRequest, "Scheme with ISIN already exists")
 				return
@@ -344,7 +439,8 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -362,7 +458,8 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.SchemeName, req.ISIN, req.AmcName, req.InternalSchemeCode,
 			req.InternalRiskRating, req.ErpGlAccount, req.AmfiSchemeCode, defaultIfEmpty(req.Status, "Active"),
 		).Scan(&schemeID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+			msg, status := getUserFriendlySchemeError(err, "Insert failed")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -371,12 +468,14 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, schemeID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -423,7 +522,8 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -440,7 +540,8 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
 		); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
+			msg, status := getUserFriendlySchemeError(err, "fetch failed")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -466,13 +567,16 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// if amc_name provided, validate AMC is approved
 				if lk == "amc_name" {
 					amcName := fmt.Sprint(v)
-					ok, err := isAMCApproved(ctx, pgxPool, amcName)
-					if err != nil {
-						api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAMCValidationFailedUser+err.Error())
-						return
+					approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
+					found := false
+					for _, amc := range approvedAMCs {
+						if strings.EqualFold(amc["amc_name"], amcName) {
+							found = true
+							break
+						}
 					}
-					if !ok {
-						api.RespondWithError(w, http.StatusBadRequest, "AMC not found or not approved: "+amcName)
+					if !found {
+						api.RespondWithError(w, http.StatusBadRequest, constants.ErrAMCNotFoundOrNotApprovedActive+amcName)
 						return
 					}
 				}
@@ -503,7 +607,8 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.masterscheme SET %s WHERE scheme_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.SchemeID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrUpdateFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -512,12 +617,14 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.SchemeID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrAuditInsertFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -562,7 +669,8 @@ func DeleteScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -572,13 +680,15 @@ func DeleteScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactionscheme (scheme_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())
 			`, id, req.Reason, requestedBy); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "insert failed: "+err.Error())
+				msg, status := getUserFriendlySchemeError(err, "insert failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.SchemeIDs})
@@ -616,7 +726,8 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -629,7 +740,8 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -674,7 +786,8 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toApprove); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "approve update failed: "+err.Error())
+				msg, status := getUserFriendlySchemeError(err, "approve update failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
@@ -685,7 +798,8 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "mark deleted failed: "+err.Error())
+				msg, status := getUserFriendlySchemeError(err, "mark deleted failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -693,13 +807,15 @@ func BulkApproveSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET is_deleted=true, status='Inactive'
 				WHERE scheme_id = ANY($1)
 			`, deleteMasterIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "master soft-delete failed: "+err.Error())
+				msg, status := getUserFriendlySchemeError(err, "master soft-delete failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -739,7 +855,8 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -752,7 +869,8 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.SchemeIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -796,12 +914,14 @@ func BulkRejectSchemeActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrUpdateFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -813,22 +933,32 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		q := `
-			WITH latest AS (
+			WITH latest_scheme AS (
 				SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
 				FROM investment.auditactionscheme
 				ORDER BY scheme_id, requested_at DESC
+			),
+			latest_amc AS (
+				SELECT DISTINCT ON (amc.amc_id) amc.amc_id, m.amc_name, amc.processing_status, m.status
+				FROM investment.auditactionamc amc
+				JOIN investment.masteramc m ON amc.amc_id = m.amc_id
+				ORDER BY amc.amc_id, amc.requested_at DESC
 			)
 			SELECT m.scheme_id, m.scheme_name, m.isin, m.internal_scheme_code, m.amc_name, m.amfi_scheme_code
 			FROM investment.masterscheme m
-			JOIN latest l ON l.scheme_id = m.scheme_id
+			JOIN latest_scheme l ON l.scheme_id = m.scheme_id
+			JOIN latest_amc la ON UPPER(la.amc_name) = UPPER(m.amc_name)
 			WHERE UPPER(l.processing_status) = 'APPROVED' 
 			  AND UPPER(m.status) = 'ACTIVE'
 			  AND COALESCE(m.is_deleted,false) = false
+			  AND UPPER(la.processing_status) = 'APPROVED'
+			  AND UPPER(la.status) = 'ACTIVE'
 			ORDER BY m.scheme_name;
 		`
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -850,17 +980,27 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Read amc_name from JSON body
 		var body struct {
-			AMCName string `json:"amc_name"`
+			AMCName string `json:"amc"`
+			AMC     string `json:"amc_name"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		amcName := strings.TrimSpace(body.AMCName)
+		if amcName == "" {
+			amcName = strings.TrimSpace(body.AMC)
+		}
 
 		// Base query
 		q := `
-			WITH latest AS (
+			WITH latest_scheme AS (
 				SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
 				FROM investment.auditactionscheme
 				ORDER BY scheme_id, requested_at DESC
+			),
+			latest_amc AS (
+				SELECT DISTINCT ON (amc.amc_id) amc.amc_id, m.amc_name, amc.processing_status, m.status
+				FROM investment.auditactionamc amc
+				JOIN investment.masteramc m ON amc.amc_id = m.amc_id
+				ORDER BY amc.amc_id, amc.requested_at DESC
 			)
 			SELECT 
 				m.scheme_id,
@@ -870,10 +1010,13 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.amc_name, '') AS amc_name,
 				COALESCE(m.amfi_scheme_code, '') AS amfi_scheme_code
 			FROM investment.masterscheme m
-			JOIN latest l ON l.scheme_id = m.scheme_id
+			JOIN latest_scheme l ON l.scheme_id = m.scheme_id
+			JOIN latest_amc la ON UPPER(la.amc_name) = UPPER(m.amc_name)
 			WHERE UPPER(l.processing_status) = 'APPROVED'
 			  AND UPPER(m.status) = 'ACTIVE'
 			  AND COALESCE(m.is_deleted,false) = false
+			  AND UPPER(la.processing_status) = 'APPROVED'
+			  AND UPPER(la.status) = 'ACTIVE'
 		`
 
 		args := []interface{}{}
@@ -886,7 +1029,8 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -895,7 +1039,8 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var id, name, isin, code, amc, amfiCode string
 			if err := rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
+				msg, status := getUserFriendlySchemeError(err, constants.ErrScanFailedPrefix)
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			out = append(out, map[string]interface{}{
@@ -964,7 +1109,8 @@ func GetSchemesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlySchemeError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1051,17 +1197,18 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// validate AMC approval
-			ok, err := isAMCApproved(ctx, pgxPool, row.AmcName)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: "AMC check failed: " + err.Error(),
-				})
-				continue
+			// validate AMC approval from context
+			approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
+			found := false
+			for _, amc := range approvedAMCs {
+				if strings.EqualFold(amc["amc_name"], row.AmcName) {
+					found = true
+					break
+				}
 			}
-			if !ok {
+			if !found {
 				results = append(results, map[string]interface{}{
-					constants.ValueSuccess: false, constants.ValueError: "AMC not approved or not found: " + row.AmcName,
+					constants.ValueSuccess: false, constants.ValueError: constants.ErrAMCNotFoundOrNotApprovedActive + row.AmcName,
 				})
 				continue
 			}
@@ -1069,7 +1216,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// ensure ISIN uniqueness only if ISIN is provided
 			if strings.TrimSpace(row.ISIN) != "" {
 				var tmp int
-				err = pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, row.ISIN).Scan(&tmp)
+				err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterscheme WHERE isin=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`, row.ISIN).Scan(&tmp)
 				if err == nil {
 					results = append(results, map[string]interface{}{
 						constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("ISIN already exists: %s", row.ISIN),
@@ -1227,16 +1374,17 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				lk := strings.ToLower(k)
 				if idx, ok := fieldPairs[lk]; ok {
 					if lk == "amc_name" {
-						ok, err := isAMCApproved(ctx, pgxPool, fmt.Sprint(v))
-						if err != nil {
-							results = append(results, map[string]interface{}{
-								constants.ValueSuccess: false, constants.ValueError: constants.ErrAMCValidationFailedUser + err.Error(),
-							})
-							continue
+						approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
+						found := false
+						for _, amc := range approvedAMCs {
+							if strings.EqualFold(amc["amc_name"], fmt.Sprint(v)) {
+								found = true
+								break
+							}
 						}
-						if !ok {
+						if !found {
 							results = append(results, map[string]interface{}{
-								constants.ValueSuccess: false, constants.ValueError: "AMC not approved: " + fmt.Sprint(v),
+								constants.ValueSuccess: false, constants.ValueError: constants.ErrAMCNotFoundOrNotApprovedActive + fmt.Sprint(v),
 							})
 							continue
 						}

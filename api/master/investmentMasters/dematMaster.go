@@ -17,6 +17,98 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// getUserFriendlyDematError translates database errors into user-friendly messages
+func getUserFriendlyDematError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := err.Error()
+	lower := strings.ToLower(errMsg)
+
+	// Connection errors
+	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "no connection") {
+		return "Database connection error. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Unique constraint: entity_name + demat_account_number
+	if strings.Contains(lower, "unique_entity_demat_not_deleted") ||
+		(strings.Contains(lower, constants.ErrDuplicateKey) && strings.Contains(lower, "entity_name") && strings.Contains(lower, "demat_account_number")) {
+		return "A demat account with this entity and account number already exists.", http.StatusOK
+	}
+
+	// Foreign key constraints
+	if strings.Contains(lower, "foreign key") || strings.Contains(lower, "fk_") {
+		if strings.Contains(lower, "auditactiondemat") {
+			return "Cannot delete: demat account has pending approval actions.", http.StatusOK
+		}
+		if strings.Contains(lower, "dp_id") {
+			return "Invalid DP ID. Please select a valid depository participant.", http.StatusOK
+		}
+		if strings.Contains(lower, "entity_name") {
+			return "Invalid entity. Please select a valid entity.", http.StatusOK
+		}
+		if strings.Contains(lower, "default_settlement_account") {
+			return "Invalid settlement account. Please select a valid bank account.", http.StatusOK
+		}
+		return "Referenced data not found. Please check your input.", http.StatusOK
+	}
+
+	// Check constraints
+	if strings.Contains(lower, "check constraint") || strings.Contains(lower, "_ck") {
+		if strings.Contains(lower, "status") || strings.Contains(lower, "masterdemat_status_ck") {
+			return "Invalid status. Must be one of: Active, Inactive, Closed.", http.StatusOK
+		}
+		if strings.Contains(lower, "source") || strings.Contains(lower, "masterdemat_source_ck") {
+			return "Invalid source. Must be one of: Manual, Upload, ERP.", http.StatusOK
+		}
+		if strings.Contains(lower, "depository") || strings.Contains(lower, "masterdemataccount_depository_check") {
+			return "Invalid depository. Must be either NSDL or CDSL.", http.StatusOK
+		}
+		if strings.Contains(lower, "actiontype") || strings.Contains(lower, "auditactiondemat_actiontype_ck") {
+			return "Invalid action type. Must be one of: CREATE, EDIT, DELETE.", http.StatusOK
+		}
+		if strings.Contains(lower, "processing_status") || strings.Contains(lower, "auditactiondemat_processing_status_ck") {
+			return "Invalid processing status.", http.StatusOK
+		}
+		return "Data validation failed. Please check your input values.", http.StatusOK
+	}
+
+	// Not null constraints
+	if strings.Contains(lower, "not null") || strings.Contains(lower, "null value") {
+		if strings.Contains(lower, "entity_name") {
+			return "Entity name is required.", http.StatusOK
+		}
+		if strings.Contains(lower, "dp_id") {
+			return "DP ID is required.", http.StatusOK
+		}
+		if strings.Contains(lower, "depository") {
+			return "Depository is required.", http.StatusOK
+		}
+		if strings.Contains(lower, "demat_account_number") {
+			return "Demat account number is required.", http.StatusOK
+		}
+		if strings.Contains(lower, "default_settlement_account") {
+			return "Default settlement account is required.", http.StatusOK
+		}
+		if strings.Contains(lower, "actiontype") {
+			return "Action type is required.", http.StatusOK
+		}
+		if strings.Contains(lower, "processing_status") {
+			return "Processing status is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Timeout errors
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") {
+		return "Operation timed out. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Default fallback
+	return fmt.Sprintf("Operation failed: %s", context), http.StatusInternalServerError
+}
+
 type CreateDematRequestSingle struct {
 	UserID                   string `json:"user_id"`
 	EntityName               string `json:"entity_name"`
@@ -85,6 +177,16 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Get context-based access controls
+		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		if len(approvedEntities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
+		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
 			return
@@ -143,6 +245,64 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// Validate all rows before processing
+			for i, row := range dataRows {
+				var entityName, dpID, settlementAcc string
+				if pos, ok := headerPos["entity_name"]; ok && pos < len(row) {
+					entityName = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["dp_id"]; ok && pos < len(row) {
+					dpID = strings.TrimSpace(row[pos])
+				}
+				var dpParticipant string
+				if pos, ok := headerPos["depository_participant"]; ok && pos < len(row) {
+					dpParticipant = strings.TrimSpace(row[pos])
+				}
+				if pos, ok := headerPos["default_settlement_account"]; ok && pos < len(row) {
+					settlementAcc = strings.TrimSpace(row[pos])
+				}
+
+				// Validate entity
+				entityFound := false
+				for _, e := range approvedEntities {
+					if strings.EqualFold(e, entityName) {
+						entityFound = true
+						break
+					}
+				}
+				if !entityFound {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Entity '%s' not in accessible entities", i+1, entityName))
+					return
+				}
+
+				// Validate DP (match against dp_id/dp_name/dp_code for either dp_id or depository_participant)
+				dpFound := false
+				for _, dp := range approvedDPs {
+					if dp["dp_id"] == dpID || strings.EqualFold(dp["dp_name"], dpID) || dp["dp_code"] == dpID ||
+						(dpParticipant != "" && (dp["dp_id"] == dpParticipant || strings.EqualFold(dp["dp_name"], dpParticipant) || dp["dp_code"] == dpParticipant)) {
+						dpFound = true
+						break
+					}
+				}
+				if !dpFound {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: DP '%s' not in approved DPs", i+1, dpID))
+					return
+				}
+
+				// Validate bank account
+				accountFound := false
+				for _, acc := range approvedBankAccounts {
+					if acc["account_number"] == settlementAcc || acc["account_id"] == settlementAcc {
+						accountFound = true
+						break
+					}
+				}
+				if !accountFound {
+					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Row %d: Settlement account '%s' not in approved bank accounts", i+1, settlementAcc))
+					return
+				}
+			}
+
 			// prepare COPY rows
 			copyRows := make([][]interface{}, len(dataRows))
 			dematNumbers := make([]string, 0, len(dataRows))
@@ -182,7 +342,8 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "masterdemataccount"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+				msg, status := getUserFriendlyDematError(err, "uploading demat accounts")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 
@@ -193,7 +354,8 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SET source = 'Upload'
 					WHERE demat_account_number = ANY($1)
 				`, dematNumbers); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to set source: "+err.Error())
+					msg, status := getUserFriendlyDematError(err, "updating source")
+					api.RespondWithError(w, status, msg)
 					return
 				}
 
@@ -204,7 +366,8 @@ func UploadDematSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM investment.masterdemataccount
 					WHERE demat_account_number = ANY($2)
 				`, userName, dematNumbers); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+					msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+					api.RespondWithError(w, status, msg)
 					return
 				}
 			}
@@ -253,6 +416,49 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		// Validate entity access
+		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		entityFound := false
+		for _, e := range approvedEntities {
+			if strings.EqualFold(e, req.EntityName) {
+				entityFound = true
+				break
+			}
+		}
+		if !entityFound {
+			api.RespondWithError(w, http.StatusForbidden, "Access denied. Entity not in accessible entities")
+			return
+		}
+
+		// Validate DP
+		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
+		dpFound := false
+		for _, dp := range approvedDPs {
+			if dp["dp_id"] == req.DPID || strings.EqualFold(dp["dp_name"], req.DPID) || dp["dp_code"] == req.DPID ||
+				(req.DepositoryParticipant != "" && (dp["dp_id"] == req.DepositoryParticipant || strings.EqualFold(dp["dp_name"], req.DepositoryParticipant) || dp["dp_code"] == req.DepositoryParticipant)) {
+				dpFound = true
+				break
+			}
+		}
+		if !dpFound {
+			api.RespondWithError(w, http.StatusBadRequest, "DP not in approved DPs")
+			return
+		}
+
+		// Validate bank account
+		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		accountFound := false
+		for _, acc := range approvedBankAccounts {
+			if acc["account_number"] == req.DefaultSettlementAccount || acc["account_id"] == req.DefaultSettlementAccount {
+				accountFound = true
+				break
+			}
+		}
+		if !accountFound {
+			api.RespondWithError(w, http.StatusBadRequest, "Settlement account not in approved bank accounts")
+			return
+		}
+
 		// uniqueness: entity_name + demat_account_number
 		var tmp int
 		err := pgxPool.QueryRow(ctx, `SELECT 1 FROM investment.masterdemataccount WHERE entity_name=$1 AND demat_account_number=$2 AND COALESCE(is_deleted,false)=false LIMIT 1`, req.EntityName, req.DematAccountNumber).Scan(&tmp)
@@ -286,7 +492,8 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.DefaultSettlementAccount,
 			defaultIfEmpty(req.Status, "Active"),
 		).Scan(&dematID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+			msg, status := getUserFriendlyDematError(err, "creating demat account")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -295,7 +502,8 @@ func CreateDematSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, dematID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -341,6 +549,10 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
+		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+
 		results := make([]map[string]interface{}, 0, len(req.Rows))
 
 		for _, row := range req.Rows {
@@ -353,6 +565,46 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, constants.ValueError: constants.ErrMissingRequiredFieldsUser,
 				})
+				continue
+			}
+
+			// Validate entity
+			entityFound := false
+			for _, e := range approvedEntities {
+				if strings.EqualFold(e, name) {
+					entityFound = true
+					break
+				}
+			}
+			if !entityFound {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Entity not in accessible entities"})
+				continue
+			}
+
+			// Validate DP (allow matching via dpid or depository_participant)
+			dpFound := false
+			for _, dp := range approvedDPs {
+				if dp["dp_id"] == dpid || strings.EqualFold(dp["dp_name"], dpid) || dp["dp_code"] == dpid ||
+					(row.DepositoryParticipant != "" && (dp["dp_id"] == row.DepositoryParticipant || strings.EqualFold(dp["dp_name"], row.DepositoryParticipant) || dp["dp_code"] == row.DepositoryParticipant)) {
+					dpFound = true
+					break
+				}
+			}
+			if !dpFound {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "DP not in approved DPs"})
+				continue
+			}
+
+			// Validate bank account
+			accountFound := false
+			for _, acc := range approvedBankAccounts {
+				if acc["account_number"] == settle || acc["account_id"] == settle {
+					accountFound = true
+					break
+				}
+			}
+			if !accountFound {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Settlement account not in approved bank accounts"})
 				continue
 			}
 
@@ -382,7 +634,8 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual')
 				RETURNING demat_id
 			`, name, dpid, dep, dacc, row.DepositoryParticipant, row.ClientID, settle, defaultIfEmpty(row.Status, "Active")).Scan(&dematID); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: "Insert failed: " + err.Error()})
+				msg, _ := getUserFriendlyDematError(err, "creating demat account")
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "entity": name, constants.ValueError: msg})
 				continue
 			}
 
@@ -390,7 +643,8 @@ func CreateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, requested_by, requested_at)
 				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 			`, dematID, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": dematID, constants.ValueError: msg})
 				continue
 			}
 
@@ -454,7 +708,8 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
 		); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
+			msg, status := getUserFriendlyDematError(err, "fetching demat account")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -504,7 +759,8 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.masterdemataccount SET %s WHERE demat_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.DematID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, "updating demat account")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -513,7 +769,8 @@ func UpdateDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.DematID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -581,7 +838,8 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
 				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
 			); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: "fetch failed: " + err.Error()})
+				msg, _ := getUserFriendlyDematError(err, "fetching demat account")
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
 				continue
 			}
 
@@ -630,7 +888,8 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, row.DematID)
 
 			if _, err := tx.Exec(ctx, q, args...); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrUpdateFailed + err.Error()})
+				msg, _ := getUserFriendlyDematError(err, "updating demat account")
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
 				continue
 			}
 
@@ -638,7 +897,8 @@ func UpdateDematBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 			`, row.DematID, row.Reason, userEmail); err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: constants.ErrAuditInsertFailed + err.Error()})
+				msg, _ := getUserFriendlyDematError(err, constants.ErrAuditInsertFailedUser)
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "demat_id": row.DematID, constants.ValueError: msg})
 				continue
 			}
 
@@ -695,7 +955,8 @@ func DeleteDemat(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondemat (demat_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())
 			`, id, req.Reason, requestedBy); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "insert failed: "+err.Error())
+				msg, status := getUserFriendlyDematError(err, "creating delete request")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
@@ -747,7 +1008,8 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, "fetching audit actions")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -789,7 +1051,8 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toApprove); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "approve update failed: "+err.Error())
+				msg, status := getUserFriendlyDematError(err, "approving actions")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
@@ -800,7 +1063,8 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "mark deleted failed: "+err.Error())
+				msg, status := getUserFriendlyDematError(err, "marking actions as deleted")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -808,7 +1072,8 @@ func BulkApproveDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET is_deleted=true, status='Inactive'
 				WHERE demat_id = ANY($1)
 			`, deleteMasterIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "master soft-delete failed: "+err.Error())
+				msg, status := getUserFriendlyDematError(err, "soft-deleting demat accounts")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
@@ -864,7 +1129,8 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.DematIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, "fetching audit actions")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -908,7 +1174,8 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, "rejecting actions")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -924,6 +1191,29 @@ func BulkRejectDematActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+
+		// Get context-based filtering
+		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		if len(approvedEntities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
+		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
+		dpIDs := make([]string, 0, len(approvedDPs))
+		for _, dp := range approvedDPs {
+			if dp["dp_id"] != "" {
+				dpIDs = append(dpIDs, dp["dp_id"])
+			}
+		}
+
+		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		accountNumbers := make([]string, 0, len(approvedBankAccounts))
+		for _, acc := range approvedBankAccounts {
+			if acc["account_number"] != "" {
+				accountNumbers = append(accountNumbers, acc["account_number"])
+			}
+		}
 
 		q := `
 			WITH latest_audit AS (
@@ -992,12 +1282,16 @@ func GetDematsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
 			LEFT JOIN clearing cl ON cl.account_id = ba.account_id
 			WHERE COALESCE(m.is_deleted,false)=false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC	;
+			  AND m.entity_name = ANY($1)
+			  AND (m.dp_id = ANY($2) OR m.depository_participant = ANY($2))
+			  AND m.default_settlement_account = ANY($3)
+			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
 		`
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, approvedEntities, dpIDs, accountNumbers)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, "fetching demat accounts")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1035,6 +1329,29 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
+		// Get context-based filtering
+		approvedEntities, _ := ctx.Value(api.BusinessUnitsKey).([]string)
+		if len(approvedEntities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
+		approvedDPs, _ := ctx.Value("ApprovedDPs").([]map[string]string)
+		dpIDs := make([]string, 0, len(approvedDPs))
+		for _, dp := range approvedDPs {
+			if dp["dp_id"] != "" {
+				dpIDs = append(dpIDs, dp["dp_id"])
+			}
+		}
+
+		approvedBankAccounts, _ := ctx.Value("ApprovedBankAccounts").([]map[string]string)
+		accountNumbers := make([]string, 0, len(approvedBankAccounts))
+		for _, acc := range approvedBankAccounts {
+			if acc["account_number"] != "" {
+				accountNumbers = append(accountNumbers, acc["account_number"])
+			}
+		}
+
 		q := `
 			WITH latest AS (
 				SELECT DISTINCT ON (demat_id)
@@ -1057,12 +1374,16 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				UPPER(l.processing_status) = 'APPROVED'
 				AND UPPER(m.status) = 'ACTIVE'
 				AND COALESCE(m.is_deleted, false) = false
+				AND m.entity_name = ANY($1)
+				AND (m.dp_id = ANY($2) OR m.depository_participant = ANY($2))
+				AND m.default_settlement_account = ANY($3)
 			ORDER BY m.demat_account_number;
 		`
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, approvedEntities, dpIDs, accountNumbers)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDematError(err, "fetching active demat accounts")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -1073,7 +1394,8 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var depositoryParticipant, clientID *string
 
 			if err := rows.Scan(&dematID, &dpID, &depository, &dematAccountNumber, &depositoryParticipant, &clientID, &defaultAccount); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+err.Error())
+				msg, status := getUserFriendlyDematError(err, "scanning row")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 
@@ -1089,7 +1411,8 @@ func GetApprovedActiveDemats(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "rows iteration failed: "+rows.Err().Error())
+			msg, status := getUserFriendlyDematError(rows.Err(), "iterating rows")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
