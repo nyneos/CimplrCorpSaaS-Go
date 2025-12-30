@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,8 +14,25 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
+)
+
+// PostgreSQL error codes
+const (
+	PgUniqueViolation           = "23505"
+	PgNotNullViolation          = "23502"
+	PgForeignKeyViolation       = "23503"
+	PgCheckViolation            = "23514"
+	PgStringDataRightTruncation = "22001"
+)
+
+// MasterCurrency constraint names
+const (
+	ConstraintCurrencyCodeUnique    = "mastercurrency_currency_code_key"
+	ConstraintDecimalPlacesCheck    = "mastercurrency_decimal_places_check"
+	ConstraintOldDecimalPlacesCheck = "mastercurrency_old_decimal_places_check"
 )
 
 // getUserFriendlyCurrencyError converts database errors into user-friendly messages
@@ -23,77 +41,74 @@ func getUserFriendlyCurrencyError(err error, context string) (string, int) {
 		return "", http.StatusOK
 	}
 
-	errMsg := strings.ToLower(err.Error())
-
-	// Unique constraint violations
-	if strings.Contains(errMsg, "unique") || strings.Contains(errMsg, "duplicate") {
-		if strings.Contains(errMsg, "currency_code") || strings.Contains(errMsg, "mastercurrency_currency_code_key") {
-			return "Currency code already exists. Please use a different code.", http.StatusOK
-		}
-		return "This currency already exists in the system.", http.StatusOK
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return fmt.Sprintf("Internal error: %s", context), http.StatusInternalServerError
 	}
 
-	// Check constraint violations
-	if strings.Contains(errMsg, "check constraint") || strings.Contains(errMsg, "violates check") {
-		if strings.Contains(errMsg, "decimal_places") {
-			return "Decimal places must be between 0 and 4.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "old_decimal_places") {
-			return "Old decimal places value is invalid (must be 0-4).", http.StatusOK
-		}
-		if strings.Contains(errMsg, "actiontype") {
-			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "processing_status") {
-			return "Invalid processing status. Must be PENDING_APPROVAL, PENDING_EDIT_APPROVAL, PENDING_DELETE_APPROVAL, APPROVED, REJECTED, or CANCELLED.", http.StatusOK
-		}
+	switch pgErr.Code {
+	case PgUniqueViolation:
+		return handleUniqueViolation(pgErr)
+	case PgNotNullViolation:
+		return handleNotNullViolation(pgErr)
+	case PgForeignKeyViolation:
+		return "Referenced record does not exist.", http.StatusOK
+	case PgCheckViolation:
+		return handleCheckViolation(pgErr)
+	case PgStringDataRightTruncation:
+		return handleStringTruncation(pgErr)
+	default:
+		return fmt.Sprintf("Database error: %s (code: %s)", context, pgErr.Code), http.StatusOK
+	}
+}
+
+func handleUniqueViolation(pgErr *pgconn.PgError) (string, int) {
+	switch pgErr.ConstraintName {
+	case ConstraintCurrencyCodeUnique:
+		return "Currency code already exists. Please use a different currency code.", http.StatusOK
+	default:
+		return "A record with this value already exists.", http.StatusOK
+	}
+}
+
+func handleNotNullViolation(pgErr *pgconn.PgError) (string, int) {
+	fieldName := formatFieldName(pgErr.ColumnName)
+	return fmt.Sprintf("Required field '%s' is missing.", fieldName), http.StatusOK
+}
+
+func handleCheckViolation(pgErr *pgconn.PgError) (string, int) {
+	switch pgErr.ConstraintName {
+	case ConstraintDecimalPlacesCheck:
+		return "Decimal places must be between 0 and 4.", http.StatusOK
+	case ConstraintOldDecimalPlacesCheck:
+		return "Old decimal places must be between 0 and 4.", http.StatusOK
+	default:
 		return "Data validation failed. Please check your input values.", http.StatusOK
 	}
+}
 
-	// Foreign key violations
-	if strings.Contains(errMsg, "foreign key") || strings.Contains(errMsg, "violates foreign key constraint") {
-		if strings.Contains(errMsg, "currency_id") {
-			return "Currency does not exist or has been deleted.", http.StatusOK
-		}
-		return "Referenced record does not exist.", http.StatusOK
+func handleStringTruncation(pgErr *pgconn.PgError) (string, int) {
+	fieldName := formatFieldName(pgErr.ColumnName)
+	return fmt.Sprintf("The value for '%s' is too long.", fieldName), http.StatusOK
+}
+
+// formatFieldName converts database column names to user-friendly names
+func formatFieldName(columnName string) string {
+	fieldNames := map[string]string{
+		"currency_code":      "Currency Code",
+		"currency_name":      "Currency Name",
+		"country":            "Country",
+		"symbol":             "Symbol",
+		"decimal_places":     "Decimal Places",
+		"status":             "Status",
+		"old_decimal_places": "Old Decimal Places",
+		"old_status":         "Old Status",
 	}
 
-	// NOT NULL violations
-	if strings.Contains(errMsg, "null value") || strings.Contains(errMsg, "violates not-null constraint") {
-		if strings.Contains(errMsg, "currency_code") {
-			return "Currency code is required.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "currency_name") {
-			return "Currency name is required.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "country") {
-			return "Country is required.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "decimal_places") {
-			return "Decimal places is required.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "status") {
-			return "Status is required.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "actiontype") {
-			return "Action type is required.", http.StatusOK
-		}
-		if strings.Contains(errMsg, "processing_status") {
-			return "Processing status is required.", http.StatusOK
-		}
-		return "Required field is missing.", http.StatusOK
+	if friendlyName, ok := fieldNames[columnName]; ok {
+		return friendlyName
 	}
-
-	// Connection/timeout errors
-	if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "network") {
-		return "Database connection issue. Please try again.", http.StatusServiceUnavailable
-	}
-
-	// Default with context
-	if context != "" {
-		return context + ": " + err.Error(), http.StatusInternalServerError
-	}
-	return err.Error(), http.StatusInternalServerError
+	return columnName
 }
 
 type CurrencyMasterRequest struct {
@@ -284,28 +299,28 @@ func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC;
 	`
 
-	rows, err := pgxPool.Query(ctx, query)
-	if err != nil {
-		errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
-		if statusCode == http.StatusOK {
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-		} else {
-			api.RespondWithError(w, statusCode, errMsg)
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyCurrencyError(err, "Failed to fetch currency data")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
 		}
-		return
-	}
-	defer rows.Close()
+		defer rows.Close()
 
-	var currencies []map[string]interface{}
-	var anyError error
+		var currencies []map[string]interface{}
+		var anyError error
 
-	for rows.Next() {
-		var (
-			currencyID, currencyCode, currencyName, country, symbol, status, oldStatus string
-			decimalPlaces, oldDecimalPlaces                                            int
-			latestRequestedAt                                                          *time.Time
-		)
+		for rows.Next() {
+			var (
+				currencyID, currencyCode, currencyName, country, symbol, status, oldStatus string
+				decimalPlaces, oldDecimalPlaces                                            int
+				latestRequestedAt                                                          *time.Time
+			)
 			err := rows.Scan(
 				&currencyID, &currencyCode, &currencyName, &country, &symbol,
 				&decimalPlaces, &status, &oldDecimalPlaces, &oldStatus, &latestRequestedAt,
@@ -798,5 +813,3 @@ func GetActiveApprovedCurrencyCodes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
-
-// Helper functions for type conversion
