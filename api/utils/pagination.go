@@ -19,7 +19,7 @@ type PaginationParams struct {
 func ExtractPagination(r *http.Request) (PaginationParams, error) {
 	params := PaginationParams{
 		Page:  1,
-		Limit: 10,
+		Limit: 10000,
 	}
 
 	if p := r.URL.Query().Get("page"); p != "" {
