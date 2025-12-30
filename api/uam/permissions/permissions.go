@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"strings"
@@ -109,9 +110,10 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Step 1: Get role_id
-		var roleID int
+		// Step 1: Get role_id (string IDs supported)
+		var roleID string
 		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, req.RoleName).Scan(&roleID); err != nil {
+			log.Print(err.Error())
 			respondWithError(w, http.StatusNotFound, "role not found")
 			return
 		}
@@ -262,7 +264,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Step 4: Bulk upsert role_permissions
-		roleIDs := []int{}
+		roleIDs := []string{}
 		permIDs := []int{}
 		alloweds := []bool{}
 
@@ -273,29 +275,28 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			}
 			key := fmt.Sprintf(constants.FormatPipelineTripleAlt, p.Key.Page, tabVal, p.Key.Action)
 			if pid, ok := permissionIdMap[key]; ok {
-				roleIDs = append(roleIDs, roleID)
+								roleIDs = append(roleIDs, roleID)
 				permIDs = append(permIDs, pid)
 				alloweds = append(alloweds, p.Allowed)
 			}
 		}
-
-		if len(roleIDs) > 0 {
-			_, err = tx.Exec(`
-			INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
-			SELECT UNNEST($1::int[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
-			ON CONFLICT (role_id, permission_id)
-			DO UPDATE SET
-			  allowed = EXCLUDED.allowed,
-			  status = CASE
-			    WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
-			    ELSE role_permissions.status
-			  END
-			`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
-			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
-				return
-			}
-		}
+				if len(roleIDs) > 0 {
+						_, err = tx.Exec(`
+						INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
+						SELECT UNNEST($1::text[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
+						ON CONFLICT (role_id, permission_id)
+						DO UPDATE SET
+							allowed = EXCLUDED.allowed,
+							status = CASE
+								WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
+								ELSE role_permissions.status
+							END
+						`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
+						if err != nil {
+								respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
+								return
+						}
+				}
 
 		if err := tx.Commit(); err != nil {
 			respondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
@@ -389,8 +390,8 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get role_id
-		var roleID int
+		// Get role_id (string supported)
+		var roleID string
 		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, roleName).Scan(&roleID); err != nil {
 			if err == sql.ErrNoRows {
 				http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
@@ -495,8 +496,8 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get role_id
-		var roleID int
+		// Get role_id (string supported)
+		var roleID string
 		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
 		if err == sql.ErrNoRows {
 			respondWithError(w, http.StatusNotFound, "Role not found")
@@ -524,7 +525,8 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		// Collect updated permissions
 		updatedPermissions := []map[string]interface{}{}
 		for rows.Next() {
-			var roleID, permissionID int
+			var roleID string
+			var permissionID int
 			var allowed bool
 			var status string
 			if err := rows.Scan(&roleID, &permissionID, &allowed, &status); err != nil {
@@ -574,7 +576,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 
 		rolesStatus := []map[string]interface{}{}
 		for rows.Next() {
-			var roleID int
+			var roleID string
 			var status string
 			if err := rows.Scan(&roleID, &status); err != nil {
 				continue
