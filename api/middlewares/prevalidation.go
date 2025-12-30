@@ -9,8 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 
-	// "log"
 	"net/http"
 	"strings"
 
@@ -72,23 +72,100 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			banks, _ := loadApprovedBanks(ctx, db)
+			// If admin override is enabled and the user is whitelisted or their role is whitelisted, preload everything
+			if IsAdminOverrideEnabled() && IsAdminUser(userID) {
+				// user-id based override (highest precedence)
+				allEntityIDs, allEntityNames, entErr := LoadAllEntities(ctx, db)
+				if entErr == nil && len(allEntityIDs) > 0 {
+					entityIDs = allEntityIDs
+					entityNames = allEntityNames
+				}
 
-			currencies, _ := loadApprovedCurrencies(ctx, db)
+				all, errs := LoadEverythingIntoContext(ctx, db)
+				for k, v := range all {
+					ctx = context.WithValue(ctx, k, v)
+				}
+				if len(errs) > 0 {
+					ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+				}
+				ctx = context.WithValue(ctx, "is_admin_override", true)
+				ctx = context.WithValue(ctx, "admin_override_by", "user")
+			} else if IsAdminOverrideEnabled() {
+				// first try in-memory session role (preferred)
+				roleMatched := false
+				matchedRoles := []string{}
+				if session != nil {
+					if session.Role != "" && IsRoleAdminName(session.Role) {
+						roleMatched = true
+						matchedRoles = append(matchedRoles, session.Role)
+					}
+					if !roleMatched && session.RoleCode != "" && IsRoleAdminName(session.RoleCode) {
+						roleMatched = true
+						matchedRoles = append(matchedRoles, session.RoleCode)
+					}
+				}
+				// fallback to DB role lookup only if session had no role info
+				if !roleMatched {
+					isRoleAdmin, dbMatched, roleErr := IsUserInAdminRole(ctx, db, userID)
+					if roleErr != nil {
+						ctx = context.WithValue(ctx, "admin_override_load_errors", []string{"role_lookup: " + roleErr.Error()})
+					}
+					if isRoleAdmin {
+						roleMatched = true
+						matchedRoles = append(matchedRoles, dbMatched...)
+					}
+				}
 
-			cashFlowCategories, _ := loadApprovedCashFlowCategories(ctx, db)
+				if roleMatched {
+					// role-based override
+					allEntityIDs, allEntityNames, entErr := LoadAllEntities(ctx, db)
+					if entErr == nil && len(allEntityIDs) > 0 {
+						entityIDs = allEntityIDs
+						entityNames = allEntityNames
+					}
+					all, errs := LoadEverythingIntoContext(ctx, db)
+					for k, v := range all {
+						ctx = context.WithValue(ctx, k, v)
+					}
+					// attach matched role info and audit
+					ctx = context.WithValue(ctx, "is_admin_override", true)
+					ctx = context.WithValue(ctx, "admin_override_by", "role")
+					ctx = context.WithValue(ctx, "admin_override_role", matchedRoles)
+					if len(errs) > 0 {
+						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
+					}
+					// audit log
+					log.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
+				}
+			} else {
+				banks, _ := loadApprovedBanks(ctx, db)
 
-			amcs, _ := loadApprovedAMCs(ctx, db)
+				currencies, _ := loadApprovedCurrencies(ctx, db)
 
-			schemes, _ := loadApprovedSchemes(ctx, db)
+				cashFlowCategories, _ := loadApprovedCashFlowCategories(ctx, db)
 
-			dps, _ := loadApprovedDPs(ctx, db)
+				amcs, _ := loadApprovedAMCs(ctx, db)
 
-			bankAccounts, _ := loadApprovedBankAccounts(ctx, db)
+				schemes, _ := loadApprovedSchemes(ctx, db)
 
-			folios, _ := loadApprovedFolios(ctx, db)
+				dps, _ := loadApprovedDPs(ctx, db)
 
-			demats, _ := loadApprovedDemats(ctx, db)
+				bankAccounts, _ := loadApprovedBankAccounts(ctx, db)
+
+				folios, _ := loadApprovedFolios(ctx, db)
+
+				demats, _ := loadApprovedDemats(ctx, db)
+
+				ctx = context.WithValue(ctx, "BankInfo", banks)
+				ctx = context.WithValue(ctx, "ActiveCurrencies", currencies)
+				ctx = context.WithValue(ctx, "CashFlowCategories", cashFlowCategories)
+				ctx = context.WithValue(ctx, "ApprovedAMCs", amcs)
+				ctx = context.WithValue(ctx, "ApprovedSchemes", schemes)
+				ctx = context.WithValue(ctx, "ApprovedDPs", dps)
+				ctx = context.WithValue(ctx, "ApprovedBankAccounts", bankAccounts)
+				ctx = context.WithValue(ctx, "ApprovedFolios", folios)
+				ctx = context.WithValue(ctx, "ApprovedDemats", demats)
+			}
 
 			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
 			// log.Printf("User ID: %s\n", userID)
@@ -146,15 +223,6 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, "root_entity_name", validationResult.RootEntityName)
 			ctx = context.WithValue(ctx, api.BusinessUnitsKey, entityNames)
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
-			ctx = context.WithValue(ctx, "BankInfo", banks)
-			ctx = context.WithValue(ctx, "ActiveCurrencies", currencies)
-			ctx = context.WithValue(ctx, "CashFlowCategories", cashFlowCategories)
-			ctx = context.WithValue(ctx, "ApprovedAMCs", amcs)
-			ctx = context.WithValue(ctx, "ApprovedSchemes", schemes)
-			ctx = context.WithValue(ctx, "ApprovedDPs", dps)
-			ctx = context.WithValue(ctx, "ApprovedBankAccounts", bankAccounts)
-			ctx = context.WithValue(ctx, "ApprovedFolios", folios)
-			ctx = context.WithValue(ctx, "ApprovedDemats", demats)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 			next.ServeHTTP(w, r.WithContext(ctx))
