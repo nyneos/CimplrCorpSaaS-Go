@@ -1,7 +1,9 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -28,6 +30,7 @@ type RuleScope struct {
 	EntityID      *string `json:"entity_id,omitempty"`
 	BankCode      *string `json:"bank_code,omitempty"`
 	AccountNumber *string `json:"account_number,omitempty"`
+	Currency      *string `json:"currency,omitempty"`
 }
 
 // CategoryRule represents a category rule
@@ -79,25 +82,117 @@ func writeFKConflict(w http.ResponseWriter) {
 	})
 }
 
-// loadCategoryRuleComponentsLocal mirrors the rule loader used during upload/recompute without depending on the upload file.
-func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string) ([]categoryRuleComponent, error) {
-	const q = `
-	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	       FROM cimplrcorpsaas.category_rules r
-	       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
-	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
-	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
-	       WHERE r.is_active = true
-	     AND (
-	           (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
-	           OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
-	           OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
-	           OR (s.scope_type = 'GLOBAL')
-	     )
-	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
-	   `
+func requestedByFromCtx(ctx context.Context, fallback string) string {
+	if s := middlewares.GetSessionFromContext(ctx); s != nil {
+		if strings.TrimSpace(s.Name) != "" {
+			return s.Name
+		}
+		if strings.TrimSpace(s.UserID) != "" {
+			return s.UserID
+		}
+	}
+	return fallback
+}
 
-	rows, err := db.QueryContext(ctx, q, accountNumber, entityID)
+func ctxHasApprovedBank(ctx context.Context, bankCode string) bool {
+	bankCode = strings.TrimSpace(bankCode)
+	if bankCode == "" {
+		return false
+	}
+	v := ctx.Value("BankInfo")
+	if v == nil {
+		return true
+	}
+	banks, ok := v.([]map[string]string)
+	if !ok {
+		return true
+	}
+	for _, b := range banks {
+		if strings.EqualFold(strings.TrimSpace(b["bank_id"]), bankCode) ||
+			strings.EqualFold(strings.TrimSpace(b["bank_name"]), bankCode) ||
+			strings.EqualFold(strings.TrimSpace(b["bank_short_name"]), bankCode) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCode, accountNumber, currency *string) (int, string) {
+	st := strings.ToUpper(strings.TrimSpace(scopeType))
+	switch st {
+	case "GLOBAL":
+		return 0, ""
+	case "ENTITY":
+		if entityID == nil || strings.TrimSpace(*entityID) == "" {
+			return http.StatusBadRequest, "Missing entity_id"
+		}
+		ids := apictx.GetEntityIDsFromCtx(ctx)
+		if len(ids) == 0 {
+			return http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest
+		}
+		for _, id := range ids {
+			if id == *entityID {
+				return 0, ""
+			}
+		}
+		return http.StatusForbidden, constants.ErrUnauthorizedEntity
+	case "ACCOUNT":
+		if accountNumber == nil || strings.TrimSpace(*accountNumber) == "" {
+			return http.StatusBadRequest, "Missing account_number"
+		}
+		if !ctxHasApprovedBankAccount(ctx, *accountNumber) {
+			return http.StatusForbidden, constants.ErrInvalidAccount
+		}
+		return 0, ""
+	case "BANK":
+		if bankCode == nil || strings.TrimSpace(*bankCode) == "" {
+			return http.StatusBadRequest, "Missing bank_code"
+		}
+		if !ctxHasApprovedBank(ctx, *bankCode) {
+			return http.StatusForbidden, "Invalid or inactive bank"
+		}
+		return 0, ""
+	case "CURRENCY":
+		if currency == nil || strings.TrimSpace(*currency) == "" {
+			return http.StatusBadRequest, "Missing currency"
+		}
+		if !ctxHasApprovedCurrency(ctx, *currency) {
+			return http.StatusForbidden, "currency not allowed"
+		}
+		return 0, ""
+	default:
+		return http.StatusBadRequest, "Invalid scope_type"
+	}
+}
+
+// loadCategoryRuleComponentsLocal mirrors the rule loader used during upload/recompute without depending on the upload file.
+func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string, accountCurrency *string) ([]categoryRuleComponent, error) {
+	const q = `
+	   SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
+	   FROM cimplrcorpsaas.category_rules r
+	   JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
+	   JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
+	   JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
+	   WHERE r.is_active = true
+	 AND (
+		   (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
+		   OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
+		   OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
+		   OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
+		   OR (s.scope_type = 'GLOBAL')
+	 )
+	   ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
+   `
+
+	// pass accountCurrency (may be nil) so currency-scoped rules are matched only when account currency is known
+	var acctCurrencyParam interface{}
+	if accountCurrency != nil {
+		acctCurrencyParam = *accountCurrency
+	} else {
+		acctCurrencyParam = nil
+	}
+
+	rows, err := db.QueryContext(ctx, q, accountNumber, entityID, acctCurrencyParam)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +265,14 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		tx, err := db.Begin()
+		ctx := r.Context()
+		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		if len(entityIDs) == 0 {
+			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
+			return
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -182,10 +284,73 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 			}
 		}()
 
+		// Ensure all provided transaction IDs are within user's accessible entity/account scope
+		scopeRows, err := tx.QueryContext(ctx, `
+	SELECT DISTINCT bs.entity_id, bs.account_number, m.currency
+	FROM cimplrcorpsaas.bank_statement_transactions t
+	JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+	LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
+	WHERE t.transaction_id = ANY($1) AND t.bank_statement_id IS NOT NULL
+	`, pq.Array(body.TransactionIDs))
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
+			return
+		}
+		unauthorizedEntity := false
+		unauthorizedAccount := false
+		unauthorizedCurrency := false
+		for scopeRows.Next() {
+			var e, a string
+			var acctCurrency sql.NullString
+			if err := scopeRows.Scan(&e, &a, &acctCurrency); err != nil {
+				continue
+			}
+			allowed := false
+			for _, id := range entityIDs {
+				if id == e {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				unauthorizedEntity = true
+				break
+			}
+			if !ctxHasApprovedBankAccount(ctx, a) {
+				unauthorizedAccount = true
+				break
+			}
+
+			// Enforce currency: ensure account's currency is approved in context (use currency fetched in query)
+			if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
+				if !ctxHasApprovedCurrency(ctx, acctCurrency.String) {
+					unauthorizedCurrency = true
+					break
+				}
+			}
+		}
+		scopeRows.Close()
+		if unauthorizedEntity {
+			tx.Rollback()
+			http.Error(w, constants.ErrUnauthorizedEntity, http.StatusForbidden)
+			return
+		}
+		if unauthorizedAccount {
+			tx.Rollback()
+			http.Error(w, constants.ErrInvalidAccount, http.StatusForbidden)
+			return
+		}
+		if unauthorizedCurrency {
+			tx.Rollback()
+			http.Error(w, "currency not allowed", http.StatusForbidden)
+			return
+		}
+
 		// Update category for given transactions
 		if _, err := tx.Exec(`UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, body.CategoryID, pq.Array(body.TransactionIDs)); err != nil {
 			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 
@@ -207,10 +372,10 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 
 		// Insert pending edit approval for each affected statement
 		for _, bsID := range bsIDs {
-			_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, body.UserID, time.Now())
+			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
 				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -246,6 +411,11 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		ctx := r.Context()
+		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		if len(entityIDs) == 0 {
+			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
+			return
+		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -260,38 +430,49 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 
 		rows, err := tx.QueryContext(ctx, `
 SELECT t.transaction_id,
-	   t.bank_statement_id,
-	   bs.account_number,
-	   bs.entity_id,
-	   COALESCE(t.description, ''),
-	   t.withdrawal_amount,
-	   t.deposit_amount
+			 t.bank_statement_id,
+			 bs.account_number,
+			 bs.entity_id,
+			 COALESCE(t.description, ''),
+			 t.withdrawal_amount,
+			 t.deposit_amount,
+			 m.currency
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
 WHERE t.category_id IS NULL
-  AND t.bank_statement_id IS NOT NULL;
-`)
+	AND t.bank_statement_id IS NOT NULL
+	AND bs.entity_id = ANY($1);
+`, pq.Array(entityIDs))
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
 		type txnRow struct {
-			id     int64
-			bsID   string
-			acct   string
-			entity string
-			desc   string
-			wd     sql.NullFloat64
-			dep    sql.NullFloat64
+			id       int64
+			bsID     string
+			acct     string
+			entity   string
+			desc     string
+			wd       sql.NullFloat64
+			dep      sql.NullFloat64
+			currency sql.NullString
 		}
 
 		var txns []txnRow
 		for rows.Next() {
 			var tr txnRow
-			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep); err == nil {
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.currency); err == nil {
+				// Skip transactions whose account currency is not approved (enforce currency after account)
+				if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
+					if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
+						// skip this txn
+						continue
+					}
+				}
 				txns = append(txns, tr)
 			}
 		}
@@ -306,10 +487,24 @@ WHERE t.category_id IS NULL
 		matchedByCategory := make(map[int64][]int64)
 
 		for _, tr := range txns {
+			if !ctxHasApprovedBankAccount(ctx, tr.acct) {
+				continue
+			}
+			// Skip transactions whose account currency is not approved (we already fetched currency)
+			if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
+				if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
+					continue
+				}
+			}
 			cacheKey := tr.acct + "|" + tr.entity
 			rules, ok := ruleCache[cacheKey]
 			if !ok {
-				rules, err = loadCategoryRuleComponentsLocal(ctx, db, tr.acct, tr.entity)
+				var acctCurPtr *string
+				if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
+					s := tr.currency.String
+					acctCurPtr = &s
+				}
+				rules, err = loadCategoryRuleComponentsLocal(ctx, db, tr.acct, tr.entity, acctCurPtr)
 				if err != nil {
 					continue
 				}
@@ -330,17 +525,17 @@ WHERE t.category_id IS NULL
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = ANY($2)`, catID, pq.Array(txnIDs)); err != nil {
 				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 			updated += len(txnIDs)
 		}
 
 		for bsID := range bsSet {
-			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, body.UserID, time.Now())
+			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
 				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -372,6 +567,11 @@ func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
 		ctx := r.Context()
+		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		if len(entityIDs) == 0 {
+			http.Error(w, constants.ErrNoAccessibleEntitiesForRequest, http.StatusForbidden)
+			return
+		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -386,38 +586,42 @@ func RecomputeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 
 		rows, err := tx.QueryContext(ctx, `
 SELECT t.transaction_id,
-       t.bank_statement_id,
-       bs.account_number,
-       bs.entity_id,
-       COALESCE(t.description, ''),
-       t.withdrawal_amount,
-       t.deposit_amount
+			 t.bank_statement_id,
+			 bs.account_number,
+			 bs.entity_id,
+			 COALESCE(t.description, ''),
+			 t.withdrawal_amount,
+			 t.deposit_amount,
+			 m.currency
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
 WHERE t.category_id IS NULL
-  AND t.bank_statement_id IS NOT NULL;
-`)
+	AND t.bank_statement_id IS NOT NULL
+	AND bs.entity_id = ANY($1);
+`, pq.Array(entityIDs))
 		if err != nil {
 			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
 		type txnRow struct {
-			id     int64
-			bsID   string
-			acct   string
-			entity string
-			desc   string
-			wd     sql.NullFloat64
-			dep    sql.NullFloat64
+			id       int64
+			bsID     string
+			acct     string
+			entity   string
+			desc     string
+			wd       sql.NullFloat64
+			dep      sql.NullFloat64
+			currency sql.NullString
 		}
 
 		var txns []txnRow
 		for rows.Next() {
 			var tr txnRow
-			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep); err == nil {
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.currency); err == nil {
 				txns = append(txns, tr)
 			}
 		}
@@ -432,10 +636,24 @@ WHERE t.category_id IS NULL
 		updated := 0
 
 		for _, tr := range txns {
+			if !ctxHasApprovedBankAccount(ctx, tr.acct) {
+				continue
+			}
+			// skip if account currency not allowed
+			if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
+				if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
+					continue
+				}
+			}
 			cacheKey := tr.acct + "|" + tr.entity
 			rules, ok := ruleCache[cacheKey]
 			if !ok {
-				rules, err = loadCategoryRuleComponentsLocal(ctx, tx, tr.acct, tr.entity)
+				var acctCurPtr *string
+				if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
+					s := tr.currency.String
+					acctCurPtr = &s
+				}
+				rules, err = loadCategoryRuleComponentsLocal(ctx, db, tr.acct, tr.entity, acctCurPtr)
 				if err != nil {
 					continue
 				}
@@ -452,10 +670,10 @@ WHERE t.category_id IS NULL
 		}
 
 		for bsID := range bsSet {
-			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, body.UserID, time.Now())
+			_, err = tx.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, requestedByFromCtx(ctx, body.UserID), time.Now())
 			if err != nil {
 				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+				http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 				return
 			}
 		}
@@ -693,11 +911,11 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		// Fetch scopes in batch
 		scopeMap := make(map[int64]RuleScope)
 		if len(scopeIDs) > 0 {
-			scopeRows, err := db.Query(`SELECT scope_id, scope_type, entity_id, bank_code, account_number FROM cimplrcorpsaas.rule_scope WHERE scope_id = ANY($1)`, pq.Array(scopeIDs))
+			scopeRows, err := db.Query(`SELECT scope_id, scope_type, entity_id, bank_code, account_number, currency FROM cimplrcorpsaas.rule_scope WHERE scope_id = ANY($1)`, pq.Array(scopeIDs))
 			if err == nil {
 				for scopeRows.Next() {
 					var s RuleScope
-					if err := scopeRows.Scan(&s.ScopeID, &s.ScopeType, &s.EntityID, &s.BankCode, &s.AccountNumber); err == nil {
+					if err := scopeRows.Scan(&s.ScopeID, &s.ScopeType, &s.EntityID, &s.BankCode, &s.AccountNumber, &s.Currency); err == nil {
 						scopeMap[s.ScopeID] = s
 					}
 				}
@@ -758,10 +976,14 @@ func CreateRuleScopeHandler(db *sql.DB) http.Handler {
 			http.Error(w, "Missing or invalid scope_type", http.StatusBadRequest)
 			return
 		}
+		if code, msg := validateScopeAccess(r.Context(), body.ScopeType, body.EntityID, body.BankCode, body.AccountNumber, body.Currency); code != 0 {
+			http.Error(w, msg, code)
+			return
+		}
 		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number) VALUES ($1, $2, $3, $4) RETURNING scope_id`, body.ScopeType, body.EntityID, body.BankCode, body.AccountNumber).Scan(&id)
+		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1, $2, $3, $4, $5) RETURNING scope_id`, body.ScopeType, body.EntityID, body.BankCode, body.AccountNumber, body.Currency).Scan(&id)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -794,10 +1016,43 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 		if body.IsActive != nil {
 			isActive = *body.IsActive
 		}
-		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive).Scan(&id)
+
+		// Validate scope belongs to caller's entity/bank/account context
+		var st string
+		var entID, bankCode, acctNo sql.NullString
+		var currency sql.NullString
+		err := db.QueryRowContext(r.Context(), `SELECT scope_type, entity_id, bank_code, account_number, currency FROM cimplrcorpsaas.rule_scope WHERE scope_id = $1`, body.ScopeID).Scan(&st, &entID, &bankCode, &acctNo, &currency)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusBadRequest)
+			return
+		}
+		var entPtr, bankPtr, acctPtr *string
+		if entID.Valid {
+			s := entID.String
+			entPtr = &s
+		}
+		if bankCode.Valid {
+			s := bankCode.String
+			bankPtr = &s
+		}
+		if acctNo.Valid {
+			s := acctNo.String
+			acctPtr = &s
+		}
+		var curPtr *string
+		if currency.Valid {
+			s := currency.String
+			curPtr = &s
+		}
+		if code, msg := validateScopeAccess(r.Context(), st, entPtr, bankPtr, acctPtr, curPtr); code != 0 {
+			http.Error(w, msg, code)
+			return
+		}
+
+		var id int64
+		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive).Scan(&id)
+		if err != nil {
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -815,17 +1070,17 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-		
+
 		var requestBody struct {
 			CategoryRuleComponent
 			Components []CategoryRuleComponent `json:"components,omitempty"`
 		}
-		
+
 		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		
+
 		// If components array is provided, use bulk insert
 		if len(requestBody.Components) > 0 {
 			// Validate all components first
@@ -834,8 +1089,14 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 					http.Error(w, "Missing or invalid fields in component at index "+string(rune(i+'0')), http.StatusBadRequest)
 					return
 				}
+				if comp.CurrencyCode != nil && strings.TrimSpace(*comp.CurrencyCode) != "" {
+					if !ctxHasApprovedCurrency(r.Context(), *comp.CurrencyCode) {
+						http.Error(w, "currency not allowed in component at index "+fmt.Sprint(i), http.StatusForbidden)
+						return
+					}
+				}
 			}
-			
+
 			tx, err := db.Begin()
 			if err != nil {
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -847,12 +1108,12 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 					http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 				}
 			}()
-			
+
 			// Build multi-row INSERT with RETURNING component_id
 			placeholders := make([]string, 0, len(requestBody.Components))
 			args := make([]interface{}, 0, len(requestBody.Components)*9)
 			for i, comp := range requestBody.Components {
-				base := i*9
+				base := i * 9
 				placeholders = append(placeholders, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
 				args = append(args, comp.RuleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
 			}
@@ -892,16 +1153,22 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 			})
 			return
 		}
-		
+
 		// Single component insert (backward compatible)
 		if requestBody.RuleID == 0 || requestBody.ComponentType == "" {
 			http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
 			return
 		}
+		if requestBody.CurrencyCode != nil && strings.TrimSpace(*requestBody.CurrencyCode) != "" {
+			if !ctxHasApprovedCurrency(r.Context(), *requestBody.CurrencyCode) {
+				http.Error(w, "currency not allowed in component", http.StatusForbidden)
+				return
+			}
+		}
 		var id int64
 		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, requestBody.RuleID, requestBody.ComponentType, requestBody.MatchType, requestBody.MatchValue, requestBody.AmountOperator, requestBody.AmountValue, requestBody.TxnFlow, requestBody.CurrencyCode, requestBody.IsActive).Scan(&id)
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -911,7 +1178,6 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		})
 	})
 }
-
 
 // DeleteTransactionCategoryHandler deletes a category and cascades deletes for rules, rule scopes, and rule components
 func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {

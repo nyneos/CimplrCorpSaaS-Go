@@ -1,16 +1,59 @@
 package bankbalance
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func ctxApprovedAccountNumbers(ctx context.Context) []string {
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return nil
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		acct := strings.TrimSpace(a["account_number"])
+		if acct != "" {
+			out = append(out, acct)
+		}
+	}
+	return out
+}
+
+func normalizeLowerTrimSlice(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func normalizeUpperTrimSlice(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
 
 // Handler: GetCurrencyWiseDashboard
 func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -50,8 +93,17 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 
+		ctx := r.Context()
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
+		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
+		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+
 		// Query: fetch entity, bank, account number, currency, balance for status=Approved, filtered by allowed BUs
-		ctx := context.Background()
 		rows, err := pgxPool.Query(ctx, `
 			WITH latest_approved AS (
 			    SELECT s.account_number,
@@ -82,7 +134,12 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    ORDER BY bankstatementid, requested_at DESC
 			) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
 			JOIN latest_approved la ON la.account_number = s.account_number AND la.maxdate = s.statement_period_end
-		`)
+			WHERE mba.is_deleted = false
+			  AND mba.entity_id = ANY($1)
+			  AND mba.account_number = ANY($2)
+			  AND lower(trim(b.bank_name)) = ANY($3)
+			  AND upper(trim(mba.currencycode)) = ANY($4)
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -132,11 +189,16 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			        FROM cimplrcorpsaas.auditactionbankstatement
 			        ORDER BY bankstatementid, requested_at DESC
 			    ) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
+			    WHERE mba.is_deleted = false
+			      AND mba.entity_id = ANY($1)
+			      AND mba.account_number = ANY($2)
+			      AND lower(trim(b.bank_name)) = ANY($3)
+			      AND upper(trim(mba.currencycode)) = ANY($4)
 			)
 			SELECT day, entity_name, bank_name, account_number, currencycode, closing_balance
 			FROM approved
 			ORDER BY day DESC, entity_name, bank_name, account_number;
-		`)
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err == nil {
 			for dayRows.Next() {
 				var day time.Time
@@ -203,7 +265,15 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
+		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
+		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
 
 		/* ---------------------------------------------------------
 		   1️⃣ LATEST APPROVED BALANCE PER ACCOUNT
@@ -230,8 +300,13 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			JOIN masterbank b ON mba.bank_id = b.bank_id
+			WHERE mba.is_deleted = false
+			  AND mba.entity_id = ANY($1)
+			  AND bbm.account_no = ANY($2)
+			  AND lower(trim(b.bank_name)) = ANY($3)
+			  AND upper(trim(COALESCE(bbm.currency_code,''))) = ANY($4)
 			ORDER BY e.entity_name, b.bank_name, bbm.account_no;
-		`)
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -276,22 +351,45 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dayWise := []map[string]interface{}{}
 
 		dayRows, err := pgxPool.Query(ctx, `
-			SELECT
-				ab.requested_at::date AS day,
-				e.entity_name,
-				b.bank_name,
-				bbm.account_no,
-				bbm.currency_code,
-				bbm.closing_balance
-			FROM public.bank_balances_manual bbm
-			JOIN public.auditactionbankbalances ab
-			     ON ab.balance_id = bbm.balance_id
-			    AND ab.processing_status = 'APPROVED'
-			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
-			JOIN masterentitycash e ON mba.entity_id = e.entity_id
-			JOIN masterbank b ON mba.bank_id = b.bank_id
-			ORDER BY day DESC, e.entity_name, b.bank_name, bbm.account_no;
-		`)
+			WITH latest_approved_action AS (
+				SELECT DISTINCT ON (balance_id)
+					balance_id,
+					requested_at
+				FROM public.auditactionbankbalances
+				WHERE processing_status = 'APPROVED'
+				ORDER BY balance_id, requested_at DESC
+			),
+			rows_scoped AS (
+				SELECT
+					COALESCE(bbm.as_of_date, laa.requested_at::date) AS day,
+					e.entity_name,
+					b.bank_name,
+					bbm.account_no,
+					bbm.currency_code,
+					bbm.closing_balance,
+					bbm.balance_id
+				FROM public.bank_balances_manual bbm
+				JOIN latest_approved_action laa
+					ON laa.balance_id = bbm.balance_id
+				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				JOIN masterentitycash e ON mba.entity_id = e.entity_id
+				JOIN masterbank b ON mba.bank_id = b.bank_id
+				WHERE mba.is_deleted = false
+					AND mba.entity_id = ANY($1)
+					AND bbm.account_no = ANY($2)
+					AND lower(trim(b.bank_name)) = ANY($3)
+					AND upper(trim(COALESCE(bbm.currency_code,''))) = ANY($4)
+			)
+			SELECT DISTINCT ON (account_no, day)
+				day,
+				entity_name,
+				bank_name,
+				account_no,
+				currency_code,
+				closing_balance
+			FROM rows_scoped
+			ORDER BY account_no, day DESC, balance_id DESC;
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err == nil {
 			for dayRows.Next() {
 				var day time.Time
@@ -388,7 +486,15 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
+		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
+		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
 
 		/* ---------------------------------------------------------
 		   1️⃣ LATEST APPROVED BALANCE PER ACCOUNT
@@ -422,11 +528,15 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    JOIN masterbankaccount mba ON mb.account_no = mba.account_number
 			    LEFT JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			    LEFT JOIN masterbank b ON mba.bank_id = b.bank_id
+			    WHERE mba.entity_id = ANY($1)
+			      AND mb.account_no = ANY($2)
+			      AND lower(trim(COALESCE(mb.bank_name, b.bank_name, ''))) = ANY($3)
+			      AND upper(trim(COALESCE(mb.currency_code, ''))) = ANY($4)
 			    ORDER BY mb.account_no, mb.dt DESC, mb.balance_id DESC
 			)
 			SELECT entity_name, bank_name, account_no, currency_code, balance_amount
 			FROM latest_per_account;
-		`)
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -491,11 +601,15 @@ func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    mb.balance_amount,
 			    mb.dt
 			FROM approved mb
-			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
+			JOIN masterbankaccount mba ON mb.account_no = mba.account_number AND mba.is_deleted = false
 			LEFT JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			LEFT JOIN masterbank b ON mba.bank_id = b.bank_id
+			WHERE mba.entity_id = ANY($1)
+			  AND mb.account_no = ANY($2)
+			  AND lower(trim(COALESCE(mb.bank_name, b.bank_name, ''))) = ANY($3)
+			  AND upper(trim(COALESCE(mb.currency_code, ''))) = ANY($4)
 			ORDER BY mb.dt DESC, entity_name, bank_name, mb.account_no;
-		`)
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err == nil {
 			for dayRows.Next() {
 				var entity, bank, accountNo, currency string
@@ -564,21 +678,35 @@ func GetApprovedBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 	return
 		// }
 
-		ctx := context.Background()
+		ctx := r.Context()
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
+		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
+		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+
 		// join bank_balances_manual to masterbankaccount to get entity_id, then entity name from masterentity, filter by entity_name
 		rows, err := pgxPool.Query(ctx, `
 			SELECT e.entity_short_name as entity_name, mb.bank_name, mb.currency_code, SUM(mb.balance_amount) AS total_closing_balance
 			FROM bank_balances_manual mb
 			JOIN masterbankaccount mba ON mb.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
+			JOIN masterbank b ON mba.bank_id = b.bank_id
 			JOIN (
 				SELECT DISTINCT ON (balance_id) balance_id, processing_status
 				FROM auditactionbankbalances
 				ORDER BY balance_id, requested_at DESC
 			) a ON a.balance_id = mb.balance_id AND a.processing_status = 'APPROVED'
-		
+			WHERE mba.is_deleted = false
+			  AND mba.entity_id = ANY($1)
+			  AND mb.account_no = ANY($2)
+			  AND lower(trim(COALESCE(mb.bank_name, b.bank_name, ''))) = ANY($3)
+			  AND upper(trim(COALESCE(mb.currency_code, ''))) = ANY($4)
 			GROUP BY e.entity_short_name, mb.bank_name, mb.currency_code;
-		`)
+		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return

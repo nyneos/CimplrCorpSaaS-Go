@@ -2,6 +2,7 @@ package validation
 
 import (
 	"CimplrCorpSaas/api/auth"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,21 +23,40 @@ func ExtractUserID(r *http.Request) (string, error) {
 	}
 	defer r.Body.Close()
 
-	// Try JSON first
+	// Try JSON first (we already have bytes)
 	var reqMap map[string]interface{}
 	if err := json.Unmarshal(body, &reqMap); err == nil {
 		if userID, ok := reqMap["user_id"].(string); ok && userID != "" {
+			// restore body for caller
+			r.Body = io.NopCloser(bytes.NewBuffer(body))
 			return userID, nil
 		}
 	}
 
-	// Try form data
-	if err := r.ParseForm(); err == nil {
-		if userID := r.FormValue("user_id"); userID != "" {
-			return userID, nil
+	// Restore body so form parsing can read it
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
+	ct := r.Header.Get("Content-Type")
+	// If multipart, explicitly call ParseMultipartForm with a reasonable maxMemory
+	if strings.Contains(strings.ToLower(ct), "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err == nil {
+			if userID := r.FormValue("user_id"); userID != "" {
+				// restore body for caller
+				r.Body = io.NopCloser(bytes.NewBuffer(body))
+				return userID, nil
+			}
+		}
+	} else {
+		if err := r.ParseForm(); err == nil {
+			if userID := r.FormValue("user_id"); userID != "" {
+				// restore body for caller
+				r.Body = io.NopCloser(bytes.NewBuffer(body))
+				return userID, nil
+			}
 		}
 	}
 
+	// Ensure body is available for caller
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
 	return "", fmt.Errorf("user_id not found in request")
 }
 

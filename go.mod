@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
+	github.com/extrame/xls v0.0.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.0
 	github.com/jackc/pgx/v5 v5.7.5
@@ -18,7 +19,6 @@ require (
 
 require (
 	github.com/extrame/ole2 v0.0.0-20160812065207-d69429661ad7 // indirect
-	github.com/extrame/xls v0.0.1 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

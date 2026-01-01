@@ -34,6 +34,11 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Missing user_id")
 			return
 		}
+		// user_id must match middleware-authenticated user
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			return
+		}
 
 		// Validate session
 		valid := false
@@ -56,26 +61,52 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.Limit = 500
 		}
 
-		// Build query
+		// Build query (scoped by allowed entities/banks when context is present)
+		entityNames := api.GetEntityNamesFromCtx(ctx)
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		normEntities := make([]string, 0, len(entityNames))
+		for _, n := range entityNames {
+			if s := strings.TrimSpace(n); s != "" {
+				normEntities = append(normEntities, strings.ToLower(s))
+			}
+		}
+		normBanks := make([]string, 0, len(bankNames))
+		for _, n := range bankNames {
+			if s := strings.TrimSpace(n); s != "" {
+				normBanks = append(normBanks, strings.ToLower(s))
+			}
+		}
+
 		query := `
 			SELECT 
-				execution_id,
-				sweep_id,
-				execution_date,
-				amount_swept,
-				from_account,
-				to_account,
-				status,
-				error_message,
-				balance_before,
-				balance_after
-			FROM sweep_execution_log
-			WHERE 1=1
+				l.execution_id,
+				l.sweep_id,
+				l.execution_date,
+				l.amount_swept,
+				l.from_account,
+				l.to_account,
+				l.status,
+				l.error_message,
+				l.balance_before,
+				l.balance_after
+			FROM sweep_execution_log l
+			JOIN mastersweepconfiguration c ON c.sweep_id = l.sweep_id
+			WHERE COALESCE(c.is_deleted, false) = false
 		`
 
 		args := []interface{}{}
 		argPos := 1
 
+		if len(normEntities) > 0 {
+			query += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", argPos)
+			args = append(args, normEntities)
+			argPos++
+		}
+		if len(normBanks) > 0 {
+			query += fmt.Sprintf(" AND lower(trim(c.bank_name)) = ANY($%d)", argPos)
+			args = append(args, normBanks)
+			argPos++
+		}
 		if req.SweepID != "" {
 			query += fmt.Sprintf(" AND sweep_id = $%d", argPos)
 			args = append(args, req.SweepID)
@@ -135,14 +166,31 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Get total count
+		// Get total count (same scoping)
 		var totalCount int
-		countQuery := "SELECT COUNT(*) FROM sweep_execution_log WHERE 1=1"
+		countQuery := `
+			SELECT COUNT(*)
+			FROM sweep_execution_log l
+			JOIN mastersweepconfiguration c ON c.sweep_id = l.sweep_id
+			WHERE COALESCE(c.is_deleted, false) = false
+		`
 		countArgs := []interface{}{}
+		countPos := 1
+		if len(normEntities) > 0 {
+			countQuery += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", countPos)
+			countArgs = append(countArgs, normEntities)
+			countPos++
+		}
+		if len(normBanks) > 0 {
+			countQuery += fmt.Sprintf(" AND lower(trim(c.bank_name)) = ANY($%d)", countPos)
+			countArgs = append(countArgs, normBanks)
+			countPos++
+		}
 
 		if req.SweepID != "" {
-			countQuery += " AND sweep_id = $1"
+			countQuery += fmt.Sprintf(" AND l.sweep_id = $%d", countPos)
 			countArgs = append(countArgs, req.SweepID)
+			countPos++
 		}
 
 		err = pgxPool.QueryRow(ctx, countQuery, countArgs...).Scan(&totalCount)
@@ -179,6 +227,11 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Missing user_id")
 			return
 		}
+		// user_id must match middleware-authenticated user
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			return
+		}
 
 		// Validate session
 		valid := false
@@ -193,7 +246,22 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Build statistics query
+		// Build statistics query (scoped by allowed entities/banks when context is present)
+		entityNames := api.GetEntityNamesFromCtx(ctx)
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		normEntities := make([]string, 0, len(entityNames))
+		for _, n := range entityNames {
+			if s := strings.TrimSpace(n); s != "" {
+				normEntities = append(normEntities, strings.ToLower(s))
+			}
+		}
+		normBanks := make([]string, 0, len(bankNames))
+		for _, n := range bankNames {
+			if s := strings.TrimSpace(n); s != "" {
+				normBanks = append(normBanks, strings.ToLower(s))
+			}
+		}
+
 		query := `
 			SELECT 
 				COUNT(*) as total_executions,
@@ -203,15 +271,27 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN amount_swept ELSE 0 END), 0) as total_amount_swept,
 				COALESCE(AVG(CASE WHEN status = 'SUCCESS' THEN amount_swept END), 0) as avg_sweep_amount,
 				MAX(execution_date) as last_execution
-			FROM sweep_execution_log
-			WHERE 1=1
+			FROM sweep_execution_log l
+			JOIN mastersweepconfiguration c ON c.sweep_id = l.sweep_id
+			WHERE COALESCE(c.is_deleted, false) = false
 		`
 
 		args := []interface{}{}
 		argPos := 1
 
+		if len(normEntities) > 0 {
+			query += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", argPos)
+			args = append(args, normEntities)
+			argPos++
+		}
+		if len(normBanks) > 0 {
+			query += fmt.Sprintf(" AND lower(trim(c.bank_name)) = ANY($%d)", argPos)
+			args = append(args, normBanks)
+			argPos++
+		}
+
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND sweep_id = $%d", argPos)
+			query += fmt.Sprintf(" AND l.sweep_id = $%d", argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}
@@ -293,6 +373,11 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Missing user_id or sweep_id")
 			return
 		}
+		// user_id must match middleware-authenticated user
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
 
 		// Validate session
 		requestedBy := ""
@@ -308,19 +393,46 @@ func ManualTriggerSweep(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Fetch sweep configuration (no cutoff_time or frequency check needed for manual)
-		var entityName, bankAccount, sweepType, parentAccount string
+		var entityName, bankName, bankAccount, sweepType, parentAccount string
 		var bufferAmount *float64
 		var activeStatus string
 
 		err := pgxPool.QueryRow(ctx, `
-			SELECT entity_name, bank_account, sweep_type, parent_account, buffer_amount, active_status
+			SELECT entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, active_status
 			FROM mastersweepconfiguration
 			WHERE sweep_id = $1 AND is_deleted = false
-		`, req.SweepID).Scan(&entityName, &bankAccount, &sweepType, &parentAccount, &bufferAmount, &activeStatus)
+		`, req.SweepID).Scan(&entityName, &bankName, &bankAccount, &sweepType, &parentAccount, &bufferAmount, &activeStatus)
 
 		if err != nil {
 			api.RespondWithResult(w, false, "Sweep configuration not found: "+err.Error())
 			return
+		}
+
+		// Validate sweep scope against prevalidation context
+		if strings.TrimSpace(entityName) != "" {
+			if !api.IsEntityAllowed(ctx, entityName) {
+				api.RespondWithResult(w, false, "unauthorized entity")
+				return
+			}
+		}
+		if strings.TrimSpace(bankName) != "" {
+			if !api.IsBankAllowed(ctx, bankName) {
+				api.RespondWithResult(w, false, "unauthorized bank")
+				return
+			}
+		}
+		if strings.TrimSpace(bankAccount) != "" {
+			if !ctxHasApprovedBankAccountFor(ctx, bankAccount, bankName, entityName) {
+				api.RespondWithResult(w, false, "unauthorized bank account")
+				return
+			}
+		}
+		if strings.TrimSpace(parentAccount) != "" {
+			// parent must be an approved account and belong to the same entity (when entity is known)
+			if !ctxHasApprovedBankAccountFor(ctx, parentAccount, "", entityName) {
+				api.RespondWithResult(w, false, "unauthorized parent account")
+				return
+			}
 		}
 
 		// Check if approved (ONLY requirement for manual trigger)
