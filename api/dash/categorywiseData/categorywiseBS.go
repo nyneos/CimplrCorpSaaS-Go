@@ -1,6 +1,7 @@
 package categorywisedata
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
@@ -67,14 +68,56 @@ type LowestBalanceAccount struct {
 	AsOfDate string  `json:"as_of_date"`
 }
 
+func ctxApprovedAccountNumbers(ctx context.Context) []string {
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return nil
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		acct := strings.TrimSpace(a["account_number"])
+		if acct != "" {
+			out = append(out, acct)
+		}
+	}
+	return out
+}
+
+func normalizeLowerTrimSlice(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func normalizeUpperTrimSlice(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	// numeric mask wide enough to avoid overflow display
 	const wideNumMask = "FM9999999999999999999999999999990.00"
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
 		q := r.URL.Query()
+		debug := strings.TrimSpace(q.Get("debug")) == "1"
 
 		entityF := q.Get("entity")
 		bankF := q.Get("bank")
@@ -88,6 +131,16 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		fromDate := time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
 
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+		allowedBanksNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
+		allowedCurrenciesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
+
+		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 || len(allowedBanksNorm) == 0 || len(allowedCurrenciesNorm) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+
 		var args []interface{}
 		arg := 1
 		var filters []string
@@ -97,18 +150,44 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, fromDate)
 		arg++
 
+		// mandatory scope filters from prevalidation context
+		filters = append(filters, fmt.Sprintf("bs.entity_id = ANY($%d)", arg))
+		args = append(args, allowedEntityIDs)
+		arg++
+		filters = append(filters, fmt.Sprintf("bs.account_number = ANY($%d)", arg))
+		args = append(args, allowedAccountNumbers)
+		arg++
+		filters = append(filters, fmt.Sprintf("lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($%d)", arg))
+		args = append(args, allowedBanksNorm)
+		arg++
+		filters = append(filters, fmt.Sprintf("upper(trim(COALESCE(mba.currency, ''))) = ANY($%d)", arg))
+		args = append(args, allowedCurrenciesNorm)
+		arg++
+
 		if entityF != "" {
+			if !api.IsEntityAllowed(ctx, entityF) {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			filters = append(filters, fmt.Sprintf("bs.entity_id = $%d", arg))
 			args = append(args, entityF)
 			arg++
 		}
 		if bankF != "" {
+			if !api.IsBankAllowed(ctx, bankF) {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			// bank name may exist on mba.bank_name or masterbank.mb.bank_name
 			filters = append(filters, fmt.Sprintf("(mba.bank_name = $%d OR mb.bank_name = $%d)", arg, arg))
 			args = append(args, bankF)
 			arg++
 		}
 		if currencyF != "" {
+			if !api.IsCurrencyAllowed(ctx, currencyF) {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			filters = append(filters, fmt.Sprintf("mba.currency = $%d", arg))
 			args = append(args, currencyF)
 			arg++
@@ -152,7 +231,7 @@ ORDER BY inflow DESC, outflow DESC;
 		}
 		defer catRows.Close()
 
-		var categories []CategoryAgg
+		categories := make([]CategoryAgg, 0)
 		for catRows.Next() {
 			var c CategoryAgg
 			if err := catRows.Scan(&c.Category, &c.Inflow, &c.Outflow); err == nil {
@@ -246,7 +325,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		}
 		defer entityRows.Close()
 
-		var entities []EntityBreakdownRow
+		entities := make([]EntityBreakdownRow, 0)
 		for entityRows.Next() {
 			var id, entityName, bankName, acct string
 			var inflow, outflow float64
@@ -317,7 +396,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		}
 		defer txnRows.Close()
 
-		var txns []TransactionRow
+		txns := make([]TransactionRow, 0)
 		for txnRows.Next() {
 			var tr TransactionRow
 			if err := txnRows.Scan(
@@ -347,14 +426,28 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		kpiArgs = append(kpiArgs, fromDate)
 		kArg++
 
+		// mandatory scope filters from prevalidation context
+		kpiFilters = append(kpiFilters, fmt.Sprintf("b.account_no = ANY($%d)", kArg))
+		kpiArgs = append(kpiArgs, allowedAccountNumbers)
+		kArg++
+		kpiFilters = append(kpiFilters, fmt.Sprintf("mba.entity_id = ANY($%d)", kArg))
+		kpiArgs = append(kpiArgs, allowedEntityIDs)
+		kArg++
+		kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = ANY($%d)", kArg))
+		kpiArgs = append(kpiArgs, allowedBanksNorm)
+		kArg++
+		kpiFilters = append(kpiFilters, fmt.Sprintf("upper(trim(COALESCE(b.currency_code, ''))) = ANY($%d)", kArg))
+		kpiArgs = append(kpiArgs, allowedCurrenciesNorm)
+		kArg++
+
 		if bankF != "" {
-			kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.bank_name, '') = $%d", kArg))
-			kpiArgs = append(kpiArgs, bankF)
+			kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = $%d", kArg))
+			kpiArgs = append(kpiArgs, strings.ToLower(strings.TrimSpace(bankF)))
 			kArg++
 		}
 		if currencyF != "" {
-			kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.currency_code, '') = $%d", kArg))
-			kpiArgs = append(kpiArgs, currencyF)
+			kpiFilters = append(kpiFilters, fmt.Sprintf("upper(trim(COALESCE(b.currency_code, ''))) = $%d", kArg))
+			kpiArgs = append(kpiArgs, strings.ToUpper(strings.TrimSpace(currencyF)))
 			kArg++
 		}
 
@@ -373,6 +466,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	  COALESCE(b.bank_name, 'Unknown') AS bank,
 	  SUM(COALESCE(b.balance_amount, b.closing_balance, 0)) AS total
 	FROM public.bank_balances_manual b
+	JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
 	JOIN approved ap
 	  ON ap.balance_id = b.balance_id
 	 AND ap.processing_status = 'APPROVED'
@@ -410,6 +504,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	  COALESCE(b.currency_code, '') AS currency_code,
 	  COALESCE(to_char(b.as_of_date, 'YYYY-MM-DD'), '') AS as_of_date
 	FROM public.bank_balances_manual b
+	JOIN public.masterbankaccount mba ON b.account_no = mba.account_number AND mba.is_deleted = false
 	JOIN approved ap
 	  ON ap.balance_id = b.balance_id
 	 AND ap.processing_status = 'APPROVED'
@@ -483,7 +578,7 @@ LIMIT 2000;
 		}
 		defer misclassifiedRows.Close()
 
-		var misclassifiedTxns []TransactionRow
+		misclassifiedTxns := make([]TransactionRow, 0)
 		for misclassifiedRows.Next() {
 			var tr TransactionRow
 			if err := misclassifiedRows.Scan(
@@ -511,6 +606,77 @@ LIMIT 2000;
 			"misclassified_transactions": misclassifiedTxns,
 			"highest_contributing_bank":  highestBank,
 			"lowest_balance_account":     lowestAcct,
+		}
+
+		if debug {
+			// Count how many rows exist after applying the exact same scope + approval + horizon filters.
+			// This helps identify if the emptiness is due to lack of uploads/approvals or due to over-scoping.
+			baseCountSQL := `
+				SELECT COUNT(*)
+				FROM cimplrcorpsaas.bank_statement_transactions t
+				JOIN cimplrcorpsaas.bank_statements bs
+					ON t.bank_statement_id = bs.bank_statement_id
+				LEFT JOIN public.masterbankaccount mba
+					ON mba.account_number = bs.account_number
+				LEFT JOIN public.masterbank mb
+					ON mb.bank_id = mba.bank_id
+				JOIN (
+					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+					FROM cimplrcorpsaas.auditactionbankstatement
+					ORDER BY bankstatementid, requested_at DESC
+				) ap ON ap.bankstatementid = bs.bank_statement_id
+					AND ap.processing_status = 'APPROVED'
+				` + whereClause + `
+			`
+			var txnCount int64
+			if err := pgxPool.QueryRow(ctx, baseCountSQL, args...).Scan(&txnCount); err != nil {
+				txnCount = -1
+			}
+
+			stmtCountSQL := `
+				SELECT COUNT(DISTINCT bs.bank_statement_id)
+				FROM cimplrcorpsaas.bank_statements bs
+				LEFT JOIN public.masterbankaccount mba
+					ON mba.account_number = bs.account_number
+				LEFT JOIN public.masterbank mb
+					ON mb.bank_id = mba.bank_id
+				JOIN (
+					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+					FROM cimplrcorpsaas.auditactionbankstatement
+					ORDER BY bankstatementid, requested_at DESC
+				) ap ON ap.bankstatementid = bs.bank_statement_id
+					AND ap.processing_status = 'APPROVED'
+				WHERE bs.entity_id = ANY($1)
+					AND bs.account_number = ANY($2)
+					AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
+					AND upper(trim(COALESCE(mba.currency, ''))) = ANY($4)
+					AND bs.statement_period_end >= $5::date
+			`
+			var stmtCount int64
+			if err := pgxPool.QueryRow(ctx, stmtCountSQL,
+				allowedEntityIDs,
+				allowedAccountNumbers,
+				allowedBanksNorm,
+				allowedCurrenciesNorm,
+				fromDate,
+			).Scan(&stmtCount); err != nil {
+				stmtCount = -1
+			}
+
+			resp["debug"] = map[string]interface{}{
+				"horizon_days":          days,
+				"from_date":             fromDate,
+				"entity_filter":         entityF,
+				"bank_filter":           bankF,
+				"currency_filter":        currencyF,
+				"allowed_entity_ids":     len(allowedEntityIDs),
+				"allowed_accounts":       len(allowedAccountNumbers),
+				"allowed_banks":          len(allowedBanksNorm),
+				"allowed_currencies":     len(allowedCurrenciesNorm),
+				"approved_statement_count": stmtCount,
+				"approved_txn_count":     txnCount,
+				"note": "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
+			}
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

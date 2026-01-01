@@ -2,7 +2,6 @@ package bankbalances
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -74,6 +73,7 @@ func normalizeTime(timeStr string) string {
 func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		entityIDs := ctxEntityIDs(ctx)
 
 		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
@@ -90,15 +90,8 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// verify session
-		sessions := auth.GetActiveSessions()
-		userName := ""
-		for _, s := range sessions {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
+		// verify session and resolve requested_by
+		userName := requestedByFromCtx(ctx, userID)
 		if userName == "" {
 			http.Error(w, constants.ErrInvalidSession, http.StatusUnauthorized)
 			return
@@ -280,10 +273,149 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					RETURNING balance_id
 				`, tgtColsStr, srcColsStr)
 
+				// Validate bank/account/currency values (when present) against prevalidated context
+				var bankExpr, acctExpr, currencyExpr string
+				for i, c := range tgtCols {
+					switch c {
+					case "bank_name":
+						bankExpr = selectExprs[i]
+					case "account_no":
+						acctExpr = selectExprs[i]
+					case "currency_code":
+						currencyExpr = selectExprs[i]
+					}
+				}
+				if bankExpr != "" || acctExpr != "" || currencyExpr != "" {
+					cols := make([]string, 0, 3)
+					if bankExpr != "" {
+						cols = append(cols, bankExpr)
+					}
+					if acctExpr != "" {
+						cols = append(cols, acctExpr)
+					}
+					if currencyExpr != "" {
+						cols = append(cols, currencyExpr)
+					}
+					valSQL := fmt.Sprintf(`SELECT DISTINCT %s FROM input_bank_balance_table s WHERE s.upload_batch_id = $1`, strings.Join(cols, ", "))
+					vrows, verr := tx.Query(ctx, valSQL, batchID)
+					if verr != nil {
+						tx.Rollback(ctx)
+						api.RespondWithError(w, http.StatusInternalServerError, pgUserFriendlyMessage(verr))
+						return
+					}
+					for vrows.Next() {
+						var bankName, accountNo, currency *string
+						// scan based on which columns we requested (in the same order)
+						if bankExpr != "" && acctExpr != "" && currencyExpr != "" {
+							_ = vrows.Scan(&bankName, &accountNo, &currency)
+						} else if bankExpr != "" && acctExpr != "" {
+							_ = vrows.Scan(&bankName, &accountNo)
+						} else if bankExpr != "" && currencyExpr != "" {
+							_ = vrows.Scan(&bankName, &currency)
+						} else if acctExpr != "" && currencyExpr != "" {
+							_ = vrows.Scan(&accountNo, &currency)
+						} else if bankExpr != "" {
+							_ = vrows.Scan(&bankName)
+						} else if acctExpr != "" {
+							_ = vrows.Scan(&accountNo)
+						} else {
+							_ = vrows.Scan(&currency)
+						}
+
+						if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxHasApprovedBankName(ctx, *bankName) {
+							vrows.Close()
+							tx.Rollback(ctx)
+							api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive bank")
+							return
+						}
+						if accountNo != nil && strings.TrimSpace(*accountNo) != "" {
+							if !ctxHasApprovedBankAccount(ctx, *accountNo) {
+								vrows.Close()
+								tx.Rollback(ctx)
+								api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
+								return
+							}
+							// If middleware provided entity scope, ensure the account's entity is allowed
+							if len(entityIDs) > 0 {
+								acct := strings.TrimSpace(*accountNo)
+								var mbaEntityID *string
+								if err := tx.QueryRow(ctx, `SELECT entity_id FROM masterbankaccount WHERE account_number = $1 LIMIT 1`, acct).Scan(&mbaEntityID); err == nil && mbaEntityID != nil {
+									// determine if provided entityIDs are names or ids
+									isNameList := true
+									for _, e := range entityIDs {
+										ee := strings.TrimSpace(e)
+										if ee == "" {
+											continue
+										}
+										if strings.HasPrefix(strings.ToUpper(ee), "EC-") || strings.Contains(ee, "-") {
+											isNameList = false
+											break
+										}
+									}
+									if isNameList {
+										// fetch allowed entity ids for matching names
+										lowerNames := make([]string, 0, len(entityIDs))
+										for _, e := range entityIDs {
+											if s := strings.TrimSpace(e); s != "" {
+												lowerNames = append(lowerNames, strings.ToLower(s))
+											}
+										}
+										rowsEnt, err := tx.Query(ctx, `SELECT entity_id FROM public.masterentity WHERE LOWER(entity_name) = ANY($1)`, lowerNames)
+										allowed := map[string]bool{}
+										if err == nil {
+											defer rowsEnt.Close()
+											for rowsEnt.Next() {
+												var id string
+												if err := rowsEnt.Scan(&id); err == nil {
+													allowed[id] = true
+												}
+											}
+										}
+										if !allowed[*mbaEntityID] {
+											vrows.Close()
+											tx.Rollback(ctx)
+											api.RespondWithError(w, http.StatusForbidden, "Account's entity not allowed")
+											return
+										}
+									} else {
+										// entityIDs are ids: match directly
+										allowed := false
+										for _, e := range entityIDs {
+											if strings.TrimSpace(e) == *mbaEntityID {
+												allowed = true
+												break
+											}
+										}
+										if !allowed {
+											vrows.Close()
+											tx.Rollback(ctx)
+											api.RespondWithError(w, http.StatusForbidden, "Account's entity not allowed")
+											return
+										}
+									}
+								} else {
+									// no masterbankaccount found for account -> forbid
+									vrows.Close()
+									tx.Rollback(ctx)
+									api.RespondWithError(w, http.StatusForbidden, constants.ErrInvalidAccount)
+									return
+								}
+							}
+						}
+						if currency != nil && strings.TrimSpace(*currency) != "" && !ctxHasApprovedCurrency(ctx, *currency) {
+							vrows.Close()
+							tx.Rollback(ctx)
+							api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive currency")
+							return
+						}
+					}
+					vrows.Close()
+				}
+
 				rows, err := tx.Query(ctx, insertSQL, batchID)
 				if err != nil {
 					tx.Rollback(ctx)
-					api.RespondWithError(w, http.StatusInternalServerError, "final insert error: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, "final insert error: "+pgUserFriendlyMessage(err))
 					return
 				}
 				var insertedIDs []string
@@ -303,7 +435,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				for _, bid := range insertedIDs {
 					if _, err := tx.Exec(ctx, `INSERT INTO auditactionbankbalances (balance_id, actiontype, processing_status, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, bid, userName); err != nil {
 						tx.Rollback(ctx)
-						api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit action: "+err.Error())
+						api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit action: "+pgUserFriendlyMessage(err))
 						return
 					}
 				}

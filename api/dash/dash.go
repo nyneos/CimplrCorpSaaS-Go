@@ -20,6 +20,7 @@ import (
 	realtimebalances "CimplrCorpSaas/api/dash/real-time-balances"
 	reports "CimplrCorpSaas/api/dash/reports"
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"database/sql"
 	"fmt"
@@ -43,20 +44,21 @@ func StartDashService(db *sql.DB) {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
 	// Statement Status Dashboard
-	mux.Handle("/dash/statement-status", api.BusinessUnitMiddleware(db)(statementstatus.GetStatementStatusHandler(pgxPool)))
-	mux.Handle("/dash/transaction-pool", api.BusinessUnitMiddleware(db)(commonpool.GetTransactionPoolHandler(db)))
+	mux.Handle("/dash/statement-status", middlewares.PreValidationMiddleware(pgxPool)(statementstatus.GetStatementStatusHandler(pgxPool)))
+	mux.Handle("/dash/transaction-pool", middlewares.PreValidationMiddleware(pgxPool)(commonpool.GetTransactionPoolHandler(db)))
 	// Categorywise Breakdown Dashboard
-	mux.Handle("/dash/categorywise-breakdown", api.BusinessUnitMiddleware(db)(categorywisedata.GetCategorywiseBreakdownHandler(pgxPool)))
+	mux.Handle("/dash/categorywise-breakdown", middlewares.PreValidationMiddleware(pgxPool)(categorywisedata.GetCategorywiseBreakdownHandler(pgxPool)))
 	mux.HandleFunc("/dash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Dashboard Service is active"))
 	})
 
 	// Real-time Balances KPI Route
-	mux.Handle("/dash/realtime-balances/kpi", api.BusinessUnitMiddleware(db)(realtimebalances.GetKpiHandler(db)))
-	// mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
-	// mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
-	mux.Handle("/dash/bank-balance/approved", api.BusinessUnitMiddleware(db)(bankbalance.GetApprovedBankBalances(pgxPool)))
-	mux.Handle("/dash/bank-balance/currency-wise", api.BusinessUnitMiddleware(db)(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))
+	mux.Handle("/dash/realtime-balances/kpi", middlewares.PreValidationMiddleware(pgxPool)(realtimebalances.GetKpiHandler(db)))
+	// Bank balance endpoints: use PreValidationMiddleware ONLY (no BusinessUnitMiddleware to avoid overriding entity scope)
+	mux.Handle("/dash/bank-balance/approved", middlewares.PreValidationMiddleware(pgxPool)(bankbalance.GetApprovedBankBalances(pgxPool)))
+	mux.Handle("/dash/bank-balance/currency-wise", middlewares.PreValidationMiddleware(pgxPool)(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))
+	mux.Handle("/dash/bank-balance/currency-wise-dashboard", middlewares.PreValidationMiddleware(pgxPool)(bankbalance.GetCurrencyWiseDashboard(pgxPool)))
+	mux.Handle("/dash/bank-balance/approved-manual", middlewares.PreValidationMiddleware(pgxPool)(bankbalance.GetApprovedBalancesFromManual(pgxPool)))
 
 	// Business Unit/Currency Exposure Dashboard
 	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))

@@ -3,13 +3,17 @@
 package commonpool
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 type ConsolidatedTransactionPool struct {
@@ -58,6 +62,36 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 
 // FetchConsolidatedTransactionPool fetches and maps all transactions for dashboard
 func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]ConsolidatedTransactionPool, error) {
+	allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+	allowedBankNames := api.GetBankNamesFromCtx(ctx)
+	allowedCurrencyCodes := api.GetCurrencyCodesFromCtx(ctx)
+	allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+
+	if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 {
+		return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+	}
+	if len(allowedBankNames) == 0 || len(allowedCurrencyCodes) == 0 {
+		return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+	}
+
+	normBanks := make([]string, 0, len(allowedBankNames))
+	for _, b := range allowedBankNames {
+		b = strings.ToLower(strings.TrimSpace(b))
+		if b != "" {
+			normBanks = append(normBanks, b)
+		}
+	}
+	normCurrencies := make([]string, 0, len(allowedCurrencyCodes))
+	for _, c := range allowedCurrencyCodes {
+		c = strings.ToUpper(strings.TrimSpace(c))
+		if c != "" {
+			normCurrencies = append(normCurrencies, c)
+		}
+	}
+	if len(normBanks) == 0 || len(normCurrencies) == 0 {
+		return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+	}
+
 	// Adjust the query to join with entity, bank, currency as needed
 	query := `
 		SELECT 
@@ -73,13 +107,17 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 			t.deposit_amount
 		FROM cimplrcorpsaas.bank_statement_transactions t
 		LEFT JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
-		LEFT JOIN public.masterbankaccount mba ON t.account_number = mba.account_number
-		LEFT JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
+		JOIN public.masterbankaccount mba ON t.account_number = mba.account_number AND mba.is_deleted = false
+		JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
 		LEFT JOIN cimplrcorpsaas.transaction_categories c ON t.category_id = c.category_id
 		LEFT JOIN public.masterentitycash me ON s.entity_id = me.entity_id
+		WHERE s.entity_id = ANY($1)
+		  AND s.account_number = ANY($2)
+		  AND lower(trim(mb.bank_name)) = ANY($3)
+		  AND upper(trim(mba.currency)) = ANY($4)
 		ORDER BY t.value_date DESC
 	`
-	rows, err := db.QueryContext(ctx, query)
+	rows, err := db.QueryContext(ctx, query, pq.Array(allowedEntityIDs), pq.Array(allowedAccountNumbers), pq.Array(normBanks), pq.Array(normCurrencies))
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}
@@ -131,4 +169,23 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 
 	}
 	return result, nil
+}
+
+func ctxApprovedAccountNumbers(ctx context.Context) []string {
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return nil
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		acct := strings.TrimSpace(a["account_number"])
+		if acct != "" {
+			out = append(out, acct)
+		}
+	}
+	return out
 }

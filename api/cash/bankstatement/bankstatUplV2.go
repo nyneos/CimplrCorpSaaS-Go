@@ -1,7 +1,9 @@
 package bankstatement
 
 import (
+	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"bytes"
 	"context"
 	"log"
@@ -22,6 +24,98 @@ import (
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
+
+func pqUserFriendlyMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	pqErr, ok := err.(*pq.Error)
+	if !ok {
+		return err.Error()
+	}
+	switch pqErr.Code {
+	case "23505":
+		// uniq_file_hash / uniq_stmt / other unique constraints
+		switch pqErr.Constraint {
+		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
+			return "This bank statement file was already uploaded earlier. Please upload a different file."
+		case "uniq_stmt":
+			return "A statement for this period is already uploaded for this account."
+		default:
+			return "A record with the same unique value already exists."
+		}
+	case "23503":
+		return "Some referenced data was not found (please refresh and try again)."
+	case "23514":
+		return "Some fields have invalid values. Please check and try again."
+	default:
+		return "Database error while processing the request. Please try again."
+	}
+}
+
+func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
+	if strings.TrimSpace(accountNumber) == "" {
+		return false
+	}
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return true
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return true
+	}
+	for _, a := range accounts {
+		if strings.EqualFold(strings.TrimSpace(a["account_number"]), strings.TrimSpace(accountNumber)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ctxApprovedCurrencies returns list of allowed currency codes from context (case-insensitive stored as upper)
+func ctxApprovedCurrencies(ctx context.Context) []string {
+	v := ctx.Value("CurrencyInfo")
+	if v == nil {
+		v = ctx.Value("ApprovedCurrencies")
+	}
+	if v == nil {
+		return nil
+	}
+	arr, ok := v.([]map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, m := range arr {
+		if c, ok := m["currency_code"]; ok {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				out = append(out, strings.ToUpper(c))
+			}
+		}
+	}
+	return out
+}
+
+// ctxHasApprovedCurrency returns true when no currency restriction is present or currency is allowed
+func ctxHasApprovedCurrency(ctx context.Context, currency string) bool {
+	currency = strings.TrimSpace(currency)
+	if currency == "" {
+		return true
+	}
+	codes := ctxApprovedCurrencies(ctx)
+	if len(codes) == 0 {
+		return true
+	}
+	up := strings.ToUpper(currency)
+	for _, c := range codes {
+		if strings.ToUpper(c) == up {
+			return true
+		}
+	}
+	return false
+}
 
 // Sentinel errors used for mapping to user-friendly messages
 var (
@@ -62,10 +156,10 @@ type categoryRuleComponent struct {
 }
 
 // loadCategoryRuleComponents fetches all active rule components for a given
-// account/entity/bank/global scope, ordered by rule priority. This mirrors the
+// account/entity/bank/currency/global scope, ordered by rule priority. This mirrors the
 // logic originally present in the upload handler so that recompute can reuse
 // the same rules.
-func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID string) ([]categoryRuleComponent, error) {
+func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
 	q := `
 	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
 	       FROM cimplrcorpsaas.category_rules r
@@ -77,12 +171,13 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 		       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
 		       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
 		       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
+		       OR (s.scope_type = 'CURRENCY' AND s.currency_code = $3)
 		       OR (s.scope_type = 'GLOBAL')
 		 )
 	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
 	   `
 
-	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID)
+	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, err
 	}
@@ -347,8 +442,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		return nil, ErrAccountNumberMissing
 	}
 
-	// Lookup entity_id and name from masterbankaccount
-	err = db.QueryRowContext(ctx, `SELECT entity_id, COALESCE(account_nickname, bank_name) FROM public.masterbankaccount WHERE account_number = $1 AND is_deleted = false`, accountNumber).Scan(&entityID, &accountName)
+	// Lookup entity_id and bank_name from masterbankaccount/masterbank
+	var bankName string
+	err = db.QueryRowContext(ctx, `
+		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+		FROM public.masterbankaccount mba
+		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+		WHERE mba.account_number = $1 AND mba.is_deleted = false
+	`, accountNumber).Scan(&entityID, &bankName, &accountName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrAccountNotFound
@@ -356,8 +457,42 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		return nil, fmt.Errorf("db error while looking up account in masterbankaccount: %w", err)
 	}
 
-	// 4. Fetch all active rules/components for this account/entity/bank/global
-	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID)
+	// Context validations (entity scope + approved bank/account lists)
+	if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
+		if !apictx.IsEntityAllowed(ctx, entityID) {
+			return nil, errors.New("no access to this entity")
+		}
+	}
+	if bankName != "" {
+		if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
+			if !apictx.IsBankAllowed(ctx, bankName) {
+				return nil, errors.New("bank not allowed")
+			}
+		}
+	}
+	if ctx.Value("ApprovedBankAccounts") != nil {
+		if !ctxHasApprovedBankAccount(ctx, accountNumber) {
+			return nil, errors.New("bank account not approved")
+		}
+	}
+
+	// Currency enforcement (entity -> bank -> account -> currency)
+	var acctCurrency sql.NullString
+	if curCodes := ctxApprovedCurrencies(ctx); len(curCodes) > 0 {
+		_ = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
+			if !ctxHasApprovedCurrency(ctx, acctCurrency.String) {
+				return nil, errors.New("currency not allowed")
+			}
+		}
+	}
+
+	// 4. Fetch all active rules/components for this account/entity/bank/currency/global
+	var currencyCode string
+	if acctCurrency.Valid {
+		currencyCode = acctCurrency.String
+	}
+	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch category rules: %w", err)
 	}
@@ -744,11 +879,19 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	uploadedCount = len(transactions)
 
 	// Insert audit action for this bank statement
+	requestedBy := "system"
+	if s := middlewares.GetSessionFromContext(ctx); s != nil {
+		if strings.TrimSpace(s.Name) != "" {
+			requestedBy = s.Name
+		} else if strings.TrimSpace(s.UserID) != "" {
+			requestedBy = s.UserID
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
 			       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 				       bankstatementid, actiontype, processing_status, requested_by, requested_at
 			       ) VALUES ($1, $2, $3, $4, $5)
-		       `, bankStatementID, "CREATE", "PENDING_APPROVAL", "system", time.Now())
+		       `, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("failed to insert audit action: %w", err)
@@ -857,7 +1000,13 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			http.Error(w, "Missing or invalid user_id in body", http.StatusBadRequest)
 			return
 		}
-		rows, err := db.Query(`
+		ctx := r.Context()
+		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		if len(entityIDs) == 0 {
+			http.Error(w, "No accessible business units found", http.StatusUnauthorized)
+			return
+		}
+		rows, err := db.QueryContext(ctx, `
 										WITH latest_audit AS (
 											SELECT a.*
 											FROM cimplrcorpsaas.auditactionbankstatement a
@@ -872,10 +1021,11 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 										FROM cimplrcorpsaas.bank_statements s
 										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
+										WHERE s.entity_id = ANY($1)
 										ORDER BY s.uploaded_at DESC
-						`)
+						`, pq.Array(entityIDs))
 		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
@@ -944,7 +1094,13 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		rows, err := db.Query(`
+		ctx := r.Context()
+		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
+		if len(entityIDs) == 0 {
+			http.Error(w, "No accessible business units found", http.StatusUnauthorized)
+			return
+		}
+		rows, err := db.QueryContext(ctx, `
 			SELECT
 				t.transaction_id,
 				e.entity_name,
@@ -965,8 +1121,9 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			LEFT JOIN cimplrcorpsaas.transaction_categories c
 				ON t.category_id = c.category_id
 			WHERE t.bank_statement_id = $1
+			  AND s.entity_id = ANY($2)
 			ORDER BY t.value_date
-		`, body.BankStatementID)
+		`, body.BankStatementID, pq.Array(entityIDs))
 
 		if err != nil {
 			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
@@ -1113,10 +1270,22 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// Load all rules/components for this account/entity/bank/global so we can
+		// Fetch account currency for rule loading
+		var acctCurrency sql.NullString
+		err = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
+		if err != nil {
+			http.Error(w, "failed to fetch account currency: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Load all rules/components for this account/entity/bank/currency/global so we can
 		// both re-evaluate categories and attach category metadata (names/types)
 		// to the KPI response, mirroring the upload behaviour.
-		rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID)
+		var currencyCode string
+		if acctCurrency.Valid {
+			currencyCode = acctCurrency.String
+		}
+		rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currencyCode)
 		if err != nil {
 			http.Error(w, "failed to fetch category rules: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1292,10 +1461,25 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		results := make([]map[string]interface{}, 0)
+		ctx := r.Context()
 		for _, bsid := range body.BankStatementIDs {
+			// entity access check
+			var entityID string
+			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
+				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
+					if !apictx.IsEntityAllowed(ctx, entityID) {
+						results = append(results, map[string]interface{}{
+							"bank_statement_id": bsid,
+							"success":           false,
+							"error":             "No access to this bank statement",
+						})
+						continue
+					}
+				}
+			}
 			// Check if the latest audit action is DELETE_PENDING_APPROVAL
 			var actionType, processingStatus string
-			err := db.QueryRow(`
+			err := db.QueryRowContext(ctx, `
 				       SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
 				       WHERE bankstatementid = $1
 				       ORDER BY action_id DESC LIMIT 1
@@ -1309,7 +1493,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 				continue
 			}
 			if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
-				tx, err := db.Begin()
+				tx, err := db.BeginTx(ctx, nil)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1372,7 +1556,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 				// On normal approval, create/update the corresponding bank balance
 				// entry and its audit record, based on the already-stored statement
 				// and transactions.
-				tx, err := db.Begin()
+				tx, err := db.BeginTx(ctx, nil)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1386,7 +1570,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 				var accountNumber string
 				var statementPeriodEnd time.Time
 				var openingBalance, closingBalance float64
-				err = tx.QueryRow(`
+				err = tx.QueryRowContext(ctx, `
 				       SELECT account_number, statement_period_end, opening_balance, closing_balance
 				       FROM cimplrcorpsaas.bank_statements
 				       WHERE bank_statement_id = $1
@@ -1402,7 +1586,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 
 				// Lookup account/bank details for balances_manual
 				var bankName, currencyCode, nickname, country string
-				err = tx.QueryRow(`
+				err = tx.QueryRowContext(ctx, `
 				       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
 				       FROM public.masterbankaccount mba
 				       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
@@ -1417,9 +1601,39 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 					continue
 				}
 
+				// Enforce bank/account/currency checks (entity already checked above)
+				if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
+					if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
+						results = append(results, map[string]interface{}{
+							"bank_statement_id": bsid,
+							"success":           false,
+							"error":             "bank not allowed",
+						})
+						continue
+					}
+				}
+				if ctx.Value("ApprovedBankAccounts") != nil {
+					if !ctxHasApprovedBankAccount(ctx, accountNumber) {
+						results = append(results, map[string]interface{}{
+							"bank_statement_id": bsid,
+							"success":           false,
+							"error":             "bank account not approved",
+						})
+						continue
+					}
+				}
+				if !ctxHasApprovedCurrency(ctx, currencyCode) {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             "currency not allowed",
+					})
+					continue
+				}
+
 				// Calculate total credits and debits from stored transactions
 				var totalCredits, totalDebits float64
-				err = tx.QueryRow(`
+				err = tx.QueryRowContext(ctx, `
 				       SELECT COALESCE(SUM(deposit_amount), 0), COALESCE(SUM(withdrawal_amount), 0)
 				       FROM cimplrcorpsaas.bank_statement_transactions
 				       WHERE bank_statement_id = $1
@@ -1554,8 +1768,22 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		results := make([]map[string]interface{}, 0)
+		ctx := r.Context()
 		for _, bsid := range body.BankStatementIDs {
-			_, err := db.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
+			var entityID string
+			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
+				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
+					if !apictx.IsEntityAllowed(ctx, entityID) {
+						results = append(results, map[string]interface{}{
+							"bank_statement_id": bsid,
+							"success":           false,
+							"error":             "No access to this bank statement",
+						})
+						continue
+					}
+				}
+			}
+			_, err := db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
@@ -1595,8 +1823,22 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		results := make([]map[string]interface{}, 0)
+		ctx := r.Context()
 		for _, bsid := range body.BankStatementIDs {
-			_, err := db.Exec(`
+			var entityID string
+			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
+				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
+					if !apictx.IsEntityAllowed(ctx, entityID) {
+						results = append(results, map[string]interface{}{
+							"bank_statement_id": bsid,
+							"success":           false,
+							"error":             "No access to this bank statement",
+						})
+						continue
+					}
+				}
+			}
+			_, err := db.ExecContext(ctx, `
 				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
 					       bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment
 				       ) VALUES ($1, $2, $3, $4, $5, $6)
@@ -1794,6 +2036,13 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	fmt.Printf("Entity ID: %s\n", entityID)
 	fmt.Printf("Account Name: %s\n", accountName)
 
+	// Context validations precedence: entity -> bank (later) -> account -> currency
+	if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
+		if !apictx.IsEntityAllowed(ctx, entityID) {
+			return ErrAccountNotFound
+		}
+	}
+
 	// 4. Extract statement period and balances from the file (assume first/last row for balances)
 	var (
 		statementPeriodStart, statementPeriodEnd time.Time
@@ -1938,6 +2187,21 @@ foundTxnHeader:
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to lookup account info for balances_manual: %w", err)
+	}
+
+	// Enforce bank/account/currency checks (entity already validated earlier)
+	if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
+		if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
+			return errors.New("bank not allowed")
+		}
+	}
+	if ctx.Value("ApprovedBankAccounts") != nil {
+		if !ctxHasApprovedBankAccount(ctx, accountNumber) {
+			return ErrAccountNotFound
+		}
+	}
+	if !ctxHasApprovedCurrency(ctx, currencyCode) {
+		return errors.New("currency not allowed")
 	}
 	// Calculate total credits and debits from transactions
 	var totalCredits, totalDebits float64
