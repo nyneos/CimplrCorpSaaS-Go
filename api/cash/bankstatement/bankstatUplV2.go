@@ -171,7 +171,7 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 		       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
 		       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
 		       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
-		       OR (s.scope_type = 'CURRENCY' AND s.currency_code = $3)
+		       OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
 		       OR (s.scope_type = 'GLOBAL')
 		 )
 	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
