@@ -945,7 +945,9 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (aa.account_id)
 					aa.account_id,
-					aa.processing_status
+					aa.processing_status,
+					aa.requested_at,
+					aa.checker_at
 				FROM auditactionbankaccount aa
 				ORDER BY aa.account_id, aa.requested_at DESC
 			),
@@ -969,10 +971,10 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
 			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-			LEFT JOIN latest_audit la ON la.account_id = a.account_id
+			LEFT JOIN latest_audit l ON l.account_id = a.account_id
 			LEFT JOIN clearing cl ON cl.account_id = a.account_id
 			WHERE 
-				la.processing_status = 'APPROVED'
+				l.processing_status = 'APPROVED'
 				AND a.status = 'Active'
 				AND COALESCE(a.is_deleted, false) = false`
 

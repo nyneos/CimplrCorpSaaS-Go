@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -39,6 +40,12 @@ type UpdateRedemptionRequest struct {
 	RedemptionID string                 `json:"redemption_id"`
 	Fields       map[string]interface{} `json:"fields"`
 	Reason       string                 `json:"reason"`
+}
+
+type GetRedemptionDetailRequest struct {
+	UserID       string `json:"user_id,omitempty"`
+	EntityName   string `json:"entity_name,omitempty"`
+	RedemptionID string `json:"redemption_id"`
 }
 
 // ---------------------------
@@ -1399,6 +1406,658 @@ func GetApprovedRedemptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", out)
+	}
+}
+
+// ---------------------------
+// GetRedemptionInitiationDetail
+// Returns deep info for a single redemption_id: initiation + audit + holding + lots + confirmations.
+// ---------------------------
+
+func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req GetRedemptionDetailRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+		if strings.TrimSpace(req.RedemptionID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "redemption_id is required")
+			return
+		}
+
+		ctx := r.Context()
+
+		// Pull initiation + latest audit + resolved folio/demat/scheme in one go.
+		q := `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (a.redemption_id)
+					a.redemption_id,
+					a.actiontype,
+					a.processing_status,
+					a.action_id,
+					a.requested_by,
+					a.requested_at,
+					a.checker_by,
+					a.checker_at,
+					a.checker_comment,
+					a.reason
+				FROM investment.auditactionredemption a
+				ORDER BY a.redemption_id, a.requested_at DESC
+			),
+			resolved_folio AS (
+				SELECT DISTINCT ON (m.redemption_id)
+					m.redemption_id,
+					f.folio_id::text AS folio_id,
+					f.folio_number,
+					f.entity_name AS folio_entity_name,
+					COALESCE(f.default_subscription_account,'') AS default_subscription_account,
+					COALESCE(f.default_redemption_account,'') AS default_redemption_account
+				FROM investment.redemption_initiation m
+				LEFT JOIN investment.masterfolio f ON (
+					(f.folio_id::text = m.folio_id) OR
+					(m.folio_id IS NOT NULL AND f.folio_number = m.folio_id)
+				)
+				WHERE m.redemption_id = $1
+				ORDER BY m.redemption_id, f.folio_id
+			),
+			resolved_demat AS (
+				SELECT DISTINCT ON (m.redemption_id)
+					m.redemption_id,
+					d.demat_id::text AS demat_id,
+					d.demat_account_number,
+					d.entity_name AS demat_entity_name,
+					COALESCE(d.default_settlement_account,'') AS default_settlement_account
+				FROM investment.redemption_initiation m
+				LEFT JOIN investment.masterdemataccount d ON (
+					(d.demat_id::text = m.demat_id) OR
+					(m.demat_id IS NOT NULL AND d.default_settlement_account = m.demat_id) OR
+					(m.demat_id IS NOT NULL AND d.demat_account_number = m.demat_id)
+				)
+				WHERE m.redemption_id = $1
+				ORDER BY m.redemption_id, d.demat_id
+			)
+			SELECT
+				m.redemption_id,
+				COALESCE(m.entity_name,'') AS entity_name,
+				m.folio_id,
+				m.demat_id,
+				m.scheme_id,
+				m.requested_by,
+				TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
+				TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				COALESCE(m.by_amount, 0) AS by_amount,
+				COALESCE(m.by_units, 0) AS by_units,
+				COALESCE(m.method, 'FIFO') AS method,
+				COALESCE(m.estimated_proceeds, 0) AS estimated_proceeds,
+				COALESCE(m.gain_loss, 0) AS gain_loss,
+				COALESCE(m.is_deleted,false) AS is_deleted,
+				COALESCE(s.scheme_id::text, m.scheme_id::text) AS resolved_scheme_id,
+				COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
+				COALESCE(s.internal_scheme_code,'') AS scheme_code,
+				COALESCE(s.isin,'') AS isin,
+				COALESCE(s.amc_name,'') AS amc_name,
+				COALESCE(rf.folio_id,'') AS resolved_folio_id,
+				COALESCE(rf.folio_number,'') AS folio_number,
+				COALESCE(rf.folio_entity_name,'') AS folio_entity_name,
+				COALESCE(rd.demat_id,'') AS resolved_demat_id,
+				COALESCE(rd.demat_account_number,'') AS demat_account_number,
+				COALESCE(rd.demat_entity_name,'') AS demat_entity_name,
+				COALESCE(rf.default_subscription_account,'') AS default_subscription_account,
+				COALESCE(rf.default_redemption_account,'') AS default_redemption_account,
+				COALESCE(rd.default_settlement_account,'') AS default_settlement_account,
+				COALESCE(l.actiontype,'') AS action_type,
+				COALESCE(l.processing_status,'') AS processing_status,
+				COALESCE(l.action_id::text,'') AS action_id,
+				COALESCE(l.requested_by,'') AS audit_requested_by,
+				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS audit_requested_at,
+				COALESCE(l.checker_by,'') AS checker_by,
+				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				COALESCE(l.checker_comment,'') AS checker_comment,
+				COALESCE(l.reason,'') AS reason
+			FROM investment.redemption_initiation m
+			LEFT JOIN latest_audit l ON l.redemption_id = m.redemption_id
+			LEFT JOIN investment.masterscheme s ON (
+				s.scheme_id::text = m.scheme_id
+			 OR s.scheme_name = m.scheme_id
+			 OR s.internal_scheme_code = m.scheme_id
+			 OR s.isin = m.scheme_id
+			)
+			LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
+			LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
+			WHERE m.redemption_id = $1
+			LIMIT 1;
+		`
+
+		var (
+			redemptionID         string
+			entityName           string
+			folioIDRaw           sql.NullString
+			dematIDRaw           sql.NullString
+			schemeIDRaw          string
+			requestedBy          string
+			requestedDate        string
+			transactionDate      string
+			byAmount             float64
+			byUnits              float64
+			method               string
+			estimatedProceeds    float64
+			gainLoss             float64
+			isDeleted            bool
+			resolvedSchemeID     string
+			schemeName           string
+			schemeCode           string
+			isin                 string
+			amcName              string
+			resolvedFolioID      string
+			folioNumber          string
+			folioEntityName      string
+			resolvedDematID      string
+			dematAccountNumber   string
+			dematEntityName      string
+			defaultSubAcctRaw    string
+			defaultRedAcctRaw    string
+			defaultSettleAcctRaw string
+			actionType           string
+			processingStatus     string
+			actionID             string
+			auditRequestedBy     string
+			auditRequestedAt     string
+			checkerBy            string
+			checkerAt            string
+			checkerComment       string
+			reason               string
+		)
+
+		err := pgxPool.QueryRow(ctx, q, req.RedemptionID).Scan(
+			&redemptionID,
+			&entityName,
+			&folioIDRaw,
+			&dematIDRaw,
+			&schemeIDRaw,
+			&requestedBy,
+			&requestedDate,
+			&transactionDate,
+			&byAmount,
+			&byUnits,
+			&method,
+			&estimatedProceeds,
+			&gainLoss,
+			&isDeleted,
+			&resolvedSchemeID,
+			&schemeName,
+			&schemeCode,
+			&isin,
+			&amcName,
+			&resolvedFolioID,
+			&folioNumber,
+			&folioEntityName,
+			&resolvedDematID,
+			&dematAccountNumber,
+			&dematEntityName,
+			&defaultSubAcctRaw,
+			&defaultRedAcctRaw,
+			&defaultSettleAcctRaw,
+			&actionType,
+			&processingStatus,
+			&actionID,
+			&auditRequestedBy,
+			&auditRequestedAt,
+			&checkerBy,
+			&checkerAt,
+			&checkerComment,
+			&reason,
+		)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "redemption_id not found")
+			return
+		}
+		if isDeleted {
+			api.RespondWithError(w, http.StatusNotFound, "redemption_id is deleted")
+			return
+		}
+
+		// Resolve entity if missing on initiation.
+		resolvedEntity := strings.TrimSpace(entityName)
+		if resolvedEntity == "" {
+			if strings.TrimSpace(folioEntityName) != "" {
+				resolvedEntity = folioEntityName
+			} else if strings.TrimSpace(dematEntityName) != "" {
+				resolvedEntity = dematEntityName
+			}
+		}
+
+		// Ensure we have an entity *name* for downstream SQL and account resolution.
+		entityNameScoped := strings.TrimSpace(resolvedEntity)
+		approvedNames := api.GetEntityNamesFromCtx(ctx)
+		approvedIDs := api.GetEntityIDsFromCtx(ctx)
+		idToName := map[string]string{}
+		minLen := len(approvedIDs)
+		if len(approvedNames) < minLen {
+			minLen = len(approvedNames)
+		}
+		for i := 0; i < minLen; i++ {
+			idToName[strings.ToUpper(strings.TrimSpace(approvedIDs[i]))] = strings.TrimSpace(approvedNames[i])
+		}
+		if mapped, ok := idToName[strings.ToUpper(strings.TrimSpace(entityNameScoped))]; ok && strings.TrimSpace(mapped) != "" {
+			entityNameScoped = strings.TrimSpace(mapped)
+		}
+		if entityNameScoped == "" {
+			entityNameScoped = strings.TrimSpace(req.EntityName)
+		}
+		if mapped, ok := idToName[strings.ToUpper(strings.TrimSpace(entityNameScoped))]; ok && strings.TrimSpace(mapped) != "" {
+			entityNameScoped = strings.TrimSpace(mapped)
+		}
+		// Final fallback: look up entity_name by entity_id if needed.
+		if entityNameScoped != "" {
+			if _, ok := idToName[strings.ToUpper(strings.TrimSpace(entityNameScoped))]; ok {
+				// already mapped
+			} else {
+				var lookedUpName string
+				if err := pgxPool.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_id = $1 LIMIT 1`, entityNameScoped).Scan(&lookedUpName); err == nil {
+					if strings.TrimSpace(lookedUpName) != "" {
+						entityNameScoped = strings.TrimSpace(lookedUpName)
+					}
+				} else if err := pgxPool.QueryRow(ctx, `SELECT entity_name FROM masterentity WHERE entity_id = $1 LIMIT 1`, entityNameScoped).Scan(&lookedUpName); err == nil {
+					if strings.TrimSpace(lookedUpName) != "" {
+						entityNameScoped = strings.TrimSpace(lookedUpName)
+					}
+				}
+			}
+		}
+
+		// Scope check (critical): must be within entities granted by middleware.
+		// NOTE: middleware provides BOTH entity names and entity IDs; some tables may store entity_id in `entity_name`.
+		allowed := false
+		if strings.TrimSpace(entityNameScoped) != "" && api.IsEntityAllowed(ctx, entityNameScoped) {
+			allowed = true
+		} else if strings.TrimSpace(resolvedEntity) != "" && api.IsEntityAllowed(ctx, resolvedEntity) {
+			allowed = true
+		} else if strings.TrimSpace(req.EntityName) != "" && api.IsEntityAllowed(ctx, req.EntityName) {
+			allowed = true
+		}
+		if !allowed {
+			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			return
+		}
+
+		// Re-resolve folio/demat under the scoped entity to avoid collisions (e.g., folio_number reused).
+		folioIdentifier := strings.TrimSpace(folioIDRaw.String)
+		if folioIdentifier == "" {
+			folioIdentifier = strings.TrimSpace(folioNumber)
+		}
+		if folioIdentifier != "" {
+			var fID, fNum, fRed string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT folio_id::text, folio_number, COALESCE(default_redemption_account,'')
+				FROM investment.masterfolio
+				WHERE COALESCE(is_deleted,false)=false
+					AND LOWER(TRIM(entity_name)) = LOWER(TRIM($1))
+					AND (folio_id::text = $2 OR folio_number = $2 OR folio_number = $3)
+				LIMIT 1
+			`, entityNameScoped, folioIdentifier, strings.TrimSpace(folioNumber)).Scan(&fID, &fNum, &fRed); err == nil {
+				if strings.TrimSpace(fID) != "" {
+					resolvedFolioID = strings.TrimSpace(fID)
+				}
+				if strings.TrimSpace(fNum) != "" {
+					folioNumber = strings.TrimSpace(fNum)
+				}
+				if strings.TrimSpace(fRed) != "" {
+					defaultRedAcctRaw = strings.TrimSpace(fRed)
+				}
+			}
+		}
+
+		dematIdentifier := strings.TrimSpace(dematIDRaw.String)
+		if dematIdentifier == "" {
+			dematIdentifier = strings.TrimSpace(dematAccountNumber)
+		}
+		if dematIdentifier != "" {
+			var dID, dNum, dSettle string
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT demat_id::text, demat_account_number, COALESCE(default_settlement_account,'')
+				FROM investment.masterdemataccount
+				WHERE COALESCE(is_deleted,false)=false
+					AND LOWER(TRIM(entity_name)) = LOWER(TRIM($1))
+					AND (demat_id::text = $2 OR demat_account_number = $2)
+				LIMIT 1
+			`, entityNameScoped, dematIdentifier).Scan(&dID, &dNum, &dSettle); err == nil {
+				if strings.TrimSpace(dID) != "" {
+					resolvedDematID = strings.TrimSpace(dID)
+				}
+				if strings.TrimSpace(dNum) != "" {
+					dematAccountNumber = strings.TrimSpace(dNum)
+				}
+				if strings.TrimSpace(dSettle) != "" {
+					defaultSettleAcctRaw = strings.TrimSpace(dSettle)
+				}
+			}
+		}
+
+		// Resolve default accounts to *account numbers* (never ids)
+		defaultRedAcct := resolveMasterBankAccountNumber(ctx, pgxPool, entityNameScoped, defaultRedAcctRaw)
+		defaultSettleAcct := resolveMasterBankAccountNumber(ctx, pgxPool, entityNameScoped, defaultSettleAcctRaw)
+		creditBankAccount := ""
+		if strings.TrimSpace(folioNumber) != "" {
+			creditBankAccount = defaultRedAcct
+		} else if strings.TrimSpace(dematAccountNumber) != "" {
+			creditBankAccount = defaultSettleAcct
+		} else if strings.TrimSpace(defaultRedAcct) != "" {
+			creditBankAccount = defaultRedAcct
+		} else {
+			creditBankAccount = defaultSettleAcct
+		}
+
+		// Holding snapshot (best-effort)
+		var (
+			snapTotalUnits    float64
+			snapAvgNav        float64
+			snapCurrentNav    float64
+			snapCurrentValue  float64
+			snapTotalInvested float64
+			snapGainLoss      float64
+			snapGainLossPct   float64
+		)
+		folioID := sql.NullString{String: resolvedFolioID, Valid: strings.TrimSpace(resolvedFolioID) != ""}
+		dematID := sql.NullString{String: resolvedDematID, Valid: strings.TrimSpace(resolvedDematID) != ""}
+		folioNumArg := nullIfEmptyString(folioNumber)
+		dematNumArg := nullIfEmptyString(dematAccountNumber)
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT
+				COALESCE(total_units,0),
+				COALESCE(avg_nav,0),
+				COALESCE(current_nav,0),
+				COALESCE(current_value,0),
+				COALESCE(total_invested_amount,0),
+				COALESCE(gain_loss,0),
+				COALESCE(gain_losss_percent,0)
+			FROM investment.portfolio_snapshot
+			WHERE entity_name=$1 AND scheme_id=$2
+				AND ((folio_id IS NOT NULL AND folio_id=$3) OR (demat_id IS NOT NULL AND demat_id=$4)
+					OR (folio_number IS NOT NULL AND folio_number=$5) OR (demat_acc_number IS NOT NULL AND demat_acc_number=$6))
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, entityNameScoped, resolvedSchemeID, folioID, dematID, folioNumArg, dematNumArg).Scan(
+			&snapTotalUnits, &snapAvgNav, &snapCurrentNav, &snapCurrentValue, &snapTotalInvested, &snapGainLoss, &snapGainLossPct,
+		)
+
+		// Blocked units: freeze units for all open (pending/approved) redemptions on the same holding.
+		// This is derived from redemption_initiation (not onboard_transaction.blocked_units).
+		var blockedByRedemptions float64
+		_ = pgxPool.QueryRow(ctx, `
+			WITH latest AS (
+				SELECT DISTINCT ON (redemption_id)
+					redemption_id,
+					processing_status,
+					requested_at
+				FROM investment.auditactionredemption
+				ORDER BY redemption_id, requested_at DESC
+			)
+			SELECT COALESCE(SUM(COALESCE(ri.by_units,0)),0)
+			FROM investment.redemption_initiation ri
+			JOIN latest l ON l.redemption_id = ri.redemption_id
+			WHERE COALESCE(ri.is_deleted,false)=false
+				AND UPPER(COALESCE(l.processing_status,'')) IN ('PENDING_APPROVAL','APPROVED')
+				AND LOWER(TRIM(COALESCE(ri.entity_name,''))) = LOWER(TRIM($1))
+				AND ri.scheme_id = $2
+				AND (
+					($3::text IS NOT NULL AND (ri.folio_id = $3 OR ri.folio_id = $5))
+					OR ($4::text IS NOT NULL AND (ri.demat_id = $4 OR ri.demat_id = $6))
+				)
+		`, entityNameScoped, resolvedSchemeID,
+			nullIfEmptyString(resolvedFolioID), nullIfEmptyString(resolvedDematID),
+			nullIfEmptyString(folioNumber), nullIfEmptyString(dematAccountNumber)).Scan(&blockedByRedemptions)
+
+		// Buy/Sell transaction breakdown for "from where" visibility.
+		buyLots := make([]map[string]any, 0, 200)
+		sellTxs := make([]map[string]any, 0, 100)
+		var totalBlockedUnits float64
+		var totalSellUnits float64
+
+		buyQ := `
+			SELECT
+				ot.id,
+				ot.batch_id,
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				ot.transaction_type,
+				COALESCE(ot.amount,0) AS amount,
+				COALESCE(ot.units,0) AS units,
+				COALESCE(ot.nav,0) AS nav,
+				COALESCE(ot.blocked_units,0) AS blocked_units,
+				COALESCE(ot.folio_number,'') AS folio_number,
+				COALESCE(ot.demat_acc_number,'') AS demat_acc_number
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.portfolio_snapshot ps ON ps.batch_id = ot.batch_id
+			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+			WHERE (COALESCE(ot.entity_name,'') = $1 OR ps.entity_name = $1)
+				AND LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
+				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $5 OR ms.isin = $6 OR ms.scheme_name = $7 )
+			ORDER BY ot.transaction_date ASC, ot.id ASC
+		`
+		rows, err := pgxPool.Query(ctx, buyQ, entityNameScoped, nullIfEmptyString(folioNumber), nullIfEmptyString(dematAccountNumber), resolvedSchemeID, resolvedSchemeID, isin, schemeName)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var (
+					id      int64
+					batchID string
+					txDate  string
+					txType  string
+					amount  float64
+					units   float64
+					nav     float64
+					blocked float64
+					fn      string
+					dn      string
+				)
+				if err := rows.Scan(&id, &batchID, &txDate, &txType, &amount, &units, &nav, &blocked, &fn, &dn); err != nil {
+					continue
+				}
+				// We'll allocate blocked units across lots (FIFO) after reading all lots.
+				_ = blocked
+				avail := units
+				buyLots = append(buyLots, map[string]any{
+					"id":               id,
+					"batch_id":         batchID,
+					"transaction_date": txDate,
+					"transaction_type": txType,
+					"folio_number":     fn,
+					"demat_acc_number": dn,
+					"amount":           amount,
+					"units":            units,
+					"nav":              nav,
+					"blocked_units":    0.0,
+					"available_units":  avail,
+				})
+			}
+		}
+
+		// Allocate blocked units across buy lots FIFO.
+		blockedRemaining := blockedByRedemptions
+		for i := range buyLots {
+			if blockedRemaining <= 0 {
+				break
+			}
+			u, _ := buyLots[i]["units"].(float64)
+			if u <= 0 {
+				continue
+			}
+			b := blockedRemaining
+			if b > u {
+				b = u
+			}
+			buyLots[i]["blocked_units"] = b
+			buyLots[i]["available_units"] = u - b
+			totalBlockedUnits += b
+			blockedRemaining -= b
+		}
+
+		sellQ := `
+			SELECT
+				ot.id,
+				ot.batch_id,
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				ot.transaction_type,
+				COALESCE(ot.amount,0) AS amount,
+				COALESCE(ot.units,0) AS units,
+				COALESCE(ot.nav,0) AS nav
+			FROM investment.onboard_transaction ot
+			LEFT JOIN investment.portfolio_snapshot ps ON ps.batch_id = ot.batch_id
+			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+			WHERE (COALESCE(ot.entity_name,'') = $1 OR ps.entity_name = $1)
+				AND LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption')
+				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $5 OR ms.isin = $6 OR ms.scheme_name = $7 )
+			ORDER BY ot.transaction_date ASC, ot.id ASC
+		`
+		rows2, err := pgxPool.Query(ctx, sellQ, entityNameScoped, nullIfEmptyString(folioNumber), nullIfEmptyString(dematAccountNumber), resolvedSchemeID, resolvedSchemeID, isin, schemeName)
+		if err == nil {
+			defer rows2.Close()
+			for rows2.Next() {
+				var (
+					id      int64
+					batchID string
+					txDate  string
+					txType  string
+					amount  float64
+					units   float64
+					nav     float64
+				)
+				if err := rows2.Scan(&id, &batchID, &txDate, &txType, &amount, &units, &nav); err != nil {
+					continue
+				}
+				totalSellUnits += math.Abs(units)
+				sellTxs = append(sellTxs, map[string]any{
+					"id":               id,
+					"batch_id":         batchID,
+					"transaction_date": txDate,
+					"transaction_type": txType,
+					"amount":           amount,
+					"units":            units,
+					"nav":              nav,
+				})
+			}
+		}
+
+		// Confirmation progress
+		confirmations := make([]map[string]any, 0, 50)
+		var confirmedUnits float64
+		confQ := `
+			SELECT redemption_confirm_id, status, COALESCE(actual_units,0), COALESCE(actual_nav,0), COALESCE(gross_proceeds,0), COALESCE(net_credited,0)
+			FROM investment.redemption_confirmation
+			WHERE redemption_id = $1
+			ORDER BY created_at DESC
+		`
+		cRows, err := pgxPool.Query(ctx, confQ, redemptionID)
+		if err == nil {
+			defer cRows.Close()
+			for cRows.Next() {
+				var rcID, st string
+				var au, anav, gp, nc float64
+				if err := cRows.Scan(&rcID, &st, &au, &anav, &gp, &nc); err != nil {
+					continue
+				}
+				confirmedUnits += au
+				confirmations = append(confirmations, map[string]any{
+					"redemption_confirm_id": rcID,
+					"status":                st,
+					"actual_units":          au,
+					"actual_nav":            anav,
+					"gross_proceeds":        gp,
+					"net_credited":          nc,
+				})
+			}
+		}
+
+		// Compose holding numbers (prefer snapshot, but always compute blocked/available from lots)
+		holdingTotalUnits := snapTotalUnits
+		if holdingTotalUnits == 0 {
+			// Fallback to buy-sell net if snapshot missing
+			var sumBuyUnits float64
+			for _, lot := range buyLots {
+				u, _ := lot["units"].(float64)
+				sumBuyUnits += u
+			}
+			holdingTotalUnits = sumBuyUnits - totalSellUnits
+			if holdingTotalUnits < 0 {
+				holdingTotalUnits = 0
+			}
+		}
+		availableUnits := holdingTotalUnits - totalBlockedUnits
+		if availableUnits < 0 {
+			availableUnits = 0
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]any{
+			"redemption": map[string]any{
+				"redemption_id":              redemptionID,
+				"entity_name":                entityNameScoped,
+				"folio_id":                   strings.TrimSpace(folioIDRaw.String),
+				"demat_id":                   strings.TrimSpace(dematIDRaw.String),
+				"scheme_id":                  schemeIDRaw,
+				"resolved_scheme_id":         resolvedSchemeID,
+				"scheme_name":                schemeName,
+				"scheme_code":                schemeCode,
+				"isin":                       isin,
+				"amc_name":                   amcName,
+				"resolved_folio_id":          resolvedFolioID,
+				"folio_number":               folioNumber,
+				"resolved_demat_id":          resolvedDematID,
+				"demat_account_number":       dematAccountNumber,
+				"requested_by":               requestedBy,
+				"requested_date":             requestedDate,
+				"transaction_date":           transactionDate,
+				"by_amount":                  byAmount,
+				"by_units":                   byUnits,
+				"method":                     method,
+				"estimated_proceeds":         estimatedProceeds,
+				"gain_loss":                  gainLoss,
+				"default_redemption_account": defaultRedAcct,
+				"default_settlement_account": defaultSettleAcct,
+				"credit_bank_account":        creditBankAccount,
+				"audit": map[string]any{
+					"action_type":       actionType,
+					"processing_status": processingStatus,
+					"action_id":         actionID,
+					"requested_by":      auditRequestedBy,
+					"requested_at":      auditRequestedAt,
+					"checker_by":        checkerBy,
+					"checker_at":        checkerAt,
+					"checker_comment":   checkerComment,
+					"reason":            reason,
+				},
+			},
+			"holding": map[string]any{
+				"entity_name":           entityNameScoped,
+				"folio_number":          folioNumber,
+				"demat_acc_number":      dematAccountNumber,
+				"scheme_id":             resolvedSchemeID,
+				"scheme_name":           schemeName,
+				"isin":                  isin,
+				"total_units":           holdingTotalUnits,
+				"blocked_units":         totalBlockedUnits,
+				"available_units":       availableUnits,
+				"avg_nav":               snapAvgNav,
+				"current_nav":           snapCurrentNav,
+				"current_value":         snapCurrentValue,
+				"total_invested_amount": snapTotalInvested,
+				"gain_loss":             snapGainLoss,
+				"gain_loss_percent":     snapGainLossPct,
+			},
+			"buy_lots":      buyLots,
+			"sell_txs":      sellTxs,
+			"confirmations": confirmations,
+			"summary": map[string]any{
+				"requested_units":         byUnits,
+				"requested_amount":        byAmount,
+				"confirmed_units":         confirmedUnits,
+				"already_redeemed_units":  totalSellUnits,
+				"currently_blocked_units": totalBlockedUnits,
+				"holding_total_units":     holdingTotalUnits,
+				"holding_available_units": availableUnits,
+			},
+		})
 	}
 }
 
