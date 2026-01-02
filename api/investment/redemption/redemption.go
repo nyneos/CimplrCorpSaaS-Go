@@ -31,6 +31,9 @@ type PortfolioHolding struct {
 	EntityName          string              `json:"entity_name"`
 	FolioNumber         *string             `json:"folio_number,omitempty"`
 	DematAccNumber      *string             `json:"demat_acc_number,omitempty"`
+	DefaultRedemptionAccount   string        `json:"default_redemption_account"`
+	DefaultSettlementAccount   string        `json:"default_settlement_account"`
+	CreditBankAccount          string        `json:"credit_bank_account"`
 	SchemeID            string              `json:"scheme_id"`
 	SchemeName          string              `json:"scheme_name"`
 	ISIN                *string             `json:"isin,omitempty"`
@@ -163,8 +166,8 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.masterscheme ms ON (
 					ms.scheme_id = t.scheme_id OR ms.internal_scheme_code = t.scheme_internal_code OR ms.isin = t.scheme_id
 				)
-				-- filter by entity from either transaction or snapshot
-				WHERE (t.entity_name = $1 OR ls.entity_name = $1)
+				-- filter strictly by resolved entity to avoid cross-entity leakage
+				WHERE COALESCE(t.entity_name, ls.entity_name) = $1
 					AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
 			)
 			SELECT
@@ -176,10 +179,9 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.ms_isin,'') AS isin,
 				COALESCE(ot.folio_id, '') AS folio_id,
 				COALESCE(ot.demat_id, '') AS demat_id,
-				-- available units: (buys - sells) minus blocked units
+				-- total units: (buys - sells). Do NOT subtract blocked here; blocked is derived from redemption initiations.
 				(SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
-					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)
-					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.blocked_units,0) ELSE 0 END)) AS units,
+					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)) AS units,
 				-- avg_nav based only on buy transactions
 				CASE WHEN SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)=0 THEN 0
 					ELSE SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.nav,0)*COALESCE(ot.units,0) ELSE 0 END)
@@ -227,13 +229,47 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				folioID.String = folioIDStr
 				folioID.Valid = true
 			} else if folioNumber != "" {
-				_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 LIMIT 1`, folioNumber).Scan(&folioID)
+				_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 LIMIT 1`, folioNumber, entityName).Scan(&folioID)
 			}
 			if dematIDStr != "" {
 				dematID.String = dematIDStr
 				dematID.Valid = true
 			} else if dematAcc != "" {
-				_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 LIMIT 1`, dematAcc).Scan(&dematID)
+				_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 AND entity_name=$2 LIMIT 1`, dematAcc, entityName).Scan(&dematID)
+			}
+
+			// Pull default accounts from masters (as defined in folio/demat masters)
+			var defaultRedAcct, defaultSettlementAcct sql.NullString
+			if folioID.Valid {
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT COALESCE(default_redemption_account,'')
+					FROM investment.masterfolio
+					WHERE folio_id=$1 AND entity_name=$2 AND COALESCE(is_deleted,false)=false
+					LIMIT 1
+				`, folioID.String, entityName).Scan(&defaultRedAcct)
+			} else if folioNumber != "" {
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT COALESCE(default_redemption_account,'')
+					FROM investment.masterfolio
+					WHERE folio_number=$1 AND entity_name=$2 AND COALESCE(is_deleted,false)=false
+					LIMIT 1
+				`, folioNumber, entityName).Scan(&defaultRedAcct)
+			}
+
+			if dematID.Valid {
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT COALESCE(default_settlement_account,'')
+					FROM investment.masterdemataccount
+					WHERE demat_id=$1 AND entity_name=$2 AND COALESCE(is_deleted,false)=false
+					LIMIT 1
+				`, dematID.String, entityName).Scan(&defaultSettlementAcct)
+			} else if dematAcc != "" {
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT COALESCE(default_settlement_account,'')
+					FROM investment.masterdemataccount
+					WHERE demat_account_number=$1 AND entity_name=$2 AND COALESCE(is_deleted,false)=false
+					LIMIT 1
+				`, dematAcc, entityName).Scan(&defaultSettlementAcct)
 			}
 
 			var currentNav float64
@@ -267,6 +303,9 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityName:          entityName,
 				FolioNumber:         nil,
 				DematAccNumber:      nil,
+				DefaultRedemptionAccount:   "",
+				DefaultSettlementAccount:   "",
+				CreditBankAccount:          "",
 				SchemeID:            schemeID,
 				SchemeName:          schemeName,
 				ISIN:                nil,
@@ -291,6 +330,54 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if dematAcc != "" {
 				h.DematAccNumber = &dematAcc
 			}
+			h.DefaultRedemptionAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultRedAcct.String)
+			h.DefaultSettlementAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultSettlementAcct.String)
+			if h.FolioNumber != nil && strings.TrimSpace(*h.FolioNumber) != "" {
+				h.CreditBankAccount = h.DefaultRedemptionAccount
+			} else if h.DematAccNumber != nil && strings.TrimSpace(*h.DematAccNumber) != "" {
+				h.CreditBankAccount = h.DefaultSettlementAccount
+			} else if h.DefaultRedemptionAccount != "" {
+				h.CreditBankAccount = h.DefaultRedemptionAccount
+			} else {
+				h.CreditBankAccount = h.DefaultSettlementAccount
+			}
+
+			// Blocked units = sum of open (pending/approved) redemptions for this holding.
+			// Derived from redemption_initiation + latest audit (not from onboard_transaction.blocked_units).
+			var blockedUnits float64
+			_ = pgxPool.QueryRow(ctx, `
+				WITH latest AS (
+					SELECT DISTINCT ON (redemption_id)
+						redemption_id,
+						processing_status,
+						requested_at
+					FROM investment.auditactionredemption
+					ORDER BY redemption_id, requested_at DESC
+				)
+				SELECT COALESCE(SUM(COALESCE(ri.by_units,0)),0)
+				FROM investment.redemption_initiation ri
+				JOIN latest l ON l.redemption_id = ri.redemption_id
+				WHERE COALESCE(ri.is_deleted,false)=false
+					AND UPPER(COALESCE(l.processing_status,'')) IN ('PENDING_APPROVAL','APPROVED')
+					AND LOWER(TRIM(COALESCE(ri.entity_name,''))) = LOWER(TRIM($1))
+					AND ri.scheme_id = $2
+					AND (
+						($3::text IS NOT NULL AND (ri.folio_id = $3 OR ri.folio_id = $5))
+						OR ($4::text IS NOT NULL AND (ri.demat_id = $4 OR ri.demat_id = $6))
+					)
+			`, entityName, schemeID,
+				nullIfEmptyString(folioID.String), nullIfEmptyString(dematID.String),
+				nullIfEmptyString(folioNumber), nullIfEmptyString(dematAcc)).Scan(&blockedUnits)
+			if blockedUnits < 0 {
+				blockedUnits = 0
+			}
+			h.BlockedUnits = blockedUnits
+			h.AvailableUnits = h.TotalUnits - blockedUnits
+			if h.AvailableUnits < 0 {
+				h.AvailableUnits = 0
+			}
+			h.CurrentValue = h.TotalUnits * h.CurrentNAV
+			h.GainLoss = (h.TotalUnits * h.CurrentNAV) - h.TotalInvestedAmount
 			if totalInvested != 0 {
 				h.GainLossPercent = (h.GainLoss / totalInvested) * 100.0
 			}
@@ -313,14 +400,16 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 										ot.demat_id,
 										TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
 								FROM investment.onboard_transaction ot
+							LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
 								LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
 								WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
+								AND (COALESCE(ot.entity_name,'') = $7 OR ps.entity_name = $7)
 									AND ( (ot.folio_number = $1) OR (ot.demat_acc_number = $2) )
 									AND ( ot.scheme_id = $3 OR ot.scheme_internal_code = $4 OR ms.isin = $5 OR ms.scheme_name = $6 )
 								ORDER BY ot.transaction_date ASC, ot.id ASC
 						`
 
-			txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, isin, schemeName)
+			txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, isin, schemeName, entityName)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 				return
@@ -543,10 +632,10 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Get folio_id or demat_id from master tables for snapshot lookup
 		var folioID, dematID sql.NullString
 		if req.FolioNumber != nil && *req.FolioNumber != "" {
-			_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 LIMIT 1`, *req.FolioNumber).Scan(&folioID)
+			_ = pgxPool.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number=$1 AND entity_name=$2 LIMIT 1`, *req.FolioNumber, req.EntityName).Scan(&folioID)
 		}
 		if req.DematAccNumber != nil && *req.DematAccNumber != "" {
-			_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 LIMIT 1`, *req.DematAccNumber).Scan(&dematID)
+			_ = pgxPool.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number=$1 AND entity_name=$2 LIMIT 1`, *req.DematAccNumber, req.EntityName).Scan(&dematID)
 		}
 
 		// Fetch current NAV from latest portfolio_snapshot with fallback to folio_number/demat_acc_number
@@ -756,4 +845,52 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", result)
 	}
+}
+
+func resolveMasterBankAccountNumber(ctx context.Context, pgxPool *pgxpool.Pool, entityName string, accountIDOrNumber string) string {
+	needle := strings.TrimSpace(accountIDOrNumber)
+	if needle == "" {
+		return ""
+	}
+
+	// 1) Preferred: entity-scoped match (prevents cross-entity collisions on account_number)
+	var accountNumber string
+	if err := pgxPool.QueryRow(ctx, `
+		SELECT ba.account_number
+		FROM public.masterbankaccount ba
+		LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+		WHERE COALESCE(ba.is_deleted,false)=false
+			AND LOWER(TRIM(COALESCE(e.entity_name, ec.entity_name))) = LOWER(TRIM($2))
+			AND (ba.account_number = $1 OR ba.account_id = $1)
+		LIMIT 1
+	`, needle, entityName).Scan(&accountNumber); err == nil {
+		return strings.TrimSpace(accountNumber)
+	}
+
+	// 2) Safe fallback: if the stored value is an account_id, it's unique globally
+	if err := pgxPool.QueryRow(ctx, `
+		SELECT ba.account_number
+		FROM public.masterbankaccount ba
+		WHERE COALESCE(ba.is_deleted,false)=false
+			AND ba.account_id = $1
+		LIMIT 1
+	`, needle).Scan(&accountNumber); err == nil {
+		return strings.TrimSpace(accountNumber)
+	}
+
+	// 3) Last resort: if it's already an account number-like value, return it
+	// (helps when masterbankaccount is missing but the stored value is actually a number)
+	isDigits := true
+	for _, r := range needle {
+		if r < '0' || r > '9' {
+			isDigits = false
+			break
+		}
+	}
+	if isDigits {
+		return needle
+	}
+
+	return ""
 }
