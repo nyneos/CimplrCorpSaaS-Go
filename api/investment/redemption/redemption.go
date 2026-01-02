@@ -21,7 +21,9 @@ import (
 
 // GetPortfolioRequest models the payload to fetch portfolio with transactions
 type GetPortfolioRequest struct {
-	EntityName string `json:"entity_name"`
+	EntityName    string `json:"entity_name"`
+	RedemptionID  string `json:"redemption_id,omitempty"`
+	UserID        string `json:"user_id,omitempty"`
 }
 
 // PortfolioHolding represents a single portfolio position
@@ -39,7 +41,9 @@ type PortfolioHolding struct {
 	ISIN                *string             `json:"isin,omitempty"`
 	TotalUnits          float64             `json:"total_units"`
 	BlockedUnits        float64             `json:"blocked_units"`
+	BlockedUnitsExcludingRedemption   float64 `json:"blocked_units_excluding_redemption,omitempty"`
 	AvailableUnits      float64             `json:"available_units"`
+	AvailableUnitsExcludingRedemption float64 `json:"available_units_excluding_redemption,omitempty"`
 	AvgNAV              float64             `json:"avg_nav"`
 	CurrentNAV          float64             `json:"current_nav"`
 	CurrentValue        float64             `json:"current_value"`
@@ -50,7 +54,7 @@ type PortfolioHolding struct {
 	Transactions        []TransactionDetail `json:"transactions"`
 }
 
-// TransactionDetail represents a single transaction
+// TransactionDetail represents a single transaction (BUY lot)
 type TransactionDetail struct {
 	ID                 int64   `json:"id"`
 	BatchID            string  `json:"batch_id,omitempty"`
@@ -66,22 +70,27 @@ type TransactionDetail struct {
 	FolioID            *string `json:"folio_id,omitempty"`
 	DematID            *string `json:"demat_id,omitempty"`
 	CreatedAt          string  `json:"created_at,omitempty"`
+	// Lot-level unit breakdown
+	TotalUnits         float64 `json:"total_units"`          // Original units from this BUY lot
+	BlockedUnits       float64 `json:"blocked_units"`        // Units blocked by pending redemptions
+	AvailableUnits     float64 `json:"available_units"`      // Units available for redemption
 }
 
-// CalculateRedemptionRequest models the payload for FIFO redemption calculation
+// CalculateRedemptionRequest models the payload for FIFO/LIFO redemption calculation
 type CalculateRedemptionRequest struct {
 	EntityName     string  `json:"entity_name"`
 	SchemeID       string  `json:"scheme_id"`
 	FolioNumber    *string `json:"folio_number,omitempty"`
 	DematAccNumber *string `json:"demat_acc_number,omitempty"`
+	Method         string  `json:"method,omitempty"` // FIFO (default) or LIFO
 	// Only one of the following should be provided
 	Units   *float64 `json:"units,omitempty"`
 	Amount  *float64 `json:"amount,omitempty"`
 	Percent *float64 `json:"percent,omitempty"`
 }
 
-// FIFOAllocation represents a single FIFO allocation result
-type FIFOAllocation struct {
+// AllocationDetail represents a single FIFO/LIFO allocation result
+type AllocationDetail struct {
 	TransactionID      int64   `json:"transaction_id"`
 	TransactionDate    string  `json:"transaction_date"`
 	OriginalUnits      float64 `json:"original_units"`
@@ -97,23 +106,24 @@ type FIFOAllocation struct {
 	DematAccNumber     *string `json:"demat_acc_number,omitempty"`
 }
 
-// RedemptionCalculation represents the complete FIFO calculation result
+// RedemptionCalculation represents the complete FIFO/LIFO calculation result
 type RedemptionCalculation struct {
-	EntityName              string           `json:"entity_name"`
-	SchemeID                string           `json:"scheme_id"`
-	SchemeName              string           `json:"scheme_name"`
-	FolioNumber             *string          `json:"folio_number,omitempty"`
-	DematAccNumber          *string          `json:"demat_acc_number,omitempty"`
-	TotalHolding            float64          `json:"total_holding"`
-	CurrentNAV              float64          `json:"current_nav"`
-	RedemptionUnits         float64          `json:"redemption_units"`
-	RedemptionAmount        float64          `json:"redemption_amount"`
-	RedemptionNAV           float64          `json:"redemption_nav"`
-	RealizedGainLoss        float64          `json:"realized_gain_loss"`
-	RealizedGainLossPercent float64          `json:"realized_gain_loss_percent"`
-	RemainingUnits          float64          `json:"remaining_units"`
-	RemainingValue          float64          `json:"remaining_value"`
-	Allocations             []FIFOAllocation `json:"allocations"`
+	EntityName              string             `json:"entity_name"`
+	SchemeID                string             `json:"scheme_id"`
+	SchemeName              string             `json:"scheme_name"`
+	FolioNumber             *string            `json:"folio_number,omitempty"`
+	DematAccNumber          *string            `json:"demat_acc_number,omitempty"`
+	Method                  string             `json:"method"`
+	TotalHolding            float64            `json:"total_holding"`
+	CurrentNAV              float64            `json:"current_nav"`
+	RedemptionUnits         float64            `json:"redemption_units"`
+	RedemptionAmount        float64            `json:"redemption_amount"`
+	RedemptionNAV           float64            `json:"redemption_nav"`
+	RealizedGainLoss        float64            `json:"realized_gain_loss"`
+	RealizedGainLossPercent float64            `json:"realized_gain_loss_percent"`
+	RemainingUnits          float64            `json:"remaining_units"`
+	RemainingValue          float64            `json:"remaining_value"`
+	Allocations             []AllocationDetail `json:"allocations"`
 }
 
 // ---------------------------
@@ -135,6 +145,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+			excludeRedemptionID := strings.TrimSpace(req.RedemptionID)
 
 		// Aggregate holdings by entity -> scheme (resolved by scheme_id/internal code/isin) and folio/demat
 		// We compute net units = sum(buys) - sum(sells) but compute avg_nav and invested amount from buys only.
@@ -342,23 +353,36 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				h.CreditBankAccount = h.DefaultSettlementAccount
 			}
 
-			// Blocked units = sum of open (pending/approved) redemptions for this holding.
-			// Derived from redemption_initiation + latest audit (not from onboard_transaction.blocked_units).
-			var blockedUnits float64
+			// Blocked units = sum of open (pending/approved) redemption initiations that do NOT yet have a CONFIRMED confirmation.
+			// Once a confirmation is CONFIRMED, the SELL transaction is created and units are no longer blocked.
+			// We return both totals:
+			// - blocked_units: includes ALL open redemptions (true freeze)
+			// - blocked_units_excluding_redemption: excludes req.RedemptionID if provided (useful for update/preview)
+			var blockedUnitsTotal float64
+			var blockedUnitsExcluding float64
 			_ = pgxPool.QueryRow(ctx, `
-				WITH latest AS (
+				WITH latest_initiation_audit AS (
 					SELECT DISTINCT ON (redemption_id)
 						redemption_id,
 						processing_status,
 						requested_at
 					FROM investment.auditactionredemption
 					ORDER BY redemption_id, requested_at DESC
+				),
+				confirmed_redemptions AS (
+					-- Redemptions that have a CONFIRMED confirmation (SELL already created)
+					SELECT DISTINCT rc.redemption_id
+					FROM investment.redemption_confirmation rc
+					WHERE UPPER(COALESCE(rc.status,'')) = 'CONFIRMED'
 				)
-				SELECT COALESCE(SUM(COALESCE(ri.by_units,0)),0)
+				SELECT
+					COALESCE(SUM(COALESCE(ri.by_units,0)),0) AS blocked_total,
+					COALESCE(SUM(CASE WHEN ($7::text IS NULL OR ri.redemption_id <> $7) THEN COALESCE(ri.by_units,0) ELSE 0 END),0) AS blocked_excluding
 				FROM investment.redemption_initiation ri
-				JOIN latest l ON l.redemption_id = ri.redemption_id
+				JOIN latest_initiation_audit l ON l.redemption_id = ri.redemption_id
 				WHERE COALESCE(ri.is_deleted,false)=false
 					AND UPPER(COALESCE(l.processing_status,'')) IN ('PENDING_APPROVAL','APPROVED')
+					AND ri.redemption_id NOT IN (SELECT redemption_id FROM confirmed_redemptions)
 					AND LOWER(TRIM(COALESCE(ri.entity_name,''))) = LOWER(TRIM($1))
 					AND ri.scheme_id = $2
 					AND (
@@ -367,14 +391,24 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					)
 			`, entityName, schemeID,
 				nullIfEmptyString(folioID.String), nullIfEmptyString(dematID.String),
-				nullIfEmptyString(folioNumber), nullIfEmptyString(dematAcc)).Scan(&blockedUnits)
-			if blockedUnits < 0 {
-				blockedUnits = 0
+				nullIfEmptyString(folioNumber), nullIfEmptyString(dematAcc), nullIfEmptyString(excludeRedemptionID)).Scan(&blockedUnitsTotal, &blockedUnitsExcluding)
+			if blockedUnitsTotal < 0 {
+				blockedUnitsTotal = 0
 			}
-			h.BlockedUnits = blockedUnits
-			h.AvailableUnits = h.TotalUnits - blockedUnits
+			if blockedUnitsExcluding < 0 {
+				blockedUnitsExcluding = 0
+			}
+			h.BlockedUnits = blockedUnitsTotal
+			h.AvailableUnits = h.TotalUnits - blockedUnitsTotal
 			if h.AvailableUnits < 0 {
 				h.AvailableUnits = 0
+			}
+			if excludeRedemptionID != "" {
+				h.BlockedUnitsExcludingRedemption = blockedUnitsExcluding
+				h.AvailableUnitsExcludingRedemption = h.TotalUnits - blockedUnitsExcluding
+				if h.AvailableUnitsExcludingRedemption < 0 {
+					h.AvailableUnitsExcludingRedemption = 0
+				}
 			}
 			h.CurrentValue = h.TotalUnits * h.CurrentNAV
 			h.GainLoss = (h.TotalUnits * h.CurrentNAV) - h.TotalInvestedAmount
@@ -382,32 +416,33 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				h.GainLossPercent = (h.GainLoss / totalInvested) * 100.0
 			}
 
-			// Fetch individual BUY transactions for this holding (ordered FIFO)
+			// Fetch individual BUY transactions for this holding (ordered FIFO) with lot-level blocked/available units
 			txQuery := `
-								SELECT 
-										ot.id,
-										ot.batch_id,
-										TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
-										ot.transaction_type,
-										ot.scheme_internal_code,
-										ot.folio_number,
-										ot.demat_acc_number,
-										COALESCE(ot.amount, 0) AS amount,
-										COALESCE(ot.units, 0) AS units,
-										COALESCE(ot.nav, 0) AS nav,
-										ot.scheme_id,
-										ot.folio_id,
-										ot.demat_id,
-										TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
-								FROM investment.onboard_transaction ot
-							LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
-								LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
-								WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
-								AND (COALESCE(ot.entity_name,'') = $7 OR ps.entity_name = $7)
-									AND ( (ot.folio_number = $1) OR (ot.demat_acc_number = $2) )
-									AND ( ot.scheme_id = $3 OR ot.scheme_internal_code = $4 OR ms.isin = $5 OR ms.scheme_name = $6 )
-								ORDER BY ot.transaction_date ASC, ot.id ASC
-						`
+				SELECT 
+					ot.id,
+					ot.batch_id,
+					TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+					ot.transaction_type,
+					ot.scheme_internal_code,
+					ot.folio_number,
+					ot.demat_acc_number,
+					COALESCE(ot.amount, 0) AS amount,
+					COALESCE(ot.units, 0) AS units,
+					COALESCE(ot.nav, 0) AS nav,
+					ot.scheme_id,
+					ot.folio_id,
+					ot.demat_id,
+					TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+					COALESCE(ot.blocked_units, 0) AS blocked_units
+				FROM investment.onboard_transaction ot
+				LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
+				LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+				WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
+					AND (COALESCE(ot.entity_name,'') = $7 OR ps.entity_name = $7)
+					AND ( (ot.folio_number = $1) OR (ot.demat_acc_number = $2) )
+					AND ( ot.scheme_id = $3 OR ot.scheme_internal_code = $4 OR ms.isin = $5 OR ms.scheme_name = $6 )
+				ORDER BY ot.transaction_date ASC, ot.id ASC
+			`
 
 			txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, isin, schemeName, entityName)
 			if err != nil {
@@ -415,9 +450,11 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			transactions := []TransactionDetail{}
+			// First, collect all BUY lots
+			buyLots := []TransactionDetail{}
 			for txRows.Next() {
 				var tx TransactionDetail
+				var blockedUnits float64
 				if err := txRows.Scan(
 					&tx.ID,
 					&tx.BatchID,
@@ -433,14 +470,58 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					&tx.FolioID,
 					&tx.DematID,
 					&tx.CreatedAt,
+					&blockedUnits,
 				); err != nil {
 					txRows.Close()
 					api.RespondWithError(w, http.StatusInternalServerError, "Transaction scan failed: "+err.Error())
 					return
 				}
-				transactions = append(transactions, tx)
+				tx.BlockedUnits = blockedUnits
+				buyLots = append(buyLots, tx)
 			}
 			txRows.Close()
+
+			// Now fetch total SELL units for this holding (same entity/scheme/folio or demat)
+			var totalSellUnits float64
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT COALESCE(SUM(ABS(COALESCE(ot.units,0))),0)
+				FROM investment.onboard_transaction ot
+				LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
+				WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption')
+					AND COALESCE(ot.entity_name,'') = $1
+					AND ( (ot.folio_number = $2) OR (ot.demat_acc_number = $3) )
+					AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $5 OR ms.isin = $6 OR ms.scheme_name = $7 )
+			`, entityName, folioNumber, dematAcc, schemeID, schemeID, isin, schemeName).Scan(&totalSellUnits)
+
+			// Apply FIFO: deduct sell units from buy lots in order
+			remainingSellUnits := totalSellUnits
+			transactions := []TransactionDetail{}
+			for _, tx := range buyLots {
+				originalUnits := tx.Units
+				// Deduct SELL units from this lot (FIFO)
+				if remainingSellUnits > 0 {
+					if remainingSellUnits >= originalUnits {
+						// This entire lot is consumed by sells
+						remainingSellUnits -= originalUnits
+						tx.TotalUnits = 0
+					} else {
+						// Partial consumption
+						tx.TotalUnits = originalUnits - remainingSellUnits
+						remainingSellUnits = 0
+					}
+				} else {
+					tx.TotalUnits = originalUnits
+				}
+				// Available = remaining after sells - blocked by pending redemptions
+				tx.AvailableUnits = tx.TotalUnits - tx.BlockedUnits
+				if tx.AvailableUnits < 0 {
+					tx.AvailableUnits = 0
+				}
+				// Only include lots that still have units remaining
+				if tx.TotalUnits > 0 {
+					transactions = append(transactions, tx)
+				}
+			}
 
 			h.Transactions = transactions
 			holdings = append(holdings, h)
@@ -461,7 +542,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // ---------------------------
 // CalculateRedemptionFIFO
-// Calculates FIFO-based redemption allocations
+// Calculates FIFO/LIFO-based redemption allocations
 // ---------------------------
 
 func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -486,6 +567,16 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Default method to FIFO if not provided
+		method := strings.ToUpper(strings.TrimSpace(req.Method))
+		if method == "" {
+			method = "FIFO"
+		}
+		if method != "FIFO" && method != "LIFO" {
+			api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO or LIFO")
+			return
+		}
+
 		// Validate that only one of units/amount/percent is provided
 		providedCount := 0
 		if req.Units != nil {
@@ -505,7 +596,7 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 
 		// We'll compute holdings from transaction rows so totals are aggregated across batches.
-		// Fetch all BUY/PURCHASE transactions ordered by date (FIFO) with flexible scheme matching and entity filter
+		// Fetch all BUY/PURCHASE transactions ordered by date based on method (FIFO/LIFO)
 		txQuery := `
 			SELECT 
 				ot.id,
@@ -523,10 +614,13 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				AND LOWER(ot.transaction_type) IN ('buy', 'purchase', 'subscription')
 				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
 				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
-			ORDER BY ot.transaction_date ASC, ot.id ASC
+			ORDER BY
+				CASE WHEN $5 = 'FIFO' THEN ot.transaction_date END ASC,
+				CASE WHEN $5 = 'LIFO' THEN ot.transaction_date END DESC,
+				ot.id ASC
 		`
 
-		rows, err := pgxPool.Query(ctx, txQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID)
+		rows, err := pgxPool.Query(ctx, txQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID, method)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 			return
@@ -594,10 +688,13 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				AND LOWER(ot.transaction_type) IN ('sell', 'redemption')
 				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
 				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
-			ORDER BY ot.transaction_date ASC, ot.id ASC
+			ORDER BY
+				CASE WHEN $5 = 'FIFO' THEN ot.transaction_date END ASC,
+				CASE WHEN $5 = 'LIFO' THEN ot.transaction_date END DESC,
+				ot.id ASC
 		`
 
-		sellRows, err := pgxPool.Query(ctx, sellQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID)
+		sellRows, err := pgxPool.Query(ctx, sellQuery, req.EntityName, req.FolioNumber, req.DematAccNumber, req.SchemeID, method)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Sell query failed: "+err.Error())
 			return
@@ -741,7 +838,7 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Apply existing redemptions to purchases (FIFO)
+		// Apply existing redemptions to purchases (using method order - already sorted)
 		purchasesCopy := make([]txItem, len(purchases))
 		copy(purchasesCopy, purchases)
 
@@ -764,8 +861,8 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Now apply the new redemption using FIFO
-		allocations := []FIFOAllocation{}
+		// Now apply the new redemption using the specified method (FIFO/LIFO)
+		allocations := []AllocationDetail{}
 		remainingToAllocate := redemptionUnits
 		totalAllocatedAmount := 0.0
 		totalRealizedGainLoss := 0.0
@@ -796,7 +893,7 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				gainLossPercent = (gainLoss / allocatedPurchaseAmount) * 100.0
 			}
 
-			allocation := FIFOAllocation{
+			allocation := AllocationDetail{
 				TransactionID:      purchase.ID,
 				TransactionDate:    purchase.TransactionDate,
 				OriginalUnits:      purchase.Units + allocatedUnits, // Original before this allocation
@@ -831,6 +928,7 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SchemeName:              schemeName,
 			FolioNumber:             req.FolioNumber,
 			DematAccNumber:          req.DematAccNumber,
+			Method:                  method,
 			TotalHolding:            totalUnits,
 			CurrentNAV:              currentNAV,
 			RedemptionUnits:         redemptionUnits,

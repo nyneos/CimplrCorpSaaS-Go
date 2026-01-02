@@ -133,6 +133,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Update blocked_units in onboard_transaction for the holding
+		// CRITICAL: Use entity_name filter to prevent cross-entity blocking when folio_number is non-unique (e.g., "1")
 		if unitsToBlock > 0 {
 			updateBlockedUnitsQuery := `
 				WITH target_transactions AS (
@@ -140,7 +141,13 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						ot.id,
 						ot.units,
 						COALESCE(ot.blocked_units, 0) AS current_blocked,
-						ot.transaction_date
+						ot.transaction_date,
+						ROW_NUMBER() OVER (
+							ORDER BY 
+								CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+								CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
+								ot.id ASC
+						) AS row_num
 					FROM investment.onboard_transaction ot
 					LEFT JOIN investment.masterscheme ms ON (
 						ms.scheme_id = ot.scheme_id OR
@@ -158,13 +165,11 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							ot.scheme_internal_code = $1
 						)
 						AND (
-							($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
-							($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+							($2::text IS NOT NULL AND ot.folio_id = $2) OR
+							($3::text IS NOT NULL AND ot.demat_id = $3)
 						)
+						AND ($6::text IS NULL OR ot.entity_name = $6)
 						AND (ot.units - COALESCE(ot.blocked_units, 0)) > 0
-					ORDER BY 
-						CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-						CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
 				),
 				blocking_allocation AS (
 					SELECT 
@@ -174,7 +179,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						LEAST(
 							units - current_blocked,
 							$5 - COALESCE(SUM(LEAST(units - current_blocked, $5)) OVER (
-								ORDER BY transaction_date
+								ORDER BY row_num
 								ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 							), 0)
 						) AS units_to_block_here
@@ -191,6 +196,7 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullIfEmptyString(req.DematID),
 				method,
 				unitsToBlock,
+				nullIfEmptyString(req.EntityName),
 			); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to block units: "+err.Error())
 				return
@@ -350,7 +356,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				unitsToBlock = row.ByAmount / latestNAV
 			}
 
-			// Update blocked_units
+			// Update blocked_units with entity scoping
 			if unitsToBlock > 0 {
 				updateBlockedUnitsQuery := `
 					WITH target_transactions AS (
@@ -358,7 +364,13 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							ot.id,
 							ot.units,
 							COALESCE(ot.blocked_units, 0) AS current_blocked,
-							ot.transaction_date
+							ot.transaction_date,
+							ROW_NUMBER() OVER (
+								ORDER BY 
+									CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+									CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
+									ot.id ASC
+							) AS row_num
 						FROM investment.onboard_transaction ot
 						LEFT JOIN investment.masterscheme ms ON (
 							ms.scheme_id = ot.scheme_id OR
@@ -376,13 +388,11 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								ot.scheme_internal_code = $1
 							)
 							AND (
-								($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
-								($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+								($2::text IS NOT NULL AND ot.folio_id = $2) OR
+								($3::text IS NOT NULL AND ot.demat_id = $3)
 							)
+							AND ($6::text IS NULL OR ot.entity_name = $6)
 							AND (ot.units - COALESCE(ot.blocked_units, 0)) > 0
-						ORDER BY 
-							CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-							CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
 					),
 					blocking_allocation AS (
 						SELECT 
@@ -392,7 +402,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							LEAST(
 								units - current_blocked,
 								$5 - COALESCE(SUM(LEAST(units - current_blocked, $5)) OVER (
-									ORDER BY transaction_date
+									ORDER BY row_num
 									ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 								), 0)
 							) AS units_to_block_here
@@ -409,6 +419,7 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					nullIfEmptyString(row.DematID),
 					method,
 					unitsToBlock,
+					nullIfEmptyString(row.EntityName),
 				); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to block units: " + err.Error()})
 					continue
@@ -848,15 +859,15 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Release blocked units for deleted redemptions
 			for _, rid := range deleteMasterIDs {
 				// Fetch redemption details to determine which units to unblock
-				var folioID, dematID, schemeID sql.NullString
+				var folioID, dematID, schemeID, entityName sql.NullString
 				var byUnits sql.NullFloat64
 				var method string
 
 				if err := tx.QueryRow(ctx, `
-					SELECT folio_id, demat_id, scheme_id, by_units, method
+					SELECT folio_id, demat_id, scheme_id, by_units, method, entity_name
 					FROM investment.redemption_initiation
 					WHERE redemption_id = $1
-				`, rid).Scan(&folioID, &dematID, &schemeID, &byUnits, &method); err != nil {
+				`, rid).Scan(&folioID, &dematID, &schemeID, &byUnits, &method, &entityName); err != nil {
 					continue // Skip if unable to fetch details
 				}
 
@@ -864,13 +875,19 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue // Nothing to unblock
 				}
 
-				// Release blocked units using the same method (FIFO/LIFO) that was used to block them
+				// Release blocked units with entity scoping to prevent cross-entity leakage
 				unblockQuery := `
 					WITH target_transactions AS (
 						SELECT 
 							ot.id,
 							COALESCE(ot.blocked_units, 0) AS current_blocked,
-							ot.transaction_date
+							ot.transaction_date,
+							ROW_NUMBER() OVER (
+								ORDER BY 
+									CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+									CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
+									ot.id ASC
+							) AS row_num
 						FROM investment.onboard_transaction ot
 						LEFT JOIN investment.masterscheme ms ON (
 							ms.scheme_id = ot.scheme_id OR
@@ -888,13 +905,11 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								ot.scheme_internal_code = $1
 							)
 							AND (
-								($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
-								($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+								($2::text IS NOT NULL AND ot.folio_id = $2) OR
+								($3::text IS NOT NULL AND ot.demat_id = $3)
 							)
+							AND ($6::text IS NULL OR ot.entity_name = $6)
 							AND COALESCE(ot.blocked_units, 0) > 0
-						ORDER BY 
-							CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-							CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
 					),
 					unblocking_allocation AS (
 						SELECT 
@@ -903,7 +918,7 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							LEAST(
 								current_blocked,
 								$5 - COALESCE(SUM(LEAST(current_blocked, $5)) OVER (
-									ORDER BY transaction_date
+									ORDER BY row_num
 									ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 								), 0)
 							) AS units_to_unblock_here
@@ -915,12 +930,15 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
 				`
 
-				var folioIDStr, dematIDStr *string
+				var folioIDStr, dematIDStr, entityNameStr *string
 				if folioID.Valid {
 					folioIDStr = &folioID.String
 				}
 				if dematID.Valid {
 					dematIDStr = &dematID.String
+				}
+				if entityName.Valid {
+					entityNameStr = &entityName.String
 				}
 
 				if _, err := tx.Exec(ctx, unblockQuery,
@@ -929,9 +947,9 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					nullIfEmptyStringPtr(dematIDStr),
 					method,
 					byUnits.Float64,
+					nullIfEmptyStringPtr(entityNameStr),
 				); err != nil {
 					// Log error but continue with deletion
-					// You might want to log this for debugging
 				}
 			}
 
@@ -1048,17 +1066,17 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Release blocked units for rejected redemptions
+		// Release blocked units for rejected redemptions with entity scoping
 		for _, rid := range req.RedemptionIDs {
-			var folioID, dematID, schemeID sql.NullString
+			var folioID, dematID, schemeID, entityName sql.NullString
 			var byUnits sql.NullFloat64
 			var method string
 
 			if err := tx.QueryRow(ctx, `
-				SELECT folio_id, demat_id, scheme_id, by_units, method
+				SELECT folio_id, demat_id, scheme_id, by_units, method, entity_name
 				FROM investment.redemption_initiation
 				WHERE redemption_id = $1
-			`, rid).Scan(&folioID, &dematID, &schemeID, &byUnits, &method); err != nil {
+			`, rid).Scan(&folioID, &dematID, &schemeID, &byUnits, &method, &entityName); err != nil {
 				continue
 			}
 
@@ -1089,9 +1107,10 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							ot.scheme_internal_code = $1
 						)
 						AND (
-							($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
-							($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+							($2::text IS NOT NULL AND ot.folio_id = $2) OR
+							($3::text IS NOT NULL AND ot.demat_id = $3)
 						)
+						AND ($6::text IS NULL OR ot.entity_name = $6)
 						AND COALESCE(ot.blocked_units, 0) > 0
 					ORDER BY 
 						CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
@@ -1116,12 +1135,15 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
 			`
 
-			var folioIDStr, dematIDStr *string
+			var folioIDStr, dematIDStr, entityNameStr *string
 			if folioID.Valid {
 				folioIDStr = &folioID.String
 			}
 			if dematID.Valid {
 				dematIDStr = &dematID.String
+			}
+			if entityName.Valid {
+				entityNameStr = &entityName.String
 			}
 
 			if _, err := tx.Exec(ctx, unblockQuery,
@@ -1130,6 +1152,7 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nullIfEmptyStringPtr(dematIDStr),
 				method,
 				byUnits.Float64,
+				nullIfEmptyStringPtr(entityNameStr),
 			); err != nil {
 				// Log error but continue
 			}
@@ -1781,23 +1804,30 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&snapTotalUnits, &snapAvgNav, &snapCurrentNav, &snapCurrentValue, &snapTotalInvested, &snapGainLoss, &snapGainLossPct,
 		)
 
-		// Blocked units: freeze units for all open (pending/approved) redemptions on the same holding.
-		// This is derived from redemption_initiation (not onboard_transaction.blocked_units).
+		// Blocked units: freeze units for all open (pending/approved) redemption initiations that do NOT yet have a CONFIRMED confirmation.
+		// Once a confirmation is CONFIRMED, the SELL transaction is created and units are no longer blocked.
 		var blockedByRedemptions float64
 		_ = pgxPool.QueryRow(ctx, `
-			WITH latest AS (
+			WITH latest_initiation_audit AS (
 				SELECT DISTINCT ON (redemption_id)
 					redemption_id,
 					processing_status,
 					requested_at
 				FROM investment.auditactionredemption
 				ORDER BY redemption_id, requested_at DESC
+			),
+			confirmed_redemptions AS (
+				-- Redemptions that have a CONFIRMED confirmation (SELL already created)
+				SELECT DISTINCT rc.redemption_id
+				FROM investment.redemption_confirmation rc
+				WHERE UPPER(COALESCE(rc.status,'')) = 'CONFIRMED'
 			)
 			SELECT COALESCE(SUM(COALESCE(ri.by_units,0)),0)
 			FROM investment.redemption_initiation ri
-			JOIN latest l ON l.redemption_id = ri.redemption_id
+			JOIN latest_initiation_audit l ON l.redemption_id = ri.redemption_id
 			WHERE COALESCE(ri.is_deleted,false)=false
 				AND UPPER(COALESCE(l.processing_status,'')) IN ('PENDING_APPROVAL','APPROVED')
+				AND ri.redemption_id NOT IN (SELECT redemption_id FROM confirmed_redemptions)
 				AND LOWER(TRIM(COALESCE(ri.entity_name,''))) = LOWER(TRIM($1))
 				AND ri.scheme_id = $2
 				AND (
@@ -1813,6 +1843,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		sellTxs := make([]map[string]any, 0, 100)
 		var totalBlockedUnits float64
 		var totalSellUnits float64
+		var totalBuyUnits float64
+		var totalBuyAmount float64
+		var totalBuyNavUnits float64
 
 		buyQ := `
 			SELECT
@@ -1833,9 +1866,12 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				AND LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
 				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
 				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $5 OR ms.isin = $6 OR ms.scheme_name = $7 )
-			ORDER BY ot.transaction_date ASC, ot.id ASC
+			ORDER BY
+				CASE WHEN $8 = 'FIFO' THEN ot.transaction_date END ASC,
+				CASE WHEN $8 = 'LIFO' THEN ot.transaction_date END DESC,
+				ot.id ASC
 		`
-		rows, err := pgxPool.Query(ctx, buyQ, entityNameScoped, nullIfEmptyString(folioNumber), nullIfEmptyString(dematAccountNumber), resolvedSchemeID, resolvedSchemeID, isin, schemeName)
+		rows, err := pgxPool.Query(ctx, buyQ, entityNameScoped, nullIfEmptyString(folioNumber), nullIfEmptyString(dematAccountNumber), resolvedSchemeID, resolvedSchemeID, isin, schemeName, method)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -1854,6 +1890,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := rows.Scan(&id, &batchID, &txDate, &txType, &amount, &units, &nav, &blocked, &fn, &dn); err != nil {
 					continue
 				}
+				totalBuyUnits += units
+				totalBuyAmount += amount
+				totalBuyNavUnits += (nav * units)
 				// We'll allocate blocked units across lots (FIFO) after reading all lots.
 				_ = blocked
 				avail := units
@@ -1873,7 +1912,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Allocate blocked units across buy lots FIFO.
+		// Allocate blocked units across buy lots based on method (FIFO/LIFO).
 		blockedRemaining := blockedByRedemptions
 		for i := range buyLots {
 			if blockedRemaining <= 0 {
@@ -1901,7 +1940,15 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ot.transaction_type,
 				COALESCE(ot.amount,0) AS amount,
 				COALESCE(ot.units,0) AS units,
-				COALESCE(ot.nav,0) AS nav
+				COALESCE(ot.nav,0) AS nav,
+				COALESCE(ot.scheme_id,'') AS scheme_id,
+				COALESCE(ot.scheme_internal_code,'') AS scheme_internal_code,
+				COALESCE(ot.folio_number,'') AS folio_number,
+				COALESCE(ot.folio_id,'') AS folio_id,
+				COALESCE(ot.demat_acc_number,'') AS demat_acc_number,
+				COALESCE(ot.demat_id,'') AS demat_id,
+				COALESCE(ot.entity_name,'') AS entity_name,
+				TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at
 			FROM investment.onboard_transaction ot
 			LEFT JOIN investment.portfolio_snapshot ps ON ps.batch_id = ot.batch_id
 			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
@@ -1916,77 +1963,144 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer rows2.Close()
 			for rows2.Next() {
 				var (
-					id      int64
-					batchID string
-					txDate  string
-					txType  string
-					amount  float64
-					units   float64
-					nav     float64
+					id                 int64
+					batchID            string
+					txDate             string
+					txType             string
+					amount             float64
+					units              float64
+					nav                float64
+					schemeIDVal        string
+					schemeInternalCode string
+					folioNumVal        string
+					folioIDVal         string
+					dematNumVal        string
+					dematIDVal         string
+					entityNameVal      string
+					createdAt          string
 				)
-				if err := rows2.Scan(&id, &batchID, &txDate, &txType, &amount, &units, &nav); err != nil {
+				if err := rows2.Scan(&id, &batchID, &txDate, &txType, &amount, &units, &nav,
+					&schemeIDVal, &schemeInternalCode, &folioNumVal, &folioIDVal,
+					&dematNumVal, &dematIDVal, &entityNameVal, &createdAt); err != nil {
 					continue
 				}
 				totalSellUnits += math.Abs(units)
 				sellTxs = append(sellTxs, map[string]any{
-					"id":               id,
-					"batch_id":         batchID,
-					"transaction_date": txDate,
-					"transaction_type": txType,
-					"amount":           amount,
-					"units":            units,
-					"nav":              nav,
+					"id":                   id,
+					"batch_id":             batchID,
+					"transaction_date":     txDate,
+					"transaction_type":     txType,
+					"amount":               amount,
+					"units":                units,
+					"nav":                  nav,
+					"scheme_id":            schemeIDVal,
+					"scheme_internal_code": schemeInternalCode,
+					"folio_number":         folioNumVal,
+					"folio_id":             folioIDVal,
+					"demat_acc_number":     dematNumVal,
+					"demat_id":             dematIDVal,
+					"entity_name":          entityNameVal,
+					"created_at":           createdAt,
 				})
 			}
 		}
 
-		// Confirmation progress
+		// Confirmation progress - fetch all confirmations for this redemption with full details
 		confirmations := make([]map[string]any, 0, 50)
 		var confirmedUnits float64
+		var confirmedAmount float64
 		confQ := `
-			SELECT redemption_confirm_id, status, COALESCE(actual_units,0), COALESCE(actual_nav,0), COALESCE(gross_proceeds,0), COALESCE(net_credited,0)
-			FROM investment.redemption_confirmation
-			WHERE redemption_id = $1
-			ORDER BY created_at DESC
+			SELECT 
+				rc.redemption_confirm_id, 
+				COALESCE(rc.status,''), 
+				COALESCE(rc.actual_units,0), 
+				COALESCE(rc.actual_nav,0), 
+				COALESCE(rc.gross_proceeds,0), 
+				COALESCE(rc.exit_load,0),
+				COALESCE(rc.tds,0),
+				COALESCE(rc.net_credited,0),
+				COALESCE(rc.confirmed_by,''),
+				COALESCE(TO_CHAR(rc.confirmed_at, 'YYYY-MM-DD HH24:MI:SS'),''),
+				COALESCE(TO_CHAR(a.requested_at, 'YYYY-MM-DD HH24:MI:SS'),'') AS created_at
+			FROM investment.redemption_confirmation rc
+			LEFT JOIN (
+				SELECT DISTINCT ON (redemption_confirm_id) 
+					redemption_confirm_id, requested_at
+				FROM investment.auditactionredemptionconfirmation
+				ORDER BY redemption_confirm_id, requested_at ASC
+			) a ON a.redemption_confirm_id = rc.redemption_confirm_id
+			WHERE rc.redemption_id = $1
+			ORDER BY a.requested_at DESC
 		`
+		fmt.Printf("[DEBUG] Querying confirmations for redemption_id=%s\n", redemptionID)
 		cRows, err := pgxPool.Query(ctx, confQ, redemptionID)
-		if err == nil {
+		if err != nil {
+			fmt.Printf("[DEBUG] Confirmations query error: %v\n", err)
+		} else {
 			defer cRows.Close()
 			for cRows.Next() {
-				var rcID, st string
-				var au, anav, gp, nc float64
-				if err := cRows.Scan(&rcID, &st, &au, &anav, &gp, &nc); err != nil {
+				var rcID, st, confirmedBy, confirmedAt, createdAt string
+				var au, anav, gp, exitLoad, tds, nc float64
+				if err := cRows.Scan(&rcID, &st, &au, &anav, &gp, &exitLoad, &tds, &nc, &confirmedBy, &confirmedAt, &createdAt); err != nil {
+					fmt.Printf("[DEBUG] Confirmation scan error: %v\n", err)
 					continue
 				}
-				confirmedUnits += au
+				fmt.Printf("[DEBUG] Found confirmation: %s, status=%s, units=%f\n", rcID, st, au)
+				// Compute amount = nav * units
+				computedAmount := anav * au
+				// Only count units from CONFIRMED confirmations
+				if strings.ToUpper(st) == "CONFIRMED" {
+					confirmedUnits += au
+					confirmedAmount += computedAmount
+				}
 				confirmations = append(confirmations, map[string]any{
 					"redemption_confirm_id": rcID,
 					"status":                st,
 					"actual_units":          au,
 					"actual_nav":            anav,
+					"amount":                computedAmount, // nav * units
 					"gross_proceeds":        gp,
+					"exit_load":             exitLoad,
+					"tds":                   tds,
 					"net_credited":          nc,
+					"confirmed_by":          confirmedBy,
+					"confirmed_at":          confirmedAt,
+					"created_at":            createdAt,
 				})
 			}
+			fmt.Printf("[DEBUG] Total confirmations found: %d, confirmedUnits=%f\n", len(confirmations), confirmedUnits)
 		}
 
 		// Compose holding numbers (prefer snapshot, but always compute blocked/available from lots)
-		holdingTotalUnits := snapTotalUnits
-		if holdingTotalUnits == 0 {
-			// Fallback to buy-sell net if snapshot missing
-			var sumBuyUnits float64
-			for _, lot := range buyLots {
-				u, _ := lot["units"].(float64)
-				sumBuyUnits += u
-			}
-			holdingTotalUnits = sumBuyUnits - totalSellUnits
-			if holdingTotalUnits < 0 {
-				holdingTotalUnits = 0
-			}
+		// For correctness/consistency, treat holding_total_units as (buys - sells) from transactions.
+		holdingTotalUnits := totalBuyUnits - totalSellUnits
+		if holdingTotalUnits < 0 {
+			holdingTotalUnits = 0
 		}
 		availableUnits := holdingTotalUnits - totalBlockedUnits
 		if availableUnits < 0 {
 			availableUnits = 0
+		}
+		holdingAvgNav := snapAvgNav
+		if totalBuyUnits > 0 {
+			holdingAvgNav = totalBuyNavUnits / totalBuyUnits
+		}
+		holdingTotalInvested := snapTotalInvested
+		if totalBuyAmount > 0 {
+			holdingTotalInvested = totalBuyAmount
+		}
+		holdingCurrentNav := snapCurrentNav
+		if holdingCurrentNav == 0 {
+			holdingCurrentNav = holdingAvgNav
+		}
+		holdingCurrentValue := snapCurrentValue
+		if holdingCurrentNav > 0 {
+			holdingCurrentValue = holdingTotalUnits * holdingCurrentNav
+		}
+		holdingGainLoss := holdingCurrentValue - holdingTotalInvested
+		holdingGainLossPct := snapGainLossPct
+		if holdingTotalInvested != 0 {
+			holdingGainLossPct = (holdingGainLoss / holdingTotalInvested) * 100.0
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]any{
@@ -2038,12 +2152,12 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"total_units":           holdingTotalUnits,
 				"blocked_units":         totalBlockedUnits,
 				"available_units":       availableUnits,
-				"avg_nav":               snapAvgNav,
-				"current_nav":           snapCurrentNav,
-				"current_value":         snapCurrentValue,
-				"total_invested_amount": snapTotalInvested,
-				"gain_loss":             snapGainLoss,
-				"gain_loss_percent":     snapGainLossPct,
+				"avg_nav":               holdingAvgNav,
+				"current_nav":           holdingCurrentNav,
+				"current_value":         holdingCurrentValue,
+				"total_invested_amount": holdingTotalInvested,
+				"gain_loss":             holdingGainLoss,
+				"gain_loss_percent":     holdingGainLossPct,
 			},
 			"buy_lots":      buyLots,
 			"sell_txs":      sellTxs,
@@ -2052,7 +2166,9 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"requested_units":         byUnits,
 				"requested_amount":        byAmount,
 				"confirmed_units":         confirmedUnits,
-				"already_redeemed_units":  totalSellUnits,
+				"confirmed_amount":        confirmedAmount,                    // nav * units from confirmed confirmations
+				"already_redeemed_units":  totalSellUnits,                     // from SELL transactions
+				"already_redeemed_amount": totalSellUnits * holdingCurrentNav, // estimated using current nav
 				"currently_blocked_units": totalBlockedUnits,
 				"holding_total_units":     holdingTotalUnits,
 				"holding_available_units": availableUnits,
