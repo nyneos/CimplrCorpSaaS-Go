@@ -36,6 +36,7 @@ type PortfolioHolding struct {
 	DefaultRedemptionAccount   string        `json:"default_redemption_account"`
 	DefaultSettlementAccount   string        `json:"default_settlement_account"`
 	CreditBankAccount          string        `json:"credit_bank_account"`
+	CreditBankName             string        `json:"credit_bank_name"`
 	SchemeID            string              `json:"scheme_id"`
 	SchemeName          string              `json:"scheme_name"`
 	ISIN                *string             `json:"isin,omitempty"`
@@ -314,10 +315,11 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityName:          entityName,
 				FolioNumber:         nil,
 				DematAccNumber:      nil,
-				DefaultRedemptionAccount:   "",
-				DefaultSettlementAccount:   "",
-				CreditBankAccount:          "",
-				SchemeID:            schemeID,
+			DefaultRedemptionAccount:   "",
+			DefaultSettlementAccount:   "",
+			CreditBankAccount:          "",
+			CreditBankName:             "",
+			SchemeID:            schemeID,
 				SchemeName:          schemeName,
 				ISIN:                nil,
 				TotalUnits:          units,
@@ -341,19 +343,21 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if dematAcc != "" {
 				h.DematAccNumber = &dematAcc
 			}
-			h.DefaultRedemptionAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultRedAcct.String)
-			h.DefaultSettlementAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultSettlementAcct.String)
-			if h.FolioNumber != nil && strings.TrimSpace(*h.FolioNumber) != "" {
-				h.CreditBankAccount = h.DefaultRedemptionAccount
-			} else if h.DematAccNumber != nil && strings.TrimSpace(*h.DematAccNumber) != "" {
-				h.CreditBankAccount = h.DefaultSettlementAccount
-			} else if h.DefaultRedemptionAccount != "" {
-				h.CreditBankAccount = h.DefaultRedemptionAccount
-			} else {
-				h.CreditBankAccount = h.DefaultSettlementAccount
-			}
-
-			// Blocked units = sum of open (pending/approved) redemption initiations that do NOT yet have a CONFIRMED confirmation.
+		h.DefaultRedemptionAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultRedAcct.String)
+		h.DefaultSettlementAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultSettlementAcct.String)
+		if h.FolioNumber != nil && strings.TrimSpace(*h.FolioNumber) != "" {
+			h.CreditBankAccount = h.DefaultRedemptionAccount
+		} else if h.DematAccNumber != nil && strings.TrimSpace(*h.DematAccNumber) != "" {
+			h.CreditBankAccount = h.DefaultSettlementAccount
+		} else if h.DefaultRedemptionAccount != "" {
+			h.CreditBankAccount = h.DefaultRedemptionAccount
+		} else {
+			h.CreditBankAccount = h.DefaultSettlementAccount
+		}
+		// Resolve bank name from credit bank account number
+		if h.CreditBankAccount != "" {
+			h.CreditBankName = resolveBankName(ctx, pgxPool, entityName, h.CreditBankAccount)
+		}			// Blocked units = sum of open (pending/approved) redemption initiations that do NOT yet have a CONFIRMED confirmation.
 			// Once a confirmation is CONFIRMED, the SELL transaction is created and units are no longer blocked.
 			// We return both totals:
 			// - blocked_units: includes ALL open redemptions (true freeze)
@@ -988,6 +992,41 @@ func resolveMasterBankAccountNumber(ctx context.Context, pgxPool *pgxpool.Pool, 
 	}
 	if isDigits {
 		return needle
+	}
+
+	return ""
+}
+
+func resolveBankName(ctx context.Context, pgxPool *pgxpool.Pool, entityName string, accountNumber string) string {
+	needle := strings.TrimSpace(accountNumber)
+	if needle == "" {
+		return ""
+	}
+
+	// Try to get bank name from masterbankaccount using entity-scoped lookup
+	var bankName string
+	if err := pgxPool.QueryRow(ctx, `
+		SELECT COALESCE(ba.bank_name, '')
+		FROM public.masterbankaccount ba
+		LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+		WHERE COALESCE(ba.is_deleted,false)=false
+			AND LOWER(TRIM(COALESCE(e.entity_name, ec.entity_name))) = LOWER(TRIM($2))
+			AND ba.account_number = $1
+		LIMIT 1
+	`, needle, entityName).Scan(&bankName); err == nil {
+		return strings.TrimSpace(bankName)
+	}
+
+	// Fallback: global lookup by account_number
+	if err := pgxPool.QueryRow(ctx, `
+		SELECT COALESCE(ba.bank_name, '')
+		FROM public.masterbankaccount ba
+		WHERE COALESCE(ba.is_deleted,false)=false
+			AND ba.account_number = $1
+		LIMIT 1
+	`, needle).Scan(&bankName); err == nil {
+		return strings.TrimSpace(bankName)
 	}
 
 	return ""
