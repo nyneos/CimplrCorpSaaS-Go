@@ -123,7 +123,7 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	// Fetch MTM data
 	rows, err := tx.Query(ctx, `
 		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.curr_nav,
-		       m.prev_nav, m.units, m.unrealized_gain_loss
+			   m.prev_nav, m.units, m.unrealized_gain_loss
 		FROM investment.accounting_mtm m
 		WHERE m.activity_id = $1
 	`, activityID)
@@ -132,17 +132,30 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	}
 	defer rows.Close()
 
+	// Read rows into memory first so we can preload related data in bulk
+	var mtmRecords []map[string]interface{}
+	schemeSet := map[string]bool{}
+	var folioIDs []string
+	var dematIDs []string
 	for rows.Next() {
 		var mtmID, schemeID string
 		var folioID, dematID *string
 		var currNav, prevNav, units, unrealizedGL float64
 
 		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan MTM data failed: %w", err)
 		}
 
-		// Prepare data map
-		data := map[string]interface{}{
+		schemeSet[schemeID] = true
+		if folioID != nil && *folioID != "" {
+			folioIDs = append(folioIDs, *folioID)
+		}
+		if dematID != nil && *dematID != "" {
+			dematIDs = append(dematIDs, *dematID)
+		}
+
+		mtmRecords = append(mtmRecords, map[string]interface{}{
 			"mtm_id":               mtmID,
 			"scheme_id":            schemeID,
 			"folio_id":             folioID,
@@ -151,10 +164,26 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 			"cost_nav":             prevNav,
 			"total_units":          units,
 			"unrealized_gain_loss": unrealizedGL,
-		}
+		})
+	}
 
-		// Generate journal entry
-		je, err := GenerateJournalEntryForMTM(ctx, tx, settings, activityID, data)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Convert scheme set to list
+	schemeIDs := make([]string, 0, len(schemeSet))
+	for s := range schemeSet {
+		schemeIDs = append(schemeIDs, s)
+	}
+
+	// Preload scheme names and bank accounts to avoid per-row queries
+	schemeCache, _ := preloadSchemeNames(ctx, tx, schemeIDs)
+	bankCache, _ := preloadBankAccountsForFoliosAndDemats(ctx, tx, folioIDs, dematIDs)
+
+	// Process records after closing rows
+	for _, data := range mtmRecords {
+		je, err := GenerateJournalEntryForMTMUsingCache(ctx, tx, settings, activityID, data, schemeCache, bankCache)
 		if err != nil {
 			return fmt.Errorf("generate MTM journal failed: %w", err)
 		}
@@ -361,7 +390,7 @@ func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
 	rows, err := tx.Query(ctx, `
 		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.curr_nav,
-		       m.prev_nav, m.units, m.unrealized_gain_loss
+			   m.prev_nav, m.units, m.unrealized_gain_loss
 		FROM investment.accounting_mtm m
 		WHERE m.activity_id = $1
 	`, activityID)
@@ -371,6 +400,9 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 
 	// Read all rows first to free connection
 	var mtmRecords []map[string]interface{}
+	schemeSet := map[string]bool{}
+	var folioIDs []string
+	var dematIDs []string
 	for rows.Next() {
 		var mtmID, schemeID string
 		var folioID, dematID *string
@@ -379,6 +411,14 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan MTM data failed: %w", err)
+		}
+
+		schemeSet[schemeID] = true
+		if folioID != nil && *folioID != "" {
+			folioIDs = append(folioIDs, *folioID)
+		}
+		if dematID != nil && *dematID != "" {
+			dematIDs = append(dematIDs, *dematID)
 		}
 
 		mtmRecords = append(mtmRecords, map[string]interface{}{
@@ -398,9 +438,18 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		return err
 	}
 
+	// Convert scheme set to list
+	schemeIDs := make([]string, 0, len(schemeSet))
+	for s := range schemeSet {
+		schemeIDs = append(schemeIDs, s)
+	}
+
+	schemeCache, _ := preloadSchemeNames(ctx, tx, schemeIDs)
+	bankCache, _ := preloadBankAccountsForFoliosAndDemats(ctx, tx, folioIDs, dematIDs)
+
 	// Process records after closing rows
 	for _, data := range mtmRecords {
-		je, err := GenerateJournalEntryForMTM(ctx, tx, settings, activityID, data)
+		je, err := GenerateJournalEntryForMTMUsingCache(ctx, tx, settings, activityID, data, schemeCache, bankCache)
 		if err != nil {
 			return fmt.Errorf("generate MTM journal failed: %w", err)
 		}
