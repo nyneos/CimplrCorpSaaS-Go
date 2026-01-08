@@ -1368,7 +1368,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'units', mt.units,
 							'prev_nav', mt.prev_nav,
 							'curr_nav', mt.curr_nav,
-							'nav_date', TO_CHAR(mt.nav_date, 'YYYY-MM-DD'),
+							'nav_date', TO_CHAR(NULLIF(mt.nav_date::text, '')::date, 'YYYY-MM-DD'),
 							'prev_value', mt.prev_value,
 							'curr_value', mt.curr_value,
 							'unrealized_gain_loss', mt.unrealized_gain_loss,
@@ -1396,9 +1396,9 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'dividend_amount', dv.dividend_amount,
 							'reinvest_units', COALESCE(dv.reinvest_units, 0),
 							'reinvest_nav', COALESCE(dv.reinvest_nav, 0),
-							'record_date', TO_CHAR(dv.record_date, 'YYYY-MM-DD'),
-							'ex_date', TO_CHAR(dv.ex_date, 'YYYY-MM-DD'),
-							'payment_date', TO_CHAR(dv.payment_date, 'YYYY-MM-DD')
+							'record_date', TO_CHAR(NULLIF(dv.record_date::text, '')::date, 'YYYY-MM-DD'),
+							'ex_date', TO_CHAR(NULLIF(dv.ex_date::text, '')::date, 'YYYY-MM-DD'),
+							'payment_date', TO_CHAR(NULLIF(dv.payment_date::text, '')::date, 'YYYY-MM-DD')
 						)
 					) AS dividend_records
 				FROM investment.accounting_dividend dv
@@ -1415,7 +1415,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'fvo_id', fv.fvo_id,
 							'scheme_id', fv.scheme_id,
 							'scheme_name', COALESCE(sch.scheme_name, fv.scheme_id),
-							'valuation_date', TO_CHAR(fv.valuation_date, 'YYYY-MM-DD'),
+							'valuation_date', TO_CHAR(NULLIF(fv.valuation_date::text, '')::date, 'YYYY-MM-DD'),
 							'market_nav', COALESCE(fv.market_nav, 0),
 							'override_nav', fv.override_nav,
 							'variance', COALESCE(fv.variance, 0),
@@ -1461,8 +1461,8 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_activity_type,
 				COALESCE(m.activity_subtype,'') AS activity_subtype,
 				COALESCE(m.old_activity_subtype,'') AS old_activity_subtype,
-				TO_CHAR(m.effective_date, 'YYYY-MM-DD') AS effective_date,
-				TO_CHAR(m.old_effective_date, 'YYYY-MM-DD') AS old_effective_date,
+				TO_CHAR(NULLIF(m.effective_date::text, '')::date, 'YYYY-MM-DD') AS effective_date,
+				TO_CHAR(NULLIF(m.old_effective_date::text, '')::date, 'YYYY-MM-DD') AS old_effective_date,
 				COALESCE(m.accounting_period, '') AS accounting_period,
 				COALESCE(m.old_accounting_period, '') AS old_accounting_period,
 				m.data_source,
@@ -1470,15 +1470,15 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.status,
 				COALESCE(m.old_status,'') AS old_status,
 				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(m.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				

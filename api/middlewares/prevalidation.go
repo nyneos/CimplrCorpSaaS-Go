@@ -215,13 +215,13 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, "ApprovedDemats", demats)
 			}
 			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-			log.Printf("User ID: %s\n", userID)
-			log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-			log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
-			log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
-			for i, name := range entityNames {
-				log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
-			}
+			// log.Printf("User ID: %s\n", userID)
+			// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+			// log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
+			// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+			// for i, name := range entityNames {
+			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+			// }
 			// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
 			// for i, amc := range amcs {
 			// 	if i < 5 || i >= len(amcs)-2 {

@@ -21,38 +21,39 @@ import (
 
 // GetPortfolioRequest models the payload to fetch portfolio with transactions
 type GetPortfolioRequest struct {
-	EntityName    string `json:"entity_name"`
-	RedemptionID  string `json:"redemption_id,omitempty"`
-	UserID        string `json:"user_id,omitempty"`
+	EntityName   string `json:"entity_name"`
+	RedemptionID string `json:"redemption_id,omitempty"`
+	UserID       string `json:"user_id,omitempty"`
 }
 
 // PortfolioHolding represents a single portfolio position
 type PortfolioHolding struct {
-	ID                  int64               `json:"id,omitempty"`
-	BatchID             string              `json:"batch_id,omitempty"`
-	EntityName          string              `json:"entity_name"`
-	FolioNumber         *string             `json:"folio_number,omitempty"`
-	DematAccNumber      *string             `json:"demat_acc_number,omitempty"`
-	DefaultRedemptionAccount   string        `json:"default_redemption_account"`
-	DefaultSettlementAccount   string        `json:"default_settlement_account"`
-	CreditBankAccount          string        `json:"credit_bank_account"`
-	CreditBankName             string        `json:"credit_bank_name"`
-	SchemeID            string              `json:"scheme_id"`
-	SchemeName          string              `json:"scheme_name"`
-	ISIN                *string             `json:"isin,omitempty"`
-	TotalUnits          float64             `json:"total_units"`
-	BlockedUnits        float64             `json:"blocked_units"`
-	BlockedUnitsExcludingRedemption   float64 `json:"blocked_units_excluding_redemption,omitempty"`
-	AvailableUnits      float64             `json:"available_units"`
-	AvailableUnitsExcludingRedemption float64 `json:"available_units_excluding_redemption,omitempty"`
-	AvgNAV              float64             `json:"avg_nav"`
-	CurrentNAV          float64             `json:"current_nav"`
-	CurrentValue        float64             `json:"current_value"`
-	TotalInvestedAmount float64             `json:"total_invested_amount"`
-	GainLoss            float64             `json:"gain_loss"`
-	GainLossPercent     float64             `json:"gain_loss_percent"`
-	CreatedAt           string              `json:"created_at,omitempty"`
-	Transactions        []TransactionDetail `json:"transactions"`
+	ID                                int64               `json:"id,omitempty"`
+	BatchID                           string              `json:"batch_id,omitempty"`
+	EntityName                        string              `json:"entity_name"`
+	FolioNumber                       *string             `json:"folio_number,omitempty"`
+	DematAccNumber                    *string             `json:"demat_acc_number,omitempty"`
+	DefaultRedemptionAccount          string              `json:"default_redemption_account"`
+	DefaultSettlementAccount          string              `json:"default_settlement_account"`
+	CreditBankAccount                 string              `json:"credit_bank_account"`
+	CreditBankName                    string              `json:"credit_bank_name"`
+	SchemeID                          string              `json:"scheme_id"`
+	SchemeName                        string              `json:"scheme_name"`
+	ISIN                              *string             `json:"isin,omitempty"`
+	Method                            string              `json:"method"`
+	TotalUnits                        float64             `json:"total_units"`
+	BlockedUnits                      float64             `json:"blocked_units"`
+	BlockedUnitsExcludingRedemption   float64             `json:"blocked_units_excluding_redemption,omitempty"`
+	AvailableUnits                    float64             `json:"available_units"`
+	AvailableUnitsExcludingRedemption float64             `json:"available_units_excluding_redemption,omitempty"`
+	AvgNAV                            float64             `json:"avg_nav"`
+	CurrentNAV                        float64             `json:"current_nav"`
+	CurrentValue                      float64             `json:"current_value"`
+	TotalInvestedAmount               float64             `json:"total_invested_amount"`
+	GainLoss                          float64             `json:"gain_loss"`
+	GainLossPercent                   float64             `json:"gain_loss_percent"`
+	CreatedAt                         string              `json:"created_at,omitempty"`
+	Transactions                      []TransactionDetail `json:"transactions"`
 }
 
 // TransactionDetail represents a single transaction (BUY lot)
@@ -72,9 +73,9 @@ type TransactionDetail struct {
 	DematID            *string `json:"demat_id,omitempty"`
 	CreatedAt          string  `json:"created_at,omitempty"`
 	// Lot-level unit breakdown
-	TotalUnits         float64 `json:"total_units"`          // Original units from this BUY lot
-	BlockedUnits       float64 `json:"blocked_units"`        // Units blocked by pending redemptions
-	AvailableUnits     float64 `json:"available_units"`      // Units available for redemption
+	TotalUnits     float64 `json:"total_units"`     // Original units from this BUY lot
+	BlockedUnits   float64 `json:"blocked_units"`   // Units blocked by pending redemptions
+	AvailableUnits float64 `json:"available_units"` // Units available for redemption
 }
 
 // CalculateRedemptionRequest models the payload for FIFO/LIFO redemption calculation
@@ -146,42 +147,43 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-			excludeRedemptionID := strings.TrimSpace(req.RedemptionID)
+		excludeRedemptionID := strings.TrimSpace(req.RedemptionID)
 
 		// Aggregate holdings by entity -> scheme (resolved by scheme_id/internal code/isin) and folio/demat
 		// We compute net units = sum(buys) - sum(sells) but compute avg_nav and invested amount from buys only.
 		// blocked_units: Sum directly from onboard_transaction.blocked_units field
 		aggQuery := `
-			WITH latest_snapshots AS (
-				SELECT DISTINCT ON (entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number))
-					entity_name, scheme_id, folio_id, folio_number, demat_id, demat_acc_number
-				FROM investment.portfolio_snapshot
-				WHERE entity_name = $1
-				ORDER BY entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number), created_at DESC
-			),
-			ot AS (
-				SELECT
-					t.id, t.batch_id, t.transaction_date, t.transaction_type, t.scheme_internal_code,
-					t.folio_number, t.demat_acc_number, t.amount, t.units, t.nav,
-					t.scheme_id, t.folio_id, t.demat_id, t.created_at,
-					COALESCE(t.blocked_units, 0) AS blocked_units,
-					COALESCE(t.entity_name, ls.entity_name) AS entity_name,
-					ms.scheme_name AS ms_scheme_name, ms.isin AS ms_isin, ms.scheme_id AS ms_scheme_id, ms.internal_scheme_code AS ms_internal_code
-				FROM investment.onboard_transaction t
-				LEFT JOIN latest_snapshots ls ON 
-					t.scheme_id = ls.scheme_id AND (
-						(t.folio_id IS NOT NULL AND t.folio_id = ls.folio_id) OR
-						(t.demat_id IS NOT NULL AND t.demat_id = ls.demat_id) OR
-						(t.folio_number IS NOT NULL AND t.folio_number = ls.folio_number) OR
-						(t.demat_acc_number IS NOT NULL AND t.demat_acc_number = ls.demat_acc_number)
-					)
-				LEFT JOIN investment.masterscheme ms ON (
-					ms.scheme_id = t.scheme_id OR ms.internal_scheme_code = t.scheme_internal_code OR ms.isin = t.scheme_id
+		WITH latest_snapshots AS (
+			SELECT DISTINCT ON (entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number))
+				entity_name, scheme_id, folio_id, folio_number, demat_id, demat_acc_number
+			FROM investment.portfolio_snapshot
+			WHERE entity_name = $1
+			ORDER BY entity_name, scheme_id, COALESCE(folio_id, folio_number), COALESCE(demat_id, demat_acc_number), created_at DESC
+		),
+		ot AS (
+			SELECT
+				t.id, t.batch_id, t.transaction_date, t.transaction_type, t.scheme_internal_code,
+				t.folio_number, t.demat_acc_number, t.amount, t.units, t.nav,
+				t.scheme_id, t.folio_id, t.demat_id, t.created_at,
+				COALESCE(t.blocked_units, 0) AS blocked_units,
+				COALESCE(t.entity_name, ls.entity_name) AS entity_name,
+				ms.scheme_name AS ms_scheme_name, ms.isin AS ms_isin, ms.scheme_id AS ms_scheme_id, ms.internal_scheme_code AS ms_internal_code
+			FROM investment.onboard_transaction t
+			LEFT JOIN latest_snapshots ls ON 
+				t.scheme_id = ls.scheme_id AND (
+					(t.folio_id IS NOT NULL AND t.folio_id = ls.folio_id) OR
+					(t.demat_id IS NOT NULL AND t.demat_id = ls.demat_id) OR
+					(t.folio_number IS NOT NULL AND t.folio_number = ls.folio_number) OR
+					(t.demat_acc_number IS NOT NULL AND t.demat_acc_number = ls.demat_acc_number)
 				)
-				-- filter strictly by resolved entity to avoid cross-entity leakage
-				WHERE COALESCE(t.entity_name, ls.entity_name) = $1
-					AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
+			LEFT JOIN investment.masterscheme ms ON (
+				ms.scheme_id = t.scheme_id OR ms.internal_scheme_code = t.scheme_internal_code OR ms.isin = t.scheme_id
 			)
+			-- filter strictly by resolved entity to avoid cross-entity leakage
+			WHERE COALESCE(t.entity_name, ls.entity_name) = $1
+				AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
+		),
+		aggregated AS (
 			SELECT
 				ot.entity_name,
 				COALESCE(ot.folio_number,'') AS folio_number,
@@ -210,8 +212,29 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ot.demat_id, '')
 			HAVING (SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription') THEN COALESCE(ot.units,0) ELSE 0 END)
 					- SUM(CASE WHEN LOWER(COALESCE(ot.transaction_type,'')) IN ('sell','redemption') THEN ABS(COALESCE(ot.units,0)) ELSE 0 END)) > 0
-			ORDER BY COALESCE(ot.folio_number,''), COALESCE(ot.demat_acc_number,''), COALESCE(ot.scheme_id, ot.scheme_internal_code, ot.ms_scheme_id)
-		`
+		)
+		SELECT
+			a.entity_name,
+			a.folio_number,
+			a.demat_acc_number,
+			a.scheme_id,
+			a.scheme_name,
+			a.isin,
+			a.folio_id,
+			a.demat_id,
+			COALESCE(ms.method, 'FIFO') AS method,
+			a.units,
+			a.avg_nav,
+			a.total_invested_amount
+		FROM aggregated a
+		LEFT JOIN investment.masterscheme ms ON (
+			ms.scheme_id = a.scheme_id 
+			OR ms.internal_scheme_code = a.scheme_id 
+			OR ms.isin = a.isin
+			OR ms.scheme_name = a.scheme_name
+		)
+		ORDER BY a.folio_number, a.demat_acc_number, a.scheme_id
+	`
 
 		rows, err := pgxPool.Query(ctx, aggQuery, req.EntityName)
 		if err != nil {
@@ -222,9 +245,9 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		holdings := []PortfolioHolding{}
 		for rows.Next() {
-			var entityName, folioNumber, dematAcc, schemeID, schemeName, isin, folioIDStr, dematIDStr string
+			var entityName, folioNumber, dematAcc, schemeID, schemeName, isin, folioIDStr, dematIDStr, method string
 			var units, avgNav, totalInvested float64
-			if err := rows.Scan(&entityName, &folioNumber, &dematAcc, &schemeID, &schemeName, &isin, &folioIDStr, &dematIDStr, &units, &avgNav, &totalInvested); err != nil {
+			if err := rows.Scan(&entityName, &folioNumber, &dematAcc, &schemeID, &schemeName, &isin, &folioIDStr, &dematIDStr, &method, &units, &avgNav, &totalInvested); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrScanFailedPrefix+err.Error())
 				return
 			}
@@ -310,29 +333,30 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			h := PortfolioHolding{
-				ID:                  0,
-				BatchID:             "",
-				EntityName:          entityName,
-				FolioNumber:         nil,
-				DematAccNumber:      nil,
-			DefaultRedemptionAccount:   "",
-			DefaultSettlementAccount:   "",
-			CreditBankAccount:          "",
-			CreditBankName:             "",
-			SchemeID:            schemeID,
-				SchemeName:          schemeName,
-				ISIN:                nil,
-				TotalUnits:          units,
-				BlockedUnits:        0,
-				AvailableUnits:      units,
-				AvgNAV:              avgNav,
-				CurrentNAV:          currentNav,
-				CurrentValue:        units * currentNav,
-				TotalInvestedAmount: totalInvested,
-				GainLoss:            (units * currentNav) - totalInvested,
-				GainLossPercent:     0,
-				CreatedAt:           "",
-				Transactions:        []TransactionDetail{},
+				ID:                       0,
+				BatchID:                  "",
+				EntityName:               entityName,
+				FolioNumber:              nil,
+				DematAccNumber:           nil,
+				DefaultRedemptionAccount: "",
+				DefaultSettlementAccount: "",
+				CreditBankAccount:        "",
+				CreditBankName:           "",
+				SchemeID:                 schemeID,
+				SchemeName:               schemeName,
+				ISIN:                     nil,
+				Method:                   method,
+				TotalUnits:               units,
+				BlockedUnits:             0,
+				AvailableUnits:           units,
+				AvgNAV:                   avgNav,
+				CurrentNAV:               currentNav,
+				CurrentValue:             units * currentNav,
+				TotalInvestedAmount:      totalInvested,
+				GainLoss:                 (units * currentNav) - totalInvested,
+				GainLossPercent:          0,
+				CreatedAt:                "",
+				Transactions:             []TransactionDetail{},
 			}
 			if isin != "" {
 				h.ISIN = &isin
@@ -343,21 +367,21 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if dematAcc != "" {
 				h.DematAccNumber = &dematAcc
 			}
-		h.DefaultRedemptionAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultRedAcct.String)
-		h.DefaultSettlementAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultSettlementAcct.String)
-		if h.FolioNumber != nil && strings.TrimSpace(*h.FolioNumber) != "" {
-			h.CreditBankAccount = h.DefaultRedemptionAccount
-		} else if h.DematAccNumber != nil && strings.TrimSpace(*h.DematAccNumber) != "" {
-			h.CreditBankAccount = h.DefaultSettlementAccount
-		} else if h.DefaultRedemptionAccount != "" {
-			h.CreditBankAccount = h.DefaultRedemptionAccount
-		} else {
-			h.CreditBankAccount = h.DefaultSettlementAccount
-		}
-		// Resolve bank name from credit bank account number
-		if h.CreditBankAccount != "" {
-			h.CreditBankName = resolveBankName(ctx, pgxPool, entityName, h.CreditBankAccount)
-		}			// Blocked units = sum of open (pending/approved) redemption initiations that do NOT yet have a CONFIRMED confirmation.
+			h.DefaultRedemptionAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultRedAcct.String)
+			h.DefaultSettlementAccount = resolveMasterBankAccountNumber(ctx, pgxPool, entityName, defaultSettlementAcct.String)
+			if h.FolioNumber != nil && strings.TrimSpace(*h.FolioNumber) != "" {
+				h.CreditBankAccount = h.DefaultRedemptionAccount
+			} else if h.DematAccNumber != nil && strings.TrimSpace(*h.DematAccNumber) != "" {
+				h.CreditBankAccount = h.DefaultSettlementAccount
+			} else if h.DefaultRedemptionAccount != "" {
+				h.CreditBankAccount = h.DefaultRedemptionAccount
+			} else {
+				h.CreditBankAccount = h.DefaultSettlementAccount
+			}
+			// Resolve bank name from credit bank account number
+			if h.CreditBankAccount != "" {
+				h.CreditBankName = resolveBankName(ctx, pgxPool, entityName, h.CreditBankAccount)
+			} // Blocked units = sum of open (pending/approved) redemption initiations that do NOT yet have a CONFIRMED confirmation.
 			// Once a confirmation is CONFIRMED, the SELL transaction is created and units are no longer blocked.
 			// We return both totals:
 			// - blocked_units: includes ALL open redemptions (true freeze)
@@ -420,35 +444,37 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				h.GainLossPercent = (h.GainLoss / totalInvested) * 100.0
 			}
 
-			// Fetch individual BUY transactions for this holding (ordered FIFO) with lot-level blocked/available units
-			txQuery := `
-				SELECT 
-					ot.id,
-					ot.batch_id,
-					TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
-					ot.transaction_type,
-					ot.scheme_internal_code,
-					ot.folio_number,
-					ot.demat_acc_number,
-					COALESCE(ot.amount, 0) AS amount,
-					COALESCE(ot.units, 0) AS units,
-					COALESCE(ot.nav, 0) AS nav,
-					ot.scheme_id,
-					ot.folio_id,
-					ot.demat_id,
-					TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
-					COALESCE(ot.blocked_units, 0) AS blocked_units
-				FROM investment.onboard_transaction ot
-				LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
-				LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
-				WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
-					AND (COALESCE(ot.entity_name,'') = $7 OR ps.entity_name = $7)
-					AND ( (ot.folio_number = $1) OR (ot.demat_acc_number = $2) )
-					AND ( ot.scheme_id = $3 OR ot.scheme_internal_code = $4 OR ms.isin = $5 OR ms.scheme_name = $6 )
-				ORDER BY ot.transaction_date ASC, ot.id ASC
-			`
+		// Fetch individual BUY transactions for this holding (ordered FIFO) with lot-level blocked/available units
+		txQuery := `
+			SELECT 
+				ot.id,
+				ot.batch_id,
+				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+				ot.transaction_type,
+				ot.scheme_internal_code,
+				ot.folio_number,
+				ot.demat_acc_number,
+				COALESCE(ot.amount, 0) AS amount,
+				COALESCE(ot.units, 0) AS units,
+				COALESCE(ot.nav, 0) AS nav,
+				ot.scheme_id,
+				ot.folio_id,
+				ot.demat_id,
+				TO_CHAR(ot.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				COALESCE(ot.blocked_units, 0) AS blocked_units
+			FROM investment.onboard_transaction ot
+			WHERE LOWER(COALESCE(ot.transaction_type,'')) IN ('buy','purchase','subscription')
+				AND COALESCE(ot.entity_name,'') = $5
+				AND ( (ot.folio_number = $1) OR (ot.demat_acc_number = $2) )
+				AND ( ot.scheme_id = $3 OR ot.scheme_internal_code = $4 )
+			GROUP BY ot.id, ot.batch_id, ot.transaction_date, ot.transaction_type, 
+				ot.scheme_internal_code, ot.folio_number, ot.demat_acc_number, 
+				ot.amount, ot.units, ot.nav, ot.scheme_id, ot.folio_id, 
+				ot.demat_id, ot.created_at, ot.blocked_units
+			ORDER BY ot.transaction_date ASC, ot.id ASC
+		`
 
-			txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, isin, schemeName, entityName)
+		txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, entityName)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 				return
@@ -576,8 +602,8 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if method == "" {
 			method = "FIFO"
 		}
-		if method != "FIFO" && method != "LIFO" {
-			api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO or LIFO")
+		if method != "FIFO" && method != "LIFO" && method != "WEIGHTED_AVERAGE" {
+			api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO, LIFO, or WEIGHTED_AVERAGE")
 			return
 		}
 
@@ -612,12 +638,10 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ot.folio_number,
 				ot.demat_acc_number
 			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
-			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
-			WHERE ps.entity_name = $1
+			WHERE COALESCE(ot.entity_name, '') = $1
 				AND LOWER(ot.transaction_type) IN ('buy', 'purchase', 'subscription')
 				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
-				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 )
 			ORDER BY
 				CASE WHEN $5 = 'FIFO' THEN ot.transaction_date END ASC,
 				CASE WHEN $5 = 'LIFO' THEN ot.transaction_date END DESC,
@@ -686,14 +710,12 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				TO_CHAR(ot.transaction_date, 'YYYY-MM-DD') AS transaction_date,
 				COALESCE(ot.units, 0) AS units
 			FROM investment.onboard_transaction ot
-			LEFT JOIN investment.portfolio_snapshot ps ON ot.batch_id = ps.batch_id
-			LEFT JOIN investment.masterscheme ms ON (ms.scheme_id = ot.scheme_id OR ms.internal_scheme_code = ot.scheme_internal_code OR ms.isin = ot.scheme_id)
-			WHERE ps.entity_name = $1
+			WHERE COALESCE(ot.entity_name, '') = $1
 				AND LOWER(ot.transaction_type) IN ('sell', 'redemption')
 				AND (( $2::text IS NOT NULL AND ot.folio_number = $2) OR ($3::text IS NOT NULL AND ot.demat_acc_number = $3))
-				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 OR ms.isin = $4 OR ms.scheme_name = $4 )
+				AND ( ot.scheme_id = $4 OR ot.scheme_internal_code = $4 )
 			ORDER BY
-				CASE WHEN $5 = 'FIFO' THEN ot.transaction_date END ASC,
+				CASE WHEN $5 IN ('FIFO', 'WEIGHTED_AVERAGE') THEN ot.transaction_date END ASC,
 				CASE WHEN $5 = 'LIFO' THEN ot.transaction_date END DESC,
 				ot.id ASC
 		`
@@ -865,61 +887,130 @@ func CalculateRedemptionFIFO(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Now apply the new redemption using the specified method (FIFO/LIFO)
+		// Now apply the new redemption using the specified method (FIFO/LIFO/WEIGHTED_AVERAGE)
 		allocations := []AllocationDetail{}
 		remainingToAllocate := redemptionUnits
 		totalAllocatedAmount := 0.0
 		totalRealizedGainLoss := 0.0
 
-		for _, purchase := range purchasesCopy {
-			if remainingToAllocate <= 0 {
-				break
-			}
-			if purchase.Units <= 0 {
-				continue
-			}
-
-			var allocatedUnits float64
-			if remainingToAllocate >= purchase.Units {
-				allocatedUnits = purchase.Units
-			} else {
-				allocatedUnits = remainingToAllocate
+		if method == "WEIGHTED_AVERAGE" {
+			// Weighted Average: Calculate average cost across all remaining lots
+			var totalRemainingUnits float64
+			var totalRemainingCost float64
+			for _, purchase := range purchasesCopy {
+				if purchase.Units > 0 {
+					totalRemainingUnits += purchase.Units
+					totalRemainingCost += purchase.Units * purchase.NAV
+				}
 			}
 
-			// Calculate allocated amount at purchase NAV
-			allocatedPurchaseAmount := allocatedUnits * purchase.NAV
-			// Calculate realized amount at current NAV
-			realizedAmount := allocatedUnits * currentNAV
-			// Gain/Loss for this allocation
-			gainLoss := realizedAmount - allocatedPurchaseAmount
-			gainLossPercent := 0.0
-			if allocatedPurchaseAmount > 0 {
-				gainLossPercent = (gainLoss / allocatedPurchaseAmount) * 100.0
+			var weightedAvgNAV float64
+			if totalRemainingUnits > 0 {
+				weightedAvgNAV = totalRemainingCost / totalRemainingUnits
 			}
 
-			allocation := AllocationDetail{
-				TransactionID:      purchase.ID,
-				TransactionDate:    purchase.TransactionDate,
-				OriginalUnits:      purchase.Units + allocatedUnits, // Original before this allocation
-				OriginalAmount:     (purchase.Units + allocatedUnits) * purchase.NAV,
-				OriginalNAV:        purchase.NAV,
-				AllocatedUnits:     allocatedUnits,
-				AllocatedAmount:    allocatedPurchaseAmount,
-				RemainingUnits:     purchase.Units,
-				GainLoss:           gainLoss,
-				GainLossPercent:    gainLossPercent,
-				SchemeInternalCode: purchase.SchemeInternalCode,
-				FolioNumber:        purchase.FolioNumber,
-				DematAccNumber:     purchase.DematAccNumber,
+			// For weighted average, allocate proportionally from all lots
+			for _, purchase := range purchasesCopy {
+				if remainingToAllocate <= 0 {
+					break
+				}
+				if purchase.Units <= 0 {
+					continue
+				}
+
+				// Allocate proportionally based on lot's percentage of total remaining
+				var allocatedUnits float64
+				if totalRemainingUnits > 0 {
+					lotProportion := purchase.Units / totalRemainingUnits
+					allocatedUnits = remainingToAllocate * lotProportion
+					// Ensure we don't over-allocate from this lot
+					if allocatedUnits > purchase.Units {
+						allocatedUnits = purchase.Units
+					}
+				} else {
+					break
+				}
+
+				// Calculate using weighted average NAV for cost basis
+				allocatedPurchaseAmount := allocatedUnits * weightedAvgNAV
+				realizedAmount := allocatedUnits * currentNAV
+				gainLoss := realizedAmount - allocatedPurchaseAmount
+				gainLossPercent := 0.0
+				if allocatedPurchaseAmount > 0 {
+					gainLossPercent = (gainLoss / allocatedPurchaseAmount) * 100.0
+				}
+
+				allocation := AllocationDetail{
+					TransactionID:      purchase.ID,
+					TransactionDate:    purchase.TransactionDate,
+					OriginalUnits:      purchase.Units + allocatedUnits,
+					OriginalAmount:     (purchase.Units + allocatedUnits) * purchase.NAV,
+					OriginalNAV:        weightedAvgNAV, // Use weighted average NAV
+					AllocatedUnits:     allocatedUnits,
+					AllocatedAmount:    allocatedPurchaseAmount,
+					RemainingUnits:     purchase.Units,
+					GainLoss:           gainLoss,
+					GainLossPercent:    gainLossPercent,
+					SchemeInternalCode: purchase.SchemeInternalCode,
+					FolioNumber:        purchase.FolioNumber,
+					DematAccNumber:     purchase.DematAccNumber,
+				}
+
+				allocations = append(allocations, allocation)
+				totalAllocatedAmount += allocatedPurchaseAmount
+				totalRealizedGainLoss += gainLoss
+				remainingToAllocate -= allocatedUnits
 			}
+		} else {
+			// FIFO/LIFO: Allocate sequentially from lots
+			for _, purchase := range purchasesCopy {
+				if remainingToAllocate <= 0 {
+					break
+				}
+				if purchase.Units <= 0 {
+					continue
+				}
 
-			allocations = append(allocations, allocation)
-			totalAllocatedAmount += allocatedPurchaseAmount
-			totalRealizedGainLoss += gainLoss
-			remainingToAllocate -= allocatedUnits
-		}
+				var allocatedUnits float64
+				if remainingToAllocate >= purchase.Units {
+					allocatedUnits = purchase.Units
+				} else {
+					allocatedUnits = remainingToAllocate
+				}
 
-		// Calculate redemption metrics
+				// Calculate allocated amount at purchase NAV
+				allocatedPurchaseAmount := allocatedUnits * purchase.NAV
+				// Calculate realized amount at current NAV
+				realizedAmount := allocatedUnits * currentNAV
+				// Gain/Loss for this allocation
+				gainLoss := realizedAmount - allocatedPurchaseAmount
+				gainLossPercent := 0.0
+				if allocatedPurchaseAmount > 0 {
+					gainLossPercent = (gainLoss / allocatedPurchaseAmount) * 100.0
+				}
+
+				allocation := AllocationDetail{
+					TransactionID:      purchase.ID,
+					TransactionDate:    purchase.TransactionDate,
+					OriginalUnits:      purchase.Units + allocatedUnits, // Original before this allocation
+					OriginalAmount:     (purchase.Units + allocatedUnits) * purchase.NAV,
+					OriginalNAV:        purchase.NAV,
+					AllocatedUnits:     allocatedUnits,
+					AllocatedAmount:    allocatedPurchaseAmount,
+					RemainingUnits:     purchase.Units,
+					GainLoss:           gainLoss,
+					GainLossPercent:    gainLossPercent,
+					SchemeInternalCode: purchase.SchemeInternalCode,
+					FolioNumber:        purchase.FolioNumber,
+					DematAccNumber:     purchase.DematAccNumber,
+				}
+
+				allocations = append(allocations, allocation)
+				totalAllocatedAmount += allocatedPurchaseAmount
+				totalRealizedGainLoss += gainLoss
+				remainingToAllocate -= allocatedUnits
+			}
+		} // Calculate redemption metrics
 		redemptionAmount := redemptionUnits * currentNAV
 		realizedGainLossPercent := 0.0
 		if totalAllocatedAmount > 0 {

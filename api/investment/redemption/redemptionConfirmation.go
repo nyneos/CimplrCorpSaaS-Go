@@ -750,11 +750,22 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 				var method string
 				var entityName sql.NullString
 				if err := tx.QueryRow(ctx, `
-					SELECT folio_id, demat_id, scheme_id, method, entity_name
-					FROM investment.redemption_initiation
-					WHERE redemption_id = $1
+					SELECT ri.folio_id, ri.demat_id, ri.scheme_id, COALESCE(ms.method, 'FIFO') AS method, ri.entity_name
+					FROM investment.redemption_initiation ri
+					LEFT JOIN investment.masterscheme ms ON (
+						ms.scheme_id = ri.scheme_id OR
+						ms.scheme_name = ri.scheme_id OR
+						ms.internal_scheme_code = ri.scheme_id OR
+						ms.isin = ri.scheme_id
+					)
+					WHERE ri.redemption_id = $1
 				`, redemptionID).Scan(&folioID, &dematID, &schemeID, &method, &entityName); err != nil {
 					continue
+				}
+
+				// Default to FIFO when method is empty to ensure deterministic unblocking order
+				if strings.TrimSpace(method) == "" {
+					method = "FIFO"
 				}
 
 				// Release blocked units with entity scoping to prevent cross-entity leakage
@@ -1260,7 +1271,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			mr.requested_date,
 			mr.by_amount,
 			mr.by_units,
-			mr.method,
+			s.method,
 			mr.entity_name,
 			
 			s.resolved_scheme_id,
@@ -1282,7 +1293,8 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 				ms.scheme_id::text AS resolved_scheme_id,
 				ms.scheme_name,
 				ms.isin,
-				ms.internal_scheme_code
+				ms.internal_scheme_code,
+				COALESCE(ms.method, 'FIFO') AS method
 			FROM investment.masterscheme ms
 			WHERE
 				ms.scheme_id::text = mr.scheme_id
@@ -1540,11 +1552,17 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			resolvedSchemeKey = *cd.ResolvedSchemeID
 		}
 		if resolvedSchemeKey != "" {
+			// Ensure we have a deterministic method; fallback to FIFO when not set
+			methodStr := cd.Method
+			if strings.TrimSpace(methodStr) == "" {
+				methodStr = "FIFO"
+			}
+
 			if _, err := tx.Exec(ctx, unblockQuery,
 				resolvedSchemeKey,
 				nullIfEmptyStringPtr(cd.ResolvedFolioID),
 				nullIfEmptyStringPtr(cd.ResolvedDematID),
-				cd.Method,
+				methodStr,
 				cd.ActualUnits,
 				entityName,
 			); err != nil {
