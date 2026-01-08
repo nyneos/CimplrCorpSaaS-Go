@@ -17,6 +17,8 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1877,6 +1879,36 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			})
 			return
 		}
+
+		// Check if is_pdf flag is set in query params first (no multipart parsing needed)
+		isPDF := r.URL.Query().Get("is_pdf") == "true"
+		
+		if isPDF {
+			// PDF processing: read bank.json and process it (NO FILE UPLOAD NEEDED)
+			log.Println("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
+			result, err := ProcessBankStatementFromJSON(r.Context(), db)
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": userFriendlyUploadError(err),
+				})
+				return
+			}
+
+			msg := "Bank statement from PDF uploaded successfully"
+			if rc, ok := result["transactions_under_review_count"].(int); ok && rc > 0 {
+				msg = fmt.Sprintf("Bank statement from PDF uploaded successfully. %d transactions are under review.", rc)
+			}
+
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": msg,
+				"data":    result,
+			})
+			return
+		}
+
+		// Regular Excel/XLS/CSV processing - requires file upload
 		if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1884,6 +1916,7 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			})
 			return
 		}
+
 		file, _, err := r.FormFile("file")
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1940,6 +1973,30 @@ type bytesFile struct {
 }
 
 func (b *bytesFile) Close() error { return nil }
+
+// PDFBankStatementJSON represents the JSON structure from PDF parsing
+type PDFBankStatementJSON struct {
+	AccountNumber  string                     `json:"account_number"`
+	AccountName    string                     `json:"account_name"`
+	BankName       string                     `json:"bank_name"`
+	IFSC           string                     `json:"ifsc"`
+	MICR           string                     `json:"micr"`
+	PeriodStart    string                     `json:"period_start"`
+	PeriodEnd      string                     `json:"period_end"`
+	OpeningBalance float64                    `json:"opening_balance"`
+	ClosingBalance float64                    `json:"closing_balance"`
+	Transactions   []PDFTransactionJSON       `json:"transactions"`
+}
+
+type PDFTransactionJSON struct {
+	TranID          *string  `json:"tran_id"`
+	TransactionDate string   `json:"transaction_date"`
+	ValueDate       string   `json:"value_date"`
+	Description     string   `json:"description"`
+	Withdrawal      float64  `json:"withdrawal"`
+	Deposit         float64  `json:"deposit"`
+	Balance         float64  `json:"balance"`
+}
 
 type BankStatement struct {
 	BankStatementID      string     `db:"bank_statement_id"`
@@ -2321,6 +2378,330 @@ foundTxnHeader:
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 	return nil
+}
+
+// ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload
+// This is a placeholder for future PDF OCR integration
+func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
+	log.Println("[PDF_PROCESSOR] Reading bank.json file")
+	
+	// Try multiple possible paths for bank.json
+	possiblePaths := []string{
+		"api/cash/bankstatement/bank.json",                                    // From project root
+		"../api/cash/bankstatement/bank.json",                                 // From cmd directory
+		filepath.Join("..", "api", "cash", "bankstatement", "bank.json"),      // Explicit relative
+		"/Users/hardikmishra/Documents/CimplrCorpSaaS.   CI work ing/CimplrCorpSaaS-Go/api/cash/bankstatement/bank.json", // Absolute fallback
+	}
+	
+	var jsonBytes []byte
+	var err error
+	var foundPath string
+	
+	for _, jsonPath := range possiblePaths {
+		jsonBytes, err = os.ReadFile(jsonPath)
+		if err == nil {
+			foundPath = jsonPath
+			log.Printf("[PDF_PROCESSOR] Found bank.json at: %s", foundPath)
+			break
+		}
+	}
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bank.json (tried multiple paths): %w", err)
+	}
+
+	var pdfData PDFBankStatementJSON
+	if err := json.Unmarshal(jsonBytes, &pdfData); err != nil {
+		return nil, fmt.Errorf("failed to parse bank.json: %w", err)
+	}
+
+	log.Printf("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
+		pdfData.AccountNumber, pdfData.BankName, pdfData.PeriodStart, pdfData.PeriodEnd, len(pdfData.Transactions))
+
+	// Generate file hash from JSON content for idempotency
+	hash := sha256.Sum256(jsonBytes)
+	fileHash := fmt.Sprintf("%x", hash[:])
+
+	// Lookup entity_id from masterbankaccount
+	var entityID, accountName, bankName string
+	err = db.QueryRowContext(ctx, `
+		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+		FROM public.masterbankaccount mba
+		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+		WHERE mba.account_number = $1 AND mba.is_deleted = false
+	`, pdfData.AccountNumber).Scan(&entityID, &bankName, &accountName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("account %s not found in master data", pdfData.AccountNumber)
+		}
+		return nil, fmt.Errorf("failed to lookup account: %w", err)
+	}
+
+	// Parse period dates
+	periodStart, err := time.Parse("2006-01-02", pdfData.PeriodStart)
+	if err != nil {
+		return nil, fmt.Errorf("invalid period_start date: %w", err)
+	}
+	periodEnd, err := time.Parse("2006-01-02", pdfData.PeriodEnd)
+	if err != nil {
+		return nil, fmt.Errorf("invalid period_end date: %w", err)
+	}
+
+	// Load category rules for this account
+	var acctCurrency sql.NullString
+	db.QueryRowContext(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, pdfData.AccountNumber).Scan(&acctCurrency)
+	
+	var currencyCode string
+	if acctCurrency.Valid {
+		currencyCode = acctCurrency.String
+	}
+	rules, err := loadCategoryRuleComponents(ctx, db, pdfData.AccountNumber, entityID, currencyCode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load category rules: %w", err)
+	}
+
+	// Convert JSON transactions to BankStatementTransaction
+	transactions := []BankStatementTransaction{}
+	categoryCount := map[int64]int{}
+	debitSum := map[int64]float64{}
+	creditSum := map[int64]float64{}
+	uncategorized := []map[string]interface{}{}
+
+	for _, txn := range pdfData.Transactions {
+		txnDate, err := time.Parse("2006-01-02", txn.TransactionDate)
+		if err != nil {
+			log.Printf("[PDF_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
+			continue
+		}
+		valDate, err := time.Parse("2006-01-02", txn.ValueDate)
+		if err != nil {
+			log.Printf("[PDF_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
+			continue
+		}
+
+		var withdrawal, deposit sql.NullFloat64
+		if txn.Withdrawal > 0 {
+			withdrawal = sql.NullFloat64{Float64: txn.Withdrawal, Valid: true}
+		}
+		if txn.Deposit > 0 {
+			deposit = sql.NullFloat64{Float64: txn.Deposit, Valid: true}
+		}
+
+		// Match category
+		categoryID := matchCategoryForTransaction(rules, txn.Description, withdrawal, deposit)
+
+		// Build transaction
+		t := BankStatementTransaction{
+			AccountNumber:    pdfData.AccountNumber,
+			ValueDate:        valDate,
+			TransactionDate:  txnDate,
+			Description:      txn.Description,
+			WithdrawalAmount: withdrawal,
+			DepositAmount:    deposit,
+			Balance:          sql.NullFloat64{Float64: txn.Balance, Valid: true},
+			CategoryID:       categoryID,
+		}
+		if txn.TranID != nil && *txn.TranID != "" {
+			t.TranID = sql.NullString{String: *txn.TranID, Valid: true}
+		}
+
+		transactions = append(transactions, t)
+
+		// Update KPIs
+		if categoryID.Valid {
+			categoryCount[categoryID.Int64]++
+			if withdrawal.Valid {
+				debitSum[categoryID.Int64] += withdrawal.Float64
+			}
+			if deposit.Valid {
+				creditSum[categoryID.Int64] += deposit.Float64
+			}
+		} else {
+			uncategorized = append(uncategorized, map[string]interface{}{
+				"transaction_date": txnDate.Format("2006-01-02"),
+				"description":      txn.Description,
+				"withdrawal":       txn.Withdrawal,
+				"deposit":          txn.Deposit,
+			})
+		}
+	}
+
+	log.Printf("[PDF_PROCESSOR] Processed %d transactions, %d categorized, %d uncategorized",
+		len(transactions), len(transactions)-len(uncategorized), len(uncategorized))
+
+	// Check for existing transactions
+	existingTxnKeys := make(map[string]bool)
+	rowsExisting, err := db.QueryContext(ctx, `
+		SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
+		FROM cimplrcorpsaas.bank_statement_transactions
+		WHERE account_number = $1
+	`, pdfData.AccountNumber)
+	if err == nil {
+		defer rowsExisting.Close()
+		for rowsExisting.Next() {
+			var acc, desc string
+			var txnDate time.Time
+			var w, d sql.NullFloat64
+			if err := rowsExisting.Scan(&acc, &txnDate, &desc, &w, &d); err == nil {
+				key := buildTxnKey(acc, txnDate, desc, w, d)
+				existingTxnKeys[key] = true
+			}
+		}
+	}
+
+	// Begin transaction
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Insert bank statement
+	var bankStatementID string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO cimplrcorpsaas.bank_statements (
+			entity_id, account_number, statement_period_start, statement_period_end, 
+			file_hash, opening_balance, closing_balance
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT ON CONSTRAINT uniq_stmt
+		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance
+		RETURNING bank_statement_id
+	`, entityID, pdfData.AccountNumber, periodStart, periodEnd, fileHash, 
+		pdfData.OpeningBalance, pdfData.ClosingBalance).Scan(&bankStatementID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert bank statement: %w", err)
+	}
+
+	log.Printf("[PDF_PROCESSOR] Created bank_statement_id: %s", bankStatementID)
+
+	// Insert transactions
+	newTxns := []BankStatementTransaction{}
+	reviewTxns := []map[string]interface{}{}
+
+	for _, t := range transactions {
+		key := buildTxnKey(t.AccountNumber, t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount)
+		if existingTxnKeys[key] {
+			reviewTxns = append(reviewTxns, map[string]interface{}{
+				"transaction_date": t.TransactionDate.Format("2006-01-02"),
+				"description":      t.Description,
+				"withdrawal":       t.WithdrawalAmount.Float64,
+				"deposit":          t.DepositAmount.Float64,
+			})
+			continue
+		}
+		newTxns = append(newTxns, t)
+	}
+
+	// Bulk insert new transactions
+	if len(newTxns) > 0 {
+		valueStrings := []string{}
+		valueArgs := []interface{}{}
+		argIdx := 1
+
+		for _, t := range newTxns {
+			valueStrings = append(valueStrings, fmt.Sprintf(
+				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
+			))
+			valueArgs = append(valueArgs, bankStatementID, t.AccountNumber, t.TranID, t.ValueDate,
+				t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount, t.Balance, t.CategoryID)
+			argIdx += 10
+		}
+
+		insertQuery := fmt.Sprintf(`
+			INSERT INTO cimplrcorpsaas.bank_statement_transactions (
+				bank_statement_id, account_number, tran_id, value_date, transaction_date,
+				description, withdrawal_amount, deposit_amount, balance, category_id
+			) VALUES %s
+			ON CONFLICT ON CONSTRAINT uniq_transaction DO NOTHING
+		`, strings.Join(valueStrings, ","))
+
+		if _, err := tx.Exec(insertQuery, valueArgs...); err != nil {
+			return nil, fmt.Errorf("failed to insert transactions: %w", err)
+		}
+	}
+
+	log.Printf("[PDF_PROCESSOR] Inserted %d new transactions, %d under review", len(newTxns), len(reviewTxns))
+
+	// Insert audit action
+	requestedBy := "system"
+	if userID := ctx.Value("user_id"); userID != nil {
+		if uid, ok := userID.(string); ok {
+			requestedBy = uid
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO cimplrcorpsaas.auditactionbankstatement (
+			bankstatementid, actiontype, processing_status, requested_by, requested_at
+		) VALUES ($1, $2, $3, $4, $5)
+	`, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert audit action: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Build KPI response
+	kpiCats := []map[string]interface{}{}
+	foundCategories := []map[string]interface{}{}
+	foundCategoryIDs := map[int64]bool{}
+	totalTxns := len(transactions)
+	groupedTxns := 0
+	ungroupedTxns := 0
+
+	for catID, count := range categoryCount {
+		kpiCats = append(kpiCats, map[string]interface{}{
+			"category_id": catID,
+			"count":       count,
+			"debit_sum":   debitSum[catID],
+			"credit_sum":  creditSum[catID],
+		})
+		foundCategoryIDs[catID] = true
+		groupedTxns += count
+	}
+	ungroupedTxns = totalTxns - groupedTxns
+
+	groupedPct := 0.0
+	ungroupedPct := 0.0
+	if totalTxns > 0 {
+		groupedPct = (float64(groupedTxns) / float64(totalTxns)) * 100
+		ungroupedPct = (float64(ungroupedTxns) / float64(totalTxns)) * 100
+	}
+
+	// Add category names from rules
+	for _, rule := range rules {
+		if foundCategoryIDs[rule.CategoryID] {
+			foundCategories = append(foundCategories, map[string]interface{}{
+				"category_id":   rule.CategoryID,
+				"category_name": rule.CategoryName,
+				"category_type": rule.CategoryType,
+			})
+			delete(foundCategoryIDs, rule.CategoryID)
+		}
+	}
+
+	result := map[string]interface{}{
+		"pages_processed":                 1,
+		"bank_wise_status":                []map[string]interface{}{{"account_number": pdfData.AccountNumber, "status": "SUCCESS"}},
+		"statement_date_coverage":         map[string]interface{}{"start": periodStart, "end": periodEnd},
+		"category_kpis":                   kpiCats,
+		"categories_found":                foundCategories,
+		"uncategorized":                   uncategorized,
+		"bank_statement_id":               bankStatementID,
+		"transactions_uploaded_count":     len(transactions),
+		"transactions_under_review_count": len(reviewTxns),
+		"transactions_under_review":       reviewTxns,
+		"grouped_transaction_count":       groupedTxns,
+		"ungrouped_transaction_count":     ungroupedTxns,
+		"grouped_transaction_percent":     groupedPct,
+		"ungrouped_transaction_percent":   ungroupedPct,
+		"source":                          "PDF_JSON",
+	}
+
+	return result, nil
 }
 
 func cleanAmount(s string) string {

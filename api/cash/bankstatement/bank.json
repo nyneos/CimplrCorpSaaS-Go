@@ -1,0 +1,158 @@
+
+{
+  "account_number": "913010038616361",
+  "account_name": "PALEPU SURYA PRAKASA RAO",
+  "bank_name": "AXIS BANK",
+  "ifsc": "UTIB0000426",
+  "micr": "500211012",
+  "period_start": "2013-10-01",
+  "period_end": "2013-10-31",
+  "opening_balance": 0.00,
+  "closing_balance": 24.00,
+  "transactions": [
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-05",
+      "value_date": "2013-10-05",
+      "description": "SALARY FOR MONTH OF SEPTEMBER 2013",
+      "withdrawal": 0,
+      "deposit": 36862.00,
+      "balance": 36862.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-07",
+      "value_date": "2013-10-07",
+      "description": "CASH-ATM/ABK ERRAGADDA-1",
+      "withdrawal": 2700.00,
+      "deposit": 0,
+      "balance": 34162.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-07",
+      "value_date": "2013-10-07",
+      "description": "CASH-ATM/SBI ERRAGADDA/HYDERABAD/071013",
+      "withdrawal": 10000.00,
+      "deposit": 0,
+      "balance": 24162.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-07",
+      "value_date": "2013-10-07",
+      "description": "CASH-ATM/SBI ERRAGADDA/HYDERABAD/071013",
+      "withdrawal": 10000.00,
+      "deposit": 0,
+      "balance": 14162.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-07",
+      "value_date": "2013-10-07",
+      "description": "CASH-ATM/SBI ERRAGADDA/HYDERABAD/071013",
+      "withdrawal": 10000.00,
+      "deposit": 0,
+      "balance": 4162.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-10",
+      "value_date": "2013-10-10",
+      "description": "ICONN/86582464/101013/AXIS MOBILE RECHARGE",
+      "withdrawal": 38.00,
+      "deposit": 0,
+      "balance": 4124.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-11",
+      "value_date": "2013-10-11",
+      "description": "CASH-ATM/ABK",
+      "withdrawal": 1200.00,
+      "deposit": 0,
+      "balance": 2924.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-12",
+      "value_date": "2013-10-12",
+      "description": "CASH-ATM/SBI",
+      "withdrawal": 600.00,
+      "deposit": 0,
+      "balance": 2324.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-15",
+      "value_date": "2013-10-15",
+      "description": "CASH-ATM/SBI ERRAGADDA/HYDERABAD/151013",
+      "withdrawal": 500.00,
+      "deposit": 0,
+      "balance": 1824.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-15",
+      "value_date": "2013-10-15",
+      "description": "CASH-ATM/ABK",
+      "withdrawal": 300.00,
+      "deposit": 0,
+      "balance": 1524.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-17",
+      "value_date": "2013-10-17",
+      "description": "NEFT/IR/AXIR132900470021/veeraveni palepu",
+      "withdrawal": 100.00,
+      "deposit": 0,
+      "balance": 1424.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-19",
+      "value_date": "2013-10-19",
+      "description": "CASH-ATM/ABK",
+      "withdrawal": 400.00,
+      "deposit": 0,
+      "balance": 1024.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-21",
+      "value_date": "2013-10-21",
+      "description": "CASH-ATM/ABK",
+      "withdrawal": 200.00,
+      "deposit": 0,
+      "balance": 824.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-24",
+      "value_date": "2013-10-24",
+      "description": "CASH-ATM/ABK",
+      "withdrawal": 300.00,
+      "deposit": 0,
+      "balance": 524.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-26",
+      "value_date": "2013-10-26",
+      "description": "CASH-ATM/ABK",
+      "withdrawal": 200.00,
+      "deposit": 0,
+      "balance": 324.00
+    },
+    {
+      "tran_id": null,
+      "transaction_date": "2013-10-28",
+      "value_date": "2013-10-27",
+      "description": "CASH-ATM/HDFC BANK LTD./HRINAGAR",
+      "withdrawal": 300.00,
+      "deposit": 0,
+      "balance": 24.00
+    }
+  ]
+}
