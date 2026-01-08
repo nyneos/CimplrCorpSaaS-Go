@@ -115,6 +115,7 @@ type CreateSchemeRequestSingle struct {
 	AmfiSchemeCode     string `json:"amfi_scheme_code"`
 	Status             string `json:"status,omitempty"`
 	Source             string `json:"source,omitempty"` // ignored, we set Manual
+	Method             string `json:"method,omitempty"`
 }
 
 type UpdateSchemeRequest struct {
@@ -445,18 +446,26 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		// validate method if provided
+		allowed := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
+		m := strings.ToUpper(strings.TrimSpace(req.Method))
+		if m != "" && !allowed[m] {
+			api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO, LIFO or WEIGHTED_AVERAGE")
+			return
+		}
+
 		insertQ := `
 			INSERT INTO investment.masterscheme (
 				scheme_name, isin, amc_name, internal_scheme_code,
-				internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual')
+				internal_risk_rating, erp_gl_account, amfi_scheme_code, status, method, source
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Manual')
 			RETURNING scheme_id
 		`
 
 		var schemeID string
 		if err := tx.QueryRow(ctx, insertQ,
 			req.SchemeName, req.ISIN, req.AmcName, req.InternalSchemeCode,
-			req.InternalRiskRating, req.ErpGlAccount, req.AmfiSchemeCode, defaultIfEmpty(req.Status, "Active"),
+			req.InternalRiskRating, req.ErpGlAccount, req.AmfiSchemeCode, defaultIfEmpty(req.Status, "Active"), m,
 		).Scan(&schemeID); err != nil {
 			msg, status := getUserFriendlySchemeError(err, "Insert failed")
 			api.RespondWithError(w, status, msg)
@@ -484,6 +493,7 @@ func CreateSchemeSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"scheme_name":      req.SchemeName,
 			"amfi_scheme_code": req.AmfiSchemeCode,
 			"source":           "Manual",
+			"method":           m,
 		})
 	}
 }
@@ -530,15 +540,15 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch existing values for old_ columns
 		sel := `
-			SELECT scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source
+			SELECT scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source, method
 			FROM investment.masterscheme
 			WHERE scheme_id=$1
 			FOR UPDATE
 		`
-		var oldVals [9]interface{}
+		var oldVals [10]interface{}
 		if err := tx.QueryRow(ctx, sel, req.SchemeID).Scan(
 			&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8],
+			&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9],
 		); err != nil {
 			msg, status := getUserFriendlySchemeError(err, "fetch failed")
 			api.RespondWithError(w, status, msg)
@@ -555,6 +565,7 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"erp_gl_account":       5,
 			"amfi_scheme_code":     6,
 			"status":               7,
+			"method":               9,
 		}
 
 		var sets []string
@@ -564,6 +575,16 @@ func UpdateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			lk := strings.ToLower(k)
 			if idx, ok := fieldPairs[lk]; ok {
+				// validate method if present
+				if lk == "method" {
+					allowed := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
+					mm := strings.ToUpper(strings.TrimSpace(fmt.Sprint(v)))
+					if mm != "" && !allowed[mm] {
+						api.RespondWithError(w, http.StatusBadRequest, "method must be FIFO, LIFO or WEIGHTED_AVERAGE")
+						return
+					}
+					v = mm
+				}
 				// if amc_name provided, validate AMC is approved
 				if lk == "amc_name" {
 					amcName := fmt.Sprint(v)
@@ -944,7 +965,7 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				JOIN investment.masteramc m ON amc.amc_id = m.amc_id
 				ORDER BY amc.amc_id, amc.requested_at DESC
 			)
-			SELECT m.scheme_id, m.scheme_name, m.isin, m.internal_scheme_code, m.amc_name, m.amfi_scheme_code
+			SELECT m.scheme_id, m.scheme_name, m.isin, m.internal_scheme_code, m.amc_name, m.amfi_scheme_code, COALESCE(m.method,'') AS method
 			FROM investment.masterscheme m
 			JOIN latest_scheme l ON l.scheme_id = m.scheme_id
 			JOIN latest_amc la ON UPPER(la.amc_name) = UPPER(m.amc_name)
@@ -964,10 +985,10 @@ func GetApprovedActiveSchemes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var id, name, isin, code, amc, amfiCode string
-			_ = rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode)
+			var id, name, isin, code, amc, amfiCode, method string
+			_ = rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode, &method)
 			out = append(out, map[string]interface{}{
-				"scheme_id": id, "scheme_name": name, "isin": isin, "internal_scheme_code": code, "amc_name": amc, "amfi_scheme_code": amfiCode,
+				"scheme_id": id, "scheme_name": name, "isin": isin, "internal_scheme_code": code, "amc_name": amc, "amfi_scheme_code": amfiCode, "method": method,
 			})
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -1008,7 +1029,8 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.isin, '') AS isin,
 				COALESCE(m.internal_scheme_code, '') AS internal_scheme_code,
 				COALESCE(m.amc_name, '') AS amc_name,
-				COALESCE(m.amfi_scheme_code, '') AS amfi_scheme_code
+				COALESCE(m.amfi_scheme_code, '') AS amfi_scheme_code,
+				COALESCE(m.method,'') AS method
 			FROM investment.masterscheme m
 			JOIN latest_scheme l ON l.scheme_id = m.scheme_id
 			JOIN latest_amc la ON UPPER(la.amc_name) = UPPER(m.amc_name)
@@ -1037,8 +1059,8 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := []map[string]interface{}{}
 		for rows.Next() {
-			var id, name, isin, code, amc, amfiCode string
-			if err := rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode); err != nil {
+			var id, name, isin, code, amc, amfiCode, method string
+			if err := rows.Scan(&id, &name, &isin, &code, &amc, &amfiCode, &method); err != nil {
 				msg, status := getUserFriendlySchemeError(err, constants.ErrScanFailedPrefix)
 				api.RespondWithError(w, status, msg)
 				return
@@ -1050,6 +1072,7 @@ func GetApprovedActiveSchemesByAMC(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"internal_scheme_code": code,
 				"amc_name":             amc,
 				"amfi_scheme_code":     amfiCode,
+				"method":               method,
 			})
 		}
 
@@ -1156,6 +1179,7 @@ type SchemeInput struct {
 	ErpGlAccount       string `json:"erp_gl_account"`
 	AmfiSchemeCode     string `json:"amfi_scheme_code"`
 	Status             string `json:"status,omitempty"`
+	Method             string `json:"method,omitempty"`
 }
 
 func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -1234,12 +1258,20 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			defer tx.Rollback(ctx)
 
+			// validate method if provided
+			allowed := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
+			m := strings.ToUpper(strings.TrimSpace(row.Method))
+			if m != "" && !allowed[m] {
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("Invalid method for %s", row.SchemeName)})
+				continue
+			}
+
 			insertQ := `
 				INSERT INTO investment.masterscheme (
 					scheme_name, isin, amc_name, internal_scheme_code,
-					internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source
+					internal_risk_rating, erp_gl_account, amfi_scheme_code, status, method, source
 				)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Manual')
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Manual')
 				RETURNING scheme_id
 			`
 			var schemeID string
@@ -1251,7 +1283,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.InternalRiskRating,
 				row.ErpGlAccount,
 				row.AmfiSchemeCode,
-				defaultIfEmpty(row.Status, "Active"),
+				defaultIfEmpty(row.Status, "Active"), m,
 			).Scan(&schemeID)
 
 			if err != nil {
@@ -1287,6 +1319,7 @@ func CreateScheme(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"amfi_scheme_code":     row.AmfiSchemeCode,
 				"source":               "Manual",
 				"requested":            userEmail,
+				"method":               m,
 			})
 		}
 
@@ -1342,12 +1375,12 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			defer tx.Rollback(ctx)
 
 			sel := `
-				SELECT scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, status, source
+				SELECT scheme_name, isin, amc_name, internal_scheme_code, internal_risk_rating, erp_gl_account, amfi_scheme_code, status, source, method
 				FROM investment.masterscheme WHERE scheme_id=$1 FOR UPDATE`
-			var oldVals [8]interface{}
+			var oldVals [10]interface{}
 			if err := tx.QueryRow(ctx, sel, row.SchemeID).Scan(
 				&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3],
-				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7],
+				&oldVals[4], &oldVals[5], &oldVals[6], &oldVals[7], &oldVals[8], &oldVals[9],
 			); err != nil {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: "fetch failed: " + err.Error(),
@@ -1364,6 +1397,7 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"erp_gl_account":       5,
 				"amfi_scheme_code":     6,
 				constants.KeyStatus:    7,
+				"method":               9,
 			}
 
 			var sets []string
@@ -1373,6 +1407,18 @@ func UpdateSchemeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for k, v := range row.Fields {
 				lk := strings.ToLower(k)
 				if idx, ok := fieldPairs[lk]; ok {
+					// validate method if present
+					if lk == "method" {
+						allowed := map[string]bool{"FIFO": true, "LIFO": true, "WEIGHTED_AVERAGE": true}
+						mm := strings.ToUpper(strings.TrimSpace(fmt.Sprint(v)))
+						if mm != "" && !allowed[mm] {
+							results = append(results, map[string]interface{}{
+								constants.ValueSuccess: false, "scheme_id": row.SchemeID, constants.ValueError: "Invalid method: " + fmt.Sprint(v),
+							})
+							continue
+						}
+						v = mm
+					}
 					if lk == "amc_name" {
 						approvedAMCs, _ := ctx.Value("ApprovedAMCs").([]map[string]string)
 						found := false
