@@ -444,8 +444,8 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				h.GainLossPercent = (h.GainLoss / totalInvested) * 100.0
 			}
 
-		// Fetch individual BUY transactions for this holding (ordered FIFO) with lot-level blocked/available units
-		txQuery := `
+			// Fetch individual BUY transactions for this holding (ordered FIFO) with lot-level blocked/available units
+			txQuery := `
 			SELECT 
 				ot.id,
 				ot.batch_id,
@@ -474,7 +474,7 @@ func GetPortfolioWithTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY ot.transaction_date ASC, ot.id ASC
 		`
 
-		txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, entityName)
+			txRows, err := pgxPool.Query(ctx, txQuery, folioNumber, dematAcc, schemeID, schemeID, entityName)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Transaction query failed: "+err.Error())
 				return

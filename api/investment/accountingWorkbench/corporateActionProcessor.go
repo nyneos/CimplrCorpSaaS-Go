@@ -24,6 +24,9 @@ func ProcessCorporateAction(ctx context.Context, tx DBExecutor, activityID strin
 		return fmt.Errorf("failed to fetch corporate actions: %w", err)
 	}
 
+	// Collect all affected scheme IDs for snapshot
+	affectedSchemes := make(map[string]bool)
+
 	// READ ALL ROWS FIRST - close before processing to avoid conn busy
 	type CARecord struct {
 		CaID            string
@@ -40,17 +43,42 @@ func ProcessCorporateAction(ctx context.Context, tx DBExecutor, activityID strin
 
 	for rows.Next() {
 		var rec CARecord
-		if err := rows.Scan(&rec.CaID, &rec.ActionType, &rec.SourceSchemeID, &rec.TargetSchemeID, 
+		if err := rows.Scan(&rec.CaID, &rec.ActionType, &rec.SourceSchemeID, &rec.TargetSchemeID,
 			&rec.NewSchemeName, &rec.RatioNew, &rec.RatioOld, &rec.ConversionRatio, &rec.BonusUnits); err != nil {
 			rows.Close()
 			return fmt.Errorf("failed to scan corporate action: %w", err)
 		}
 		caRecords = append(caRecords, rec)
+
+		// Collect affected schemes
+		affectedSchemes[rec.SourceSchemeID] = true
+		if rec.TargetSchemeID != nil && *rec.TargetSchemeID != "" {
+			affectedSchemes[*rec.TargetSchemeID] = true
+		}
 	}
 	rows.Close()
 
 	if err := rows.Err(); err != nil {
 		return err
+	}
+
+	// Convert affected schemes map to slice
+	schemeIDs := make([]string, 0, len(affectedSchemes))
+	for schemeID := range affectedSchemes {
+		schemeIDs = append(schemeIDs, schemeID)
+	}
+
+	// CAPTURE SNAPSHOT BEFORE making any changes
+	if len(caRecords) > 0 && len(schemeIDs) > 0 {
+		snapshot, err := CaptureSnapshotBeforeCorporateAction(ctx, tx, activityID, caRecords[0].ActionType, schemeIDs)
+		if err != nil {
+			return fmt.Errorf("failed to capture snapshot: %w", err)
+		}
+
+		// Save snapshot to audit table
+		if err := SaveSnapshotToAudit(ctx, tx, activityID, snapshot, true); err != nil {
+			return fmt.Errorf("failed to save snapshot: %w", err)
+		}
 	}
 
 	// NOW PROCESS - connection is free for sub-queries
@@ -69,7 +97,7 @@ func ProcessCorporateAction(ctx context.Context, tx DBExecutor, activityID strin
 
 		switch rec.ActionType {
 		case "SCHEME_MERGER":
-			if err := processMerger(ctx, tx, rec.SourceSchemeID, rec.TargetSchemeID, conversionRatioPtr); err != nil {
+			if err := processMerger(ctx, tx, rec.SourceSchemeID, rec.TargetSchemeID, conversionRatioPtr, activityID); err != nil {
 				return fmt.Errorf("merger processing failed: %w", err)
 			}
 
@@ -82,7 +110,7 @@ func ProcessCorporateAction(ctx context.Context, tx DBExecutor, activityID strin
 			if ratioNewPtr == nil || ratioOldPtr == nil {
 				return fmt.Errorf("SPLIT requires ratio_new and ratio_old - please provide split ratio values (e.g., 2:1 split = ratio_new:2, ratio_old:1). Current values: ratio_new=%v, ratio_old=%v", rec.RatioNew, rec.RatioOld)
 			}
-			if err := processSplit(ctx, tx, rec.SourceSchemeID, ratioNewPtr, ratioOldPtr); err != nil {
+			if err := processSplit(ctx, tx, rec.SourceSchemeID, ratioNewPtr, ratioOldPtr, activityID); err != nil {
 				return fmt.Errorf("split processing failed: %w", err)
 			}
 
@@ -90,7 +118,7 @@ func ProcessCorporateAction(ctx context.Context, tx DBExecutor, activityID strin
 			if ratioNewPtr == nil || ratioOldPtr == nil {
 				return fmt.Errorf("BONUS requires ratio_new and ratio_old - please provide bonus ratio values (e.g., 1:2 bonus = ratio_new:1, ratio_old:2). Current values: ratio_new=%v, ratio_old=%v", rec.RatioNew, rec.RatioOld)
 			}
-			if err := processBonus(ctx, tx, rec.SourceSchemeID, ratioNewPtr, ratioOldPtr); err != nil {
+			if err := processBonus(ctx, tx, rec.SourceSchemeID, ratioNewPtr, ratioOldPtr, activityID); err != nil {
 				return fmt.Errorf("bonus processing failed: %w", err)
 			}
 
@@ -104,11 +132,11 @@ func ProcessCorporateAction(ctx context.Context, tx DBExecutor, activityID strin
 
 // processMerger: Merge scheme A into B, update scheme name in master table
 // New Units in B = round_units(Units in A * Conversion Ratio)
-func processMerger(ctx context.Context, tx DBExecutor, sourceSchemeID string, targetSchemeID *string, conversionRatio *float64) error {
+func processMerger(ctx context.Context, tx DBExecutor, sourceSchemeID string, targetSchemeID *string, conversionRatio *float64, activityID string) error {
 	if targetSchemeID == nil || *targetSchemeID == "" {
 		return fmt.Errorf("SCHEME_MERGER requires target_scheme_id - please specify the target scheme for merger")
 	}
-	
+
 	// Default conversion ratio to 1:1 if not specified
 	var ratio float64 = 1.0
 	if conversionRatio != nil && *conversionRatio > 0 {
@@ -140,6 +168,17 @@ func processMerger(ctx context.Context, tx DBExecutor, sourceSchemeID string, ta
 		return fmt.Errorf("failed to update portfolio snapshot: %w", err)
 	}
 
+	// UPDATE ONBOARD_TRANSACTION (source of truth) - merge scheme A into B
+	_, err = tx.Exec(ctx, `
+		UPDATE investment.onboard_transaction
+		SET scheme_id = $1,
+		    units = ROUND(units * $2, 3)
+		WHERE scheme_id = $3
+	`, *targetSchemeID, ratio, sourceSchemeID)
+	if err != nil {
+		return fmt.Errorf("failed to update onboard_transaction for merger: %w", err)
+	}
+
 	return nil
 }
 
@@ -154,7 +193,7 @@ func processNameChange(ctx context.Context, tx DBExecutor, sourceSchemeID string
 		SET scheme_name = $1
 		WHERE scheme_id = $2
 	`, *newSchemeName, sourceSchemeID)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to update scheme name: %w", err)
 	}
@@ -163,7 +202,7 @@ func processNameChange(ctx context.Context, tx DBExecutor, sourceSchemeID string
 }
 
 // processSplit: Split (a for b): New Units = Old Units * a / b; New Avg. Cost = Old Avg. Cost * b / a
-func processSplit(ctx context.Context, tx DBExecutor, sourceSchemeID string, ratioNew *float64, ratioOld *float64) error {
+func processSplit(ctx context.Context, tx DBExecutor, sourceSchemeID string, ratioNew *float64, ratioOld *float64, activityID string) error {
 	if ratioNew == nil || ratioOld == nil || *ratioNew <= 0 || *ratioOld <= 0 {
 		return fmt.Errorf("valid ratio_new (a) and ratio_old (b) are required for split")
 	}
@@ -178,21 +217,33 @@ func processSplit(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 		    avg_nav = avg_nav * $2
 		WHERE scheme_id = $3
 	`, splitMultiplier, *ratioOld / *ratioNew, sourceSchemeID)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to process split: %w", err)
 	}
 
-		// Do not change master scheme name for split actions. Only update
-		// portfolio snapshot totals and avg_nav above. Name metadata should be
-		// changed only via explicit SCHEME_NAME_CHANGE actions.
+	// UPDATE ONBOARD_TRANSACTION (source of truth) - apply split ratio
+	_, err = tx.Exec(ctx, `
+		UPDATE investment.onboard_transaction
+		SET units = ROUND(units * $1, 3),
+		    nav = nav * $2
+		WHERE scheme_id = $3
+	`, splitMultiplier, *ratioOld / *ratioNew, sourceSchemeID)
 
-		return nil
+	if err != nil {
+		return fmt.Errorf("failed to update onboard_transaction for split: %w", err)
+	}
+
+	// Do not change master scheme name for split actions. Only update
+	// portfolio snapshot totals and avg_nav above. Name metadata should be
+	// changed only via explicit SCHEME_NAME_CHANGE actions.
+
+	return nil
 }
 
 // processBonus: Bonus (x for y): Bonus Units = floor_to_precision(Old Units * x / y)
 // New Avg. Cost = Old Cost Basis / (Old Units + Bonus Units)
-func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, ratioNew *float64, ratioOld *float64) error {
+func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, ratioNew *float64, ratioOld *float64, activityID string) error {
 	if ratioNew == nil || ratioOld == nil || *ratioNew <= 0 || *ratioOld <= 0 {
 		return fmt.Errorf("valid ratio_new (x) and ratio_old (y) are required for bonus")
 	}
@@ -202,11 +253,11 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 
 	// Struct to hold holding data
 	type holdingData struct {
-		folioNumber   *string
+		folioNumber    *string
 		dematAccNumber *string
-		entityName    *string
-		totalUnits    float64
-		avgCost       float64
+		entityName     *string
+		totalUnits     float64
+		avgCost        float64
 	}
 
 	// Fetch all holdings for this scheme
@@ -240,7 +291,7 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 	// Now update each holding
 	for _, h := range holdings {
 		// Calculate bonus units: floor to 3 decimal places
-		bonusUnits := math.Floor((h.totalUnits * bonusRatio) * 1000) / 1000
+		bonusUnits := math.Floor((h.totalUnits*bonusRatio)*1000) / 1000
 		newTotalUnits := h.totalUnits + bonusUnits
 
 		// Calculate new average cost: Old Cost Basis / New Total Units
@@ -257,17 +308,78 @@ func processBonus(ctx context.Context, tx DBExecutor, sourceSchemeID string, rat
 			  AND COALESCE(demat_acc_number, '') = COALESCE($5, '')
 			  AND COALESCE(entity_name, '') = COALESCE($6, '')
 		`, newTotalUnits, newAvgCost, sourceSchemeID, h.folioNumber, h.dematAccNumber, h.entityName)
-		
+
 		if err != nil {
 			return fmt.Errorf("failed to update holding with bonus: %w", err)
 		}
 	}
 
-		// Do not modify master scheme name for bonus actions. Bonus adjustments
-		// are applied to holdings only; master scheme name changes belong to
-		// explicit SCHEME_NAME_CHANGE actions.
+	// UPDATE ONBOARD_TRANSACTION (source of truth) - bonus doesn't change individual transactions
+	// Instead, we need to INSERT synthetic bonus transactions to maintain balance
+	// For each unique folio/demat + scheme combination, insert a bonus transaction
+	rows2, err := tx.Query(ctx, `
+		SELECT DISTINCT
+			COALESCE(folio_number, '') as folio_number,
+			COALESCE(folio_id, '') as folio_id,
+			COALESCE(demat_acc_number, '') as demat_acc_number,
+			COALESCE(demat_id, '') as demat_id,
+			scheme_id,
+			SUM(units) as total_units
+		FROM investment.onboard_transaction
+		WHERE scheme_id = $1
+		GROUP BY folio_number, folio_id, demat_acc_number, demat_id, scheme_id
+		HAVING SUM(units) > 0
+	`, sourceSchemeID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch transaction groups for bonus: %w", err)
+	}
+	defer rows2.Close()
 
-		return nil
+	for rows2.Next() {
+		var folioNumber, folioID, dematAcc, dematID, schemeID string
+		var totalUnits float64
+		if err := rows2.Scan(&folioNumber, &folioID, &dematAcc, &dematID, &schemeID, &totalUnits); err != nil {
+			continue
+		}
+
+		// Calculate bonus units
+		bonusUnitsCalc := math.Floor((totalUnits*bonusRatio)*1000) / 1000
+		if bonusUnitsCalc <= 0 {
+			continue
+		}
+
+		// Insert bonus transaction with NAV = 0 (zero cost basis)
+		_, err := tx.Exec(ctx, `
+			INSERT INTO investment.onboard_transaction (
+				transaction_date, transaction_type, folio_number, folio_id,
+				demat_acc_number, demat_id, scheme_id, units, nav, amount, 
+				entity_name, batch_id
+			)
+			SELECT 
+				CURRENT_DATE as transaction_date,
+				'BONUS' as transaction_type,
+				$1, $2, $3, $4, $5, $6,
+				0 as nav,  -- Bonus units have zero cost
+				0 as amount,
+				entity_name,
+				'BONUS-' || $7 as batch_id
+			FROM investment.onboard_transaction
+			WHERE scheme_id = $5
+			  AND COALESCE(folio_number, '') = $1
+			  AND COALESCE(demat_acc_number, '') = $3
+			LIMIT 1
+		`, folioNumber, folioID, dematAcc, dematID, schemeID, bonusUnitsCalc, activityID)
+
+		if err != nil {
+			return fmt.Errorf("failed to insert bonus transaction: %w", err)
+		}
+	}
+
+	// Do not modify master scheme name for bonus actions. Bonus adjustments
+	// are applied to holdings only; master scheme name changes belong to
+	// explicit SCHEME_NAME_CHANGE actions.
+
+	return nil
 }
 
 // ProcessFVONavOverride validates FVO records during approval

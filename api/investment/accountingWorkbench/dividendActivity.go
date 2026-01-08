@@ -112,6 +112,15 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Auto-calculate reinvest_units if not provided for REINVESTMENT transactions
+		reinvestUnits := req.ReinvestUnits
+		if strings.ToUpper(req.TransactionType) == "REINVESTMENT" || strings.ToUpper(req.TransactionType) == "REINVEST" {
+			if reinvestUnits == 0 && req.ReinvestNAV > 0 {
+				// Calculate units = dividend_amount / reinvest_nav
+				reinvestUnits = req.DividendAmount / req.ReinvestNAV
+			}
+		}
+
 		// Insert Dividend record
 		var dividendID string
 		if err := tx.QueryRow(ctx, `
@@ -122,7 +131,7 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING dividend_id
 		`, activityID, req.SchemeID, nullIfEmptyString(req.FolioID), req.ExDate, req.RecordDate,
 			req.PaymentDate, req.TransactionType, req.DividendAmount,
-			nullIfZeroFloat(req.ReinvestNAV), nullIfZeroFloat(req.ReinvestUnits)).Scan(&dividendID); err != nil {
+			nullIfZeroFloat(req.ReinvestNAV), nullIfZeroFloat(reinvestUnits)).Scan(&dividendID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Dividend insert failed: "+err.Error())
 			return
 		}
@@ -244,6 +253,15 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Auto-calculate reinvest_units if not provided for REINVESTMENT transactions
+			reinvestUnits := row.ReinvestUnits
+			if strings.ToUpper(row.TransactionType) == "REINVESTMENT" || strings.ToUpper(row.TransactionType) == "REINVEST" {
+				if reinvestUnits == 0 && row.ReinvestNAV > 0 {
+					// Calculate units = dividend_amount / reinvest_nav
+					reinvestUnits = row.DividendAmount / row.ReinvestNAV
+				}
+			}
+
 			var dividendID string
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.accounting_dividend (
@@ -253,7 +271,7 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING dividend_id
 			`, activityID, row.SchemeID, nullIfEmptyString(row.FolioID), row.ExDate, row.RecordDate,
 				row.PaymentDate, row.TransactionType, row.DividendAmount,
-				nullIfZeroFloat(row.ReinvestNAV), nullIfZeroFloat(row.ReinvestUnits)).Scan(&dividendID); err != nil {
+				nullIfZeroFloat(row.ReinvestNAV), nullIfZeroFloat(reinvestUnits)).Scan(&dividendID); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "error": "Dividend insert failed: " + err.Error()})
 				continue
 			}
@@ -380,6 +398,28 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
 			return
+		}
+
+		// Auto-recalculate reinvest_units if transaction_type is REINVESTMENT and reinvest_units is 0
+		var transactionType string
+		var dividendAmount, reinvestNAV, reinvestUnits float64
+		err = tx.QueryRow(ctx, `
+			SELECT transaction_type, dividend_amount, COALESCE(reinvest_nav, 0), COALESCE(reinvest_units, 0)
+			FROM investment.accounting_dividend
+			WHERE dividend_id = $1
+		`, req.DividendID).Scan(&transactionType, &dividendAmount, &reinvestNAV, &reinvestUnits)
+		
+		if err == nil {
+			if (strings.ToUpper(transactionType) == "REINVESTMENT" || strings.ToUpper(transactionType) == "REINVEST") &&
+				reinvestUnits == 0 && reinvestNAV > 0 {
+				// Auto-calculate units = dividend_amount / reinvest_nav
+				calculatedUnits := dividendAmount / reinvestNAV
+				_, _ = tx.Exec(ctx, `
+					UPDATE investment.accounting_dividend
+					SET reinvest_units = $1
+					WHERE dividend_id = $2
+				`, calculatedUnits, req.DividendID)
+			}
 		}
 
 		// Audit
