@@ -530,63 +530,9 @@ func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, settings *S
 
 // generateCorporateActionJournalInTx generates journal entries for Corporate Action within existing transaction
 func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID, subtype string) error {
-	rows, err := tx.Query(ctx, `
-		SELECT ca.ca_id, ca.action_type, ca.source_scheme_id,
-		       ca.target_scheme_id, ca.new_scheme_name, ca.ratio_new, ca.ratio_old,
-		       ca.conversion_ratio, ca.bonus_units
-		FROM investment.accounting_corporate_action ca
-		WHERE ca.activity_id = $1
-	`, activityID)
-	if err != nil {
-		return fmt.Errorf("fetch Corporate Action data failed: %w", err)
-	}
-
-	// Read all rows first to free connection
-	var caRecords []map[string]interface{}
-	for rows.Next() {
-		var caID, actionType, sourceSchemeID string
-		var targetSchemeID, newSchemeName *string
-		var ratioNew, ratioOld, conversionRatio, bonusUnits *float64
-
-		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &newSchemeName, &ratioNew, &ratioOld, &conversionRatio, &bonusUnits); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan Corporate Action data failed: %w", err)
-		}
-
-		caRecords = append(caRecords, map[string]interface{}{
-			"corporate_action_id": caID,
-			"action_type":         actionType,
-			"source_scheme_id":    sourceSchemeID,
-			"target_scheme_id":    targetSchemeID,
-			"new_scheme_name":     newSchemeName,
-			"ratio_new":           ratioNew,
-			"ratio_old":           ratioOld,
-			"conversion_ratio":    conversionRatio,
-			"bonus_units":         bonusUnits,
-		})
-	}
-	rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	// Process records after closing rows
-	for _, data := range caRecords {
-		je, err := GenerateJournalEntryForCorporateAction(ctx, tx, settings, activityID, data)
-		if err != nil {
-			return fmt.Errorf("generate Corporate Action journal failed: %w", err)
-		}
-
-		// Corporate actions may not generate journal entries (handled by processor)
-		if je != nil {
-			if err := SaveJournalEntry(ctx, tx, je); err != nil {
-				return fmt.Errorf("save Corporate Action journal failed: %w", err)
-			}
-		}
-	}
-
-	return nil
+	// Use new comprehensive journal generation for corporate actions
+	// This handles SPLIT, BONUS, MERGER with proper accounting entries
+	return GenerateCorporateActionJournals(ctx, tx, activityID)
 }
 
 // generateFVOJournalInTx generates journal entries for FVO within existing transaction
@@ -1163,6 +1109,65 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("corporate action processing failed for activity %s: %v", actID, err))
 							return
 						}
+
+						// Refresh portfolio snapshots after corporate action
+						// Get affected schemes from the activity
+						rows, err := tx.Query(ctx, `
+							SELECT DISTINCT source_scheme_id FROM investment.accounting_corporate_action
+							WHERE activity_id = $1
+							UNION
+							SELECT DISTINCT target_scheme_id FROM investment.accounting_corporate_action
+							WHERE activity_id = $1 AND target_scheme_id IS NOT NULL
+						`, actID)
+						if err == nil {
+							var affectedSchemes []string
+							for rows.Next() {
+								var schemeID string
+								if err := rows.Scan(&schemeID); err == nil {
+									affectedSchemes = append(affectedSchemes, schemeID)
+								}
+							}
+							rows.Close()
+
+							// Refresh portfolio for affected schemes
+							if len(affectedSchemes) > 0 {
+								if err := RefreshPortfolioAfterCorporateAction(ctx, tx, affectedSchemes, ""); err != nil {
+									api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("portfolio refresh failed for activity %s: %v", actID, err))
+									return
+								}
+							}
+						}
+
+					case "DIVIDEND":
+						// Process dividend reinvestment (creates buy transactions)
+						if err := ProcessDividendReinvestment(ctx, tx, actID); err != nil {
+							api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("dividend reinvestment processing failed for activity %s: %v", actID, err))
+							return
+						}
+
+						// Refresh portfolio after dividend reinvestment
+						rows, err := tx.Query(ctx, `
+							SELECT DISTINCT scheme_id FROM investment.accounting_dividend
+							WHERE activity_id = $1 AND LOWER(transaction_type) IN ('reinvest', 'reinvestment')
+						`, actID)
+						if err == nil {
+							var affectedSchemes []string
+							for rows.Next() {
+								var schemeID string
+								if err := rows.Scan(&schemeID); err == nil {
+									affectedSchemes = append(affectedSchemes, schemeID)
+								}
+							}
+							rows.Close()
+
+							if len(affectedSchemes) > 0 {
+								if err := RefreshPortfolioAfterCorporateAction(ctx, tx, affectedSchemes, ""); err != nil {
+									api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("portfolio refresh after dividend failed for activity %s: %v", actID, err))
+									return
+								}
+							}
+						}
+
 					case "FVO":
 						// Process FVO NAV override (updates masterscheme NAV)
 						if err := ProcessFVONavOverride(ctx, tx, actID); err != nil {
