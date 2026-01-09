@@ -125,6 +125,7 @@ var (
 	ErrAccountNotFound       = errors.New("bank account not found in master data")
 	ErrAccountNumberMissing  = errors.New("account number not found in file header")
 	ErrStatementPeriodExists = errors.New("a statement for this period already exists for this account")
+	ErrAllTransactionsDuplicate = errors.New("all transactions in this statement already exist")
 )
 var (
 	acNoHeader                      = "A/C No:"
@@ -2592,6 +2593,11 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		newTxns = append(newTxns, t)
 	}
 
+	// Check if all transactions are duplicates
+	if len(newTxns) == 0 && len(reviewTxns) > 0 {
+		return nil, ErrAllTransactionsDuplicate
+	}
+
 	// Bulk insert new transactions
 	if len(newTxns) > 0 {
 		valueStrings := []string{}
@@ -2749,6 +2755,9 @@ func userFriendlyUploadError(err error) string {
 	}
 	if errors.Is(err, ErrStatementPeriodExists) {
 		return "A statement for this period is already uploaded for this account."
+	}
+	if errors.Is(err, ErrAllTransactionsDuplicate) {
+		return "This statement has already been uploaded. All transactions in this statement already exist in the system."
 	}
 
 	msg := err.Error()
