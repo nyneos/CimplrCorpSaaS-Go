@@ -325,7 +325,7 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if bankName != nil && strings.TrimSpace(*bankName) != "" && !ctxHasApprovedBankName(ctx, *bankName) {
 							vrows.Close()
 							tx.Rollback(ctx)
-							api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive bank")
+							api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 							return
 						}
 						if accountNo != nil && strings.TrimSpace(*accountNo) != "" {

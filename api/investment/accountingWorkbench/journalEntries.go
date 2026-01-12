@@ -210,7 +210,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM gain - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
@@ -223,7 +223,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM gain - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
 		})
 
 		je.TotalDebit = roundedAmount
@@ -244,7 +244,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM loss - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
@@ -257,7 +257,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM loss - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
 		})
 
 		je.TotalDebit = roundedAmount
@@ -350,7 +350,7 @@ func GenerateJournalEntryForMTMUsingCache(ctx context.Context, executor DBExecut
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM gain - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
@@ -363,7 +363,7 @@ func GenerateJournalEntryForMTMUsingCache(ctx context.Context, executor DBExecut
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM gain - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
 		})
 
 		je.TotalDebit = roundedAmount
@@ -384,7 +384,7 @@ func GenerateJournalEntryForMTMUsingCache(ctx context.Context, executor DBExecut
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM loss - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
@@ -397,7 +397,7 @@ func GenerateJournalEntryForMTMUsingCache(ctx context.Context, executor DBExecut
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM loss - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
 		})
 
 		je.TotalDebit = roundedAmount

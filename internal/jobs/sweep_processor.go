@@ -140,7 +140,7 @@ func ProcessApprovedSweeps(db *pgxpool.Pool, batchSize int) error {
 	now := time.Now()
 	currentHour := now.Hour()
 	currentMinute := now.Minute()
-	today := now.Format("2006-01-02")
+	today := now.Format(constants.DateFormat)
 
 	// OPTIMIZATION 1-3: Time-window filtering, execution log filtering, and balance JOIN in single optimized query
 	query := `

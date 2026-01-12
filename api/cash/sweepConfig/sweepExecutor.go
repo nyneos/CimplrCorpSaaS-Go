@@ -98,12 +98,12 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argPos := 1
 
 		if len(normEntities) > 0 {
-			query += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", argPos)
+			query += fmt.Sprintf(constants.QuerryEntityNameLower, argPos)
 			args = append(args, normEntities)
 			argPos++
 		}
 		if len(normBanks) > 0 {
-			query += fmt.Sprintf(" AND lower(trim(c.bank_name)) = ANY($%d)", argPos)
+			query += fmt.Sprintf(constants.QuerryBankNameLower, argPos)
 			args = append(args, normBanks)
 			argPos++
 		}
@@ -177,12 +177,12 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		countArgs := []interface{}{}
 		countPos := 1
 		if len(normEntities) > 0 {
-			countQuery += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", countPos)
+			countQuery += fmt.Sprintf(constants.QuerryEntityNameLower, countPos)
 			countArgs = append(countArgs, normEntities)
 			countPos++
 		}
 		if len(normBanks) > 0 {
-			countQuery += fmt.Sprintf(" AND lower(trim(c.bank_name)) = ANY($%d)", countPos)
+			countQuery += fmt.Sprintf(constants.QuerryBankNameLower, countPos)
 			countArgs = append(countArgs, normBanks)
 			countPos++
 		}
@@ -280,12 +280,12 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argPos := 1
 
 		if len(normEntities) > 0 {
-			query += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", argPos)
+			query += fmt.Sprintf(constants.QuerryEntityNameLower, argPos)
 			args = append(args, normEntities)
 			argPos++
 		}
 		if len(normBanks) > 0 {
-			query += fmt.Sprintf(" AND lower(trim(c.bank_name)) = ANY($%d)", argPos)
+			query += fmt.Sprintf(constants.QuerryBankNameLower, argPos)
 			args = append(args, normBanks)
 			argPos++
 		}

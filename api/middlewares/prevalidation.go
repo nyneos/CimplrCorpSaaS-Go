@@ -168,14 +168,14 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					if i < 5 || i >= len(amcs)-2 {
 						log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
 					} else if i == 5 {
-						log.Printf("  ... (%d more) ...\n", len(amcs)-7)
+						log.Printf(constants.FormatLogMore, len(amcs)-7)
 					}
 				}
 				log.Printf("\nApproved Schemes (%d):\n", len(schemes))
 				if len(schemes) > 0 {
 					log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
 					if len(schemes) > 1 {
-						log.Printf("  ... (%d more) ...\n", len(schemes)-1)
+						log.Printf(constants.FormatLogMore, len(schemes)-1)
 					}
 				}
 				log.Printf("\nApproved DPs (%d):\n", len(dps))
@@ -192,7 +192,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 					if i < 5 || i >= len(folios)-2 {
 						log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 					} else if i == 5 {
-						log.Printf("  ... (%d more) ...\n", len(folios)-7)
+						log.Printf(constants.FormatLogMore, len(folios)-7)
 					}
 				}
 				log.Printf("\nApproved Demats (%d):\n", len(demats))
@@ -227,14 +227,14 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// 	if i < 5 || i >= len(amcs)-2 {
 			// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
 			// 	} else if i == 5 {
-			// 		log.Printf("  ... (%d more) ...\n", len(amcs)-7)
+			// 		log.Printf(constants.FormatLogMore, len(amcs)-7)
 			// 	}
 			// }
 			// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
 			// if len(schemes) > 0 {
 			// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
 			// 	if len(schemes) > 1 {
-			// 		log.Printf("  ... (%d more) ...\n", len(schemes)-1)
+			// 		log.Printf(constants.FormatLogMore, len(schemes)-1)
 			// 	}
 			// }
 			// log.Printf("\nApproved DPs (%d):\n", len(dps))
@@ -251,7 +251,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// 	if i < 5 || i >= len(folios)-2 {
 			// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
 			// 	} else if i == 5 {
-			// 		log.Printf("  ... (%d more) ...\n", len(folios)-7)
+			// 		log.Printf(constants.FormatLogMore, len(folios)-7)
 			// 	}
 			// }
 			// log.Printf("\nApproved Demats (%d):\n", len(demats))

@@ -208,6 +208,13 @@ const (
 	QuerryFilterGroup      = " AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d"
 	QuerryBankName         = "(b.bank_name IS NULL OR b.bank_name = ANY($%d))"
 	QuerryCurrency         = "(a.currency IS NULL OR a.currency = ANY($%d))"
+	QuerryEntityNameLower  = " AND lower(trim(c.entity_name)) = ANY($%d)"
+	QuerryBankNameLower    = " AND lower(trim(c.bank_name)) = ANY($%d)"
+	FormatInvestmentID     = "INV-%s"
+	FormatInvestmentName   = "Investment - %s"
+	FormatMTMGain          = "MTM gain - %s"
+	FormatMTMLoss          = "MTM loss - %s"
+	FormatLogMore          = "  ... (%d more) ...\n"
 )
 
 var (
