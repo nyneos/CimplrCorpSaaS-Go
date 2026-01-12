@@ -33,7 +33,7 @@ func InitDB() (*sql.DB, error) {
 }
 
 func main() {
-	_ = godotenv.Load("../.env")
+	_ = godotenv.Load(".env")
 
 	fmt.Println("ENV CHECK:")
 	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
@@ -76,7 +76,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
