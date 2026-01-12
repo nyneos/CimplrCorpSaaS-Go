@@ -2,7 +2,7 @@ package constants
 
 // Common error messages
 const (
-	ErrInvalidSession                = "invalid user_id or session" //"User not found in active sessions".  "Invalid or inactive session"
+	// ErrInvalidSession                = "invalid user_id or session" //"User not found in active sessions".  "Invalid or inactive session"
 	ErrInvalidJSON                   = "invalid json or missing fields"
 	ErrInvalidJSONRequired           = "invalid json or missing required fields"
 	ErrExposureHeaderIDsUserID       = "exposureHeaderIds and user_id are required"
@@ -10,30 +10,30 @@ const (
 	ErrExposureUploadFilenamePattern = "upload-*.xlsx"
 	ErrInvalidJSONShort              = "Invalid JSON"
 	ErrInvalidJSONPrefix             = "invalid JSON: "
-	ErrMissingUserID                 = "Missing or invalid user_id in body"
-	ErrUserIDRequired                = "user_id required"
-	ErrDB                            = "DB error"
-	ErrDBPrefix                      = "DB error: "
-	ErrUpdateFailed                  = "update failed: "
-	ErrPreviewBuild                  = "preview build: "
-	ErrFailedToParseForm             = "Failed to parse form: "
-	ErrAuditInsertFailed             = "Audit insert failed: "
-	ErrTxBeginFailed                 = "TX begin failed: "
-	ErrInvalidRequestBody            = "Invalid request body"
-	ErrNoAccessibleBusinessUnit      = "No accessible business units found"
-	ErrFailedToQuery                 = "Failed to query"
-	ErrPleaseLogin                   = "Please login to continue."
-	ErrScanFailed                    = "scan failed"
-	ErrScanFailedPrefix              = "scan failed: "
-	ErrMethodNotAllowed              = "Method Not Allowed"
-	ErrUserIIsRequired               = "user_id is required"
-	ErrRequiredColumnNotFound        = "required column '%s' not found in header"
-	ErrIndexRequired                 = "index required"
+	// ErrMissingUserID                 = "Missing or invalid user_id in body"
+	ErrUserIDRequired     = "user_id required"
+	ErrDB                 = "DB error"
+	ErrDBPrefix           = "DB error: "
+	ErrUpdateFailed       = "update failed: "
+	ErrPreviewBuild       = "preview build: "
+	ErrFailedToParseForm  = "Failed to parse form: "
+	ErrAuditInsertFailed  = "Audit insert failed: "
+	ErrTxBeginFailed      = "TX begin failed: "
+	ErrInvalidRequestBody = "Invalid request body"
+	// ErrNoAccessibleBusinessUnit      = "No accessible business units found"
+	ErrFailedToQuery          = "Failed to query"
+	ErrPleaseLogin            = "Please login to continue."
+	ErrScanFailed             = "scan failed"
+	ErrScanFailedPrefix       = "scan failed: "
+	ErrMethodNotAllowed       = "Method Not Allowed"
+	ErrUserIIsRequired        = "user_id is required"
+	ErrRequiredColumnNotFound = "required column '%s' not found in header"
+	ErrIndexRequired          = "index required"
 )
 
 // General internal/server/upload error messages
 const (
-	ErrInternalServer                 = "Internal server error"
+	// ErrInternalServer                 = "Internal server error"
 	ErrFailedToParseMultipartForm     = "Failed to parse multipart form"
 	ErrNoFilesUploaded                = "No files uploaded"
 	ErrFailedToOpenFile               = "Failed to open uploaded file"
@@ -56,6 +56,7 @@ const (
 	ErrMTMInsertFailed                = "MTM insert failed: "
 	ErrSettingKeyRequired             = "setting_key parameter is required"
 	ErrSettingNotFound                = "Setting not found"
+	ErrBankStatementAlreadyExists     = "Bank Statement Transactions exist in system delete them first"
 )
 
 // Additional common messages used across handlers
@@ -65,11 +66,11 @@ const (
 	ErrInvalidCSV                     = "Invalid CSV file"
 	ErrNoAccessibleEntitiesForRequest = "No accessible entities found for request"
 	ErrUnauthorizedFolioIDsFormat     = "unauthorized folio_ids: %v"
-	ErrInvalidCurrency                = "Invalid or unsupported currency"
-	ErrInvalidBank                    = "Invalid or unsupported bank"
-	ErrInvalidCashFlowCategory        = "Invalid or unsupported cash flow category"
-	ErrInvalidAMC                     = "Invalid or inactive AMC"
-	ErrInvalidAccount                 = "Invalid or inactive account"
+	// ErrInvalidCurrency                = "Invalid or unsupported currency"
+	// ErrInvalidBank                    = "Invalid or unsupported bank"
+	// ErrInvalidCashFlowCategory        = "Invalid or unsupported cash flow category"
+	ErrInvalidAMC     = "Invalid or inactive AMC"
+	ErrInvalidAccount = "Invalid or inactive account"
 )
 
 // Additional user-facing messages for folio handlers
@@ -99,10 +100,11 @@ const (
 
 // DB / SQL error templates
 const (
-	ErrTxStartFailed       = "failed to start transaction: "
-	ErrTxCommitFailed      = "failed to commit transaction: "
-	ErrCommitFailed        = "commit failed: "
-	ErrQueryFailed         = "query failed: "
+	// ErrTxStartFailed  = "failed to start transaction: "
+	ErrTxStartFailed  = "Failed to start transaction,"
+	ErrTxCommitFailed = "failed to commit transaction: "
+	ErrCommitFailed   = "commit failed: "
+	// ErrQueryFailed         = "query failed: "
 	FormatSQLError         = "ERROR: %s"
 	ErrRowsError           = "rows error: "
 	ErrRowsScanFailed      = "rows scan failed: "
@@ -139,6 +141,7 @@ const (
 	ErrCommitFailedCapitalized   = "Commit failed: "
 	ErrTxBeginFailedCapitalized  = "tx begin failed: "
 	ErrBeginTransactionFailed    = "begin transaction failed: %w"
+	ErrDuplicateKey              = "duplicate key"
 )
 
 // Date formats
@@ -171,9 +174,14 @@ const (
 	ErrBulkSchemeMappingFailed          = "scheme mapping failed: "
 	ErrBulkOnboardMappingFailed         = "onboard mapping failed: "
 	ErrBulkRelationshipInsertFailed     = "relationship insert failed: "
-	ErrEntityNotFound                   = "Entity not found"
-	ErrAuthServiceUnavailable           = "Auth service unavailable"
-	ErrNoRowsUpdated                    = "No rows updated"
+	// ErrEntityNotFound                   = "Entity not found"
+	ErrAuthServiceUnavailable             = "Auth service unavailable"
+	ErrNoRowsUpdated                      = "No rows updated"
+	ErrFailedToFetchCategoryRelationships = "Failed to fetch category relationships"
+	ErrAlreadyExists                      = "already exists"
+	ErrAMCNotFoundOrNotApprovedActive     = "AMC not found or not approved/active: "
+	ErrUnableToUpdateParentAccountBalance = "Unable to update parent account balance"
+	ErrUnableToLogSweepExecution          = "Unable to log sweep execution"
 )
 const (
 	StatusCodeAwaitingApproval = "Awaiting-Approval"
@@ -198,6 +206,8 @@ const (
 	QuerryCurrencyCode     = " AND cp.currency_code = $%d"
 	QuerryFplCurrency      = " AND fpl.currency = $%d"
 	QuerryFilterGroup      = " AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d"
+	QuerryBankName         = "(b.bank_name IS NULL OR b.bank_name = ANY($%d))"
+	QuerryCurrency         = "(a.currency IS NULL OR a.currency = ANY($%d))"
 )
 
 var (
