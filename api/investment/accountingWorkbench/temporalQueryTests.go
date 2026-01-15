@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,7 +27,7 @@ func TestTemporalQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		var testDate time.Time
 		var err error
 		if testDateStr != "" {
-			testDate, err = time.Parse("2006-01-02", testDateStr)
+			testDate, err = time.Parse(constants.DateFormat, testDateStr)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("invalid test_date format (use YYYY-MM-DD): %v", err), http.StatusBadRequest)
 				return
@@ -75,7 +76,7 @@ type ValidationResult struct {
 func runTemporalTests(ctx context.Context, pool *pgxpool.Pool, schemeID string, asOfDate time.Time) (*TemporalTestResult, error) {
 	result := &TemporalTestResult{
 		SchemeID: schemeID,
-		TestDate: asOfDate.Format("2006-01-02"),
+		TestDate: asOfDate.Format(constants.DateFormat),
 	}
 
 	// Test 1: Get current data from masterscheme
@@ -86,7 +87,7 @@ func runTemporalTests(ctx context.Context, pool *pgxpool.Pool, schemeID string, 
 	result.CurrentData = currentScheme
 
 	// Test 2: Get historical data using temporal query
-	schemeSnapshot, portfolioRecords, err := GetDataAsOf(ctx, pool, schemeID, asOfDate.Format("2006-01-02"))
+	schemeSnapshot, portfolioRecords, err := GetDataAsOf(ctx, pool, schemeID, asOfDate.Format(constants.DateFormat))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get historical data: %w", err)
 	}

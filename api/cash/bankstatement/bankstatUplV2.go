@@ -121,10 +121,10 @@ func ctxHasApprovedCurrency(ctx context.Context, currency string) bool {
 
 // Sentinel errors used for mapping to user-friendly messages
 var (
-	ErrFileAlreadyUploaded   = errors.New("bank statement file already uploaded")
-	ErrAccountNotFound       = errors.New("bank account not found in master data")
-	ErrAccountNumberMissing  = errors.New("account number not found in file header")
-	ErrStatementPeriodExists = errors.New("a statement for this period already exists for this account")
+	ErrFileAlreadyUploaded      = errors.New("bank statement file already uploaded")
+	ErrAccountNotFound          = errors.New("bank account not found in master data")
+	ErrAccountNumberMissing     = errors.New("account number not found in file header")
+	ErrStatementPeriodExists    = errors.New("a statement for this period already exists for this account")
 	ErrAllTransactionsDuplicate = errors.New("all transactions in this statement already exist")
 )
 var (
@@ -1883,7 +1883,7 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 
 		// Check if is_pdf flag is set in query params first (no multipart parsing needed)
 		isPDF := r.URL.Query().Get("is_pdf") == "true"
-		
+
 		if isPDF {
 			// PDF processing: read bank.json and process it (NO FILE UPLOAD NEEDED)
 			log.Println("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
@@ -1977,26 +1977,26 @@ func (b *bytesFile) Close() error { return nil }
 
 // PDFBankStatementJSON represents the JSON structure from PDF parsing
 type PDFBankStatementJSON struct {
-	AccountNumber  string                     `json:"account_number"`
-	AccountName    string                     `json:"account_name"`
-	BankName       string                     `json:"bank_name"`
-	IFSC           string                     `json:"ifsc"`
-	MICR           string                     `json:"micr"`
-	PeriodStart    string                     `json:"period_start"`
-	PeriodEnd      string                     `json:"period_end"`
-	OpeningBalance float64                    `json:"opening_balance"`
-	ClosingBalance float64                    `json:"closing_balance"`
-	Transactions   []PDFTransactionJSON       `json:"transactions"`
+	AccountNumber  string               `json:"account_number"`
+	AccountName    string               `json:"account_name"`
+	BankName       string               `json:"bank_name"`
+	IFSC           string               `json:"ifsc"`
+	MICR           string               `json:"micr"`
+	PeriodStart    string               `json:"period_start"`
+	PeriodEnd      string               `json:"period_end"`
+	OpeningBalance float64              `json:"opening_balance"`
+	ClosingBalance float64              `json:"closing_balance"`
+	Transactions   []PDFTransactionJSON `json:"transactions"`
 }
 
 type PDFTransactionJSON struct {
-	TranID          *string  `json:"tran_id"`
-	TransactionDate string   `json:"transaction_date"`
-	ValueDate       string   `json:"value_date"`
-	Description     string   `json:"description"`
-	Withdrawal      float64  `json:"withdrawal"`
-	Deposit         float64  `json:"deposit"`
-	Balance         float64  `json:"balance"`
+	TranID          *string `json:"tran_id"`
+	TransactionDate string  `json:"transaction_date"`
+	ValueDate       string  `json:"value_date"`
+	Description     string  `json:"description"`
+	Withdrawal      float64 `json:"withdrawal"`
+	Deposit         float64 `json:"deposit"`
+	Balance         float64 `json:"balance"`
 }
 
 type BankStatement struct {
@@ -2385,19 +2385,19 @@ foundTxnHeader:
 // This is a placeholder for future PDF OCR integration
 func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
 	log.Println("[PDF_PROCESSOR] Reading bank.json file")
-	
+
 	// Try multiple possible paths for bank.json
 	possiblePaths := []string{
-		"api/cash/bankstatement/bank.json",                                    // From project root
-		"../api/cash/bankstatement/bank.json",                                 // From cmd directory
-		filepath.Join("..", "api", "cash", "bankstatement", "bank.json"),      // Explicit relative
+		"api/cash/bankstatement/bank.json",                               // From project root
+		"../api/cash/bankstatement/bank.json",                            // From cmd directory
+		filepath.Join("..", "api", "cash", "bankstatement", "bank.json"), // Explicit relative
 		"/Users/hardikmishra/Documents/CimplrCorpSaaS.   CI work ing/CimplrCorpSaaS-Go/api/cash/bankstatement/bank.json", // Absolute fallback
 	}
-	
+
 	var jsonBytes []byte
 	var err error
 	var foundPath string
-	
+
 	for _, jsonPath := range possiblePaths {
 		jsonBytes, err = os.ReadFile(jsonPath)
 		if err == nil {
@@ -2406,7 +2406,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 			break
 		}
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bank.json (tried multiple paths): %w", err)
 	}
@@ -2451,7 +2451,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	// Load category rules for this account
 	var acctCurrency sql.NullString
 	db.QueryRowContext(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, pdfData.AccountNumber).Scan(&acctCurrency)
-	
+
 	var currencyCode string
 	if acctCurrency.Valid {
 		currencyCode = acctCurrency.String
@@ -2567,7 +2567,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		ON CONFLICT ON CONSTRAINT uniq_stmt
 		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance
 		RETURNING bank_statement_id
-	`, entityID, pdfData.AccountNumber, periodStart, periodEnd, fileHash, 
+	`, entityID, pdfData.AccountNumber, periodStart, periodEnd, fileHash,
 		pdfData.OpeningBalance, pdfData.ClosingBalance).Scan(&bankStatementID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert bank statement: %w", err)

@@ -2,6 +2,7 @@ package accountingworkbench
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -67,7 +68,7 @@ func GetSchemeDataAsOf(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Default to today if no date specified
 		asOfDate := req.AsOfDate
 		if asOfDate == "" {
-			asOfDate = time.Now().Format("2006-01-02")
+			asOfDate = time.Now().Format(constants.DateFormat)
 		}
 
 		ctx := r.Context()

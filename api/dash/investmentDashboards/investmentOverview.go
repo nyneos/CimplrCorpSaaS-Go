@@ -67,11 +67,11 @@ type TransactionDetail struct {
 
 // AggregatedValue is used for grouping data by any dimension
 type AggregatedValue struct {
-	GroupKey   string  `json:"group_key"`   // The grouping dimension value (entity name, amc name, etc.)
-	GroupType  string  `json:"group_type"`  // What the grouping represents: "entity", "amc", "scheme", "category"
-	Value      float64 `json:"value"`       // The aggregated value
-	Count      int     `json:"count"`       // Number of items in this group
-	Percentage float64 `json:"percentage"`  // Percentage of total
+	GroupKey   string  `json:"group_key"`  // The grouping dimension value (entity name, amc name, etc.)
+	GroupType  string  `json:"group_type"` // What the grouping represents: "entity", "amc", "scheme", "category"
+	Value      float64 `json:"value"`      // The aggregated value
+	Count      int     `json:"count"`      // Number of items in this group
+	Percentage float64 `json:"percentage"` // Percentage of total
 }
 
 // KPICard represents a single KPI metric card
@@ -102,7 +102,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Validate entity from context if not provided
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 
@@ -115,13 +115,13 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		today := time.Now().UTC()
 		fyStart := getFinancialYearStart(today)
-		
+
 		// Use previous fiscal year start as the comparison point (not last month)
 		// e.g., if today is within FY 2025-26 (starts Apr 1 2025), previous FY start = Apr 1 2024
 		prevFYStart := fyStart.AddDate(-1, 0, 0)
 		// Compute last month end (used for month-over-month AUM comparison)
 		lastMonthEnd := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
-		
+
 		// OPTIMIZED: Single comprehensive query for all KPIs
 		kpiQuery := `
 		WITH params AS (
@@ -328,7 +328,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			prevFYStart.Format(constants.DateFormat),
 			allowedEntitiesParam,
 		).Scan(&totalAUM, &lastMonthAUM, &fyStartAUM, &prevFyAUM, &ytdBuys, &ytdSells, &totalCash, &sellableMF)
-		
+
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "KPI query failed: "+err.Error())
 			return
@@ -401,7 +401,7 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fetch AUM breakdown by entity, AMC, scheme for transparency
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilterSQL, allowedEntities)
-		
+
 		// Fetch YTD raw transactions (not grouped)
 		rawTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilterSQL, allowedEntities, fyStart)
 
@@ -409,20 +409,20 @@ func GetInvestmentOverviewKPIs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"cards":        cards,
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 			"details": map[string]interface{}{
-				"total_aum":        totalAUM,
-				"last_month_aum":   lastMonthAUM,
-				"last_fy_aum":      prevFyAUM,
-				"fy_start_aum":     fyStartAUM,
-				"ytd_buys":         ytdBuys,
-				"ytd_sells":        ytdSells,
-				"ytd_pnl":          ytdPL,
-				"cash_balance":     totalCash,
-				"sellable_mf":      sellableMF,
-				"liquidity_total":  liquidityTotal,
-				"xirr_annualized":  xirrVal * 100,
-				"financial_year":   fmt.Sprintf("FY %d-%d", fyStart.Year(), fyStart.Year()+1),
-				"period_start":     fyStart.Format(constants.DateFormat),
-				"period_end":       today.Format(constants.DateFormat),
+				"total_aum":       totalAUM,
+				"last_month_aum":  lastMonthAUM,
+				"last_fy_aum":     prevFyAUM,
+				"fy_start_aum":    fyStartAUM,
+				"ytd_buys":        ytdBuys,
+				"ytd_sells":       ytdSells,
+				"ytd_pnl":         ytdPL,
+				"cash_balance":    totalCash,
+				"sellable_mf":     sellableMF,
+				"liquidity_total": liquidityTotal,
+				"xirr_annualized": xirrVal * 100,
+				"financial_year":  fmt.Sprintf("FY %d-%d", fyStart.Year(), fyStart.Year()+1),
+				"period_start":    fyStart.Format(constants.DateFormat),
+				"period_end":      today.Format(constants.DateFormat),
 			},
 			"aum_detail":         aumDetails,
 			"transaction_detail": rawTransactions,
@@ -477,14 +477,14 @@ func fetchAUMDetails(ctx context.Context, pgxPool *pgxpool.Pool, entityFilter st
 		WHERE COALESCE(ps.current_value, 0) > 0
 		ORDER BY ps.entity_name, ms.amc_name, ps.current_value DESC
 	`
-	
+
 	rows, err := pgxPool.Query(ctx, query)
 	if err != nil {
 		log.Printf("[investmentOverview] fetchAUMDetails query error: %v", err)
 		return []InvestmentDetail{}
 	}
 	defer rows.Close()
-	
+
 	details := make([]InvestmentDetail, 0, 100)
 	for rows.Next() {
 		var d InvestmentDetail
@@ -534,14 +534,14 @@ func fetchRawTransactionDetails(ctx context.Context, pgxPool *pgxpool.Pool, enti
 		WHERE ot.transaction_date >= $1
 		ORDER BY ot.transaction_date DESC, ot.entity_name, ot.amount DESC
 	`
-	
+
 	rows, err := pgxPool.Query(ctx, query, fromDate)
 	if err != nil {
 		log.Printf("[investmentOverview] fetchRawTransactionDetails query error: %v", err)
 		return []TransactionDetail{}
 	}
 	defer rows.Close()
-	
+
 	transactions := make([]TransactionDetail, 0, 200)
 	for rows.Next() {
 		var t TransactionDetail
@@ -649,14 +649,14 @@ func fetchAUMDetailsWithRisk(ctx context.Context, pgxPool *pgxpool.Pool, entityF
 		WHERE COALESCE(ps.current_value, 0) > 0
 		ORDER BY ps.entity_name, ms.internal_risk_rating, ps.current_value DESC
 	`
-	
+
 	rows, err := pgxPool.Query(ctx, query)
 	if err != nil {
 		log.Printf("[investmentOverview] fetchAUMDetailsWithRisk query error: %v", err)
 		return []InvestmentDetail{}
 	}
 	defer rows.Close()
-	
+
 	details := make([]InvestmentDetail, 0)
 	for rows.Next() {
 		var d InvestmentDetail
@@ -692,7 +692,7 @@ func calculatePortfolioXIRR(ctx context.Context, pgxPool *pgxpool.Pool, entityFi
 	if len(allowedEntities) > 0 {
 		allowedParam = allowedEntities
 	}
-    
+
 	rows, err := pgxPool.Query(ctx, flowsQ, nullIfEmpty(entityFilter), allowedParam, terminalDate)
 	if err != nil {
 		return 0
@@ -840,7 +840,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -856,9 +856,9 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			allowedParam = allowedEntities
 		}
 
-				// QUERY 1: Summary rows for chart
-				// Compute true YTD P&L per scheme: Closing - Opening - (Buys - Sells)
-				q := `
+		// QUERY 1: Summary rows for chart
+		// Compute true YTD P&L per scheme: Closing - Opening - (Buys - Sells)
+		q := `
 				WITH params AS (
 						SELECT $1::date AS fy_start, $2::text AS entity_filter, $3::text AS amc_filter, $4::text[] AS allowed_entities
 				),
@@ -924,7 +924,7 @@ func GetEntityPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// RAW TABULAR DATA: Portfolio snapshot rows that create the performance numbers
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
-		
+
 		// RAW TABULAR DATA: YTD transactions contributing to performance
 		rawTransactions := fetchRawTransactionDetails(ctx, pgxPool, entityFilter, allowedEntities, fyStart)
 
@@ -967,7 +967,7 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1017,10 +1017,10 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		out.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
-		
+
 		// RAW TABULAR DATA: Portfolio details with risk ratings
 		aumDetails := fetchAUMDetailsWithRisk(ctx, pgxPool, entityFilter, allowedEntities)
-		
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"lcr":              out.LCR,
 			"total_value":      out.TotalValue,
@@ -1062,7 +1062,7 @@ func GetAMCWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1220,7 +1220,7 @@ func GetAMCPerformance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1326,7 +1326,7 @@ func GetTopPerformingAssets(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1447,7 +1447,7 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1468,20 +1468,20 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Generate month boundaries
 		type monthInfo struct {
-			Label      string
-			MonthIdx   int
-			EndDate    string
-			IsCurrent  bool
+			Label     string
+			MonthIdx  int
+			EndDate   string
+			IsCurrent bool
 		}
 		fyMonths := []time.Month{
 			time.April, time.May, time.June, time.July, time.August, time.September,
 			time.October, time.November, time.December, time.January, time.February, time.March,
 		}
 		monthLabels := []string{"Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"}
-		
+
 		months := make([]monthInfo, 0, 12)
 		monthDates := make([]string, 0, 12) // For SQL array parameter
-		
+
 		for i, m := range fyMonths {
 			year := req.Year
 			if i >= 9 { // Jan, Feb, Mar are in next calendar year
@@ -1697,7 +1697,7 @@ func GetAUMMovementWaterfall(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -1859,7 +1859,7 @@ func GetAUMBreakdown(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2009,7 +2009,7 @@ func GetPerformanceAttribution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2301,7 +2301,7 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2417,10 +2417,10 @@ func GetDailyPnLHeatmap(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
 		response := map[string]interface{}{
-			"heatmap":  heatmap,
-			"entities": entityList,
-			"amcs":     amcList,
-			"group_by": req.GroupBy,
+			"heatmap":          heatmap,
+			"entities":         entityList,
+			"amcs":             amcList,
+			"group_by":         req.GroupBy,
 			"portfolio_detail": aumDetails,
 			"summary": map[string]interface{}{
 				"total_pnl":       totalPnL,
@@ -2469,7 +2469,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)
@@ -2494,7 +2494,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Generate month end dates for batch query
 		monthNames := []string{"Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"}
 		monthDates := make([]string, 0, 12)
-		
+
 		for i := 0; i < 12; i++ {
 			var monthStart time.Time
 			if i < 9 { // Apr-Dec
@@ -2503,7 +2503,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				monthStart = time.Date(req.Year+1, time.Month(i-8), 1, 0, 0, 0, 0, time.UTC)
 			}
 			monthEnd := monthStart.AddDate(0, 1, -1)
-			
+
 			if monthStart.After(now) {
 				break
 			}
@@ -2515,7 +2515,7 @@ func GetPortfolioVsBenchmark(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if len(monthDates) == 0 {
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"series": []BenchmarkPoint{{Month: "Apr", Portfolio: 100, Benchmark: 100}},
+				"series":         []BenchmarkPoint{{Month: "Apr", Portfolio: 100, Benchmark: 100}},
 				"benchmark_name": req.Benchmark, "financial_year": fmt.Sprintf(constants.FormatFiscalYear, req.Year, req.Year+1),
 				"generated_at": time.Now().UTC().Format(time.RFC3339),
 			})
@@ -2690,7 +2690,7 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Entity validation
 		entityFilter := strings.TrimSpace(req.EntityName)
 		if entityFilter != "" && !api.IsEntityAllowed(ctx, entityFilter) {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 		allowedEntities := api.GetEntityNamesFromCtx(ctx)

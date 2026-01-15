@@ -1676,13 +1676,15 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// already mapped
 			} else {
 				var lookedUpName string
-				if err := pgxPool.QueryRow(ctx, `SELECT entity_name FROM masterentitycash WHERE entity_id = $1 LIMIT 1`, entityNameScoped).Scan(&lookedUpName); err == nil {
-					if strings.TrimSpace(lookedUpName) != "" {
-						entityNameScoped = strings.TrimSpace(lookedUpName)
-					}
-				} else if err := pgxPool.QueryRow(ctx, `SELECT entity_name FROM masterentity WHERE entity_id = $1 LIMIT 1`, entityNameScoped).Scan(&lookedUpName); err == nil {
-					if strings.TrimSpace(lookedUpName) != "" {
-						entityNameScoped = strings.TrimSpace(lookedUpName)
+				// try possible tables in order until we find a non-empty entity_name
+				tables := []string{"masterentitycash", "masterentity"}
+				for _, tbl := range tables {
+					query := fmt.Sprintf("SELECT entity_name FROM %s WHERE entity_id = $1 LIMIT 1", tbl)
+					if err := pgxPool.QueryRow(ctx, query, entityNameScoped).Scan(&lookedUpName); err == nil {
+						if strings.TrimSpace(lookedUpName) != "" {
+							entityNameScoped = strings.TrimSpace(lookedUpName)
+							break
+						}
 					}
 				}
 			}
@@ -1699,7 +1701,7 @@ func GetRedemptionInitiationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			allowed = true
 		}
 		if !allowed {
-			api.RespondWithError(w, http.StatusForbidden, "not allowed for this entity")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrEntityNotFound)
 			return
 		}
 

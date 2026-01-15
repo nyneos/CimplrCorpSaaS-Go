@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"time"
@@ -157,8 +158,8 @@ func generateMergerJournal(ctx context.Context, tx DBExecutor, activityID string
 	// Debit: Investment in Target Scheme (increase)
 	je.Lines = append(je.Lines, JournalEntryLine{
 		LineNumber:    1,
-		AccountNumber: fmt.Sprintf("INV-%s", *rec.TargetSchemeID),
-		AccountName:   fmt.Sprintf("Investment - %s", targetSchemeName),
+		AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, *rec.TargetSchemeID),
+		AccountName:   fmt.Sprintf(constants.FormatInvestmentName, targetSchemeName),
 		AccountType:   "ASSET",
 		DebitAmount:   totalCostBasis,
 		CreditAmount:  0,
@@ -169,8 +170,8 @@ func generateMergerJournal(ctx context.Context, tx DBExecutor, activityID string
 	// Credit: Investment in Source Scheme (decrease)
 	je.Lines = append(je.Lines, JournalEntryLine{
 		LineNumber:    2,
-		AccountNumber: fmt.Sprintf("INV-%s", rec.SourceSchemeID),
-		AccountName:   fmt.Sprintf("Investment - %s", sourceSchemeName),
+		AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
+		AccountName:   fmt.Sprintf(constants.FormatInvestmentName, sourceSchemeName),
 		AccountType:   "ASSET",
 		DebitAmount:   0,
 		CreditAmount:  totalCostBasis,
@@ -232,8 +233,8 @@ func generateSplitJournal(ctx context.Context, tx DBExecutor, activityID string,
 	// Debit: Investment Account (reversal of old basis)
 	je.Lines = append(je.Lines, JournalEntryLine{
 		LineNumber:    1,
-		AccountNumber: fmt.Sprintf("INV-%s", rec.SourceSchemeID),
-		AccountName:   fmt.Sprintf("Investment - %s", schemeName),
+		AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
+		AccountName:   fmt.Sprintf(constants.FormatInvestmentName, schemeName),
 		AccountType:   "ASSET",
 		DebitAmount:   totalInvestment,
 		CreditAmount:  0,
@@ -244,8 +245,8 @@ func generateSplitJournal(ctx context.Context, tx DBExecutor, activityID string,
 	// Credit: Investment Account (new basis - same amount)
 	je.Lines = append(je.Lines, JournalEntryLine{
 		LineNumber:    2,
-		AccountNumber: fmt.Sprintf("INV-%s", rec.SourceSchemeID),
-		AccountName:   fmt.Sprintf("Investment - %s", schemeName),
+		AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
+		AccountName:   fmt.Sprintf(constants.FormatInvestmentName, schemeName),
 		AccountType:   "ASSET",
 		DebitAmount:   0,
 		CreditAmount:  totalInvestment,
@@ -311,8 +312,8 @@ func generateBonusJournal(ctx context.Context, tx DBExecutor, activityID string,
 	// Debit: Investment Account (bonus units received)
 	je.Lines = append(je.Lines, JournalEntryLine{
 		LineNumber:    1,
-		AccountNumber: fmt.Sprintf("INV-%s", rec.SourceSchemeID),
-		AccountName:   fmt.Sprintf("Investment - %s", schemeName),
+		AccountNumber: fmt.Sprintf(constants.FormatInvestmentID, rec.SourceSchemeID),
+		AccountName:   fmt.Sprintf(constants.FormatInvestmentName, schemeName),
 		AccountType:   "ASSET",
 		DebitAmount:   memoAmount,
 		CreditAmount:  0,

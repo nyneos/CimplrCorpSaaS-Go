@@ -408,7 +408,7 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.accounting_dividend
 			WHERE dividend_id = $1
 		`, req.DividendID).Scan(&transactionType, &dividendAmount, &reinvestNAV, &reinvestUnits)
-		
+
 		if err == nil {
 			if (strings.ToUpper(transactionType) == "REINVESTMENT" || strings.ToUpper(transactionType) == "REINVEST") &&
 				reinvestUnits == 0 && reinvestNAV > 0 {

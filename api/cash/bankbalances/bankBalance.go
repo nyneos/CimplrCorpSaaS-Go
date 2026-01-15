@@ -300,7 +300,7 @@ func CreateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if !ctxHasApprovedBankName(ctx, req.BankName) {
-			api.RespondWithResult(w, false, "Invalid or inactive bank")
+			api.RespondWithResult(w, false, constants.ErrBankInvalidOrInactive)
 			return
 		}
 		if !ctxHasApprovedBankAccount(ctx, req.AccountNo) {
@@ -1110,7 +1110,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if curBankName.Valid && !ctxHasApprovedBankName(ctx, curBankName.S) {
-			api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive bank")
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 			return
 		}
 		if curAccountNo.Valid && !ctxHasApprovedBankAccount(ctx, curAccountNo.S) {
@@ -1151,7 +1151,7 @@ func UpdateBankBalance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			switch k {
 			case "bank_name":
 				if !ctxHasApprovedBankName(ctx, fmt.Sprint(v)) {
-					api.RespondWithError(w, http.StatusForbidden, "Invalid or inactive bank")
+					api.RespondWithError(w, http.StatusForbidden, constants.ErrBankInvalidOrInactive)
 					return
 				}
 				addStrField("bank_name", "old_bank_name", v, curBankName)

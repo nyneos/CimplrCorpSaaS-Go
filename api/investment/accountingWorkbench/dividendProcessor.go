@@ -1,6 +1,7 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"log"
@@ -11,7 +12,7 @@ import (
 // Called during approval for REINVEST type dividends
 func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID string) error {
 	log.Printf("[DEBUG DIVIDEND] ProcessDividendReinvestment called for activity: %s", activityID)
-	
+
 	// First, check ALL dividends for this activity (debugging)
 	debugRows, _ := tx.Query(ctx, `
 		SELECT dividend_id, transaction_type, dividend_amount, reinvest_nav, reinvest_units
@@ -23,13 +24,13 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 			var did, ttype string
 			var amt, nav, units float64
 			if err := debugRows.Scan(&did, &ttype, &amt, &nav, &units); err == nil {
-				log.Printf("[DEBUG DIVIDEND] Found dividend: %s | Type: %s | Amount: %.2f | Nav: %.4f | Units: %.6f", 
+				log.Printf("[DEBUG DIVIDEND] Found dividend: %s | Type: %s | Amount: %.2f | Nav: %.4f | Units: %.6f",
 					did, ttype, amt, nav, units)
 			}
 		}
 		debugRows.Close()
 	}
-	
+
 	// Fetch all REINVEST dividends for this activity
 	rows, err := tx.Query(ctx, `
 		SELECT 
@@ -77,7 +78,7 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 	}
 
 	log.Printf("[DEBUG DIVIDEND] Found %d reinvest dividends with units > 0", len(reinvests))
-	
+
 	if len(reinvests) == 0 {
 		log.Printf("[DEBUG DIVIDEND] No reinvestments to process (all dividends have reinvest_units = 0 or are PAYOUT type)")
 		return nil
@@ -87,11 +88,11 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 	for _, dr := range reinvests {
 		log.Printf("[DEBUG DIVIDEND] Processing reinvest: %s | Scheme: %s | FolioID from dividend: %v | Units: %.6f | NAV: %.4f | Amount: %.2f",
 			dr.DividendID, dr.SchemeID, dr.FolioID, dr.ReinvestUnits, dr.ReinvestNAV, dr.DividendAmount)
-			
+
 		// Get folio details if folio_id is provided
 		var folioNumber, entityName, folioID string
 		var dematAccNumber, dematID *string
-		
+
 		if dr.FolioID != nil && *dr.FolioID != "" {
 			// Folio specified in dividend - use it
 			log.Printf("[DEBUG DIVIDEND] Fetching folio details for folio_id: %s", *dr.FolioID)
@@ -107,7 +108,7 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 				log.Printf("[ERROR DIVIDEND] Failed to fetch folio %s: %v", *dr.FolioID, err)
 				return fmt.Errorf("failed to fetch folio %s: %w", *dr.FolioID, err)
 			}
-			
+
 			log.Printf("[DEBUG DIVIDEND] Found folio: ID=%s, Number=%s, Entity=%s", folioID, folioNumber, entityName)
 		} else {
 			// No folio specified - find one linked to this scheme
@@ -129,10 +130,10 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 				log.Printf("[ERROR DIVIDEND] No active folio found for scheme %s: %v", dr.SchemeID, err)
 				return fmt.Errorf("no active folio found for scheme %s: %w", dr.SchemeID, err)
 			}
-			
+
 			log.Printf("[DEBUG DIVIDEND] Found folio via scheme mapping: ID=%s, Number=%s, Entity=%s", folioID, folioNumber, entityName)
 		}
-		
+
 		// Try to find linked demat account for this folio
 		// Check if there's a default demat linked to this entity that we can use
 		var tempDematAcc, tempDematID string
@@ -167,7 +168,7 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 		// Parse payment date
 		paymentDate := dr.PaymentDate
 		if paymentDate == "" {
-			paymentDate = time.Now().Format("2006-01-02")
+			paymentDate = time.Now().Format(constants.DateFormat)
 		}
 
 		// Generate a unique batch_id for this dividend reinvestment transaction
@@ -222,7 +223,7 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 			log.Printf("[ERROR DIVIDEND] Failed to create onboard_transaction for dividend %s: %v", dr.DividendID, err)
 			return fmt.Errorf("failed to create reinvestment transaction for dividend %s: %w", dr.DividendID, err)
 		}
-		
+
 		log.Printf("[DEBUG DIVIDEND] Successfully created onboard_transaction for dividend %s", dr.DividendID)
 	}
 
