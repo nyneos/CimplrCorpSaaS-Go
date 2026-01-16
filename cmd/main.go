@@ -76,7 +76,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
@@ -115,3 +115,4 @@ func main() {
 		appmanager.GetPgxPool().Close()
 	}
 }
+
