@@ -285,25 +285,75 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// after storing, proxy stream to fin-pdf-upload and stream the response to the client
-		// we will include an initial message with upload id
-		initial := map[string]interface{}{"status": "uploaded", "id": id}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		enc := json.NewEncoder(w)
-		if err := enc.Encode(initial); err != nil {
-			log.Printf("failed to write initial response: %v", err)
-			return
-		}
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+		// Proxy to fin-pdf-upload and get the complete response
+		finURL := os.Getenv("FIN_PDF_UPLOAD_URL")
+		if finURL == "" {
+			finURL = "https://fin-pdf-upload.onrender.com/parse/stream"
 		}
 
-		// Proxy the streaming AI responses
-		if perr := proxyStreamToFinPDF(w, r, fileBytes, header.Filename); perr != nil {
-			log.Printf("proxy to fin pdf error: %v", perr)
-			// attempt to send a safe error message
-			_ = enc.Encode(map[string]interface{}{"status": "error", "message": "Failed to parse file for preview"})
+		// Build multipart/form-data body with field name `pdf` (file)
+		var b bytes.Buffer
+		mw := multipart.NewWriter(&b)
+		fw, err := mw.CreateFormFile("pdf", header.Filename)
+		if err != nil {
+			respondWithError(w, err, "Failed to prepare file for parsing", http.StatusInternalServerError)
 			return
+		}
+		if _, err := fw.Write(fileBytes); err != nil {
+			respondWithError(w, err, "Failed to prepare file for parsing", http.StatusInternalServerError)
+			return
+		}
+		if err := mw.Close(); err != nil {
+			respondWithError(w, err, "Failed to prepare file for parsing", http.StatusInternalServerError)
+			return
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", finURL, &b)
+		if err != nil {
+			respondWithError(w, err, "Failed to create parsing request", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+
+		client := &http.Client{Timeout: 0}
+		resp, err := client.Do(req)
+		if err != nil {
+			respondWithError(w, err, "Failed to connect to parsing service", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Read the complete AI response
+		aiResponseBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			respondWithError(w, err, "Failed to read parsing response", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse the AI response to merge with our upload data
+		var aiResponse map[string]interface{}
+		if err := json.Unmarshal(aiResponseBytes, &aiResponse); err != nil {
+			log.Printf("AI response parsing error: %v, raw: %s", err, string(aiResponseBytes))
+			respondWithError(w, err, "Failed to parse AI response", http.StatusInternalServerError)
+			return
+		}
+
+		// Merge upload metadata with AI response
+		combinedResponse := map[string]interface{}{
+			"id":     id,
+			"status": "uploaded",
+		}
+		
+		// Copy all fields from AI response
+		for key, value := range aiResponse {
+			combinedResponse[key] = value
+		}
+
+		// Send the single combined JSON response
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
+			log.Printf("failed to write response: %v", err)
 		}
 	})
 }
@@ -414,7 +464,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 
 		// Compute validation result
 		isValid := len(issues) == 0
-		
+
 		// Get actual closing balance from metadata
 		var actualClosing *float64
 		if input.Clean.Metadata.ClosingBalance != nil {
