@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"path/filepath"
 
 	"crypto/sha256"
 	"database/sql"
@@ -18,10 +19,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/extrame/xls"
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
@@ -139,6 +142,89 @@ var (
 	balanceHeader                   = "Balance (INR)"
 	missingUserIDOrBankStatementIDs = "Missing user_id or bank_statement_ids"
 )
+
+const (
+	bankStmtDefaultBucket  = "cimplr"
+	bankStmtPrefix         = "bankstatements/"
+	bankStmtDefaultRegion  = "ap-south-1"
+	bankStmtDefaultBaseURL = "https://cimplr.s3.ap-south-1.amazonaws.com/"
+)
+
+func bankStmtBucket() string {
+	if b := strings.TrimSpace(os.Getenv("BANK_STMT_S3_BUCKET")); b != "" {
+		return b
+	}
+	return bankStmtDefaultBucket
+}
+
+func bankStmtRegion() string {
+	if r := strings.TrimSpace(os.Getenv("BANK_STMT_S3_REGION")); r != "" {
+		return r
+	}
+	return bankStmtDefaultRegion
+}
+
+func bankStmtBaseURL() string {
+	if u := strings.TrimSpace(os.Getenv("BANK_STMT_S3_BASE_URL")); u != "" {
+		u = strings.TrimSuffix(u, "/")
+		return u + "/"
+	}
+	return bankStmtDefaultBaseURL
+}
+
+func sanitizePathSegment(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "unknown"
+	}
+	replacer := strings.NewReplacer(" ", "_", "/", "_", "\\", "_")
+	return replacer.Replace(s)
+}
+
+func buildBankStatementS3Key(accountNumber, fileHash, fileExt string) string {
+	ext := strings.TrimSpace(fileExt)
+	if ext == "" {
+		ext = ".bin"
+	}
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	acct := sanitizePathSegment(accountNumber)
+	return fmt.Sprintf("%s%s/%s%s", bankStmtPrefix, acct, fileHash, ext)
+}
+
+func detectContentType(data []byte) string {
+	if len(data) == 0 {
+		return "application/octet-stream"
+	}
+	if len(data) > 512 {
+		return http.DetectContentType(data[:512])
+	}
+	return http.DetectContentType(data)
+}
+
+func uploadBankStatementToS3(ctx context.Context, key string, body []byte, contentType string) (string, error) {
+	bucket := bankStmtBucket()
+	region := bankStmtRegion()
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return "", fmt.Errorf("load AWS config: %w", err)
+	}
+	client := s3.NewFromConfig(cfg)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(body),
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
+	}
+	return bankStmtBaseURL() + key, nil
+}
 
 // categoryRuleComponent represents a single rule component used for
 // categorizing transactions. This is shared between the upload and recompute
@@ -345,9 +431,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
+	contentType := detectContentType(tmpFile)
 
 	var rows [][]string
 	var isCSV bool
+	fileExt := ".xlsx"
 
 	//var isXLS bool Try Excel first
 	xl, xlErr := excelize.OpenReader(bytes.NewReader(tmpFile))
@@ -362,6 +450,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			return nil, errors.New("excel must have at least one data row")
 		}
 		isCSV = false
+		fileExt = ".xlsx"
 
 	} else {
 		// Try XLS (legacy Excel)
@@ -383,6 +472,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, errors.New("xls must have at least one data row")
 			}
 			isCSV = false
+			fileExt = ".xls"
 
 		} else {
 			// Try CSV
@@ -396,6 +486,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, errors.New("csv must have at least one data row")
 			}
 			isCSV = true
+			fileExt = ".csv"
 		}
 	}
 
@@ -488,6 +579,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, errors.New("currency not allowed")
 			}
 		}
+	}
+
+	s3Key := buildBankStatementS3Key(accountNumber, fileHash, fileExt)
+	s3URL, err := uploadBankStatementToS3(ctx, s3Key, tmpFile, contentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to store original file to s3: %w", err)
 	}
 
 	// 4. Fetch all active rules/components for this account/entity/bank/currency/global
@@ -985,6 +1082,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"ungrouped_transaction_count":     ungroupedTxns,
 		"grouped_transaction_percent":     groupedPct,
 		"ungrouped_transaction_percent":   ungroupedPct,
+		"file_storage_key":                s3Key,
+		"file_storage_url":                s3URL,
 	}
 	return result, nil
 }
@@ -2049,6 +2148,8 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
+	contentType := detectContentType(tmpFile)
+	fileExt := ".xlsx"
 	xl, err := excelize.OpenReader(bytes.NewReader(tmpFile))
 	if err != nil {
 		return fmt.Errorf("failed to parse excel: %w", err)
@@ -2099,6 +2200,11 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		if !apictx.IsEntityAllowed(ctx, entityID) {
 			return ErrAccountNotFound
 		}
+	}
+
+	s3Key := buildBankStatementS3Key(accountNumber, fileHash, fileExt)
+	if _, err := uploadBankStatementToS3(ctx, s3Key, tmpFile, contentType); err != nil {
+		return fmt.Errorf("failed to store original file to s3: %w", err)
 	}
 
 	// 4. Extract statement period and balances from the file (assume first/last row for balances)

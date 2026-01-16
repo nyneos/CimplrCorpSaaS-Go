@@ -101,6 +101,11 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", api.BusinessUnitMiddleware(db)(fxops.GetMaturityBucketsByCurrencyPair(db)))
 	// Comprehensive FX Ops Dashboard (with filters)
 	mux.Handle("/dash/landingpage/dashboard", api.BusinessUnitMiddleware(db)(landingpage.GetFXOpsDashboard(db)))
+	// Home/Landing dashboard (liquidity + investments + risk)
+	mux.Handle("/dash/landingpage/home", api.BusinessUnitMiddleware(db)(landingpage.GetHomePageDashboard(db)))
+	mux.Handle("/dash/landingpage/cash", middlewares.PreValidationMiddleware(pgxPool)(landingpage.GetLandingCashDashboard(pgxPool)))
+
+	
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
 	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
@@ -182,7 +187,7 @@ func StartDashService(db *sql.DB) {
 
 	// Planned Inflow/Outflow Dashboard
 	mux.Handle("/dash/planned-inflow-outflow", api.BusinessUnitMiddleware(db)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
-
+	
 	log.Println("Dashboard Service started on :4143")
 	err = http.ListenAndServe(":4143", mux)
 	if err != nil {
