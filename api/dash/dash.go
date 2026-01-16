@@ -13,6 +13,7 @@ import (
 	fxops "CimplrCorpSaas/api/dash/fx-ops"
 	hedgeproposal "CimplrCorpSaas/api/dash/hedging-proposal"
 	investmentdashboards "CimplrCorpSaas/api/dash/investmentDashboards"
+	landingpage "CimplrCorpSaas/api/dash/landing-page"
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
 	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
@@ -98,6 +99,8 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/fx-ops/ready-for-settlement", api.BusinessUnitMiddleware(db)(fxops.GetForwardBookingsMaturingTodayCount(db)))
 	mux.Handle("/dash/fx-ops/daily-traded-volume", api.BusinessUnitMiddleware(db)(fxops.GetTodayBookingAmountSum(db)))
 	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", api.BusinessUnitMiddleware(db)(fxops.GetMaturityBucketsByCurrencyPair(db)))
+	// Comprehensive FX Ops Dashboard (with filters)
+	mux.Handle("/dash/landingpage/dashboard", api.BusinessUnitMiddleware(db)(landingpage.GetFXOpsDashboard(db)))
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
 	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
