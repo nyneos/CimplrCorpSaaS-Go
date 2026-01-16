@@ -101,6 +101,8 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", api.BusinessUnitMiddleware(db)(fxops.GetMaturityBucketsByCurrencyPair(db)))
 	// Comprehensive FX Ops Dashboard (with filters)
 	mux.Handle("/dash/landingpage/dashboard", api.BusinessUnitMiddleware(db)(landingpage.GetFXOpsDashboard(db)))
+	// Home/Landing dashboard (liquidity + investments + risk)
+	mux.Handle("/dash/landingpage/home", api.BusinessUnitMiddleware(db)(landingpage.GetHomePageDashboard(db)))
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
 	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
