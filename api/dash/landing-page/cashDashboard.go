@@ -100,13 +100,13 @@ ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, 
 		}
 		defer rows.Close()
 
-		type balRow struct{
-			Account string
+		type balRow struct {
+			Account  string
 			Currency string
-			Balance float64
-			Bank string
-			Entity string
-			Country string
+			Balance  float64
+			Bank     string
+			Entity   string
+			Country  string
 		}
 		balRows := []balRow{}
 		for rows.Next() {
@@ -148,6 +148,24 @@ ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, 
 			entitySums[r0.Entity] += v
 			accountSums[r0.Account] += v
 			countrySums[strings.ToUpper(strings.TrimSpace(r0.Country))] += v
+		}
+
+		// Round aggregates to 2 decimals to avoid tiny float artifacts
+		totalINR = math.Round(totalINR*100) / 100
+		for k, v := range currencySums {
+			currencySums[k] = math.Round(v*100) / 100
+		}
+		for k, v := range bankSums {
+			bankSums[k] = math.Round(v*100) / 100
+		}
+		for k, v := range entitySums {
+			entitySums[k] = math.Round(v*100) / 100
+		}
+		for k, v := range accountSums {
+			accountSums[k] = math.Round(v*100) / 100
+		}
+		for k, v := range countrySums {
+			countrySums[k] = math.Round(v*100) / 100
 		}
 
 		// Build KPI responses (string formatting kept simple)
@@ -192,6 +210,7 @@ WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
 			actualInflowsINR += toINR(amt, cur)
 		}
 		inflowRows.Close()
+		actualInflowsINR = math.Round(actualInflowsINR*100) / 100
 
 		// Actual outflows (payables) - approved
 		outflowQ := `SELECT COALESCE(SUM(p.amount),0)::float8 as sum_amount, COALESCE(p.currency_code,'INR') FROM tr_payables p
@@ -213,6 +232,7 @@ WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
 			actualOutflowsINR += toINR(amt, cur)
 		}
 		outflowRows.Close()
+		actualOutflowsINR = math.Round(actualOutflowsINR*100) / 100
 
 		// Forecasts: use cashflow_proposal_item.expected_amount where start_date between
 		forecastQ := `SELECT COALESCE(SUM(i.expected_amount),0)::float8 as sum_amount, COALESCE(p.currency_code,'INR')
@@ -238,14 +258,17 @@ AND (
 			forecastTotalINR += toINR(amt, cur)
 		}
 		frows.Close()
+		forecastTotalINR = math.Round(forecastTotalINR*100) / 100
 
 		// Build Forecast KPI set similar to mockForecastKPIs
+		projectedClosing := math.Round((totalINR + (actualInflowsINR - actualOutflowsINR)) * 100) / 100
+		liquidityGap := math.Round(math.Abs(projectedClosing - totalINR) * 100) / 100
 		forecastKPIs := []map[string]interface{}{
 			{"title": "Current Balance", "value": totalINR},
 			{"title": "Projected Inflows", "value": actualInflowsINR},
 			{"title": "Projected Outflows", "value": actualOutflowsINR},
-			{"title": "Projected Closing", "value": totalINR + (actualInflowsINR - actualOutflowsINR)},
-			{"title": "Liquidity Gap", "value": math.Abs((totalINR + actualInflowsINR - actualOutflowsINR) - totalINR)},
+			{"title": "Projected Closing", "value": projectedClosing},
+			{"title": "Liquidity Gap", "value": liquidityGap},
 		}
 
 		// Build pie datasets
@@ -273,7 +296,9 @@ AND (
 		}
 		countryStatement := []StatementRow{}
 		for k, v := range countrySums {
-			if k == "" { k = "Unknown" }
+			if k == "" {
+				k = "Unknown"
+			}
 			countryStatement = append(countryStatement, StatementRow{Title: k, Inflow: v})
 		}
 		accountStatement := []StatementRow{}
