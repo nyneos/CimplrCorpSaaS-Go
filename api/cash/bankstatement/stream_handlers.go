@@ -343,7 +343,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 			"id":     id,
 			"status": "uploaded",
 		}
-		
+
 		// Copy all fields from AI response
 		for key, value := range aiResponse {
 			combinedResponse[key] = value

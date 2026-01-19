@@ -395,11 +395,62 @@ func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, en
 	args := []interface{}{dateStr}
 	filter := ""
 	if len(entities) > 0 {
-		filter = " AND mec.entity_name = ANY($2)"
+		// tolerate both entity names and entity IDs passed in 'entities'
+		filter = " AND (mec.entity_name = ANY($2) OR mba.entity_id = ANY($2))"
 		args = append(args, pqStringArray(entities))
 	}
 
-	// Mirror GetApprovedBankBalances: only approved balances, closing_balance, and non-deleted accounts.
+	// Prefer bank_statements (approved, latest per account) to match dashboard queries
+	bsArgs := []interface{}{dateStr}
+	bsFilter := ""
+	if len(entities) > 0 {
+		// accept either entity names or entity IDs from context
+		bsFilter = " AND (me.entity_name = ANY($2) OR mba.entity_id = ANY($2))"
+		bsArgs = append(bsArgs, pqStringArray(entities))
+	}
+
+	bsQuery := fmt.Sprintf(`
+		WITH latest_approved AS (
+			SELECT s.account_number, MAX(s.statement_period_end) AS maxdate
+			FROM cimplrcorpsaas.bank_statements s
+			JOIN (
+				SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status, requested_at
+				FROM cimplrcorpsaas.auditactionbankstatement
+				ORDER BY bankstatementid, requested_at DESC
+			) a ON a.bankstatementid = s.bank_statement_id
+			WHERE a.processing_status = 'APPROVED'
+			GROUP BY s.account_number
+		)
+		SELECT COALESCE(SUM(s.closing_balance),0)::float8 AS sum_amt, COALESCE(mba.currency,'INR') as currency_code
+		FROM cimplrcorpsaas.bank_statements s
+		JOIN latest_approved la ON la.account_number = s.account_number AND la.maxdate = s.statement_period_end
+		JOIN masterbankaccount mba ON s.account_number = mba.account_number
+		JOIN masterentitycash me ON mba.entity_id = me.entity_id
+		WHERE mba.is_deleted = false AND s.statement_period_end <= $1 %s
+		GROUP BY mba.currency`, bsFilter)
+
+	bsRows, err := db.QueryContext(ctx, bsQuery, bsArgs...)
+	if err != nil {
+		return 0, err
+	}
+	defer bsRows.Close()
+
+	var total float64
+	for bsRows.Next() {
+		var amt float64
+		var cur string
+		if err := bsRows.Scan(&amt, &cur); err != nil {
+			return 0, err
+		}
+		total += convertToINR(amt, cur)
+	}
+
+	// Fallback: if no results from bank_statement, fall back to manual balances (existing logic)
+	if total > 0 {
+		return total, nil
+	}
+
+	// Fallback query: latest approved in bank_balances_manual
 	query := fmt.Sprintf(`SELECT closing_balance, COALESCE(currency_code,'INR') FROM (
 		WITH latest_approved_balance AS (
 			SELECT DISTINCT ON (balance_id) balance_id, processing_status
@@ -424,45 +475,10 @@ func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, en
 	}
 	defer rows.Close()
 
-	var total float64
 	for rows.Next() {
 		var amt float64
 		var cur string
 		if err := rows.Scan(&amt, &cur); err != nil {
-			return 0, err
-		}
-		total += convertToINR(amt, cur)
-	}
-	rows.Close()
-
-	// Fallback: use approved bank_statement closing balances when manual table is empty or too small.
-	if total > 0 {
-		return total, nil
-	}
-
-	bsArgs := []interface{}{dateStr}
-	bsFilter := ""
-	if len(entities) > 0 {
-		bsFilter = " AND me.entity_name = ANY($2)"
-		bsArgs = append(bsArgs, pqStringArray(entities))
-	}
-
-	bsQuery := fmt.Sprintf(`SELECT COALESCE(SUM(bs.closingbalance),0)::float8, COALESCE(bs.currency_code,'INR')
-		FROM bank_statement bs
-		JOIN masterentity me ON bs.entityid = me.entity_id
-		WHERE bs.status = 'Approved' AND bs.statementdate <= $1%s
-		GROUP BY bs.currency_code`, bsFilter)
-
-	bsRows, err := db.QueryContext(ctx, bsQuery, bsArgs...)
-	if err != nil {
-		return 0, err
-	}
-	defer bsRows.Close()
-
-	for bsRows.Next() {
-		var amt float64
-		var cur string
-		if err := bsRows.Scan(&amt, &cur); err != nil {
 			return 0, err
 		}
 		total += convertToINR(amt, cur)
