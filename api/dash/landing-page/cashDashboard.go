@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"log"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -331,29 +332,37 @@ AND (
 			arq := `SELECT COALESCE(SUM(invoice_amount),0)::float8, COALESCE(currency_code,'INR') FROM tr_receivables r
 JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
 WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
-			arrows, _ := pgxPool.Query(ctx, arq, wsStr, weStr)
-			for arrows.Next() {
-				var amt float64
-				var cur string
-				if err := arrows.Scan(&amt, &cur); err == nil {
-					aIn += toINR(amt, cur)
+			arrows, err := pgxPool.Query(ctx, arq, wsStr, weStr)
+			if err != nil {
+				log.Printf("[WARN] cashDashboard actual inflow query failed for %s - %s: %v", wsStr, weStr, err)
+			} else {
+				for arrows.Next() {
+					var amt float64
+					var cur string
+					if err := arrows.Scan(&amt, &cur); err == nil {
+						aIn += toINR(amt, cur)
+					}
 				}
+				arrows.Close()
 			}
-			arrows.Close()
 
 			// actual outflow
 			aoq := `SELECT COALESCE(SUM(amount),0)::float8, COALESCE(currency_code,'INR') FROM tr_payables p
 JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
 WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
-			arows2, _ := pgxPool.Query(ctx, aoq, wsStr, weStr)
-			for arows2.Next() {
-				var amt float64
-				var cur string
-				if err := arows2.Scan(&amt, &cur); err == nil {
-					aOut += toINR(amt, cur)
+			arows2, err := pgxPool.Query(ctx, aoq, wsStr, weStr)
+			if err != nil {
+				log.Printf("[WARN] cashDashboard actual outflow query failed for %s - %s: %v", wsStr, weStr, err)
+			} else {
+				for arows2.Next() {
+					var amt float64
+					var cur string
+					if err := arows2.Scan(&amt, &cur); err == nil {
+						aOut += toINR(amt, cur)
+					}
 				}
+				arows2.Close()
 			}
-			arows2.Close()
 
 			// forecast inflow/outflow from cashflow_proposal_item.start_date
 			var fIn, fOut float64
@@ -365,16 +374,20 @@ AND (
   SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY a.requested_at DESC LIMIT 1
 ) = 'APPROVED'
 GROUP BY p.currency_code`
-			frows2, _ := pgxPool.Query(ctx, fq, wsStr, weStr)
-			for frows2.Next() {
-				var infl, outf float64
-				var cur string
-				if err := frows2.Scan(&infl, &outf, &cur); err == nil {
-					fIn += toINR(infl, cur)
-					fOut += toINR(outf, cur)
+			frows2, err := pgxPool.Query(ctx, fq, wsStr, weStr)
+			if err != nil {
+				log.Printf("[WARN] cashDashboard forecast query failed for %s - %s: %v", wsStr, weStr, err)
+			} else {
+				for frows2.Next() {
+					var infl, outf float64
+					var cur string
+					if err := frows2.Scan(&infl, &outf, &cur); err == nil {
+						fIn += toINR(infl, cur)
+						fOut += toINR(outf, cur)
+					}
 				}
+				frows2.Close()
 			}
-			frows2.Close()
 
 			weeks = append(weeks, map[string]interface{}{
 				"week":             ws.Format("Jan 2") + " - " + we.Format("Jan 2"),

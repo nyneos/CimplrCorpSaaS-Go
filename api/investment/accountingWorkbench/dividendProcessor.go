@@ -14,12 +14,14 @@ func ProcessDividendReinvestment(ctx context.Context, tx DBExecutor, activityID 
 	log.Printf("[DEBUG DIVIDEND] ProcessDividendReinvestment called for activity: %s", activityID)
 
 	// First, check ALL dividends for this activity (debugging)
-	debugRows, _ := tx.Query(ctx, `
+	debugRows, err := tx.Query(ctx, `
 		SELECT dividend_id, transaction_type, dividend_amount, reinvest_nav, reinvest_units
 		FROM investment.accounting_dividend
 		WHERE activity_id = $1
 	`, activityID)
-	if debugRows != nil {
+	if err != nil {
+		log.Printf("[DEBUG DIVIDEND] debug query failed: %v", err)
+	} else {
 		for debugRows.Next() {
 			var did, ttype string
 			var amt, nav, units float64

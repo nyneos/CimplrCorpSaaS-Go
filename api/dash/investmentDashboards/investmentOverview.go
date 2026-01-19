@@ -532,10 +532,13 @@ func fetchRawTransactionDetails(ctx context.Context, pgxPool *pgxpool.Pool, enti
 		LEFT JOIN investment.amfi_scheme_master_staging asm ON asm.scheme_code::text = ms.amfi_scheme_code::text
 		LEFT JOIN latest_nav ln ON ln.scheme_code = COALESCE(ms.amfi_scheme_code::text, asm.scheme_code::text)
 		WHERE ot.transaction_date >= $1
+		  AND ($2::text IS NULL OR COALESCE(ot.entity_name,'') = $2)
+		  AND ($3::text[] IS NULL OR COALESCE(ot.entity_name,'') = ANY($3))
 		ORDER BY ot.transaction_date DESC, ot.entity_name, ot.amount DESC
 	`
 
-	rows, err := pgxPool.Query(ctx, query, fromDate)
+	// Pass entity filters the same way other queries do to ensure consistent results
+	rows, err := pgxPool.Query(ctx, query, fromDate, nullIfEmpty(entityFilter), allowedEntities)
 	if err != nil {
 		log.Printf("[investmentOverview] fetchRawTransactionDetails query error: %v", err)
 		return []TransactionDetail{}
@@ -1022,13 +1025,16 @@ func GetConsolidatedRisk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		aumDetails := fetchAUMDetailsWithRisk(ctx, pgxPool, entityFilter, allowedEntities)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"lcr":              out.LCR,
-			"total_value":      out.TotalValue,
-			"low_value":        out.LowValue,
-			"medium_value":     out.MediumValue,
-			"high_value":       out.HighValue,
-			"generated_at":     out.GeneratedAt,
-			"portfolio_detail": aumDetails,
+			"rows": map[string]interface{}{
+				"generated_at":     out.GeneratedAt,
+				"high_value":       out.HighValue,
+				"lcr":              out.LCR,
+				"low_value":        out.LowValue,
+				"medium_value":     out.MediumValue,
+				"portfolio_detail": aumDetails,
+				"total_value":      out.TotalValue,
+			},
+			"success": true,
 		})
 	}
 }
@@ -1645,11 +1651,14 @@ func GetAUMCompositionTrend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		aumDetails := fetchAUMDetails(ctx, pgxPool, entityFilter, allowedEntities)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"rows":             outRows,
-			"amc_names":        amcNames,
-			"portfolio_detail": aumDetails,
-			"fy_label":         fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100),
-			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+			"rows": map[string]interface{}{
+				"amc_names":        amcNames,
+				"fy_label":         fmt.Sprintf(constants.FormatFiscalYear, req.Year, (req.Year+1)%100),
+				"generated_at":     time.Now().UTC().Format(time.RFC3339),
+				"portfolio_detail": aumDetails,
+				"rows":             outRows,
+			},
+			"success": true,
 		})
 	}
 }
