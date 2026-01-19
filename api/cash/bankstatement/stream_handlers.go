@@ -213,6 +213,8 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
+		log.Printf("[BANK-PREVIEW] /cash/preview start: remote=%s method=%s", r.RemoteAddr, r.Method)
+
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
 			http.Error(w, "failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
@@ -227,9 +229,15 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		// Detect file type by extension and route to appropriate handler
 		fh := r.MultipartForm.File["file"][0]
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
+		log.Printf("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
+		// try to log user_id field if present
+		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
+			log.Printf("[BANK-PREVIEW] user_id=%s", vals[0])
+		}
 		// Accept PDF and DOCX for streaming to external AI parser; others go to V2
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
+			log.Printf("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
 			h := UploadBankStatementV2Handler(db)
 			h.ServeHTTP(w, r)
 			return
@@ -287,10 +295,13 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 
 		// Proxy to fin-pdf-upload and get the complete response
 		finURL := os.Getenv("FIN_PDF_UPLOAD_URL")
+
+		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service: fin_url=%s", finURL)
 		if finURL == "" {
 			finURL = "https://fin-pdf-upload.onrender.com/parse/stream"
 		}
 
+		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service: fin_url=%s", finURL)
 		// Build multipart/form-data body with field name `pdf` (file)
 		var b bytes.Buffer
 		mw := multipart.NewWriter(&b)
