@@ -3,11 +3,11 @@ package landingpage
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"strings"
 	"time"
-	"log"
 
 	"CimplrCorpSaas/api/constants"
 
@@ -262,8 +262,8 @@ AND (
 		forecastTotalINR = math.Round(forecastTotalINR*100) / 100
 
 		// Build Forecast KPI set similar to mockForecastKPIs
-		projectedClosing := math.Round((totalINR + (actualInflowsINR - actualOutflowsINR)) * 100) / 100
-		liquidityGap := math.Round(math.Abs(projectedClosing - totalINR) * 100) / 100
+		projectedClosing := math.Round((totalINR+(actualInflowsINR-actualOutflowsINR))*100) / 100
+		liquidityGap := math.Round(math.Abs(projectedClosing-totalINR)*100) / 100
 		forecastKPIs := []map[string]interface{}{
 			{"title": "Current Balance", "value": totalINR},
 			{"title": "Projected Inflows", "value": actualInflowsINR},
