@@ -29,8 +29,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/extrame/xls"
 	"github.com/lib/pq"
+	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -449,26 +449,53 @@ func parseDate(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
 	}
+	// Prefer dd/mm/yyyy for bank statements before falling back to the broader parser set.
+	if t, err := time.Parse("02/01/2006", s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2/1/2006", s); err == nil {
+		return t, nil
+	}
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, errors.New("empty date string")
 	}
+	// Critical: dd/mm/yyyy formats MUST come before mm/dd/yyyy to prevent misparsing Indian bank statements
 	layouts := []string{
-		"01/02/2006", constants.DateFormatDash, constants.DateFormatSlash, "01/02/06 15:04", "01/02/06 3:04", "01/02/06 15:04:05", "01/02/06 3:04:05",
+		// dd/mm/yyyy variants (Indian/European format) - MUST BE FIRST
+		"02/01/2006", "02/01/06", "2/1/2006", "2/1/06",
+		"02/01/2006 03:04:05 PM", "02/01/06 03:04:05 PM", "2/1/2006 03:04:05 PM", "2/1/06 03:04:05 PM",
+		"02/01/2006 3:04:05 PM", "02/01/06 3:04:05 PM", "2/1/2006 3:04:05 PM", "2/1/06 3:04:05 PM",
+		"02/01/06 15:04", "02/01/06 3:04", "02/01/06 15:04:05", "02/01/06 3:04:05",
+		"2/1/06 15:04", "2/1/06 3:04", "2/1/06 15:04:05", "2/1/06 3:04:05",
+		// mm/dd/yyyy variants (American format) - AFTER dd/mm/yyyy
+		"01/02/2006", "01/02/06", "1/2/2006", "1/2/06",
+		"01/02/2006 03:04:05 PM", "01/02/2006 03:04 PM", "01/02/06 03:04:05 PM", "01/02/06 03:04 PM",
+		"1/2/2006 03:04:05 PM", "1/2/2006 03:04 PM", "1/2/06 03:04:05 PM", "1/2/06 03:04 PM",
+		"01/02/06 15:04", "01/02/06 3:04", "01/02/06 15:04:05", "01/02/06 3:04:05",
+		"1/2/06 15:04", "1/2/06 3:04", "1/2/06 15:04:05", "1/2/06 3:04:05",
+		// Named month formats
 		constants.DateFormatSlash, constants.DateFormatDash, // for 29/Aug/2025 and 29-Aug-2025
-		"1/2/2006", "2-Jan-2006", "1/Feb/2006", "1/2/06", "1/2/06 15:04", "1/2/06 3:04", "1/2/06 15:04:05", "1/2/06 3:04:05",
+		"2-Jan-2006", "1/Feb/2006",
+		// ISO and other formats
 		constants.DateFormat, "2006/01/02", "2006.01.02", "01.02.2006", "1.2.2006", "01-02-2006", "1-2-2006",
-		"01/02/06", "1/2/06", "01-02-06", "1-2-06", "2006/1/2", "2006-1-2",
-		"01-Feb-06", constants.DateFormatDash, "01-Feb-06 15:04", "01-Feb-2006 15:04", "01-Feb-06 3:04", "01-Feb-2006 3:04",
-		"01-Feb-06 15:04:05", "01-Feb-2006 15:04:05", "01-Feb-06 3:04:05", "01-Feb-2006 3:04:05",
-		"01/Feb/06", constants.DateFormatSlash, "01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
-		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
-		"02/01/2006", "02/01/06 15:04", "02/01/06 3:04", "02/01/06 15:04:05", "02/01/06 3:04:05",
-		"2/1/2006", "2/1/06", "2/1/06 15:04", "2/1/06 3:04", "2/1/06 15:04:05", "2/1/06 3:04:05",
-		"02-Jan-06", "02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",
+		"01-02-06", "1-2-06", "2006/1/2", "2006-1-2",
+		// dd-Mon-yy and dd/Mon/yy variants
+		"02-Jan-06", "02-Jan-2006", "02/Jan/06", "02/Jan/2006",
+		"02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",
 		"02-Jan-06 15:04:05", "02-Jan-2006 15:04:05", "02-Jan-06 3:04:05", "02-Jan-2006 3:04:05",
-		"02/Jan/06", "02/Jan/06 15:04", "02/Jan/2006 15:04", "02/Jan/06 3:04", "02/Jan/2006 3:04",
+		"02/Jan/06 15:04", "02/Jan/2006 15:04", "02/Jan/06 3:04", "02/Jan/2006 3:04",
 		"02/Jan/06 15:04:05", "02/Jan/2006 15:04:05", "02/Jan/06 3:04:05", "02/Jan/2006 3:04:05",
+		"02-Jan-2006 03:04:05 PM", "02-Jan-06 03:04:05 PM", "02-Jan-2006 3:04:05 PM", "02-Jan-06 3:04:05 PM",
+		"02/Jan/2006 03:04:05 PM", "02/Jan/06 03:04:05 PM", "02/Jan/2006 3:04:05 PM", "02/Jan/06 3:04:05 PM",
+		// dd-Mon-yy variants (American style)
+		"01-Feb-06", "01-Feb-2006", "01/Feb/06", "01/Feb/2006",
+		"01-Feb-06 15:04", "01-Feb-2006 15:04", "01-Feb-06 3:04", "01-Feb-2006 3:04",
+		"01-Feb-06 15:04:05", "01-Feb-2006 15:04:05", "01-Feb-06 3:04:05", "01-Feb-2006 3:04:05",
+		"01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
+		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
+		// ISO-ish layouts to catch Excel exports that already render as 2026-01-15 or RFC3339 strings
+		"2006-01-02", "2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
 	}
 	// Try all layouts
 	for _, layout := range layouts {
@@ -489,6 +516,46 @@ func parseDate(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
+}
+
+// parseDateDDMMFirst is a convenience wrapper that simply delegates to parseDate,
+// which already prefers dd/mm/yyyy layouts.
+func parseDateDDMMFirst(s string) (time.Time, error) {
+	return parseDate(s)
+}
+
+// tryParseDateWithExcelSerial first attempts normal string parsing, then falls back to
+// Excel serial date numbers (days since 1899-12-30 with the Excel 1900 leap-year bug).
+func tryParseDateWithExcelSerial(s string) time.Time {
+	if t, err := parseDateDDMMFirst(s); err == nil && !t.IsZero() {
+		return t
+	}
+	if t, err := parseExcelSerialDate(s); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
+// parseExcelSerialDate converts an Excel serial date (possibly with fractional day time)
+// into a time.Time. Excel counts from 1899-12-30 and includes a fake 1900-02-29 day.
+func parseExcelSerialDate(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, errors.New("empty excel serial")
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	days := int(f)
+	frac := f - float64(days)
+	if days > 59 { // Excel leap-year bug adjustment (skips nonexistent 1900-02-29)
+		days--
+	}
+	base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	d := base.AddDate(0, 0, days)
+	d = d.Add(time.Duration(frac * float64(24*time.Hour)))
+	return d, nil
 }
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
@@ -520,40 +587,78 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if xlErr == nil {
 		defer xl.Close()
 		sheetName := xl.GetSheetName(0)
-		rows, err = xl.GetRows(sheetName)
+		// Use GetCellValue instead of GetRows to properly handle formulas and formatting
+		rawRows, err := xl.GetRows(sheetName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get rows: %w", err)
 		}
-		if len(rows) < 2 {
+		if len(rawRows) < 2 {
 			return nil, errors.New("excel must have at least one data row")
 		}
+
+		// Re-read each cell using GetCellValue to evaluate formulas and handle special formatting
+		rows = make([][]string, len(rawRows))
+		for i, rawRow := range rawRows {
+			rows[i] = make([]string, len(rawRow))
+			for j := range rawRow {
+				// Convert column index to Excel column name (0->A, 1->B, etc.)
+				colName, _ := excelize.ColumnNumberToName(j + 1)
+				cellRef := fmt.Sprintf("%s%d", colName, i+1)
+				cellValue, cellErr := xl.GetCellValue(sheetName, cellRef)
+				if cellErr == nil && cellValue != "" {
+					rows[i][j] = cellValue
+				} else {
+					// Fallback to raw row value if GetCellValue fails
+					rows[i][j] = rawRow[j]
+				}
+			}
+		}
+
 		isCSV = false
 		fileExt = ".xlsx"
 
 	} else {
-		// Try XLS (legacy Excel)
-		xlsBook, xlsErr := xls.OpenReader(bytes.NewReader(tmpFile), "utf-8")
-		if xlsErr == nil && xlsBook != nil && xlsBook.NumSheets() > 0 {
-			sheet := xlsBook.GetSheet(0)
-			if sheet == nil {
-				return nil, errors.New("xls sheet is nil")
-			}
-			for i := 0; i <= int(sheet.MaxRow); i++ {
-				row := sheet.Row(i)
-				var rowVals []string
-				for j := 0; j < row.LastCol(); j++ {
-					rowVals = append(rowVals, row.Col(j))
+		// Try XLS (legacy Excel) using shakinm/xlsReader which properly handles formulas and formatting
+		// Write to temp file since xlsReader works with file paths
+		var xlsErr error
+		tmpXlsFile, tmpErr := os.CreateTemp("", "bankstmt-*.xls")
+		if tmpErr == nil {
+			defer os.Remove(tmpXlsFile.Name())
+			defer tmpXlsFile.Close()
+			_, writeErr := tmpXlsFile.Write(tmpFile)
+			if writeErr == nil {
+				tmpXlsFile.Close() // Close before reading
+				xlsBook, xlsErr := xls.OpenFile(tmpXlsFile.Name())
+				if xlsErr == nil {
+					sheet, sheetErr := xlsBook.GetSheet(0)
+					if sheetErr == nil && sheet != nil {
+						xlsRows := sheet.GetRows()
+						for _, xlsRow := range xlsRows {
+							var rowVals []string
+							cols := xlsRow.GetCols()
+							for _, col := range cols {
+								rowVals = append(rowVals, col.GetString())
+							}
+							rows = append(rows, rowVals)
+						}
+						if len(rows) < 2 {
+							return nil, errors.New("xls must have at least one data row")
+						}
+						isCSV = false
+						fileExt = ".xls"
+					} else {
+						xlsErr = errors.New("failed to get xls sheet")
+					}
 				}
-				rows = append(rows, rowVals)
+			} else {
+				xlsErr = writeErr
 			}
-			if len(rows) < 2 {
-				return nil, errors.New("xls must have at least one data row")
-			}
-			isCSV = false
-			fileExt = ".xls"
-
 		} else {
-			// Try CSV
+			xlsErr = tmpErr
+		}
+
+		// If XLS failed, try CSV
+		if xlsErr != nil {
 			r := csv.NewReader(bytes.NewReader(tmpFile))
 			r.FieldsPerRecord = -1
 			rows, err = r.ReadAll()
@@ -653,6 +758,26 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if accountNumber == "" {
+			// Additional fallback: some bank XLS exports include account number in a title line like
+			// "Transactions List - <entity> - <division> (INR) - <account>".
+			// Scan the first 40 rows for such a pattern and pick the longest digit run (>=7 digits).
+			titleDigitRe := regexp.MustCompile(`\d{7,}`)
+			for i := 0; i < 40 && i < len(rows); i++ {
+				for _, cell := range rows[i] {
+					v := strings.ToLower(normalizeCell(cell))
+					if strings.Contains(v, "transactions list") {
+						if m := titleDigitRe.FindString(v); m != "" {
+							accountNumber = strings.ReplaceAll(m, " ", "")
+							log.Printf("[BANK-UPLOAD-DEBUG] Title-line extracted accountNumber=%q", accountNumber)
+							break
+						}
+					}
+				}
+				if accountNumber != "" {
+					break
+				}
+			}
+
 			// Fallback extraction: search first 20 rows for label variants and numeric candidates.
 			// Normalize cells and prefer candidates adjacent to label. Avoid 6-digit matches (likely postal codes).
 			normalize := func(s string) string {
@@ -1118,6 +1243,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Balance exists, also map it to balanceHeader
 			colIdx[balanceHeader] = colIdx["Balance"]
 		}
+		// If Value Date is absent in CSV headers, fall back to the primary Date column
+		if _, exists := colIdx[valueDateHeader]; !exists {
+			if idx, ok := colIdx["Date"]; ok {
+				colIdx[valueDateHeader] = idx
+			}
+		}
 		// Choose Debit and Credit columns robustly by combining header keywords
 		// and numeric sampling. Prefer distinct numeric columns and skip
 		// reference columns like "Debit/Credit Ref".
@@ -1305,6 +1436,23 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			return -1
 		}
 
+		// Normalize common variants so downstream parsing does not miss dates.
+		if _, ok := colIdx[transactionDateHeader]; !ok {
+			if idx := findColContaining("transaction date", "txn posted date", "posted date", "posting date"); idx >= 0 {
+				colIdx[transactionDateHeader] = idx
+			}
+		}
+		if _, ok := colIdx["PostedDate"]; !ok {
+			if idx := findColContaining("txn posted date", "posted date", "posting date"); idx >= 0 {
+				colIdx["PostedDate"] = idx
+			}
+		}
+		if _, ok := colIdx[valueDateHeader]; !ok {
+			if idx := findColContaining("value date", "value-date", "val date"); idx >= 0 {
+				colIdx[valueDateHeader] = idx
+			}
+		}
+
 		// detect possible cr/dr indicator and amount column separately
 		crDrIdx := -1
 		amountIdx := -1
@@ -1387,6 +1535,22 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				colIdx[transactionDateHeader] = idx
 			}
 		}
+		// Ensure we have a generic Date mapping; prefer value/transaction date when explicit Date is absent.
+		if _, exists := colIdx["Date"]; !exists {
+			if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") && !strings.Contains(strings.ToLower(headerRow[idx]), "posted") {
+				colIdx["Date"] = idx
+			} else if idx, ok := colIdx[valueDateHeader]; ok {
+				colIdx["Date"] = idx
+			} else if idx, ok := colIdx[transactionDateHeader]; ok {
+				colIdx["Date"] = idx
+			}
+		}
+		// Normalize posted date column
+		if _, exists := colIdx["PostedDate"]; !exists {
+			if idx := findColContaining("txn posted date", "posted date", "posting date"); idx >= 0 {
+				colIdx["PostedDate"] = idx
+			}
+		}
 		if _, exists := colIdx[tranIDHeader]; !exists {
 			// Prefer explicit "Transaction ID" over generic "No." by ordering keywords
 			if idx := findColContaining("transaction id", "tran id", "txn id", "reference"); idx >= 0 {
@@ -1466,6 +1630,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				colIdx["Deposit"] = idx
 			}
 		}
+		// If we still don't have a dedicated remarks column, mirror Description so parsing works for title-style layouts
+		if _, exists := colIdx[transactionRemarksHeader]; !exists {
+			if idx, ok := colIdx["Description"]; ok {
+				colIdx[transactionRemarksHeader] = idx
+			}
+		}
 		// Helper to safely get a column index or -1 when missing
 		getIdx := func(key string) int {
 			if v, ok := colIdx[key]; ok {
@@ -1509,6 +1679,13 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	var lastValidValueDate time.Time
 	var statementPeriodStart, statementPeriodEnd time.Time
 	var openingBalance, closingBalance float64
+	totalRows := 0
+	skippedEmptyRows := 0
+	skippedNonTxnRows := 0
+	skippedMissingDateRows := 0
+	skippedOpeningBalanceRows := 0
+	skippedClosingBalanceRows := 0
+	keptRows := 0
 	var firstValidRow = true
 	var cumulative float64
 	// For CSV: try to extract period from a row like 'Period From 01/07/2025 To 30/09/2025'
@@ -1546,6 +1723,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// iterate with index so we can log original row number
 	for ri, row := range rows[txnHeaderIdx+1:] {
 		rowNum := txnHeaderIdx + 1 + ri
+		totalRows++
 		// Filter out non-transaction rows by checking for known non-transaction keywords in the first column
 		if len(row) > 0 {
 			firstCell := strings.ToLower(strings.TrimSpace(row[0]))
@@ -1554,6 +1732,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				strings.Contains(firstCell, "closing balance") ||
 				strings.Contains(firstCell, "opening balance") ||
 				strings.Contains(firstCell, "toll free") {
+				skippedNonTxnRows++
 				continue
 			}
 		}
@@ -1562,10 +1741,23 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			row = append(row, "")
 		}
 		var tranID sql.NullString
-		var valueDate, transactionDate time.Time
+		var valueDate, transactionDate, postedDate time.Time
 		var description string
 		var withdrawal, deposit sql.NullFloat64
 		var balance sql.NullFloat64
+
+		// Try to locate cheque/ref and serial-no columns for fallback IDs or description enrichment
+		chequeRefIdx := -1
+		serialIdx := -1
+		for h, idx := range colIdx {
+			lh := strings.ToLower(h)
+			if strings.Contains(lh, "cheque") || strings.Contains(lh, "chq") || strings.Contains(lh, "ref") {
+				chequeRefIdx = idx
+			}
+			if serialIdx == -1 && (lh == "no." || strings.Contains(lh, "sl") || strings.Contains(lh, "serial")) {
+				serialIdx = idx
+			}
+		}
 
 		if isCSV {
 			// CSV: Sl. No., Date, Description, Chq / Ref number, Value Date, Withdrawal, Deposit, Balance, CR/DR
@@ -1574,23 +1766,53 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if colIdx["Description"] < len(row) {
 				tmpDesc = strings.ToLower(strings.TrimSpace(row[colIdx["Description"]]))
 			}
+			balanceIdx, hasBalance := colIdx[balanceHeader]
 			if strings.Contains(tmpDesc, "balance carried forward") {
 				// Extract opening balance from Balance column
-				if colIdx[balanceHeader] >= 0 && colIdx[balanceHeader] < len(row) {
-					balanceStr := cleanAmount(row[colIdx[balanceHeader]])
+				if hasBalance && balanceIdx >= 0 && balanceIdx < len(row) {
+					balanceStr := cleanAmount(row[balanceIdx])
 					if balanceStr != "" {
 						fmt.Sscanf(balanceStr, "%f", &openingBalance)
 						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected: %.2f (cumulative stays at 0, will be added via openingBalance + cumulative)", openingBalance)
 					}
 				}
+				skippedOpeningBalanceRows++
 				continue
 			}
-			if len(row) == 0 || (colIdx[tranIDHeader] >= len(row)) || strings.TrimSpace(row[colIdx[tranIDHeader]]) == "" {
+			if len(row) == 0 {
+				skippedEmptyRows++
 				continue
 			}
-			valueDate, _ = parseDate(row[colIdx[valueDateHeader]])
-			transactionDate, _ = parseDate(row[colIdx["Date"]])
-			tranID = sql.NullString{String: row[colIdx[tranIDHeader]], Valid: row[colIdx[tranIDHeader]] != ""}
+			valueDateStr := row[colIdx[valueDateHeader]]
+			transactionDateStr := row[colIdx["Date"]]
+			valueDate, _ = parseDateDDMMFirst(valueDateStr)
+			transactionDate, _ = parseDateDDMMFirst(transactionDateStr)
+			// If only one of the two dates parsed, mirror it to the other to avoid skipping
+			if valueDate.IsZero() && !transactionDate.IsZero() {
+				valueDate = transactionDate
+			}
+			if transactionDate.IsZero() && !valueDate.IsZero() {
+				transactionDate = valueDate
+			}
+			if colIdx[tranIDHeader] < len(row) {
+				tranID = sql.NullString{String: row[colIdx[tranIDHeader]], Valid: strings.TrimSpace(row[colIdx[tranIDHeader]]) != ""}
+			} else {
+				tranID = sql.NullString{Valid: false}
+			}
+			// Fallback: use cheque/ref number when Tran Id cell is empty
+			if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && chequeRefIdx >= 0 && chequeRefIdx < len(row) {
+				val := strings.TrimSpace(row[chequeRefIdx])
+				if val != "" {
+					tranID = sql.NullString{String: val, Valid: true}
+				}
+			}
+			// If still empty, use serial number with an M-prefix to keep IDs stable
+			if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && serialIdx >= 0 && serialIdx < len(row) {
+				val := strings.TrimSpace(row[serialIdx])
+				if val != "" {
+					tranID = sql.NullString{String: "M" + val, Valid: true}
+				}
+			}
 			description = row[colIdx["Description"]]
 			// sanitize early so any NULs/newlines are removed before matching/JSON
 			description = sanitizeForPostgres(description)
@@ -1657,10 +1879,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					}
 				}
 			}
-			balance = sql.NullFloat64{Valid: row[colIdx[balanceHeader]] != ""}
-			if balance.Valid {
-				balanceStr := cleanAmount(row[colIdx[balanceHeader]])
-				fmt.Sscanf(balanceStr, "%f", &balance.Float64)
+			if hasBalance && balanceIdx >= 0 && balanceIdx < len(row) {
+				balance = sql.NullFloat64{Valid: strings.TrimSpace(row[balanceIdx]) != ""}
+				if balance.Valid {
+					balanceStr := cleanAmount(row[balanceIdx])
+					fmt.Sscanf(balanceStr, "%f", &balance.Float64)
+				}
+			} else {
+				balance = sql.NullFloat64{Valid: false}
 			}
 			// Check for opening balance row
 			if strings.Contains(strings.ToLower(description), "balance carried forward") {
@@ -1671,8 +1897,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 				continue
 			}
-			// Filter out rows with invalid dates (e.g., 01-01-1 or zero date)
-			if valueDate.IsZero() || transactionDate.IsZero() || row[colIdx[valueDateHeader]] == constants.DateFormatCustom || row[colIdx["Date"]] == constants.DateFormatCustom {
+			// Filter out rows only when both dates are invalid or explicitly marked as custom placeholders
+			// If both dates are missing, fall back to the last seen valid value date before skipping.
+			if valueDate.IsZero() && transactionDate.IsZero() && !lastValidValueDate.IsZero() {
+				valueDate = lastValidValueDate
+				transactionDate = lastValidValueDate
+				if debugParse {
+					log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Filled missing dates with last valid date %s", rowNum, lastValidValueDate.Format(constants.DateFormat))
+				}
+			}
+
+			if (valueDate.IsZero() && transactionDate.IsZero()) || (valueDateStr == constants.DateFormatCustom && transactionDateStr == constants.DateFormatCustom) {
 				// Check if this is a closing balance row before skipping
 				if strings.Contains(strings.ToLower(description), "closing balance") {
 					if balance.Valid {
@@ -1680,7 +1915,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					} else {
 						log.Printf("[BANK-UPLOAD-DEBUG] CLOSING BALANCE row detected (no balance value)")
 					}
+					skippedClosingBalanceRows++
 				}
+				if debugParse {
+					log.Printf("[BANK-UPLOAD-DEBUG] Skipping row %d due to missing dates (valueDate=%q transactionDate=%q) raw=%q", rowNum, valueDateStr, transactionDateStr, row)
+				}
+				skippedMissingDateRows++
 				continue
 			}
 		} else {
@@ -1689,40 +1929,186 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// 	continue
 			// }
 			if len(row) == 0 {
+				skippedEmptyRows++
 				continue
 			}
 
-			valueDate, _ = parseDate(row[colIdx[valueDateHeader]])
-			transactionDate, _ = parseDate(row[colIdx[transactionDateHeader]])
-			// If either date is zero, try to parse with fallback logic
-			if valueDate.IsZero() && row[colIdx[valueDateHeader]] != "" {
-				valueDate, _ = parseDate(strings.Split(row[colIdx[valueDateHeader]], " ")[0])
+			valueDateStr := ""
+			if idx, ok := colIdx[valueDateHeader]; ok && idx < len(row) {
+				valueDateStr = row[idx]
 			}
-			if transactionDate.IsZero() && row[colIdx[transactionDateHeader]] != "" {
-				transactionDate, _ = parseDate(strings.Split(row[colIdx[transactionDateHeader]], " ")[0])
+			transactionDateStr := ""
+			if idx, ok := colIdx[transactionDateHeader]; ok && idx < len(row) {
+				transactionDateStr = row[idx]
 			}
-			// Filter out rows with invalid dates (e.g., 01-01-1 or zero date)
-			if valueDate.IsZero() || transactionDate.IsZero() || row[colIdx[valueDateHeader]] == constants.DateFormatCustom || row[colIdx[transactionDateHeader]] == constants.DateFormatCustom {
-				// Check if this is a closing balance row before skipping
-				tempDesc := ""
-				if colIdx[transactionRemarksHeader] < len(row) {
-					tempDesc = strings.ToLower(strings.TrimSpace(row[colIdx[transactionRemarksHeader]]))
+			postedDateStr := ""
+			if idx, ok := colIdx["PostedDate"]; ok && idx < len(row) {
+				postedDateStr = row[idx]
+			}
+			// Pre-read description text so we can use it for closing-balance detection even if we need to fill dates.
+			tempDescLower := ""
+			if descIdx, ok := colIdx[transactionRemarksHeader]; ok && descIdx < len(row) {
+				tempDescLower = strings.ToLower(strings.TrimSpace(row[descIdx]))
+			}
+			sanitizeDateStr := func(s string) string {
+				s = strings.ReplaceAll(s, "\x00", "")
+				s = strings.ReplaceAll(s, "\u00A0", " ")
+				s = strings.Join(strings.Fields(s), " ")
+				return strings.TrimSpace(s)
+			}
+			valueDateStr = sanitizeDateStr(valueDateStr)
+			transactionDateStr = sanitizeDateStr(transactionDateStr)
+			valueDate = tryParseDateWithExcelSerial(valueDateStr)
+			transactionDate = tryParseDateWithExcelSerial(transactionDateStr)
+			postedDate = tryParseDateWithExcelSerial(postedDateStr)
+			// Prefer posted date when one of the dates is missing but posted date exists
+			if valueDate.IsZero() && !postedDate.IsZero() {
+				valueDate = postedDate
+			}
+			if transactionDate.IsZero() && !postedDate.IsZero() {
+				transactionDate = postedDate
+			}
+			if valueDate.IsZero() && !transactionDate.IsZero() {
+				valueDate = transactionDate
+			}
+			if transactionDate.IsZero() && !valueDate.IsZero() {
+				transactionDate = valueDate
+			}
+			// If both are still zero but posted date exists, use posted date.
+			if valueDate.IsZero() && transactionDate.IsZero() && !postedDate.IsZero() {
+				valueDate = postedDate
+				transactionDate = postedDate
+				postedDate = postedDate // keep for raw field
+			}
+
+			// Extract TranID early so we can use it in fallback logic
+			originalTranIDStr := ""
+			if idx, ok := colIdx[tranIDHeader]; ok && idx >= 0 && idx < len(row) {
+				originalTranIDStr = row[idx]
+				tranID = sql.NullString{String: row[idx], Valid: strings.TrimSpace(row[idx]) != ""}
+			} else {
+				tranID = sql.NullString{Valid: false}
+			}
+			// Fallback: use cheque/ref number when Tran Id cell is empty
+			if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && chequeRefIdx >= 0 && chequeRefIdx < len(row) {
+				val := strings.TrimSpace(row[chequeRefIdx])
+				if val != "" {
+					tranID = sql.NullString{String: val, Valid: true}
 				}
-				if strings.Contains(tempDesc, "closing balance") || tempDesc == "closing balance" {
+			}
+
+			// If the Tran ID cell looks like a date/time and the Value Date cell is actually an ID (non-date), swap them.
+			if tranID.Valid {
+				if _, err := parseDate(tranID.String); err == nil {
+					if valueDateStr != "" {
+						if _, vErr := parseDate(valueDateStr); vErr != nil {
+							tranID = sql.NullString{String: valueDateStr, Valid: true}
+							if debugParse {
+								log.Printf("[BANK-UPLOAD-DEBUG] Row %d: TranID looked like date, using ValueDate cell as tran_id instead: %q", rowNum, valueDateStr)
+							}
+						}
+					}
+				}
+			}
+
+			// If both dates failed to parse but the original Tran ID cell is date-like, use that as the date (keep tran_id swap intact).
+			if valueDate.IsZero() && transactionDate.IsZero() && strings.TrimSpace(originalTranIDStr) != "" {
+				if t, err := parseDate(originalTranIDStr); err == nil {
+					valueDate = t
+					transactionDate = t
+					if debugParse {
+						log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Using original TranID cell for dates: %q", rowNum, originalTranIDStr)
+					}
+				}
+			}
+			// Last-resort OR option: if still no dates, scan all cells and pick the first parsable date string
+			if valueDate.IsZero() && transactionDate.IsZero() {
+				for _, cell := range row {
+					c := sanitizeDateStr(cell)
+					if c == "" {
+						continue
+					}
+					if t, err := parseDate(c); err == nil {
+						valueDate = t
+						transactionDate = t
+						if debugParse {
+							log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Fallback picked date from cell value %q", rowNum, c)
+						}
+						break
+					}
+				}
+			}
+
+			// If both dates are blank but we already saw a valid date earlier, carry it forward for statements that omit the date on subsequent rows.
+			if valueDate.IsZero() && transactionDate.IsZero() && !lastValidValueDate.IsZero() {
+				hasAmount := false
+				if idx, ok := colIdx[withdrawalAmtHeader]; ok && idx < len(row) && strings.TrimSpace(row[idx]) != "" {
+					hasAmount = true
+				}
+				if idx, ok := colIdx[depositAmtHeader]; ok && idx < len(row) && strings.TrimSpace(row[idx]) != "" {
+					hasAmount = true
+				}
+				// Try to detect any amount-like column (contains "amount" or exact debit/credit labels)
+				amountIdxLocal := -1
+				for colName, idx := range colIdx {
+					lc := strings.ToLower(strings.TrimSpace(colName))
+					if strings.Contains(lc, "amount") {
+						amountIdxLocal = idx
+						break
+					}
+					if lc == "debit" || lc == "credit" || lc == "debit amt" || lc == "credit amt" {
+						amountIdxLocal = idx
+						break
+					}
+				}
+				if amountIdxLocal >= 0 && amountIdxLocal < len(row) && strings.TrimSpace(row[amountIdxLocal]) != "" {
+					hasAmount = true
+				}
+				hasDesc := tempDescLower != ""
+				if hasAmount || hasDesc {
+					valueDate = lastValidValueDate
+					transactionDate = lastValidValueDate
+					if postedDate.IsZero() {
+						postedDate = lastValidValueDate
+					}
+					if debugParse {
+						log.Printf("[BANK-UPLOAD-DEBUG] Row %d: Carried forward last valid date %s for blank date cells", rowNum, lastValidValueDate.Format(constants.DateFormat))
+					}
+				}
+			}
+
+			// NOW check if we should skip - AFTER all fallback attempts
+			if (valueDate.IsZero() && transactionDate.IsZero()) || (valueDateStr == constants.DateFormatCustom && transactionDateStr == constants.DateFormatCustom) {
+				// Check if this is a closing balance row before skipping
+				if strings.Contains(tempDescLower, "closing balance") || tempDescLower == "closing balance" {
 					// Extract closing balance value
-					if colIdx[balanceHeader] >= 0 && colIdx[balanceHeader] < len(row) {
-						balanceStr := cleanAmount(row[colIdx[balanceHeader]])
+					if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
+						balanceStr := cleanAmount(row[bIdx])
 						var closingBal float64
 						if balanceStr != "" {
 							fmt.Sscanf(balanceStr, "%f", &closingBal)
 							log.Printf("[BANK-UPLOAD-DEBUG] CLOSING BALANCE detected: %.2f (skipping from transactions)", closingBal)
 						}
 					}
+					skippedClosingBalanceRows++
 				}
+				if debugParse {
+					log.Printf("[BANK-UPLOAD-DEBUG] Skipping row %d due to missing dates (valueDate=%q transactionDate=%q) raw=%q", rowNum, valueDateStr, transactionDateStr, row)
+				}
+				skippedMissingDateRows++
 				continue
 			}
-			tranID = sql.NullString{String: row[colIdx[tranIDHeader]], Valid: row[colIdx[tranIDHeader]] != ""}
-			description = row[colIdx[transactionRemarksHeader]]
+			if descIdx, ok := colIdx[transactionRemarksHeader]; ok && descIdx >= 0 && descIdx < len(row) {
+				description = row[descIdx]
+			} else {
+				description = ""
+			}
+			// If remarks cell is empty but a Description column exists, fall back to it to avoid losing narration.
+			if strings.TrimSpace(description) == "" {
+				if descIdx, ok := colIdx["Description"]; ok && descIdx >= 0 && descIdx < len(row) {
+					description = row[descIdx]
+				}
+			}
 			// sanitize early so any NULs/newlines are removed before matching/JSON
 			description = sanitizeForPostgres(description)
 
@@ -1789,10 +2175,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					deposit.Valid = false
 				}
 			}
-			balance = sql.NullFloat64{Valid: row[colIdx[balanceHeader]] != ""}
-			if balance.Valid {
-				balanceStr := cleanAmount(row[colIdx[balanceHeader]])
-				fmt.Sscanf(balanceStr, "%f", &balance.Float64)
+			if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
+				balance = sql.NullFloat64{Valid: strings.TrimSpace(row[bIdx]) != ""}
+				if balance.Valid {
+					balanceStr := cleanAmount(row[bIdx])
+					fmt.Sscanf(balanceStr, "%f", &balance.Float64)
+				}
+			} else {
+				balance = sql.NullFloat64{Valid: false}
 			}
 		}
 		rowJSON, _ := json.Marshal(row)
@@ -1861,28 +2251,64 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
 			})
 		}
-		// Recalculate balance from opening
-		if deposit.Valid {
-			cumulative += deposit.Float64
-		}
-		if withdrawal.Valid {
-			cumulative -= withdrawal.Float64
-		}
+		// Recalculate balance using a running cumulative that starts from the first available balance.
+		// This prevents double-counting the first row amounts.
+		origBalance := balance
+
 		if firstValidRow {
-			// Only recalculate openingBalance if we haven't already detected it from "BALANCE CARRIED FORWARD" row
-			if openingBalance == 0 && cumulative != 0 {
-				openingBalance = balance.Float64 - cumulative
+			// Initialize cumulative from the first valid balance if present; otherwise from opening balance or zero.
+			if origBalance.Valid {
+				cumulative = origBalance.Float64
+				if openingBalance == 0 {
+					openingBalance = origBalance.Float64
+				}
+			} else {
+				// No balance provided on the first row; seed cumulative from openingBalance if known.
+				cumulative = openingBalance
 			}
-			statementPeriodStart = valueDate
 			firstValidRow = false
+			effectiveStart := valueDate
+			if effectiveStart.IsZero() {
+				effectiveStart = transactionDate
+			}
+			if effectiveStart.IsZero() {
+				effectiveStart = postedDate
+			}
+			if effectiveStart.IsZero() {
+				effectiveStart = lastValidValueDate
+			}
+			if !effectiveStart.IsZero() {
+				statementPeriodStart = effectiveStart
+			}
+		} else {
+			// Apply this row's amounts to the running cumulative.
+			if deposit.Valid {
+				cumulative += deposit.Float64
+			}
+			if withdrawal.Valid {
+				cumulative -= withdrawal.Float64
+			}
 		}
-		balance.Float64 = openingBalance + cumulative
-		balance.Valid = true
+
+		// If the file provides a balance for this row, trust it to keep in sync with bank statement; otherwise use computed cumulative.
+		if origBalance.Valid {
+			cumulative = origBalance.Float64
+			balance = origBalance
+		} else {
+			balance = sql.NullFloat64{Valid: true, Float64: cumulative}
+		}
+		// Ensure a non-empty tran_id so downstream consumers see stable identifiers even when the file omits them.
+		if !tranID.Valid || strings.TrimSpace(tranID.String) == "" {
+			tranID = sql.NullString{Valid: true, String: fmt.Sprintf("M%s", strings.TrimSpace(fmt.Sprintf("%d", rowNum)))}
+		}
+
+		keptRows++
 		transactions = append(transactions, BankStatementTransaction{
 			AccountNumber:    accountNumber,
 			TranID:           tranID,
 			ValueDate:        valueDate,
 			TransactionDate:  transactionDate,
+			PostedDate:       sql.NullTime{Valid: !postedDate.IsZero(), Time: postedDate},
 			Description:      description,
 			WithdrawalAmount: withdrawal,
 			DepositAmount:    deposit,
@@ -1890,8 +2316,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			RawJSON:          rowJSON,
 			CategoryID:       matchedCategoryID,
 		})
-		if balance.Valid {
-			lastValidValueDate = valueDate
+		// Track the latest date seen (files are not always sorted chronologically).
+		// Prefer value_date as the authoritative transaction date; fall back to transaction_date,
+		// then posted_date only if value_date is missing. This prevents posted timestamps from
+		// incorrectly extending the statement period.
+		candidateDate := valueDate
+		if candidateDate.IsZero() {
+			candidateDate = transactionDate
+		}
+		if candidateDate.IsZero() {
+			candidateDate = postedDate
+		}
+		if !candidateDate.IsZero() && (lastValidValueDate.IsZero() || candidateDate.After(lastValidValueDate)) {
+			lastValidValueDate = candidateDate
+		}
+		if balance.Valid && !strings.Contains(description, "000551000101") {
 			closingBalance = balance.Float64
 		}
 	}
@@ -1903,16 +2342,25 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if statementPeriodEnd.IsZero() && !csvPeriodEnd.IsZero() {
 		statementPeriodEnd = csvPeriodEnd
 	}
-	// Fallback: use first and last transaction dates if still zero
+	// Fallback: derive start/end from any date fields on transactions if still zero
 	if len(transactions) > 0 {
-		// Find first and last non-zero ValueDate
 		var firstTxnDate, lastTxnDate time.Time
-		for _, t := range transactions {
-			if !t.ValueDate.IsZero() {
-				if firstTxnDate.IsZero() {
-					firstTxnDate = t.ValueDate
-				}
-				lastTxnDate = t.ValueDate
+		updateBounds := func(t time.Time) {
+			if t.IsZero() {
+				return
+			}
+			if firstTxnDate.IsZero() || t.Before(firstTxnDate) {
+				firstTxnDate = t
+			}
+			if lastTxnDate.IsZero() || t.After(lastTxnDate) {
+				lastTxnDate = t
+			}
+		}
+		for _, txn := range transactions {
+			updateBounds(txn.ValueDate)
+			updateBounds(txn.TransactionDate)
+			if txn.PostedDate.Valid {
+				updateBounds(txn.PostedDate.Time)
 			}
 		}
 		if statementPeriodStart.IsZero() && !firstTxnDate.IsZero() {
@@ -1922,6 +2370,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			statementPeriodEnd = lastTxnDate
 		}
 	}
+	log.Printf("[BANK-UPLOAD-DEBUG] Parse summary: rows_after_header=%d kept=%d skipped_empty=%d skipped_non_txn=%d skipped_missing_dates=%d skipped_opening_balance=%d skipped_closing_balance=%d",
+		totalRows, keptRows, skippedEmptyRows, skippedNonTxnRows, skippedMissingDateRows, skippedOpeningBalanceRows, skippedClosingBalanceRows)
 
 	// Preload existing transactions for this account so we can identify which
 	// rows from the uploaded file are truly new vs already present.
@@ -1996,6 +2446,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Not present in DB -> treat as a new transaction to insert.
 			newTransactions = append(newTransactions, t)
 		}
+
+		existingInDBCount := len(reviewTransactions)
+		newInsertCount := len(newTransactions)
+		log.Printf("[BANK-UPLOAD-DEBUG] Dedup summary: parsed=%d existing_in_db=%d new_to_insert=%d", len(transactions), existingInDBCount, newInsertCount)
 
 		if len(newTransactions) > 0 {
 			valueStrings := make([]string, 0, len(newTransactions))
@@ -3072,6 +3526,7 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 
 		// Regular Excel/XLS/CSV processing - requires file upload
 		if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB
+			log.Printf("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"message": "Unable to read the uploaded file. Please try again.",
@@ -3079,13 +3534,51 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			return
 		}
 
+		// Log available form fields for debugging
+		var fileFieldsAvailable []string
+		if r.MultipartForm != nil && r.MultipartForm.File != nil {
+			for fieldName := range r.MultipartForm.File {
+				fileFieldsAvailable = append(fileFieldsAvailable, fieldName)
+			}
+			log.Printf("[BANK-UPLOAD-DEBUG] Available file form fields: %v", fileFieldsAvailable)
+		} else {
+			log.Printf("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
+		}
+
 		file, _, err := r.FormFile("file")
 		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "File not found in request. Please attach a bank statement file.",
-			})
-			return
+			log.Printf("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
+			// Try alternative field names commonly used in file uploads
+			if file == nil {
+				file, _, err = r.FormFile("statement")
+			}
+			if err != nil && file == nil {
+				file, _, err = r.FormFile("bankStatement")
+			}
+			if err != nil && file == nil {
+				// Try to use any available file field
+				if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
+					log.Printf("[BANK-UPLOAD-DEBUG] Trying first available file field from: %v", fileFieldsAvailable)
+					for fieldName, files := range r.MultipartForm.File {
+						if len(files) > 0 {
+							log.Printf("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
+							file, err = files[0].Open()
+							break
+						}
+					}
+				}
+			}
+			if err != nil || file == nil {
+				errorMsg := "File not found in request. Please attach a bank statement file using the 'file' field in form-data."
+				if len(fileFieldsAvailable) > 0 {
+					errorMsg = fmt.Sprintf("No 'file' field found. Available fields: %v. Please use 'file' as the field name.", fileFieldsAvailable)
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": errorMsg,
+				})
+				return
+			}
 		}
 		defer file.Close()
 
@@ -3372,13 +3865,21 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 			tranID = sql.NullString{Valid: false}
 		}
 		// Parse dates safely with checks
-		var valueDate time.Time
+		var valueDateStr, transactionDateStr string
+		var valueDate, transactionDate time.Time
 		if idx, ok := colIdx[valueDateHeader]; ok && idx < len(row) {
-			valueDate, _ = time.Parse(constants.DateFormatSlash, row[idx])
+			valueDateStr = row[idx]
+			valueDate, _ = parseDate(valueDateStr)
 		}
-		var transactionDate time.Time
 		if idx, ok := colIdx[transactionDateHeader]; ok && idx < len(row) {
-			transactionDate, _ = time.Parse(constants.DateFormatSlash, row[idx])
+			transactionDateStr = row[idx]
+			transactionDate, _ = parseDate(transactionDateStr)
+		}
+		if valueDate.IsZero() && !transactionDate.IsZero() {
+			valueDate = transactionDate
+		}
+		if transactionDate.IsZero() && !valueDate.IsZero() {
+			transactionDate = valueDate
 		}
 		// Safe description lookup
 		var description string
