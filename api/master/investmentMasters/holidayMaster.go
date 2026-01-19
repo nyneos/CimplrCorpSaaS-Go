@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+    "log"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -754,17 +755,22 @@ func UploadHolidayBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// get mapping
 			calMap := map[string]string{}
-			rows, _ := pgxPool.Query(ctx, `
+			rows, err := pgxPool.Query(ctx, `
 				SELECT calendar_code, calendar_id
 				FROM investment.mastercalendar
 				WHERE calendar_code = ANY($1) AND is_deleted=false
 			`, codes)
-			for rows.Next() {
-				var code, id string
-				_ = rows.Scan(&code, &id)
-				calMap[code] = id
+			if err != nil {
+				log.Printf("[WARN] failed to fetch calendar mapping: %v", err)
+			} else {
+				for rows.Next() {
+					var code, id string
+					if err := rows.Scan(&code, &id); err == nil {
+						calMap[code] = id
+					}
+				}
+				rows.Close()
 			}
-			rows.Close()
 
 			// build copy rows
 			tmpRows := make([][]interface{}, 0, len(dataRows))

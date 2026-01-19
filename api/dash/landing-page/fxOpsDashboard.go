@@ -482,8 +482,10 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 	// Check if exposure is hedged
 	hedgedMap := make(map[string]bool)
 	hedgeQuery := `SELECT DISTINCT exposure_header_id FROM exposure_hedge_links WHERE is_active = true`
-	hedgeRows, _ := db.QueryContext(ctx, hedgeQuery)
-	if hedgeRows != nil {
+	hedgeRows, err := db.QueryContext(ctx, hedgeQuery)
+	if err != nil {
+		log.Printf("[WARN] failed to fetch exposure hedges: %v", err)
+	} else {
 		defer hedgeRows.Close()
 		for hedgeRows.Next() {
 			var expID string
