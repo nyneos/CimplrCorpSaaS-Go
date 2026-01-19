@@ -9,6 +9,7 @@ import (
 	"CimplrCorpSaas/api/cash/projection"
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/travel"
 	"context"
 	"database/sql"
 	"fmt"
@@ -118,6 +119,11 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-balances/all", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/upload", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/update", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UpdateBankBalance(pgxPool)))
+
+	// Travel package endpoints
+	mux.Handle("/cash/package/create", (travel.CreatePackageHandler(db)))
+	mux.Handle("/cash/package", (travel.GetPackageHandler(db)))
+	mux.Handle("/cash/package/delete", (travel.DeletePackageHandler(db)))
 
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))
