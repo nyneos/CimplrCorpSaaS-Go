@@ -1084,52 +1084,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			log.Printf("[BANK-UPLOAD-DEBUG] excel-header-col idx=%d header=%q norm=%q numericSample=%v samples=%q", idx, col, norm, numericSample, samples)
 		}
 
-		// Verbose header/column dump to help debugging: for each header column,
-		// log index, original header, normalized header token, whether it looks
-		// numeric (by sampling following data rows), and up to 5 sample cells.
-		// sampleValuesLimit := 5
-		// for idx, col := range headerRow {
-		// 	norm := strings.ToLower(strings.TrimSpace(col))
-		// 	// normalize token: remove punctuation and collapse whitespace
-		// 	norm = strings.ReplaceAll(norm, ",", "")
-		// 	norm = strings.ReplaceAll(norm, ".", "")
-		// 	norm = strings.ReplaceAll(norm, "/", " ")
-		// 	norm = strings.Join(strings.Fields(norm), " ")
-		// 	numericSample := false
-		// 	// sample a few rows after header to check numeric likelihood
-		// 	countSamples := 0
-		// 	numCount := 0
-		// 	for r := txnHeaderIdx + 1; r < len(rows) && countSamples < 20; r++ {
-		// 		row := rows[r]
-		// 		if idx >= len(row) {
-		// 			countSamples++
-		// 			continue
-		// 		}
-		// 		cell := strings.TrimSpace(row[idx])
-		// 		if cell == "" {
-		// 			countSamples++
-		// 			continue
-		// 		}
-		// 		if cleanAmount(cell) != "" {
-		// 			numCount++
-		// 		}
-		// 		countSamples++
-		// 	}
-		// 	if countSamples > 0 && numCount*2 >= countSamples {
-		// 		numericSample = true
-		// 	}
-		// 	// collect sample values
-		// 	samples := []string{}
-		// 	for r := txnHeaderIdx + 1; r < len(rows) && len(samples) < sampleValuesLimit; r++ {
-		// 		row := rows[r]
-		// 		if idx < len(row) {
-		// 			samples = append(samples, row[idx])
-		// 		} else {
-		// 			samples = append(samples, "")
-		// 		}
-		// 	}
-		// 	log.Printf("[BANK-UPLOAD-DEBUG] header-col idx=%d header=%q norm=%q numericSample=%v samples=%q", idx, col, norm, numericSample, samples)
-		// }
 		// Add flexible column name mappings for CSV as well
 		findColContaining := func(keywords ...string) int {
 			for colName, idx := range colIdx {
@@ -2077,6 +2031,68 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 
+			// Check for opening balance row
+			if strings.Contains(tempDescLower, "balance carried forward") {
+				// Extract opening balance from balance column
+				if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
+					balanceStr := cleanAmount(row[bIdx])
+					if balanceStr != "" {
+						fmt.Sscanf(balanceStr, "%f", &openingBalance)
+						cumulative = openingBalance
+						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel): %.2f", openingBalance)
+						skippedOpeningBalanceRows++
+						continue
+					}
+				}
+				// Fallback: scan from the end for a numeric-looking cell
+				for i := len(row) - 1; i >= 0; i-- {
+					cand := cleanAmount(row[i])
+					if cand != "" {
+						fmt.Sscanf(cand, "%f", &openingBalance)
+						cumulative = openingBalance
+						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel scan): %.2f", openingBalance)
+						skippedOpeningBalanceRows++
+						continue
+					}
+				}
+				// If nothing numeric found, still skip as opening balance row
+				skippedOpeningBalanceRows++
+				continue
+			}
+
+			// Fallback: scan entire row for 'balance carried forward' in any cell
+			for _, cell := range row {
+				if strings.Contains(strings.ToLower(strings.TrimSpace(cell)), "balance carried forward") {
+					// Prefer balance column
+					if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
+						balanceStr := cleanAmount(row[bIdx])
+						if balanceStr != "" {
+							fmt.Sscanf(balanceStr, "%f", &openingBalance)
+							cumulative = openingBalance
+							log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel fallback): %.2f", openingBalance)
+							skippedOpeningBalanceRows++
+							goto continueRowExcel
+						}
+					}
+					// Scan for last numeric
+					for i := len(row) - 1; i >= 0; i-- {
+						cand := cleanAmount(row[i])
+						if cand != "" {
+							fmt.Sscanf(cand, "%f", &openingBalance)
+							cumulative = openingBalance
+							log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel scan fallback): %.2f", openingBalance)
+							skippedOpeningBalanceRows++
+							goto continueRowExcel
+						}
+					}
+					skippedOpeningBalanceRows++
+					goto continueRowExcel
+				}
+			}
+
+		continueRowExcel:
+			_ = 0
+
 			// NOW check if we should skip - AFTER all fallback attempts
 			if (valueDate.IsZero() && transactionDate.IsZero()) || (valueDateStr == constants.DateFormatCustom && transactionDateStr == constants.DateFormatCustom) {
 				// Check if this is a closing balance row before skipping
@@ -2372,6 +2388,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 	log.Printf("[BANK-UPLOAD-DEBUG] Parse summary: rows_after_header=%d kept=%d skipped_empty=%d skipped_non_txn=%d skipped_missing_dates=%d skipped_opening_balance=%d skipped_closing_balance=%d",
 		totalRows, keptRows, skippedEmptyRows, skippedNonTxnRows, skippedMissingDateRows, skippedOpeningBalanceRows, skippedClosingBalanceRows)
+
+	// If opening balance was detected but first transaction has balance 0, recalculate all balances starting from opening balance
+	if openingBalance != 0 && len(transactions) > 0 && (!transactions[0].Balance.Valid || transactions[0].Balance.Float64 == 0) {
+		cumulative = openingBalance
+		for i := 0; i < len(transactions); i++ {
+			transactions[i].Balance = sql.NullFloat64{Valid: true, Float64: cumulative}
+			if transactions[i].DepositAmount.Valid {
+				cumulative += transactions[i].DepositAmount.Float64
+			}
+			if transactions[i].WithdrawalAmount.Valid {
+				cumulative -= transactions[i].WithdrawalAmount.Float64
+			}
+		}
+		log.Printf("[BANK-UPLOAD-DEBUG] Recalculated balances starting from opening balance %.2f", openingBalance)
+	}
 
 	// Preload existing transactions for this account so we can identify which
 	// rows from the uploaded file are truly new vs already present.
