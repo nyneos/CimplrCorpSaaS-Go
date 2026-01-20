@@ -7,13 +7,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
-	"io"
 	"strconv"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -768,11 +768,16 @@ var (
 	mfapiCacheTTL = 90 * time.Second
 )
 
+// shared HTTP client with timeout
+var httpClient = &http.Client{Timeout: 5 * time.Second}
+
 // getMFAPIData fetches latest and previous NAV from MFAPI with caching.
 // Returns scheme name (if available), nav and prevNav (0 if not found).
-func getMFAPIData(code string) (string, float64, float64) {
+// getMFAPIData fetches latest and previous NAV from MFAPI with caching and returns
+// (schemeName, latestNav, prevNav, latestDate, prevDate)
+func getMFAPIData(code string) (string, float64, float64, string, string) {
 	if code == "" {
-		return "", 0, 0
+		return "", 0, 0, "", ""
 	}
 
 	// Check cache
@@ -780,19 +785,30 @@ func getMFAPIData(code string) (string, float64, float64) {
 	entry, ok := mfapiCache[code]
 	mfapiCacheMu.RUnlock()
 	if ok && time.Since(entry.FetchedAt) < mfapiCacheTTL {
-		return entry.Name, entry.NAV, entry.PrevNAV
+		return entry.Name, entry.NAV, entry.PrevNAV, "", ""
 	}
-
 	apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", code)
-	resp, err := http.Get(apiURL)
-	if err != nil || resp == nil {
-		if resp != nil {
-			resp.Body.Close()
+	var body []byte
+	var respErr error
+	// simple retry(1)
+	for i := 0; i < 2; i++ {
+		resp, err := httpClient.Get(apiURL)
+		if err != nil || resp == nil {
+			respErr = err
+			if resp != nil {
+				resp.Body.Close()
+			}
+			time.Sleep(200 * time.Millisecond)
+			continue
 		}
-		return "", 0, 0
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		respErr = nil
+		break
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	if respErr != nil {
+		return "", 0, 0, "", ""
+	}
 
 	var apiResp struct {
 		Meta struct {
@@ -808,20 +824,19 @@ func getMFAPIData(code string) (string, float64, float64) {
 
 	name := ""
 	var nav, prev float64
+	var navDate, prevDate string
 	if json.Unmarshal(body, &apiResp) == nil && len(apiResp.Data) > 0 {
 		name = apiResp.Meta.SchemeName
-		if apiResp.Meta.SchemeName == "" {
-			// sometimes name might be in Data or not present; leave empty if missing
-			name = ""
-		}
 		// parse latest
 		if val, err := strconv.ParseFloat(strings.ReplaceAll(apiResp.Data[0].NAV, ",", ""), 64); err == nil {
 			nav = val
+			navDate = apiResp.Data[0].Date
 		}
 		// parse previous (if present)
 		if len(apiResp.Data) > 1 {
 			if val, err := strconv.ParseFloat(strings.ReplaceAll(apiResp.Data[1].NAV, ",", ""), 64); err == nil {
 				prev = val
+				prevDate = apiResp.Data[1].Date
 			}
 		}
 	}
@@ -831,7 +846,7 @@ func getMFAPIData(code string) (string, float64, float64) {
 	mfapiCache[code] = mfapiCacheEntry{Name: name, NAV: nav, PrevNAV: prev, FetchedAt: time.Now()}
 	mfapiCacheMu.Unlock()
 
-	return name, nav, prev
+	return name, nav, prev, navDate, prevDate
 }
 
 // CashFlow used for XIRR
@@ -2915,10 +2930,12 @@ type MarketRateTickerLiteRow struct {
 	SchemeName string  `json:"scheme_name"`
 	SchemeID   string  `json:"scheme_id"`
 	AMFICode   string  `json:"amfi_code"`
+	ISIN       string  `json:"isin,omitempty"`
 	NAV        float64 `json:"nav"`
 	PrevNAV    float64 `json:"prev_nav"`
 	Change     float64 `json:"change"`
 	ChangePct  float64 `json:"change_pct"`
+	NavSource  string  `json:"nav_source,omitempty"`
 }
 
 // GetMarketRatesTickerLite returns a lightweight list of approved schemes
@@ -2980,6 +2997,7 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(m.scheme_name,'') AS scheme_name,
 			m.scheme_id,
 			COALESCE(m.amfi_scheme_code::text,'') AS amfi_code,
+	            COALESCE(m.isin, '') AS isin,
 			COALESCE(ln.nav_value,0)::float8 AS nav,
 			COALESCE(pn.nav_value,0)::float8 AS prev_nav
 		FROM investment.masterscheme m
@@ -3019,10 +3037,12 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			rows.Close()
 
 			type mfRes struct {
-				Code string
-				Name string
-				NAV  float64
-				Prev float64
+				Code     string
+				Name     string
+				NAV      float64
+				Prev     float64
+				SchemeID string
+				ISIN     string
 			}
 
 			resCh := make(chan mfRes, len(codes))
@@ -3034,15 +3054,23 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				go func(code string) {
 					defer wg.Done()
 					sem <- struct{}{}
-					name, nav, prev := getMFAPIData(code)
+					name, nav, prev, _, _ := getMFAPIData(code)
 					<-sem
-					resCh <- mfRes{Code: code, Name: name, NAV: nav, Prev: prev}
+					// try to enrich from masterscheme: scheme_id, isin, scheme_name
+					var schemeID, isin, msName sql.NullString
+					q := `SELECT scheme_id, isin, scheme_name FROM investment.masterscheme WHERE amfi_scheme_code::text = $1 LIMIT 1`
+					_ = pgxPool.QueryRow(context.Background(), q, code).Scan(&schemeID, &isin, &msName)
+					if name == "" && msName.Valid {
+						name = msName.String
+					}
+					resCh <- mfRes{Code: code, Name: name, NAV: nav, Prev: prev, SchemeID: schemeID.String, ISIN: isin.String}
 				}(c)
 			}
 
 			wg.Wait()
 			close(resCh)
 
+			var stagingHits, mfapiHits, mfapiMisses int
 			for r := range resCh {
 				nav := r.NAV
 				prevNav := r.Prev
@@ -3055,36 +3083,89 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if prevNav > 0 {
 					pct = math.Round(((change/prevNav)*100)*10000) / 10000
 				}
+				source := "mfapi"
+				if nav == 0 && prevNav == 0 {
+					source = "none"
+					mfapiMisses++
+				} else {
+					mfapiHits++
+				}
+
 				out = append(out, MarketRateTickerLiteRow{
 					SchemeName: r.Name,
-					SchemeID:   "",
+					SchemeID:   r.SchemeID,
 					AMFICode:   r.Code,
+					ISIN:       r.ISIN,
 					NAV:        nav,
 					PrevNAV:    prevNav,
 					Change:     change,
 					ChangePct:  pct,
+					NavSource:  source,
 				})
+
+				// Persist MFapi latest nav into staging for subsequent fast reads
+				if source == "mfapi" && nav > 0 {
+					// parse code to bigint
+					if sc, err := strconv.ParseInt(r.Code, 10, 64); err == nil {
+						// parse nav date (if available) from MFAPI (we don't have date here in this path)
+						// Insert with today's file_date and created_at
+						upsertQ := `INSERT INTO investment.amfi_nav_staging (scheme_code, scheme_name, nav_value, nav_date, file_date, created_at)
+							VALUES ($1, $2, $3::numeric(18,4), CURRENT_DATE, CURRENT_DATE, now())
+							ON CONFLICT (scheme_code, nav_date) DO UPDATE SET nav_value = EXCLUDED.nav_value, scheme_name = COALESCE(amfi_nav_staging.scheme_name, EXCLUDED.scheme_name)`
+						go func(codeInt int64, name string, navVal float64) {
+							// run in goroutine to avoid blocking
+							_, _ = pgxPool.Exec(context.Background(), upsertQ, codeInt, nullIfEmpty(name), navVal)
+						}(sc, r.Name, nav)
+					}
+				}
 			}
+			_ = stagingHits
+			_ = mfapiHits
+			_ = mfapiMisses
 		} else {
+			var stagingHits, mfapiHits int
 			for rows.Next() {
-				var rname, sid, amfi string
+				var rname, sid, amfi, isin string
 				var nav, prevNav float64
-				if err := rows.Scan(&rname, &sid, &amfi, &nav, &prevNav); err != nil {
+				if err := rows.Scan(&rname, &sid, &amfi, &isin, &nav, &prevNav); err != nil {
 					continue
 				}
 
+				source := "staging"
 				// If NAVs not available locally, try MFapi (mfapi.in) as a fallback
 				if (nav == 0 || prevNav == 0) && amfi != "" {
-					name, mnav, mprev := getMFAPIData(amfi)
+					name, mnav, mprev, mNavDate, _ := getMFAPIData(amfi)
 					if name != "" && rname == "" {
 						rname = name
 					}
-					if nav == 0 {
+					if nav == 0 && mnav > 0 {
 						nav = mnav
+						source = "mfapi"
+						mfapiHits++
 					}
-					if prevNav == 0 {
+					if prevNav == 0 && mprev > 0 {
 						prevNav = mprev
+						source = "mfapi"
 					}
+
+					// Persist latest MFAPI nav into staging (upsert). Run async to avoid latency.
+					if mnav > 0 {
+						if sc, err := strconv.ParseInt(amfi, 10, 64); err == nil {
+							upsertQ := `INSERT INTO investment.amfi_nav_staging (scheme_code, scheme_name, nav_value, nav_date, file_date, created_at)
+								VALUES ($1, $2, $3::numeric(18,4), $4::date, CURRENT_DATE, now())
+								ON CONFLICT (scheme_code, nav_date) DO UPDATE SET nav_value = EXCLUDED.nav_value, scheme_name = COALESCE(amfi_nav_staging.scheme_name, EXCLUDED.scheme_name)`
+							// parse mNavDate (DD-MM-YYYY) to SQL date; if parse fails, use CURRENT_DATE
+							navDate := time.Now().Format(constants.DateFormat)
+							if t, err := time.Parse("02-01-2006", mNavDate); err == nil {
+								navDate = t.Format(constants.DateFormat)
+							}
+							go func(codeInt int64, name string, navVal float64, dateStr string) {
+								_, _ = pgxPool.Exec(context.Background(), upsertQ, codeInt, nullIfEmpty(name), navVal, dateStr)
+							}(sc, name, mnav, navDate)
+						}
+					}
+				} else {
+					stagingHits++
 				}
 
 				change := nav - prevNav
@@ -3099,18 +3180,24 @@ func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					pct = math.Round(((change/prevNav)*100)*10000) / 10000
 				}
 
+				// set source if not set
+				if source == "staging" && (nav == 0 && prevNav == 0) {
+					source = "none"
+				}
+
 				out = append(out, MarketRateTickerLiteRow{
 					SchemeName: rname,
 					SchemeID:   sid,
 					AMFICode:   amfi,
+					ISIN:       isin,
 					NAV:        nav,
 					PrevNAV:    prevNav,
 					Change:     change,
 					ChangePct:  pct,
+					NavSource:  source,
 				})
 			}
 		}
-
 		api.RespondWithPayload(w, true, "", out)
 	}
 }
