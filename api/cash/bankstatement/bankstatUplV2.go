@@ -2666,9 +2666,13 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 											) b ON a.bankstatementid = b.bankstatementid AND a.action_id = b.max_action_id
 										)
 										SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
-													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason
+													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
+														COALESCE(mb.bank_name, '') AS bank_name,
+														mba.account_nickname AS account_nickname
 										FROM cimplrcorpsaas.bank_statements s
 										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+										LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
+										LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
 										WHERE s.entity_id = ANY($1)
 										ORDER BY s.uploaded_at DESC
@@ -2684,9 +2688,11 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			var start, end, uploaded time.Time
 			var open, close float64
 			var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
+			var bankName sql.NullString
+			var accountNickname sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason); err != nil {
+				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname); err != nil {
 				continue
 			}
 			// Add computed field for delete pending approval
@@ -2712,6 +2718,8 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				"checker_at":                 checkerAt.Time,
 				"checker_comment":            checkerComment.String,
 				"reason":                     reason.String,
+				"bank_name":                  bankName.String,
+				"account_nickname":           accountNickname.String,
 				"is_delete_pending_approval": isDeletePending,
 			})
 		}
