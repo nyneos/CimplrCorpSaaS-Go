@@ -10,6 +10,9 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"io"
+	"strconv"
+	"sync"
 	"strings"
 	"time"
 
@@ -749,6 +752,86 @@ func getFinancialYearStart(t time.Time) time.Time {
 		fy = fy.AddDate(-1, 0, 0)
 	}
 	return fy
+}
+
+// MFAPI cache to reduce external HTTP requests
+type mfapiCacheEntry struct {
+	Name      string
+	NAV       float64
+	PrevNAV   float64
+	FetchedAt time.Time
+}
+
+var (
+	mfapiCacheMu  sync.RWMutex
+	mfapiCache    = make(map[string]mfapiCacheEntry)
+	mfapiCacheTTL = 90 * time.Second
+)
+
+// getMFAPIData fetches latest and previous NAV from MFAPI with caching.
+// Returns scheme name (if available), nav and prevNav (0 if not found).
+func getMFAPIData(code string) (string, float64, float64) {
+	if code == "" {
+		return "", 0, 0
+	}
+
+	// Check cache
+	mfapiCacheMu.RLock()
+	entry, ok := mfapiCache[code]
+	mfapiCacheMu.RUnlock()
+	if ok && time.Since(entry.FetchedAt) < mfapiCacheTTL {
+		return entry.Name, entry.NAV, entry.PrevNAV
+	}
+
+	apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", code)
+	resp, err := http.Get(apiURL)
+	if err != nil || resp == nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return "", 0, 0
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var apiResp struct {
+		Meta struct {
+			SchemeName string `json:"scheme_name"`
+			SchemeCode string `json:"scheme_code"`
+		} `json:"meta"`
+		Data []struct {
+			Date string `json:"date"`
+			NAV  string `json:"nav"`
+		} `json:"data"`
+		Status string `json:"status"`
+	}
+
+	name := ""
+	var nav, prev float64
+	if json.Unmarshal(body, &apiResp) == nil && len(apiResp.Data) > 0 {
+		name = apiResp.Meta.SchemeName
+		if apiResp.Meta.SchemeName == "" {
+			// sometimes name might be in Data or not present; leave empty if missing
+			name = ""
+		}
+		// parse latest
+		if val, err := strconv.ParseFloat(strings.ReplaceAll(apiResp.Data[0].NAV, ",", ""), 64); err == nil {
+			nav = val
+		}
+		// parse previous (if present)
+		if len(apiResp.Data) > 1 {
+			if val, err := strconv.ParseFloat(strings.ReplaceAll(apiResp.Data[1].NAV, ",", ""), 64); err == nil {
+				prev = val
+			}
+		}
+	}
+
+	// Store in cache
+	mfapiCacheMu.Lock()
+	mfapiCache[code] = mfapiCacheEntry{Name: name, NAV: nav, PrevNAV: prev, FetchedAt: time.Now()}
+	mfapiCacheMu.Unlock()
+
+	return name, nav, prev
 }
 
 // CashFlow used for XIRR
@@ -2824,5 +2907,210 @@ func GetMarketRatesTicker(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 		})
+	}
+}
+
+// MarketRateTickerLiteRow is a compact row for light-weight tickers
+type MarketRateTickerLiteRow struct {
+	SchemeName string  `json:"scheme_name"`
+	SchemeID   string  `json:"scheme_id"`
+	AMFICode   string  `json:"amfi_code"`
+	NAV        float64 `json:"nav"`
+	PrevNAV    float64 `json:"prev_nav"`
+	Change     float64 `json:"change"`
+	ChangePct  float64 `json:"change_pct"`
+}
+
+// GetMarketRatesTickerLite returns a lightweight list of approved schemes
+// with current NAV, previous NAV and percentage change. Request JSON: { "limit": 100 }
+func GetMarketRatesTickerLite(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Limit      int  `json:"limit,omitempty"`
+			AllSchemes bool `json:"all_schemes,omitempty"` // when true, include all schemes from masterscheme (not just approved)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Limit <= 0 || req.Limit > 10000 {
+			req.Limit = 100
+		}
+
+		ctx := r.Context()
+
+		// Choose query based on AllSchemes flag. Default: approved + active schemes only.
+		var query string
+		if req.AllSchemes {
+			// When all_schemes=true we want to iterate AMFI codes present in amfi_nav_staging
+			// and fetch latest/previous NAVs from MFapi. Build a simple list of distinct AMFI codes.
+			query = `
+		SELECT DISTINCT scheme_code::text AS amfi_code
+		FROM investment.amfi_nav_staging
+		ORDER BY amfi_code
+		LIMIT $1
+		`
+		} else {
+			// Approved + active schemes only (existing behaviour)
+			query = `
+		WITH latest_nav AS (
+			SELECT DISTINCT ON (scheme_code) scheme_code::text AS scheme_code, nav_value, nav_date
+			FROM investment.amfi_nav_staging
+			ORDER BY scheme_code, nav_date DESC
+		),
+		prev_nav AS (
+			SELECT DISTINCT ON (scheme_code) scheme_code::text AS scheme_code, nav_value
+			FROM investment.amfi_nav_staging
+			ORDER BY scheme_code, nav_date DESC OFFSET 1
+		),
+		latest_scheme AS (
+			SELECT DISTINCT ON (scheme_id) scheme_id, processing_status
+			FROM investment.auditactionscheme
+			ORDER BY scheme_id, requested_at DESC
+		),
+		latest_amc AS (
+			SELECT DISTINCT ON (amc.amc_id) amc.amc_id, m.amc_name, amc.processing_status, m.status
+			FROM investment.auditactionamc amc
+			JOIN investment.masteramc m ON amc.amc_id = m.amc_id
+			ORDER BY amc.amc_id, amc.requested_at DESC
+		)
+		SELECT
+			COALESCE(m.scheme_name,'') AS scheme_name,
+			m.scheme_id,
+			COALESCE(m.amfi_scheme_code::text,'') AS amfi_code,
+			COALESCE(ln.nav_value,0)::float8 AS nav,
+			COALESCE(pn.nav_value,0)::float8 AS prev_nav
+		FROM investment.masterscheme m
+		JOIN latest_scheme ls ON ls.scheme_id = m.scheme_id
+		JOIN latest_amc la ON UPPER(la.amc_name) = UPPER(m.amc_name)
+		LEFT JOIN latest_nav ln ON ln.scheme_code = COALESCE(m.amfi_scheme_code::text, '')
+		LEFT JOIN prev_nav pn ON pn.scheme_code = ln.scheme_code
+		WHERE UPPER(ls.processing_status) = 'APPROVED'
+		  AND UPPER(m.status) = 'ACTIVE'
+		  AND COALESCE(m.is_deleted,false) = false
+		  AND UPPER(la.processing_status) = 'APPROVED'
+		  AND UPPER(la.status) = 'ACTIVE'
+		ORDER BY m.scheme_name
+		LIMIT $1
+		`
+		}
+
+		rows, err := pgxPool.Query(ctx, query, req.Limit)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out := make([]MarketRateTickerLiteRow, 0)
+
+		if req.AllSchemes {
+			// Collect AMFI codes from rows
+			codes := make([]string, 0)
+			for rows.Next() {
+				var code string
+				if err := rows.Scan(&code); err != nil {
+					continue
+				}
+				codes = append(codes, code)
+			}
+			rows.Close()
+
+			type mfRes struct {
+				Code string
+				Name string
+				NAV  float64
+				Prev float64
+			}
+
+			resCh := make(chan mfRes, len(codes))
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, 16) // concurrency limit
+
+			for _, c := range codes {
+				wg.Add(1)
+				go func(code string) {
+					defer wg.Done()
+					sem <- struct{}{}
+					name, nav, prev := getMFAPIData(code)
+					<-sem
+					resCh <- mfRes{Code: code, Name: name, NAV: nav, Prev: prev}
+				}(c)
+			}
+
+			wg.Wait()
+			close(resCh)
+
+			for r := range resCh {
+				nav := r.NAV
+				prevNav := r.Prev
+				change := nav - prevNav
+				// Round to 4 decimals
+				nav = math.Round(nav*10000) / 10000
+				prevNav = math.Round(prevNav*10000) / 10000
+				change = math.Round(change*10000) / 10000
+				pct := 0.0
+				if prevNav > 0 {
+					pct = math.Round(((change/prevNav)*100)*10000) / 10000
+				}
+				out = append(out, MarketRateTickerLiteRow{
+					SchemeName: r.Name,
+					SchemeID:   "",
+					AMFICode:   r.Code,
+					NAV:        nav,
+					PrevNAV:    prevNav,
+					Change:     change,
+					ChangePct:  pct,
+				})
+			}
+		} else {
+			for rows.Next() {
+				var rname, sid, amfi string
+				var nav, prevNav float64
+				if err := rows.Scan(&rname, &sid, &amfi, &nav, &prevNav); err != nil {
+					continue
+				}
+
+				// If NAVs not available locally, try MFapi (mfapi.in) as a fallback
+				if (nav == 0 || prevNav == 0) && amfi != "" {
+					name, mnav, mprev := getMFAPIData(amfi)
+					if name != "" && rname == "" {
+						rname = name
+					}
+					if nav == 0 {
+						nav = mnav
+					}
+					if prevNav == 0 {
+						prevNav = mprev
+					}
+				}
+
+				change := nav - prevNav
+
+				// Round to 4 decimal places
+				nav = math.Round(nav*10000) / 10000
+				prevNav = math.Round(prevNav*10000) / 10000
+				change = math.Round(change*10000) / 10000
+
+				pct := 0.0
+				if prevNav > 0 {
+					pct = math.Round(((change/prevNav)*100)*10000) / 10000
+				}
+
+				out = append(out, MarketRateTickerLiteRow{
+					SchemeName: rname,
+					SchemeID:   sid,
+					AMFICode:   amfi,
+					NAV:        nav,
+					PrevNAV:    prevNav,
+					Change:     change,
+					ChangePct:  pct,
+				})
+			}
+		}
+
+		api.RespondWithPayload(w, true, "", out)
 	}
 }
