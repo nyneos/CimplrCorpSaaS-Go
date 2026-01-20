@@ -143,7 +143,7 @@ func StartDashService(db *sql.DB) {
 	// Investment: Market Rates Ticker (Mutual Funds with NAV, Change, MTM)
 	mux.Handle("/dash/investment/overview/market-rates-ticker", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetMarketRatesTicker(pgxPool)))
 	// Investment: Market Rates Ticker (Lite) - approved schemes with NAV and change
-	mux.Handle("dash/investment/ticker", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetMarketRatesTickerLite(pgxPool)))
+	mux.Handle("/dash/investment/ticker", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetMarketRatesTickerLite(pgxPool)))
 	// Investment: Top performing assets (YTD)
 	mux.Handle("/dash/investment/overview/top-performing", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetTopPerformingAssets(pgxPool)))
 	// Investment: AUM Composition & Trend (stacked area by AMC)
