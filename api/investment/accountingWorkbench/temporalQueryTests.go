@@ -42,7 +42,7 @@ func TestTemporalQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
 	}
 }
@@ -345,7 +345,7 @@ func VerifyAllQueriesHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			"timestamp":         time.Now().Format(time.RFC3339),
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(response)
 	}
 }

@@ -129,7 +129,7 @@ func ctxHasApprovedCurrency(ctx context.Context, currency string) bool {
 // normalizeCell trims, removes non-breaking spaces and collapses whitespace
 func normalizeCell(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, "\u00A0", " ")
+	s = strings.ReplaceAll(s, constants.NBSP, " ")
 	return strings.Join(strings.Fields(s), " ")
 }
 
@@ -495,7 +495,7 @@ func parseDate(s string) (time.Time, error) {
 		"01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
 		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
 		// ISO-ish layouts to catch Excel exports that already render as 2026-01-15 or RFC3339 strings
-		"2006-01-02", "2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
+		constants.DateFormat, "2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
 	}
 	// Try all layouts
 	for _, layout := range layouts {
@@ -782,7 +782,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Normalize cells and prefer candidates adjacent to label. Avoid 6-digit matches (likely postal codes).
 			normalize := func(s string) string {
 				s = strings.TrimSpace(s)
-				s = strings.ReplaceAll(s, "\u00A0", " ")
+				s = strings.ReplaceAll(s, constants.NBSP, " ")
 				return strings.Join(strings.Fields(s), " ")
 			}
 
@@ -906,7 +906,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 				if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
 					log.Printf("[BANK-UPLOAD-DEBUG] DB error while trying candidate %q: %v", cand, qErr)
-					return nil, fmt.Errorf("db error while looking up account in masterbankaccount: %w", qErr)
+					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
 				}
 			}
 			if !matched {
@@ -915,7 +915,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		} else {
 			log.Printf("[BANK-UPLOAD-DEBUG] DB error while looking up account %q: %v", accountNumber, err)
-			return nil, fmt.Errorf("db error while looking up account in masterbankaccount: %w", err)
+			return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, err)
 		}
 	}
 
@@ -928,7 +928,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if bankName != "" {
 		if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
 			if !apictx.IsBankAllowed(ctx, bankName) {
-				return nil, errors.New("bank not allowed")
+				return nil, errors.New(constants.ErrBankNotAllowed)
 			}
 		}
 	}
@@ -944,7 +944,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		_ = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
 		if acctCurrency.Valid && strings.TrimSpace(acctCurrency.String) != "" {
 			if !ctxHasApprovedCurrency(ctx, acctCurrency.String) {
-				return nil, errors.New("currency not allowed")
+				return nil, errors.New(constants.ErrCurrencyNotAllowed)
 			}
 		}
 	}
@@ -1011,7 +1011,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					if strings.EqualFold(c, "Date") || strings.Contains(lc, "date") {
 						hasDate = true
 					}
-					if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") || strings.Contains(lc, "narration") || strings.Contains(lc, "debit/credit ref") {
+					if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") || strings.Contains(lc, "narration") || strings.Contains(lc, constants.ErrDebitCreditReference2) {
 						hasDesc = true
 					}
 					if strings.EqualFold(c, "Withdrawal") || strings.EqualFold(c, "Deposit") || strings.EqualFold(c, "Debit") || strings.EqualFold(c, "Credit") || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") || strings.Contains(lc, "amount") {
@@ -1135,7 +1135,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			for colName, idx := range colIdx {
 				lcName := strings.ToLower(strings.TrimSpace(colName))
 				if lcName == "debit" || lcName == "credit" || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit") {
-					if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") || strings.Contains(lcName, "your reference") {
+					if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") || strings.Contains(lcName, constants.ErrReferenceRequired) {
 						continue
 					}
 					if sampleNumericColumn(idx) {
@@ -1176,7 +1176,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			return -1
 		}
 
-		if idx := findDescriptionCol("debit/credit ref", "debit / credit ref", "debit credit ref", "debit credit reference", "debit/credit reference", "debitcreditref"); idx >= 0 {
+		if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 			colIdx["Description"] = idx
 			log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
 		} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
@@ -1217,7 +1217,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			for colName, idx := range colIdx {
 				lc := strings.ToLower(strings.TrimSpace(colName))
 				// skip obvious reference columns
-				if strings.Contains(lc, "ref") || strings.Contains(lc, "reference") || strings.Contains(lc, "your reference") {
+				if strings.Contains(lc, "ref") || strings.Contains(lc, "reference") || strings.Contains(lc, constants.ErrReferenceRequired) {
 					continue
 				}
 				hdrScore := 0
@@ -1369,7 +1369,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			for i := 0; i < 30 && i < len(rows); i++ {
 				log.Printf("[BANK-UPLOAD-DEBUG] Excel row[%d]=%q", i, rows[i])
 			}
-			return nil, errors.New("transaction header row not found in Excel file")
+			return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
 		}
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
@@ -1392,12 +1392,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 		// Normalize common variants so downstream parsing does not miss dates.
 		if _, ok := colIdx[transactionDateHeader]; !ok {
-			if idx := findColContaining("transaction date", "txn posted date", "posted date", "posting date"); idx >= 0 {
+			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			}
 		}
 		if _, ok := colIdx["PostedDate"]; !ok {
-			if idx := findColContaining("txn posted date", "posted date", "posting date"); idx >= 0 {
+			if idx := findColContaining(constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
 				colIdx["PostedDate"] = idx
 			}
 		}
@@ -1423,14 +1423,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// then prefer exact matches for Debit or Credit
 			for colName, idx := range colIdx {
 				lcName := strings.ToLower(strings.TrimSpace(colName))
-				if lcName == "debit" || lcName == "credit" || lcName == "debit amt" || lcName == "credit amt" {
+				if lcName == "debit" || lcName == "credit" || lcName == constants.DebitAmount || lcName == constants.CreditAmount {
 					return idx
 				}
 			}
 			// otherwise, pick a debit/credit-like column only if it is NOT a reference column
 			for colName, idx := range colIdx {
 				lcName := strings.ToLower(colName)
-				if (strings.Contains(lcName, "debit") || strings.Contains(lcName, "credit") || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit")) && !strings.Contains(lcName, "ref") && !strings.Contains(lcName, "reference") && !strings.Contains(lcName, "your reference") {
+				if (strings.Contains(lcName, "debit") || strings.Contains(lcName, "credit") || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit")) && !strings.Contains(lcName, "ref") && !strings.Contains(lcName, "reference") && !strings.Contains(lcName, constants.ErrReferenceRequired) {
 					return idx
 				}
 			}
@@ -1453,14 +1453,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Prefer explicit description column when present
 			if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
 				colIdx["Description"] = idx
-			} else if idx := findColContaining("debit/credit ref", "debit credit ref", "debit credit reference", "debit/credit reference", "debitcreditref"); idx >= 0 {
+			} else if idx := findColContaining(constants.ErrDebitCreditReference2, constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx["Description"] = idx
 			}
 		}
 		if _, exists := colIdx[transactionRemarksHeader]; !exists {
 			// Prefer Debit/Credit Ref header if present for transaction remarks
 			// Try variations with slash and space
-			if idx := findColContaining("debit/credit ref", "debit / credit ref", "debit credit ref", "debit credit reference", "debit/credit reference", "debitcreditref"); idx >= 0 {
+			if idx := findColContaining(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
 				log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
 			} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
@@ -1475,7 +1475,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		if _, exists := colIdx[valueDateHeader]; !exists {
 			// Try "Value Date", "Txn Posted Date", or any date column
-			if idx := findColContaining("value date", "txn posted date"); idx >= 0 {
+			if idx := findColContaining("value date", constants.TransactionPostedDate); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
 				colIdx[valueDateHeader] = idx
@@ -1483,7 +1483,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		if _, exists := colIdx[transactionDateHeader]; !exists {
 			// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
-			if idx := findColContaining("transaction date", "txn posted date", "posted date"); idx >= 0 {
+			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
@@ -1501,7 +1501,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		// Normalize posted date column
 		if _, exists := colIdx["PostedDate"]; !exists {
-			if idx := findColContaining("txn posted date", "posted date", "posting date"); idx >= 0 {
+			if idx := findColContaining(constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
 				colIdx["PostedDate"] = idx
 			}
 		}
@@ -1532,7 +1532,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					continue
 				}
 				// Exact match for debit or withdrawal
-				if lcName == "debit" || lcName == "withdrawal" || lcName == "debit amt" || lcName == "withdrawal amt" {
+				if lcName == "debit" || lcName == "withdrawal" || lcName == constants.DebitAmount || lcName == "withdrawal amt" {
 					colIdx[withdrawalAmtHeader] = idx
 					break
 				}
@@ -1547,7 +1547,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					continue
 				}
 				// Exact match for credit or deposit
-				if lcName == "credit" || lcName == "deposit" || lcName == "credit amt" || lcName == "deposit amt" {
+				if lcName == "credit" || lcName == "deposit" || lcName == constants.CreditAmount || lcName == "deposit amt" {
 					colIdx[depositAmtHeader] = idx
 					break
 				}
@@ -1616,7 +1616,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if !hasDate || (!hasDesc && !hasAmount) {
-			return nil, errors.New("transaction header row not found in Excel file")
+			return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
 		}
 	}
 
@@ -1683,7 +1683,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			firstCell := strings.ToLower(strings.TrimSpace(row[0]))
 			if strings.Contains(firstCell, "call 1800") ||
 				strings.Contains(firstCell, "write to us") ||
-				strings.Contains(firstCell, "closing balance") ||
+				strings.Contains(firstCell, constants.ClosingBalance) ||
 				strings.Contains(firstCell, "opening balance") ||
 				strings.Contains(firstCell, "toll free") {
 				skippedNonTxnRows++
@@ -1721,7 +1721,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				tmpDesc = strings.ToLower(strings.TrimSpace(row[colIdx["Description"]]))
 			}
 			balanceIdx, hasBalance := colIdx[balanceHeader]
-			if strings.Contains(tmpDesc, "balance carried forward") {
+			if strings.Contains(tmpDesc, constants.BalanceCarriedForward) {
 				// Extract opening balance from Balance column
 				if hasBalance && balanceIdx >= 0 && balanceIdx < len(row) {
 					balanceStr := cleanAmount(row[balanceIdx])
@@ -1843,7 +1843,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				balance = sql.NullFloat64{Valid: false}
 			}
 			// Check for opening balance row
-			if strings.Contains(strings.ToLower(description), "balance carried forward") {
+			if strings.Contains(strings.ToLower(description), constants.BalanceCarriedForward) {
 				if balance.Valid {
 					openingBalance = balance.Float64
 					cumulative = openingBalance
@@ -1863,7 +1863,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 			if (valueDate.IsZero() && transactionDate.IsZero()) || (valueDateStr == constants.DateFormatCustom && transactionDateStr == constants.DateFormatCustom) {
 				// Check if this is a closing balance row before skipping
-				if strings.Contains(strings.ToLower(description), "closing balance") {
+				if strings.Contains(strings.ToLower(description), constants.ClosingBalance) {
 					if balance.Valid {
 						log.Printf("[BANK-UPLOAD-DEBUG] CLOSING BALANCE detected: %.2f (skipping from transactions)", balance.Float64)
 					} else {
@@ -1906,7 +1906,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 			sanitizeDateStr := func(s string) string {
 				s = strings.ReplaceAll(s, "\x00", "")
-				s = strings.ReplaceAll(s, "\u00A0", " ")
+				s = strings.ReplaceAll(s, constants.NBSP, " ")
 				s = strings.Join(strings.Fields(s), " ")
 				return strings.TrimSpace(s)
 			}
@@ -1932,7 +1932,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if valueDate.IsZero() && transactionDate.IsZero() && !postedDate.IsZero() {
 				valueDate = postedDate
 				transactionDate = postedDate
-				postedDate = postedDate // keep for raw field
+				// postedDate is already populated; no further assignment required
 			}
 
 			// Extract TranID early so we can use it in fallback logic
@@ -2010,7 +2010,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 						amountIdxLocal = idx
 						break
 					}
-					if lc == "debit" || lc == "credit" || lc == "debit amt" || lc == "credit amt" {
+					if lc == "debit" || lc == "credit" || lc == constants.DebitAmount || lc == constants.CreditAmount {
 						amountIdxLocal = idx
 						break
 					}
@@ -2032,7 +2032,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 
 			// Check for opening balance row
-			if strings.Contains(tempDescLower, "balance carried forward") {
+			if strings.Contains(tempDescLower, constants.BalanceCarriedForward) {
 				// Extract opening balance from balance column
 				if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
 					balanceStr := cleanAmount(row[bIdx])
@@ -2062,7 +2062,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 			// Fallback: scan entire row for 'balance carried forward' in any cell
 			for _, cell := range row {
-				if strings.Contains(strings.ToLower(strings.TrimSpace(cell)), "balance carried forward") {
+				if strings.Contains(strings.ToLower(strings.TrimSpace(cell)), constants.BalanceCarriedForward) {
 					// Prefer balance column
 					if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
 						balanceStr := cleanAmount(row[bIdx])
@@ -2096,7 +2096,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// NOW check if we should skip - AFTER all fallback attempts
 			if (valueDate.IsZero() && transactionDate.IsZero()) || (valueDateStr == constants.DateFormatCustom && transactionDateStr == constants.DateFormatCustom) {
 				// Check if this is a closing balance row before skipping
-				if strings.Contains(tempDescLower, "closing balance") || tempDescLower == "closing balance" {
+				if strings.Contains(tempDescLower, constants.ClosingBalance) || tempDescLower == constants.ClosingBalance {
 					// Extract closing balance value
 					if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
 						balanceStr := cleanAmount(row[bIdx])
@@ -2447,7 +2447,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("failed to insert bank statement: %w", err)
+		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
 
 	// Bulk insert transactions for speed, skip duplicates
@@ -2541,7 +2541,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		       `, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
 	if err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("failed to insert audit action: %w", err)
+		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit: %w", err)
@@ -3128,7 +3128,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
-							"error":             "No access to this bank statement",
+							"error":             constants.ErrNoAccessToBankStatement,
 						})
 						continue
 					}
@@ -3264,7 +3264,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
-							"error":             "bank not allowed",
+							"error":             constants.ErrBankNotAllowed,
 						})
 						continue
 					}
@@ -3283,7 +3283,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
-						"error":             "currency not allowed",
+						"error":             constants.ErrCurrencyNotAllowed,
 					})
 					continue
 				}
@@ -3434,7 +3434,7 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
-							"error":             "No access to this bank statement",
+							"error":             constants.ErrNoAccessToBankStatement,
 						})
 						continue
 					}
@@ -3489,7 +3489,7 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 						results = append(results, map[string]interface{}{
 							"bank_statement_id": bsid,
 							"success":           false,
-							"error":             "No access to this bank statement",
+							"error":             constants.ErrNoAccessToBankStatement,
 						})
 						continue
 					}
@@ -3781,7 +3781,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrAccountNotFound
 		}
-		return fmt.Errorf("db error while looking up account in masterbankaccount: %w", err)
+		return fmt.Errorf(constants.ErrDBMasterBankAccountLookup, err)
 	}
 
 	// Print extracted data
@@ -3847,7 +3847,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		}
 	}
 	if txnHeaderIdx == -1 {
-		return errors.New("transaction header row not found in Excel file")
+		return errors.New(constants.ErrTransactionHeaderRowNotFound)
 	}
 
 	// Map columns by trimmed header name for flexibility
@@ -3874,7 +3874,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		}
 	}
 	if !hasDate || (!hasDesc && !hasAmount) {
-		return errors.New("transaction header row not found in Excel file")
+		return errors.New(constants.ErrTransactionHeaderRowNotFound)
 	}
 
 	// Parse transactions, skip header
@@ -4052,7 +4052,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("failed to insert bank statement: %w", err)
+		return fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
 
 	// Upsert into public.bank_balances_manual for dashboard matching
@@ -4073,7 +4073,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	// Enforce bank/account/currency checks (entity already validated earlier)
 	if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
 		if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
-			return errors.New("bank not allowed")
+			return errors.New(constants.ErrBankNotAllowed)
 		}
 	}
 	if ctx.Value("ApprovedBankAccounts") != nil {
@@ -4082,7 +4082,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		}
 	}
 	if !ctxHasApprovedCurrency(ctx, currencyCode) {
-		return errors.New("currency not allowed")
+		return errors.New(constants.ErrCurrencyNotAllowed)
 	}
 	// Calculate total credits and debits from transactions
 	var totalCredits, totalDebits float64
@@ -4196,7 +4196,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	       `, bankStatementID, "CREATE", "PENDING_APPROVAL", "system", time.Now())
 	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("failed to insert audit action: %w", err)
+		return fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit: %w", err)
@@ -4262,11 +4262,11 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	}
 
 	// Parse period dates
-	periodStart, err := time.Parse("2006-01-02", pdfData.PeriodStart)
+	periodStart, err := time.Parse(constants.DateFormat, pdfData.PeriodStart)
 	if err != nil {
 		return nil, fmt.Errorf("invalid period_start date: %w", err)
 	}
-	periodEnd, err := time.Parse("2006-01-02", pdfData.PeriodEnd)
+	periodEnd, err := time.Parse(constants.DateFormat, pdfData.PeriodEnd)
 	if err != nil {
 		return nil, fmt.Errorf("invalid period_end date: %w", err)
 	}
@@ -4292,12 +4292,12 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	uncategorized := []map[string]interface{}{}
 
 	for _, txn := range pdfData.Transactions {
-		txnDate, err := time.Parse("2006-01-02", txn.TransactionDate)
+		txnDate, err := time.Parse(constants.DateFormat, txn.TransactionDate)
 		if err != nil {
 			log.Printf("[PDF_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
 			continue
 		}
-		valDate, err := time.Parse("2006-01-02", txn.ValueDate)
+		valDate, err := time.Parse(constants.DateFormat, txn.ValueDate)
 		if err != nil {
 			log.Printf("[PDF_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
 			continue
@@ -4342,7 +4342,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 			}
 		} else {
 			uncategorized = append(uncategorized, map[string]interface{}{
-				"transaction_date": txnDate.Format("2006-01-02"),
+				"transaction_date": txnDate.Format(constants.DateFormat),
 				"description":      txn.Description,
 				"withdrawal":       txn.Withdrawal,
 				"deposit":          txn.Deposit,
@@ -4393,7 +4393,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	`, entityID, pdfData.AccountNumber, periodStart, periodEnd, fileHash,
 		pdfData.OpeningBalance, pdfData.ClosingBalance).Scan(&bankStatementID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to insert bank statement: %w", err)
+		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
 
 	log.Printf("[PDF_PROCESSOR] Created bank_statement_id: %s", bankStatementID)
@@ -4406,7 +4406,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		key := buildTxnKey(t.AccountNumber, t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount)
 		if existingTxnKeys[key] {
 			reviewTxns = append(reviewTxns, map[string]interface{}{
-				"transaction_date": t.TransactionDate.Format("2006-01-02"),
+				"transaction_date": t.TransactionDate.Format(constants.DateFormat),
 				"description":      t.Description,
 				"withdrawal":       t.WithdrawalAmount.Float64,
 				"deposit":          t.DepositAmount.Float64,
@@ -4466,7 +4466,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		) VALUES ($1, $2, $3, $4, $5)
 	`, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("failed to insert audit action: %w", err)
+		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
 	}
 
 	if err := tx.Commit(); err != nil {

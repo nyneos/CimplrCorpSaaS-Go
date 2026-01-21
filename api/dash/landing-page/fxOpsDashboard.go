@@ -191,13 +191,13 @@ func getMaturingExposuresAlert(ctx context.Context, db *sql.DB, entities []strin
 	argPos := 2
 
 	if len(entities) > 0 {
-		entityFilter = fmt.Sprintf(" AND eh.entity = ANY($%d)", argPos)
+		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
 		args = append(args, pq.Array(entities))
 		argPos++
 	}
 
 	if len(currencies) > 0 {
-		currencyFilter = fmt.Sprintf(" AND eh.currency = ANY($%d)", argPos)
+		currencyFilter = fmt.Sprintf(constants.QuerryCurrency2, argPos)
 		args = append(args, pq.Array(currencies))
 	}
 
@@ -302,7 +302,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 
 	// Add entity filter only if entities are provided
 	if len(entities) > 0 {
-		entityFilter = fmt.Sprintf(" AND eh.entity = ANY($%d)", argPos)
+		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
 		args = append(args, pq.Array(entities))
 		argPos++
 	}
@@ -315,7 +315,7 @@ func getUnhedgedExposures(ctx context.Context, db *sql.DB, entities []string, cu
 	}
 
 	if len(currencies) > 0 {
-		currencyFilter = fmt.Sprintf(" AND eh.currency = ANY($%d)", argPos)
+		currencyFilter = fmt.Sprintf(constants.QuerryCurrency2, argPos)
 		args = append(args, pq.Array(currencies))
 	}
 
@@ -412,7 +412,7 @@ func getPendingSettlementToday(ctx context.Context, db *sql.DB, entities []strin
 	entityFilter := ""
 	args := []interface{}{today}
 	if len(entities) > 0 {
-		entityFilter = "WHERE eh.entity = ANY($2) AND"
+		entityFilter = constants.QuerryWhereClause
 		args = append(args, pq.Array(entities))
 	} else {
 		entityFilter = "WHERE"
@@ -446,13 +446,13 @@ func getExposureMaturities(ctx context.Context, db *sql.DB, entities []string, c
 	argPos := 1
 
 	if len(entities) > 0 {
-		entityFilter = fmt.Sprintf(" AND eh.entity = ANY($%d)", argPos)
+		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
 		args = append(args, pq.Array(entities))
 		argPos++
 	}
 
 	if len(currencies) > 0 {
-		currencyFilter = fmt.Sprintf(" AND eh.currency = ANY($%d)", argPos)
+		currencyFilter = fmt.Sprintf(constants.QuerryCurrency2, argPos)
 		args = append(args, pq.Array(currencies))
 	}
 
@@ -556,7 +556,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 	entityFilter := ""
 	args := []interface{}{today}
 	if len(entities) > 0 {
-		entityFilter = "WHERE eh.entity = ANY($2) AND"
+		entityFilter = constants.QuerryWhereClause
 		args = append(args, pq.Array(entities))
 	} else {
 		entityFilter = "WHERE"
@@ -602,7 +602,7 @@ func getSettlementPerformance(ctx context.Context, db *sql.DB, entities []string
 	upcomingEntityFilter := ""
 	upcomingArgs := []interface{}{today}
 	if len(entities) > 0 {
-		upcomingEntityFilter = "WHERE eh.entity = ANY($2) AND"
+		upcomingEntityFilter = constants.QuerryWhereClause
 		upcomingArgs = append(upcomingArgs, pq.Array(entities))
 	} else {
 		upcomingEntityFilter = "WHERE"
@@ -761,7 +761,7 @@ func getHighUnhedgedAlert(ctx context.Context, db *sql.DB, entities []string, cu
 
 	if totalUnhedged > 1000000 { // > $1M
 		return Alert{
-			Title:       "High Unhedged Exposure",
+			Title:       constants.QuerryHighUnhedgedExposure,
 			Value:       formatAmount(totalUnhedged),
 			Description: fmt.Sprintf("Total unhedged exposure of %s requires attention", formatAmount(totalUnhedged)),
 			Action:      "Review hedging strategy",
@@ -770,7 +770,7 @@ func getHighUnhedgedAlert(ctx context.Context, db *sql.DB, entities []string, cu
 		}
 	} else if totalUnhedged > 0 {
 		return Alert{
-			Title:       "High Unhedged Exposure",
+			Title:       constants.QuerryHighUnhedgedExposure,
 			Value:       formatAmount(totalUnhedged),
 			Description: fmt.Sprintf("Total unhedged exposure: %s", formatAmount(totalUnhedged)),
 			Action:      "Monitor exposure levels",
@@ -779,7 +779,7 @@ func getHighUnhedgedAlert(ctx context.Context, db *sql.DB, entities []string, cu
 		}
 	} else {
 		return Alert{
-			Title:       "High Unhedged Exposure",
+			Title:       constants.QuerryHighUnhedgedExposure,
 			Value:       "$0",
 			Description: "No unhedged exposures detected",
 			Action:      "Maintain current strategy",

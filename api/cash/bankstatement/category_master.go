@@ -157,7 +157,7 @@ func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCo
 			return http.StatusBadRequest, "Missing currency"
 		}
 		if !ctxHasApprovedCurrency(ctx, *currency) {
-			return http.StatusForbidden, "currency not allowed"
+			return http.StatusForbidden, constants.ErrCurrencyNotAllowed
 		}
 		return 0, ""
 	default:
@@ -343,7 +343,7 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		}
 		if unauthorizedCurrency {
 			tx.Rollback()
-			http.Error(w, "currency not allowed", http.StatusForbidden)
+			http.Error(w, constants.ErrCurrencyNotAllowed, http.StatusForbidden)
 			return
 		}
 
@@ -1091,7 +1091,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 				}
 				if comp.CurrencyCode != nil && strings.TrimSpace(*comp.CurrencyCode) != "" {
 					if !ctxHasApprovedCurrency(r.Context(), *comp.CurrencyCode) {
-						http.Error(w, "currency not allowed in component at index "+fmt.Sprint(i), http.StatusForbidden)
+						http.Error(w, constants.ErrCurrencyNotAllowed+" in component at index "+fmt.Sprint(i), http.StatusForbidden)
 						return
 					}
 				}
@@ -1161,7 +1161,7 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		}
 		if requestBody.CurrencyCode != nil && strings.TrimSpace(*requestBody.CurrencyCode) != "" {
 			if !ctxHasApprovedCurrency(r.Context(), *requestBody.CurrencyCode) {
-				http.Error(w, "currency not allowed in component", http.StatusForbidden)
+				http.Error(w, constants.ErrCurrencyNotAllowed+" in component", http.StatusForbidden)
 				return
 			}
 		}
