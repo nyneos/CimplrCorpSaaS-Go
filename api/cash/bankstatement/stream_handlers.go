@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -74,7 +75,7 @@ func uploadToSupabase(ctx context.Context, fileBytes []byte, objectPath string) 
 	if strings.HasSuffix(strings.ToLower(objectPath), ".docx") {
 		contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	}
-	req.Header.Set("Content-Type", contentType)
+	req.Header.Set(constants.ContentTypeText, contentType)
 
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
@@ -103,7 +104,7 @@ func respondWithError(w http.ResponseWriter, err error, userMsg string, code int
 	if userMsg == "" {
 		userMsg = "Internal server error"
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": userMsg})
 }
@@ -163,7 +164,7 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 		return err
 	}
 	// set content type to multipart with boundary
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
@@ -179,7 +180,7 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 		}
 	}
 	// ensure chunked streaming
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, ok := w.(http.Flusher)
@@ -268,7 +269,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 				"status": "exists",
 				"id":     existingID,
 			}
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -307,15 +308,15 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		mw := multipart.NewWriter(&b)
 		fw, err := mw.CreateFormFile("pdf", header.Filename)
 		if err != nil {
-			respondWithError(w, err, "Failed to prepare file for parsing", http.StatusInternalServerError)
+			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
 			return
 		}
 		if _, err := fw.Write(fileBytes); err != nil {
-			respondWithError(w, err, "Failed to prepare file for parsing", http.StatusInternalServerError)
+			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
 			return
 		}
 		if err := mw.Close(); err != nil {
-			respondWithError(w, err, "Failed to prepare file for parsing", http.StatusInternalServerError)
+			respondWithError(w, err, constants.ErrFailedToPrepareFile, http.StatusInternalServerError)
 			return
 		}
 
@@ -324,7 +325,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 			respondWithError(w, err, "Failed to create parsing request", http.StatusInternalServerError)
 			return
 		}
-		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 		client := &http.Client{Timeout: 0}
 		resp, err := client.Do(req)
@@ -361,7 +362,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		}
 
 		// Send the single combined JSON response
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
 			log.Printf("failed to write response: %v", err)
@@ -398,7 +399,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 				return
 			}
 			// Validate date format
-			if _, err := time.Parse("2006-01-02", *tx.TranDate); err != nil {
+			if _, err := time.Parse(constants.DateFormat, *tx.TranDate); err != nil {
 				respondWithError(w, nil, fmt.Sprintf("Invalid date format for transaction %d. Expected format: YYYY-MM-DD.", i+1), http.StatusBadRequest)
 				return
 			}
@@ -545,7 +546,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 				return
 			}
 			// Validate date format
-			if _, err := time.Parse("2006-01-02", *tx.TranDate); err != nil {
+			if _, err := time.Parse(constants.DateFormat, *tx.TranDate); err != nil {
 				respondWithError(w, nil, fmt.Sprintf("Invalid date format for transaction %d (%s). Expected format: YYYY-MM-DD.", i+1, *tx.TranDate), http.StatusBadRequest)
 				return
 			}
@@ -614,12 +615,12 @@ func CommitHandler(db *sql.DB) http.Handler {
 		// Parse period dates from metadata
 		var periodStart, periodEnd time.Time
 		if payload.Clean.Metadata.PeriodStart != nil && strings.TrimSpace(*payload.Clean.Metadata.PeriodStart) != "" {
-			if t, err := time.Parse("2006-01-02", *payload.Clean.Metadata.PeriodStart); err == nil {
+			if t, err := time.Parse(constants.DateFormat, *payload.Clean.Metadata.PeriodStart); err == nil {
 				periodStart = t
 			}
 		}
 		if payload.Clean.Metadata.PeriodEnd != nil && strings.TrimSpace(*payload.Clean.Metadata.PeriodEnd) != "" {
-			if t, err := time.Parse("2006-01-02", *payload.Clean.Metadata.PeriodEnd); err == nil {
+			if t, err := time.Parse(constants.DateFormat, *payload.Clean.Metadata.PeriodEnd); err == nil {
 				periodEnd = t
 			}
 		}
@@ -627,7 +628,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 		// Use first and last transaction dates as fallback
 		if periodStart.IsZero() && len(payload.Clean.Transactions) > 0 {
 			if payload.Clean.Transactions[0].TranDate != nil && strings.TrimSpace(*payload.Clean.Transactions[0].TranDate) != "" {
-				if t, err := time.Parse("2006-01-02", *payload.Clean.Transactions[0].TranDate); err == nil {
+				if t, err := time.Parse(constants.DateFormat, *payload.Clean.Transactions[0].TranDate); err == nil {
 					periodStart = t
 				}
 			}
@@ -635,7 +636,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 		if periodEnd.IsZero() && len(payload.Clean.Transactions) > 0 {
 			lastTx := payload.Clean.Transactions[len(payload.Clean.Transactions)-1]
 			if lastTx.TranDate != nil && strings.TrimSpace(*lastTx.TranDate) != "" {
-				if t, err := time.Parse("2006-01-02", *lastTx.TranDate); err == nil {
+				if t, err := time.Parse(constants.DateFormat, *lastTx.TranDate); err == nil {
 					periodEnd = t
 				}
 			}
@@ -670,7 +671,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 		}
 
 		// Generate file hash for deduplication
-		fileHash := fmt.Sprintf("%s_%s_%s", accountNumber, periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02"))
+		fileHash := fmt.Sprintf("%s_%s_%s", accountNumber, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat))
 
 		// Insert parent bank_statements row (matching V2 structure)
 		var bankStatementID string
@@ -702,12 +703,12 @@ func CommitHandler(db *sql.DB) http.Handler {
 				// Parse dates
 				var tranDate, valueDate time.Time
 				if t.TranDate != nil && strings.TrimSpace(*t.TranDate) != "" {
-					if parsed, err := time.Parse("2006-01-02", *t.TranDate); err == nil {
+					if parsed, err := time.Parse(constants.DateFormat, *t.TranDate); err == nil {
 						tranDate = parsed
 					}
 				}
 				if t.ValueDate != nil && strings.TrimSpace(*t.ValueDate) != "" {
-					if parsed, err := time.Parse("2006-01-02", *t.ValueDate); err == nil {
+					if parsed, err := time.Parse(constants.DateFormat, *t.ValueDate); err == nil {
 						valueDate = parsed
 					}
 				}
@@ -924,7 +925,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 			"ungrouped_transaction_count":     ungroupedTxns,
 			"grouped_transaction_percent":     groupedPct,
 			"ungrouped_transaction_percent":   ungroupedPct,
-			"statement_date_coverage":         map[string]interface{}{"start": periodStart.Format("2006-01-02"), "end": periodEnd.Format("2006-01-02")},
+			"statement_date_coverage":         map[string]interface{}{"start": periodStart.Format(constants.DateFormat), "end": periodEnd.Format(constants.DateFormat)},
 			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
 			"pages_processed":                 pagesProcessed,
 			"transactions_under_review_count": len(reviewTransactions),
@@ -938,7 +939,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 			"success": true,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
 	})
 }
@@ -986,7 +987,7 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 			respondWithError(w, err, "Failed to fetch metadata", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(row)
 	})
 }
@@ -1119,7 +1120,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		}()
 
 		// stream file
-		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set(constants.ContentTypeText, "application/pdf")
 		fname := filename.String
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fname))
 		http.ServeContent(w, r, fname, time.Now(), bytes.NewReader(data))

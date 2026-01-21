@@ -81,17 +81,18 @@ const (
 // ============================================================================
 
 const (
-	ErrNoBankAccounts           = "No bank accounts found"
-	ErrNoBankAccountsForEntity  = "No bank accounts found for the selected entity"
-	ErrNoBankAccountsForBank    = "No bank accounts found for the selected bank"
-	ErrBankAccountNotFound      = "Bank account not found or you don't have access to it"
-	ErrBankAccountNotApproved   = "Bank account is pending approval"
-	ErrBankAccountNotActive     = "Bank account is not active"
-	ErrBankAccountDeleted       = "Bank account has been deleted"
-	ErrBankAccountRequired      = "Bank account information is required"
-	ErrBankAccountAlreadyExists = "Bank account already exists in the system"
-	ErrBankAccountCreateFailed  = "Failed to create bank account"
-	ErrBankAccountUpdateFailed  = "'. Please contact your administrator."
+	ErrNoBankAccounts            = "No bank accounts found"
+	ErrNoBankAccountsForEntity   = "No bank accounts found for the selected entity"
+	ErrNoBankAccountsForBank     = "No bank accounts found for the selected bank"
+	ErrBankAccountNotFound       = "Bank account not found or you don't have access to it"
+	ErrBankAccountNotApproved    = "Bank account is pending approval"
+	ErrBankAccountNotActive      = "Bank account is not active"
+	ErrBankAccountDeleted        = "Bank account has been deleted"
+	ErrBankAccountRequired       = "Bank account information is required"
+	ErrBankAccountAlreadyExists  = "Bank account already exists in the system"
+	ErrBankAccountCreateFailed   = "Failed to create bank account"
+	ErrBankAccountUpdateFailed   = "'. Please contact your administrator."
+	ErrDBMasterBankAccountLookup = "db error while looking up account in masterbankaccount: %w"
 )
 
 const (

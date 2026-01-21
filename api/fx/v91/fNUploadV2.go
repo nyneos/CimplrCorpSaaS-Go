@@ -1376,7 +1376,7 @@ func fastMapWithHeaderLower(row map[string]string, headerLower map[string]string
 		"DocumentCurrency":  {"document currency", "doc. curr.", "waers", "document_currency", "doccurrency"},
 		"DocumentNumber":    {"document number", "belnr", "document", "document_number", "docno"},
 		"DocumentDate":      {"document date", "bldat", "document_date", "doc. date"},
-		"PostingDate":       {"posting date", "budat", "posting_date", "pstng date"},
+		"PostingDate":       {constants.TransactionPostingDate, "budat", "posting_date", "pstng date"},
 		"NetDueDate":        {"net due date", "net due date", "baseline date", "due date", "net_due_date", "clearing date"},
 		"AmountDoc":         {"amount in doc. curr.", "amount in doc. curr", "wrbtr", "amt in doc. curr.", "amount_in_doc_curr", "amount", "amount in local currency", "dmbtr", "amount_in_local_currency"},
 		"Assignment":        {"assignment", "zuonr", "reference"},

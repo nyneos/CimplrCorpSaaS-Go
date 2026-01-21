@@ -482,7 +482,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						parsed := time.Time{}
 						var parseErr error
 						// Try a few common formats MFAPI returns
-						for _, f := range []string{"2006-01-02", "02-01-2006", "02-Jan-2006", "02-Jan-06"} {
+						for _, f := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
 							parsed, parseErr = time.Parse(f, lastEntry.Date)
 							if parseErr == nil {
 								break
@@ -493,7 +493,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							log.Printf("CreateMTMBulk: unable to parse NAV date '%s' for scheme %s: %v", lastEntry.Date, amfiCode, parseErr)
 							navFetchError = "Invalid NAV date format"
 						} else {
-							actualEndDate = parsed.Format("2006-01-02")
+							actualEndDate = parsed.Format(constants.DateFormat)
 						}
 
 						if navVal, err := strconv.ParseFloat(lastEntry.NAV, 64); err == nil {
@@ -559,9 +559,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// 2. Fallback to investment.amfi_nav_staging with `nav_date <= actualEndDate` ordered desc.
 			// 3. Final fallback to avg_nav (cost basis).
 			if actualEndDate != "" {
-				parsedEnd, perr := time.Parse("2006-01-02", actualEndDate)
+				parsedEnd, perr := time.Parse(constants.DateFormat, actualEndDate)
 				if perr == nil {
-					startRange := parsedEnd.AddDate(0, 0, -7).Format("2006-01-02")
+					startRange := parsedEnd.AddDate(0, 0, -7).Format(constants.DateFormat)
 					// Try MFapi for range startRange..actualEndDate
 					if amfiCode != "" {
 						apiRangeURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startRange, actualEndDate)
@@ -581,7 +581,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								for _, e := range apiRangeResp.Data {
 									var d time.Time
 									var dErr error
-									for _, f := range []string{"2006-01-02", "02-01-2006", "02-Jan-2006", "02-Jan-06"} {
+									for _, f := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
 										d, dErr = time.Parse(f, e.Date)
 										if dErr == nil {
 											break
@@ -1348,7 +1348,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							endParsed, _ := time.Parse(constants.DateFormat, endDate)
 
 							for _, entry := range apiResp.Data {
-								entryDate, err := time.Parse("02-01-2006", entry.Date) // MFapi format: DD-MM-YYYY
+								entryDate, err := time.Parse(constants.DateFormatAlt, entry.Date) // MFapi format: DD-MM-YYYY
 								if err != nil {
 									continue
 								}

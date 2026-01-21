@@ -296,7 +296,7 @@ func getTopUnhedgedByCurrency(ctx context.Context, db *sql.DB, entities []string
 	args := []interface{}{}
 	argPos := 1
 	if len(entities) > 0 {
-		entityFilter = fmt.Sprintf(" AND eh.entity = ANY($%d)", argPos)
+		entityFilter = fmt.Sprintf(constants.QuerryEntity, argPos)
 		args = append(args, pqStringArray(entities))
 		argPos++
 	}
