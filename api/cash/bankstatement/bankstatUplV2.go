@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+    "sort"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -2635,6 +2636,317 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	return result, nil
 }
 
+// UploadMultiAccountBankStatementHandler parses a single CSV file containing rows
+// for multiple accounts, groups rows by account_number and invokes the existing
+// categorization pipeline for each account independently.
+//
+// Behaviour:
+// - Expects a multipart form upload with a single CSV file field (commonly `file`).
+// - Requires `multi=true` form field to be set; UploadBankStatementV2Handler will
+//   delegate to this handler when present.
+// - Parses CSV (robust to header name variations), groups rows by account number,
+//   builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
+//   and calls UploadBankStatementV2WithCategorization for each account.
+// - Aggregates results per-account and isolates failures to the account level.
+func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		if r.Method != http.MethodPost {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "Only POST method is allowed for this endpoint.",
+			})
+			return
+		}
+
+		// Ensure multipart form is parsed
+		if r.MultipartForm == nil {
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to read the uploaded file. Please try again."})
+				return
+			}
+		}
+
+		// Find the uploaded file (same tolerant logic as single-file handler)
+		var file multipart.File
+		var fhHeader *multipart.FileHeader
+		var err error
+		file, fhHeader, err = r.FormFile("file")
+		if err != nil || file == nil {
+			// try alternative field names
+			if file == nil {
+				file, fhHeader, err = r.FormFile("statement")
+			}
+			if err != nil || file == nil {
+				file, fhHeader, err = r.FormFile("bankStatement")
+			}
+			if err != nil || file == nil {
+				// try first available file field
+				if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
+					for _, files := range r.MultipartForm.File {
+						if len(files) > 0 {
+							fhHeader = files[0]
+							file, err = fhHeader.Open()
+							break
+						}
+					}
+				}
+			}
+		}
+		if err != nil || file == nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "File not found in request. Please attach a CSV file using the 'file' field in form-data."})
+			return
+		}
+		defer file.Close()
+
+		// Read file bytes
+		fileBytes, err := io.ReadAll(file)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Failed to read the uploaded file. Please try again."})
+			return
+		}
+
+		// Parse CSV
+		rdr := csv.NewReader(bytes.NewReader(fileBytes))
+		rdr.FieldsPerRecord = -1
+		rows, err := rdr.ReadAll()
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to parse CSV file. Please ensure it is a valid CSV."})
+			return
+		}
+		if len(rows) < 1 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "CSV contains no rows."})
+			return
+		}
+
+		header := rows[0]
+		// helper to find header indices (case-insensitive, substring match)
+		findIdx := func(keywords ...string) int {
+			for i, h := range header {
+				lc := strings.ToLower(strings.TrimSpace(h))
+				for _, kw := range keywords {
+					if strings.Contains(lc, strings.ToLower(kw)) {
+						return i
+					}
+				}
+			}
+			return -1
+		}
+
+		accIdx := findIdx("account number", "account_no", "account")
+		dateIdx := findIdx("transaction date", "statement date", "date")
+		valDateIdx := findIdx("value date", "value-date", "value")
+		descIdx := findIdx("transaction description", "description", "remarks", "narration")
+		// prefer explicit Extra Information column when available
+		extraInfoIdx := findIdx("extra information", "extra", "extra-info", "extra_info")
+		debitIdx := findIdx("debit", "debit amount", "withdrawal")
+		creditIdx := findIdx("credit", "credit amount", "deposit")
+		openingIdx := findIdx("opening", "opening available", "opening available balance")
+		closingIdx := findIdx("closing", "closing available", "current / closing")
+
+		if accIdx == -1 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "CSV must contain an account number column."})
+			return
+		}
+
+		// Group rows by account number
+		groups := make(map[string][][]string)
+		for ri := 1; ri < len(rows); ri++ {
+			row := rows[ri]
+			// guard length
+			if accIdx >= len(row) {
+				continue
+			}
+			acc := strings.TrimSpace(row[accIdx])
+			if acc == "" {
+				continue
+			}
+			groups[acc] = append(groups[acc], row)
+		}
+
+		ctx := r.Context()
+		results := make(map[string]interface{})
+
+		// Process each account independently
+		for account, grecs := range groups {
+			// Build structured input per-account by normalizing rows into transactions.
+			stm := StructuredBankStatement{
+				AccountNumber: account,
+				BankName:      "",
+				Transactions:  []StructuredTransaction{},
+			}
+
+			var rowsTxns []struct {
+				dt        time.Time
+				valueDate time.Time
+				desc      string
+				withdrawal float64
+				deposit   float64
+				rawClose  string
+			}
+			var minDate, maxDate time.Time
+			var openingBalance, closingBalance float64
+			openingFound := false
+
+			// First pass: collect rows into temporary slice and capture opening/closing if present
+			for _, rrow := range grecs {
+				get := func(idx int) string {
+					if idx >= 0 && idx < len(rrow) {
+						return strings.TrimSpace(rrow[idx])
+					}
+					return ""
+				}
+				// Prefer value date when available
+				dateCell := get(dateIdx)
+				if valDateIdx >= 0 {
+					if v := get(valDateIdx); v != "" {
+						dateCell = v
+					}
+				}
+				dt := tryParseDateWithExcelSerial(dateCell)
+				if dt.IsZero() {
+					// skip unparsable rows
+					continue
+				}
+
+				// description: prefer Extra Information column if present
+				descCell := ""
+				if extraInfoIdx >= 0 {
+					descCell = get(extraInfoIdx)
+				}
+				if descCell == "" {
+					descCell = get(descIdx)
+				}
+				descCell = sanitizeForPostgres(descCell)
+
+				debitStr := cleanAmount(get(debitIdx))
+				creditStr := cleanAmount(get(creditIdx))
+				closeStr := cleanAmount(get(closingIdx))
+
+				var w, d float64
+				if debitStr != "" {
+					if v, err := strconv.ParseFloat(debitStr, 64); err == nil {
+						w = v
+					}
+				}
+				if creditStr != "" {
+					if v, err := strconv.ParseFloat(creditStr, 64); err == nil {
+						d = v
+					}
+				}
+
+				rowsTxns = append(rowsTxns, struct {
+					dt        time.Time
+					valueDate time.Time
+					desc      string
+					withdrawal float64
+					deposit   float64
+					rawClose  string
+				}{dt: dt, valueDate: dt, desc: descCell, withdrawal: w, deposit: d, rawClose: closeStr})
+
+				if minDate.IsZero() || dt.Before(minDate) {
+					minDate = dt
+				}
+				if maxDate.IsZero() || dt.After(maxDate) {
+					maxDate = dt
+				}
+
+				// opening balance: read from first non-empty Opening column if available
+				if !openingFound && openingIdx >= 0 {
+					opStr := cleanAmount(get(openingIdx))
+					if opStr != "" {
+						if v, err := strconv.ParseFloat(opStr, 64); err == nil {
+							openingBalance = v
+							openingFound = true
+						}
+					}
+				}
+				// closing balance: capture last non-empty closing column
+				if closeStr != "" {
+					if v, err := strconv.ParseFloat(closeStr, 64); err == nil {
+						closingBalance = v
+					}
+				}
+			}
+
+			if len(rowsTxns) == 0 {
+				results[account] = map[string]interface{}{"success": false, "message": "No parseable transactions for account"}
+				continue
+			}
+
+			// Sort transactions by date ascending to compute running balance
+			sort.Slice(rowsTxns, func(i, j int) bool { return rowsTxns[i].dt.Before(rowsTxns[j].dt) })
+
+			// If opening balance wasn't found in opening column, try to derive from first row's rawClose and deltas
+			running := 0.0
+			if openingFound {
+				running = openingBalance
+			} else {
+				// start from 0 and compute; we'll set opening to first computed running later
+				running = 0.0
+			}
+
+			// Build structured transactions with cumulative balance
+			for _, rt := range rowsTxns {
+				running = running - rt.withdrawal + rt.deposit
+				txn := StructuredTransaction{
+					TransactionDate: rt.dt.Format(constants.DateFormat),
+					ValueDate:       rt.valueDate.Format(constants.DateFormat),
+					Description:     rt.desc,
+					Withdrawal:      rt.withdrawal,
+					Deposit:         rt.deposit,
+					Balance:         running,
+				}
+				stm.Transactions = append(stm.Transactions, txn)
+			}
+
+			// finalize period and balances
+			stm.PeriodStart = minDate.Format(constants.DateFormat)
+			stm.PeriodEnd = maxDate.Format(constants.DateFormat)
+			if openingFound {
+				stm.OpeningBalance = openingBalance
+			} else {
+				// when opening not provided, set to running minus sum of transactions
+				// compute opening as first running minus first txn effect
+				if len(stm.Transactions) > 0 {
+					first := stm.Transactions[0]
+					stm.OpeningBalance = first.Balance - (first.Deposit - first.Withdrawal)
+				}
+			}
+			// prefer explicit captured closingBalance if present, else use running
+			if closingBalance != 0 {
+				stm.ClosingBalance = closingBalance
+			} else if len(stm.Transactions) > 0 {
+				stm.ClosingBalance = stm.Transactions[len(stm.Transactions)-1].Balance
+			}
+
+			// compute idempotent fileHash = sha256(serialized_transactions + account_number)
+			// Use the original file bytes for idempotency surface too (stable)
+			var txnBuf bytes.Buffer
+			enc := json.NewEncoder(&txnBuf)
+			_ = enc.Encode(stm.Transactions)
+			h := sha256.New()
+			h.Write(txnBuf.Bytes())
+			h.Write([]byte(account))
+			fileHash := fmt.Sprintf("%x", h.Sum(nil))
+
+			// Call structured ingestion
+			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash)
+			if upErr != nil {
+				results[account] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
+				continue
+			}
+			results[account] = map[string]interface{}{"success": true, "data": res}
+		}
+
+		// Return aggregated results
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data":    results,
+		})
+	})
+}
+
 // 1. Get all bank statements (POST, req: user_id)
 func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3573,6 +3885,14 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			return
 		}
 
+		// If client requested multi-account CSV processing, delegate to the
+		// dedicated handler which groups rows by account_number and calls the
+		// existing categorization pipeline per-account.
+		if r.FormValue("multi") == "true" {
+			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+			return
+		}
+
 		// Log available form fields for debugging
 		var fileFieldsAvailable []string
 		if r.MultipartForm != nil && r.MultipartForm.File != nil {
@@ -4242,64 +4562,113 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	log.Printf("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
 		pdfData.AccountNumber, pdfData.BankName, pdfData.PeriodStart, pdfData.PeriodEnd, len(pdfData.Transactions))
 
-	// Generate file hash from JSON content for idempotency
+	// Delegate to generic structured processor
+	var structured StructuredBankStatement
+	structured.AccountNumber = pdfData.AccountNumber
+	structured.BankName = pdfData.BankName
+	structured.PeriodStart = pdfData.PeriodStart
+	structured.PeriodEnd = pdfData.PeriodEnd
+	structured.OpeningBalance = pdfData.OpeningBalance
+	structured.ClosingBalance = pdfData.ClosingBalance
+	for _, t := range pdfData.Transactions {
+		st := StructuredTransaction{
+			TranID:          t.TranID,
+			TransactionDate: t.TransactionDate,
+			ValueDate:       t.ValueDate,
+			Description:     t.Description,
+			Withdrawal:      t.Withdrawal,
+			Deposit:         t.Deposit,
+			Balance:         t.Balance,
+		}
+		structured.Transactions = append(structured.Transactions, st)
+	}
 	hash := sha256.Sum256(jsonBytes)
 	fileHash := fmt.Sprintf("%x", hash[:])
+	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash)
+}
 
+// StructuredBankStatement and StructuredTransaction are canonical input types
+// for structured ingestion (PDF JSON or pre-parsed CSV JSON).
+type StructuredBankStatement struct {
+	AccountNumber  string
+	BankName       string
+	PeriodStart    string
+	PeriodEnd      string
+	OpeningBalance float64
+	ClosingBalance float64
+	Transactions   []StructuredTransaction
+}
+
+type StructuredTransaction struct {
+	TranID          *string
+	TransactionDate string
+	ValueDate       string
+	Description     string
+	Withdrawal      float64
+	Deposit         float64
+	Balance         float64
+}
+
+// ProcessBankStatementFromStructuredInput performs the same ingestion, categorization,
+// dedup and KPI computation as the PDF JSON processor but accepts structured input
+// directly (no file I/O or header detection).
+func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string) (map[string]interface{}, error) {
 	// Lookup entity_id from masterbankaccount
 	var entityID, accountName, bankName string
-	err = db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `
 		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
 		FROM public.masterbankaccount mba
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		WHERE mba.account_number = $1 AND mba.is_deleted = false
-	`, pdfData.AccountNumber).Scan(&entityID, &bankName, &accountName)
+	`, input.AccountNumber).Scan(&entityID, &bankName, &accountName)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("account %s not found in master data", pdfData.AccountNumber)
+			return nil, fmt.Errorf("account %s not found in master data", input.AccountNumber)
 		}
 		return nil, fmt.Errorf("failed to lookup account: %w", err)
 	}
 
-	// Parse period dates
-	periodStart, err := time.Parse(constants.DateFormat, pdfData.PeriodStart)
+	// Parse period dates (optional: input may already be ISO; enforce format)
+	periodStart, err := time.Parse(constants.DateFormat, input.PeriodStart)
 	if err != nil {
 		return nil, fmt.Errorf("invalid period_start date: %w", err)
 	}
-	periodEnd, err := time.Parse(constants.DateFormat, pdfData.PeriodEnd)
+	periodEnd, err := time.Parse(constants.DateFormat, input.PeriodEnd)
 	if err != nil {
 		return nil, fmt.Errorf("invalid period_end date: %w", err)
 	}
 
 	// Load category rules for this account
 	var acctCurrency sql.NullString
-	db.QueryRowContext(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, pdfData.AccountNumber).Scan(&acctCurrency)
+	db.QueryRowContext(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency)
 
 	var currencyCode string
 	if acctCurrency.Valid {
 		currencyCode = acctCurrency.String
 	}
-	rules, err := loadCategoryRuleComponents(ctx, db, pdfData.AccountNumber, entityID, currencyCode)
+	rules, err := loadCategoryRuleComponents(ctx, db, input.AccountNumber, entityID, currencyCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
 
-	// Convert JSON transactions to BankStatementTransaction
+	// Convert structured transactions to BankStatementTransaction and build
+	// per-category transaction lists for KPI output (matching V2 format).
 	transactions := []BankStatementTransaction{}
 	categoryCount := map[int64]int{}
 	debitSum := map[int64]float64{}
 	creditSum := map[int64]float64{}
 	uncategorized := []map[string]interface{}{}
+	categoryTxns := map[int64][]map[string]interface{}{}
 
-	for _, txn := range pdfData.Transactions {
+	for i, txn := range input.Transactions {
 		txnDate, err := time.Parse(constants.DateFormat, txn.TransactionDate)
 		if err != nil {
-			log.Printf("[PDF_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
+			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
 			continue
 		}
 		valDate, err := time.Parse(constants.DateFormat, txn.ValueDate)
 		if err != nil {
-			log.Printf("[PDF_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
+			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
 			continue
 		}
 
@@ -4316,7 +4685,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 
 		// Build transaction
 		t := BankStatementTransaction{
-			AccountNumber:    pdfData.AccountNumber,
+			AccountNumber:    input.AccountNumber,
 			ValueDate:        valDate,
 			TransactionDate:  txnDate,
 			Description:      txn.Description,
@@ -4331,27 +4700,40 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 
 		transactions = append(transactions, t)
 
-		// Update KPIs
+		// Update KPIs and category transaction lists
 		if categoryID.Valid {
-			categoryCount[categoryID.Int64]++
+			catID := categoryID.Int64
+			categoryCount[catID]++
 			if withdrawal.Valid {
-				debitSum[categoryID.Int64] += withdrawal.Float64
+				debitSum[catID] += withdrawal.Float64
 			}
 			if deposit.Valid {
-				creditSum[categoryID.Int64] += deposit.Float64
+				creditSum[catID] += deposit.Float64
 			}
+			txMap := map[string]interface{}{
+				"index":             i,
+				"tran_id":           t.TranID.String,
+				"value_date":        t.ValueDate,
+				"transaction_date":  t.TransactionDate,
+				"description":       t.Description,
+				"withdrawal_amount": t.WithdrawalAmount.Float64,
+				"deposit_amount":    t.DepositAmount.Float64,
+				"balance":           t.Balance.Float64,
+				"category_id":       catID,
+			}
+			categoryTxns[catID] = append(categoryTxns[catID], txMap)
 		} else {
 			uncategorized = append(uncategorized, map[string]interface{}{
+				"index":            i,
 				"transaction_date": txnDate.Format(constants.DateFormat),
+				"value_date":       valDate.Format(constants.DateFormat),
 				"description":      txn.Description,
 				"withdrawal":       txn.Withdrawal,
 				"deposit":          txn.Deposit,
+				"balance":          txn.Balance,
 			})
 		}
 	}
-
-	log.Printf("[PDF_PROCESSOR] Processed %d transactions, %d categorized, %d uncategorized",
-		len(transactions), len(transactions)-len(uncategorized), len(uncategorized))
 
 	// Check for existing transactions
 	existingTxnKeys := make(map[string]bool)
@@ -4359,7 +4741,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
 		FROM cimplrcorpsaas.bank_statement_transactions
 		WHERE account_number = $1
-	`, pdfData.AccountNumber)
+	`, input.AccountNumber)
 	if err == nil {
 		defer rowsExisting.Close()
 		for rowsExisting.Next() {
@@ -4390,13 +4772,11 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		ON CONFLICT ON CONSTRAINT uniq_stmt
 		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance
 		RETURNING bank_statement_id
-	`, entityID, pdfData.AccountNumber, periodStart, periodEnd, fileHash,
-		pdfData.OpeningBalance, pdfData.ClosingBalance).Scan(&bankStatementID)
+	`, entityID, input.AccountNumber, periodStart, periodEnd, fileHash,
+		input.OpeningBalance, input.ClosingBalance).Scan(&bankStatementID)
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
-
-	log.Printf("[PDF_PROCESSOR] Created bank_statement_id: %s", bankStatementID)
 
 	// Insert transactions
 	newTxns := []BankStatementTransaction{}
@@ -4450,8 +4830,6 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		}
 	}
 
-	log.Printf("[PDF_PROCESSOR] Inserted %d new transactions, %d under review", len(newTxns), len(reviewTxns))
-
 	// Insert audit action
 	requestedBy := "system"
 	if userID := ctx.Value("user_id"); userID != nil {
@@ -4479,19 +4857,27 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 	foundCategoryIDs := map[int64]bool{}
 	totalTxns := len(transactions)
 	groupedTxns := 0
-	ungroupedTxns := 0
-
 	for catID, count := range categoryCount {
+		// find category name/type from rules
+		catName := ""
+		for _, rule := range rules {
+			if rule.CategoryID == catID {
+				catName = rule.CategoryName
+				break
+			}
+		}
 		kpiCats = append(kpiCats, map[string]interface{}{
-			"category_id": catID,
-			"count":       count,
-			"debit_sum":   debitSum[catID],
-			"credit_sum":  creditSum[catID],
+			"category_id":   catID,
+			"category_name": catName,
+			"count":         count,
+			"debit_sum":     debitSum[catID],
+			"credit_sum":    creditSum[catID],
+			"transactions":  categoryTxns[catID],
 		})
 		foundCategoryIDs[catID] = true
 		groupedTxns += count
 	}
-	ungroupedTxns = totalTxns - groupedTxns
+	ungroupedTxns := totalTxns - groupedTxns
 
 	groupedPct := 0.0
 	ungroupedPct := 0.0
@@ -4514,7 +4900,7 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 
 	result := map[string]interface{}{
 		"pages_processed":                 1,
-		"bank_wise_status":                []map[string]interface{}{{"account_number": pdfData.AccountNumber, "status": "SUCCESS"}},
+		"bank_wise_status":                []map[string]interface{}{{"account_number": input.AccountNumber, "status": "SUCCESS"}},
 		"statement_date_coverage":         map[string]interface{}{"start": periodStart, "end": periodEnd},
 		"category_kpis":                   kpiCats,
 		"categories_found":                foundCategories,
@@ -4527,12 +4913,11 @@ func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]i
 		"ungrouped_transaction_count":     ungroupedTxns,
 		"grouped_transaction_percent":     groupedPct,
 		"ungrouped_transaction_percent":   ungroupedPct,
-		"source":                          "PDF_JSON",
+		"source":                          "STRUCTURED_INPUT",
 	}
 
 	return result, nil
 }
-
 func cleanAmount(s string) string {
 	s = strings.ReplaceAll(s, ",", "")
 	return strings.TrimSpace(s)
