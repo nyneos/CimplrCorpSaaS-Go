@@ -78,9 +78,9 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		dateToday := time.Now().UTC().Format(constants.DateFormat)
 		q := `
 SELECT DISTINCT ON (COALESCE(bbm.account_no, bbm.iban, bbm.nickname))
-	bbm.account_no, COALESCE(bbm.currency_code,'INR') as currency_code, COALESCE(bbm.closing_balance,0)::float8 as closing_balance,
-	COALESCE(mba.bank_name,'') as bank_name, COALESCE(me.entity_name,'') as entity_name,
-	COALESCE(bbm.country, mba.country, '') as country
+		bbm.account_no, COALESCE(bbm.nickname,'') as nickname, COALESCE(bbm.currency_code,'INR') as currency_code, COALESCE(bbm.closing_balance,0)::float8 as closing_balance,
+		COALESCE(mba.bank_name,'') as bank_name, COALESCE(me.entity_name,'') as entity_name,
+		COALESCE(bbm.country, mba.country, '') as country
 FROM bank_balances_manual bbm
 JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
 LEFT JOIN masterentitycash me ON mba.entity_id = me.entity_id
@@ -103,6 +103,7 @@ ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, 
 
 		type balRow struct {
 			Account  string
+			Nickname string
 			Currency string
 			Balance  float64
 			Bank     string
@@ -111,9 +112,9 @@ ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, 
 		}
 		balRows := []balRow{}
 		for rows.Next() {
-			var a, cur, bank, ent, country string
+			var a, n, cur, bank, ent, country string
 			var bal float64
-			if err := rows.Scan(&a, &cur, &bal, &bank, &ent, &country); err != nil {
+			if err := rows.Scan(&a, &n, &cur, &bal, &bank, &ent, &country); err != nil {
 				continue
 			}
 			// apply filters if provided
@@ -130,7 +131,7 @@ ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, 
 				continue
 			}
 
-			balRows = append(balRows, balRow{Account: a, Currency: cur, Balance: bal, Bank: bank, Entity: ent, Country: country})
+			balRows = append(balRows, balRow{Account: a, Nickname: n, Currency: cur, Balance: bal, Bank: bank, Entity: ent, Country: country})
 		}
 
 		// compute KPIs
@@ -292,8 +293,10 @@ AND (
 
 		// Statement rows (top few)
 		type StatementRow struct {
-			Title  string  `json:"title"`
-			Inflow float64 `json:"inflow"`
+			Title    string  `json:"title"`
+			Inflow   float64 `json:"inflow"`
+			Bank     string  `json:"bank"`
+			Nickname string  `json:"nickname"`
 		}
 		countryStatement := []StatementRow{}
 		for k, v := range countrySums {
@@ -302,9 +305,20 @@ AND (
 			}
 			countryStatement = append(countryStatement, StatementRow{Title: k, Inflow: v})
 		}
+		// build quick lookup maps for account -> bank/nickname so we can enrich the
+		// account statement safely without additional DB hits
+		accountToBank := map[string]string{}
+		accountToNickname := map[string]string{}
+		for _, br := range balRows {
+			if br.Account != "" {
+				accountToBank[br.Account] = br.Bank
+				accountToNickname[br.Account] = br.Nickname
+			}
+		}
+
 		accountStatement := []StatementRow{}
 		for a, v := range accountSums {
-			accountStatement = append(accountStatement, StatementRow{Title: a, Inflow: v})
+			accountStatement = append(accountStatement, StatementRow{Title: a, Inflow: v, Bank: accountToBank[a], Nickname: accountToNickname[a]})
 		}
 		currencyStatement := []StatementRow{}
 		for c, v := range currencySums {
