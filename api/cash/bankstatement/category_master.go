@@ -835,11 +835,10 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 
 func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-
 		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
