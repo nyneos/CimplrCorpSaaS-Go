@@ -119,6 +119,25 @@ func CreateBankAccountMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+
+		// Validate entity - user must have access to this entity
+		if !api.IsEntityAllowed(ctx, req.EntityID) {
+			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to create bank accounts for entity '"+req.EntityID+constants.ErrBankAccountUpdateFailed)
+			return
+		}
+
+		// Validate bank - user must have access to this bank
+		if strings.TrimSpace(req.BankName) != "" && !api.IsBankAllowed(ctx, req.BankName) {
+			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use bank '"+req.BankName+constants.ErrBankAccountUpdateFailed)
+			return
+		}
+
+		// Validate currency - user must have access to this currency
+		if strings.TrimSpace(req.Currency) != "" && !api.IsCurrencyAllowed(ctx, req.Currency) {
+			api.RespondWithError(w, http.StatusForbidden, "Access denied: You don't have permission to use currency '"+req.Currency+constants.ErrBankAccountUpdateFailed)
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
@@ -917,11 +936,18 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		query := `
+		ctx := r.Context()
+		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		baseQuery := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (aa.account_id)
 					aa.account_id,
-					aa.processing_status
+					aa.processing_status,
+					aa.requested_at,
+					aa.checker_at
 				FROM auditactionbankaccount aa
 				ORDER BY aa.account_id, aa.requested_at DESC
 			),
@@ -945,16 +971,38 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
 			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-			LEFT JOIN latest_audit la ON la.account_id = a.account_id
+			LEFT JOIN latest_audit l ON l.account_id = a.account_id
 			LEFT JOIN clearing cl ON cl.account_id = a.account_id
 			WHERE 
-				la.processing_status = 'APPROVED'
+				l.processing_status = 'APPROVED'
 				AND a.status = 'Active'
-				AND COALESCE(a.is_deleted, false) = false
-			ORDER BY a.account_nickname NULLS LAST, a.account_number;
-		`
+				AND COALESCE(a.is_deleted, false) = false`
 
-		rows, err := pgxPool.Query(r.Context(), query)
+		filters := []string{}
+		args := []interface{}{}
+		argIdx := 1
+
+		if len(entityIDs) > 0 {
+			filters = append(filters, fmt.Sprintf("(a.entity_id IS NULL OR a.entity_id = ANY($%d))", argIdx))
+			args = append(args, entityIDs)
+			argIdx++
+		}
+		if len(bankNames) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
+			args = append(args, bankNames)
+			argIdx++
+		}
+		if len(currCodes) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
+			args = append(args, currCodes)
+		}
+
+		if len(filters) > 0 {
+			baseQuery += " AND " + strings.Join(filters, " AND ")
+		}
+		baseQuery += " ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+
+		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
@@ -1474,7 +1522,11 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}))
 
-		query := `
+		ctx := r.Context()
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		baseQuery := `
 			SELECT
 				b.bank_name,
 				a.account_number,
@@ -1491,10 +1543,27 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) astatus ON TRUE
-			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false
-		`
+			WHERE astatus.processing_status = 'APPROVED' AND a.status = 'Active' AND COALESCE(a.is_deleted, false) = false`
 
-		rows, err := pgxPool.Query(r.Context(), query)
+		filters := []string{}
+		args := []interface{}{}
+		argIdx := 1
+
+		if len(bankNames) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
+			args = append(args, bankNames)
+			argIdx++
+		}
+		if len(currCodes) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
+			args = append(args, currCodes)
+		}
+
+		if len(filters) > 0 {
+			baseQuery += " AND " + strings.Join(filters, " AND ")
+		}
+
+		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1562,6 +1631,10 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 
 		query := `
         SELECT 
@@ -1691,10 +1764,32 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
         LEFT JOIN masterbank b ON a.bank_id = b.bank_id
         LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
         LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
-	WHERE a.account_id = $1 AND COALESCE(a.is_deleted, false) = false
-        `
+	WHERE a.account_id = $1 AND COALESCE(a.is_deleted, false) = false`
 
-		rows, err := pgxPool.Query(ctx, query, req.AccountID)
+		filters := []string{}
+		args := []interface{}{req.AccountID}
+		argIdx := 2
+
+		if len(entityIDs) > 0 {
+			filters = append(filters, fmt.Sprintf("(a.entity_id = ANY($%d))", argIdx))
+			args = append(args, entityIDs)
+			argIdx++
+		}
+		if len(bankNames) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
+			args = append(args, bankNames)
+			argIdx++
+		}
+		if len(currCodes) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
+			args = append(args, currCodes)
+		}
+
+		if len(filters) > 0 {
+			query += " AND " + strings.Join(filters, " AND ")
+		}
+
+		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1760,11 +1855,9 @@ func GetBankAccountsForUser(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		} else {
-			api.RespondWithError(w, http.StatusNotFound, "account not found")
+			api.RespondWithError(w, http.StatusNotFound, "Bank account not found or you don't have permission to access it")
 			return
-		}
-
-		// fetch audit info for this account
+		} // fetch audit info for this account
 		auditMap := make(map[string]map[string]interface{})
 		auditQuery := `SELECT DISTINCT ON (account_id) account_id, processing_status, requested_by, requested_at, actiontype, action_id, checker_by, checker_at, checker_comment, reason FROM auditactionbankaccount WHERE account_id=$1 ORDER BY account_id, requested_at DESC`
 		arows, err := pgxPool.Query(ctx, auditQuery, req.AccountID)
@@ -2097,7 +2190,15 @@ func GetBankAccountMetaAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		ctx := r.Context()
 
-		// build base query - include account_number and latest audit details plus action_id
+		entityIDs := api.GetEntityIDsFromCtx(ctx)
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		// If user has no accessible entities, return empty result
+		if len(entityIDs) == 0 {
+			api.RespondWithPayload(w, true, "No bank accounts accessible with your current permissions", []map[string]interface{}{})
+			return
+		} // build base query - include account_number and latest audit details plus action_id
 		baseQuery := `
 	SELECT 
     a.account_id, 
@@ -2126,14 +2227,36 @@ LEFT JOIN LATERAL (
     WHERE aa.account_id = a.account_id
     ORDER BY aa.requested_at DESC
     LIMIT 1
-) aa ON TRUE;
+) aa ON TRUE
+WHERE COALESCE(a.is_deleted, false) = false`
 
-		
-		`
+		filters := []string{}
+		args := []interface{}{}
+		argIdx := 1
 
-		// exclude soft-deleted accounts from meta by adding WHERE after the lateral join
-		baseQuery = strings.Replace(baseQuery, ") aa ON TRUE;", ") aa ON TRUE WHERE COALESCE(a.is_deleted, false) = false;", 1)
-		rows, err := pgxPool.Query(ctx, baseQuery)
+		// Filter by entity_id - REQUIRED
+		filters = append(filters, fmt.Sprintf("(a.entity_id = ANY($%d))", argIdx))
+		args = append(args, entityIDs)
+		argIdx++ // Filter by bank - optional
+		if len(bankNames) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryBankName, argIdx))
+			args = append(args, bankNames)
+			argIdx++
+		}
+
+		// Filter by currency - optional
+		if len(currCodes) > 0 {
+			filters = append(filters, fmt.Sprintf(constants.QuerryCurrency, argIdx))
+			args = append(args, currCodes)
+			argIdx++
+		}
+
+		if len(filters) > 0 {
+			baseQuery += " AND " + strings.Join(filters, " AND ")
+		}
+		baseQuery += "ORDER BY GREATEST(COALESCE(aa.requested_at, '1970-01-01'::timestamp), COALESCE(aa.checker_at, '1970-01-01'::timestamp)) DESC"
+
+		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return

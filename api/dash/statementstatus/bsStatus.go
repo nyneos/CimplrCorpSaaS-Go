@@ -1,11 +1,13 @@
 package statementstatus
 
 import (
+	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,13 +74,68 @@ type StatementStatusResponse struct {
 	EntityCompleteness []EntityCompletenessItem `json:"entityCompleteness"`
 }
 
+func ctxApprovedAccountNumbers(ctx context.Context) []string {
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return nil
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		acct := strings.TrimSpace(a["account_number"])
+		if acct != "" {
+			out = append(out, acct)
+		}
+	}
+	return out
+}
+
+func normalizeLowerTrimSlice(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func normalizeUpperTrimSlice(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // GetStatementStatusHandler returns a handler that computes:
 //   - accounts list (with status and uploadedAt) for accounts belonging to APPROVED banks
 //   - compliance per APPROVED bank (completed / total / percent)
 //   - completeness per entity (considering only accounts under APPROVED banks)
 func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+		ctx := r.Context()
+
+		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
+		allowedBankNamesNorm := normalizeLowerTrimSlice(api.GetBankNamesFromCtx(ctx))
+		allowedCurrencyCodesNorm := normalizeUpperTrimSlice(api.GetCurrencyCodesFromCtx(ctx))
+
+		if len(allowedEntityIDs) == 0 || len(allowedAccountNumbers) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
+		if len(allowedBankNamesNorm) == 0 || len(allowedCurrencyCodesNorm) == 0 {
+			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+			return
+		}
 
 		// horizon: default 14 days; if query param `days` provided and >14, use it
 		days := 14
@@ -173,10 +230,14 @@ LEFT JOIN LATERAL (
 	WHERE bs3.account_number = mba.account_number
 		AND bs3.statement_period_end >= $1::date
 ) stmts ON true
-WHERE mba.is_deleted = false;
+WHERE mba.is_deleted = false
+  AND mba.entity_id = ANY($2)
+  AND mba.account_number = ANY($3)
+  AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($4)
+  AND upper(trim(COALESCE(mba.currency, ''))) = ANY($5);
 `
 
-		rows, err := pgxPool.Query(ctx, accountsSQL, fromDate)
+		rows, err := pgxPool.Query(ctx, accountsSQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedBankNamesNorm, allowedCurrencyCodesNorm)
 		if err != nil {
 			http.Error(w, "error querying accounts: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -244,11 +305,15 @@ LEFT JOIN LATERAL (
 	LIMIT 1
 ) bs_latest ON true
 WHERE mba.is_deleted = false
+  AND mba.entity_id = ANY($2)
+  AND mba.account_number = ANY($3)
+  AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($4)
+  AND upper(trim(COALESCE(mba.currency, ''))) = ANY($5)
 GROUP BY bank_label
 ORDER BY percent DESC;
 `
 
-		bankRows, err := pgxPool.Query(ctx, bankSQL, fromDate)
+		bankRows, err := pgxPool.Query(ctx, bankSQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedBankNamesNorm, allowedCurrencyCodesNorm)
 		if err != nil {
 			http.Error(w, "error querying bank compliance: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -297,11 +362,14 @@ LEFT JOIN LATERAL (
 	LIMIT 1
 ) bs_latest ON true
 WHERE mba.is_deleted = false
+  AND mba.entity_id = ANY($2)
+  AND mba.account_number = ANY($3)
+  AND upper(trim(COALESCE(mba.currency, ''))) = ANY($4)
 GROUP BY me.entity_name
 ORDER BY percent DESC;
 `
 
-		entityRows, err := pgxPool.Query(ctx, entitySQL, fromDate)
+		entityRows, err := pgxPool.Query(ctx, entitySQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedCurrencyCodesNorm)
 		if err != nil {
 			http.Error(w, "error querying entity completeness: "+err.Error(), http.StatusInternalServerError)
 			return

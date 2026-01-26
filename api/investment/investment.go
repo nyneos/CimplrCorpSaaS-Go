@@ -91,6 +91,7 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/redemption/initiation/delete", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.DeleteRedemption(pool))))
 	mux.Handle("/investment/redemption/initiation/approve", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.BulkApproveRedemptionActions(pool))))
 	mux.Handle("/investment/redemption/initiation/reject", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.BulkRejectRedemptionActions(pool))))
+	mux.Handle("/investment/redemption/initiation/detail", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionInitiationDetail(pool))))
 	mux.Handle("/investment/redemption/initiation/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetRedemptionsWithAudit(pool))))
 	mux.Handle("/investment/redemption/initiation/approved", api.BusinessUnitMiddleware(db)(http.HandlerFunc(redemption.GetApprovedRedemptions(pool))))
 
@@ -144,6 +145,14 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/investment/accounting/fvo/create-bulk", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.CreateFVOBulk(pool))))
 	mux.Handle("/investment/accounting/fvo/update", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.UpdateFVO(pool))))
 	mux.Handle("/investment/accounting/fvo/all", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetFVOsWithAudit(pool))))
+
+	// Accounting Workbench - Temporal Query endpoints (NEW - for historical data)
+	mux.Handle("/investment/accounting/scheme-data-as-of", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetSchemeDataAsOf(pool))))
+	mux.Handle("/investment/accounting/mtm-report-as-of", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.GetMTMReportAsOf(pool))))
+
+	// Temporal Query Test & Validation endpoints
+	mux.Handle("/investment/accounting/test-temporal", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.TestTemporalQueriesHandler(pool))))
+	mux.Handle("/investment/accounting/verify-queries", api.BusinessUnitMiddleware(db)(http.HandlerFunc(accountingworkbench.VerifyAllQueriesHandler(pool))))
 
 	// AMFI sync endpoints
 	mux.HandleFunc("/investment/amfi/sync-schemes", amfisync.SyncSchemesHandler(pool))

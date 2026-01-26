@@ -3,6 +3,7 @@ package sweepconfig
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,6 +43,31 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.UserID == "" {
 			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
+		}
+		// user_id must match middleware-authenticated user
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+
+		// validate entity / bank / account against middleware-provided context
+		if strings.TrimSpace(req.EntityName) != "" {
+			if !api.IsEntityAllowed(ctx, req.EntityName) {
+				api.RespondWithResult(w, false, "unauthorized entity")
+				return
+			}
+		}
+		if strings.TrimSpace(req.BankName) != "" {
+			if !api.IsBankAllowed(ctx, req.BankName) {
+				api.RespondWithResult(w, false, "unauthorized bank")
+				return
+			}
+		}
+		if strings.TrimSpace(req.BankAccount) != "" {
+			if !ctxHasApprovedBankAccountFor(ctx, req.BankAccount, req.BankName, req.EntityName) {
+				api.RespondWithResult(w, false, "unauthorized bank account")
+				return
+			}
 		}
 
 		// resolve requested_by
@@ -107,6 +134,12 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "user_id and sweep_id required")
 			return
 		}
+		// user_id must match middleware-authenticated user
+		ctx := r.Context()
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
 
 		requestedBy := ""
 		for _, s := range auth.GetActiveSessions() {
@@ -120,7 +153,6 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to begin tx: "+err.Error())
@@ -163,13 +195,34 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos += 2
 		}
 
+		// track the final values so we can validate bank_account against final bank/entity
+		finalEntity := strings.TrimSpace(fmt.Sprint(curEntity.ValueOrZero()))
+		finalBank := strings.TrimSpace(fmt.Sprint(curBank.ValueOrZero()))
+		finalAccount := strings.TrimSpace(fmt.Sprint(curAccount.ValueOrZero()))
+
 		for k, v := range req.Fields {
 			switch k {
 			case "entity_name":
+				// validate requested entity is allowed in context
+				if s := fmt.Sprint(v); strings.TrimSpace(s) != "" {
+					if !api.IsEntityAllowed(ctx, s) {
+						api.RespondWithResult(w, false, "unauthorized entity")
+						return
+					}
+				}
+				finalEntity = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("entity_name", "old_entity_name", v, curEntity)
 			case "bank_name":
+				if s := fmt.Sprint(v); strings.TrimSpace(s) != "" {
+					if !api.IsBankAllowed(ctx, s) {
+						api.RespondWithResult(w, false, "unauthorized bank")
+						return
+					}
+				}
+				finalBank = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("bank_name", "old_bank_name", v, curBank)
 			case "bank_account":
+				finalAccount = strings.TrimSpace(fmt.Sprint(v))
 				addStrField("bank_account", "old_bank_account", v, curAccount)
 			case "sweep_type":
 				addStrField("sweep_type", "old_sweep_type", v, curType)
@@ -187,6 +240,14 @@ func UpdateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				addStrField("active_status", "old_active_status", v, curActive)
 			default:
 				// ignore unknown
+			}
+		}
+
+		// validate the final account (if present) matches bank/entity and allowed entities
+		if strings.TrimSpace(finalAccount) != "" {
+			if !ctxHasApprovedBankAccountFor(ctx, finalAccount, finalBank, finalEntity) {
+				api.RespondWithResult(w, false, "unauthorized bank account")
+				return
 			}
 		}
 
@@ -234,6 +295,11 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithResult(w, false, "Missing user_id in body")
 			return
 		}
+		// user_id must match middleware-authenticated user
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSessionCapitalized)
+			return
+		}
 
 		// validate session
 		valid := false
@@ -249,8 +315,28 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// skip soft-deleted rows
-		base := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY created_at DESC, sweep_id`
-		rows, err := pgxPool.Query(ctx, base)
+		entityNames := api.GetEntityNamesFromCtx(ctx)
+		var rows pgx.Rows
+		var err error
+		if len(entityNames) > 0 {
+			// normalize entity names (trim + lower) and compare against lower(trim(entity_name)) in DB
+			norm := make([]string, 0, len(entityNames))
+			for _, n := range entityNames {
+				if s := strings.TrimSpace(n); s != "" {
+					norm = append(norm, strings.ToLower(s))
+				}
+			}
+			if len(norm) == 0 {
+				// nothing allowed
+				api.RespondWithPayload(w, true, "", []map[string]interface{}{})
+				return
+			}
+			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) ORDER BY created_at DESC, sweep_id`
+			rows, err = pgxPool.Query(ctx, q, norm)
+		} else {
+			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY created_at DESC, sweep_id`
+			rows, err = pgxPool.Query(ctx, q)
+		}
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrDBPrefix+err.Error())
 			return
@@ -296,6 +382,20 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							deletedAt = auditInfo.DeletedAt
 						}
 					}
+				}
+			}
+
+			// apply context-level filters for bank and bank_account (entity filtering is handled in SQL)
+			bankStr := fmt.Sprint(bank.ValueOrZero())
+			accountStr := fmt.Sprint(account.ValueOrZero())
+			if bankStr != "" {
+				if !api.IsBankAllowed(ctx, bankStr) {
+					continue
+				}
+			}
+			if accountStr != "" {
+				if !ctxHasApprovedBankAccount(ctx, accountStr) {
+					continue
 				}
 			}
 
@@ -682,4 +782,81 @@ func (n sqlNullFloat) ValueOrZero() interface{} {
 		return n.F
 	}
 	return nil
+}
+
+// ctxHasApprovedBankAccount checks middleware-provided ApprovedBankAccounts in context
+func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
+	accountNumber = strings.TrimSpace(accountNumber)
+	if accountNumber == "" {
+		return false
+	}
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return true
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return true
+	}
+	for _, a := range accounts {
+		if strings.EqualFold(strings.TrimSpace(a["account_number"]), accountNumber) {
+			return true
+		}
+	}
+	return false
+}
+
+// ctxHasApprovedBankAccountFor checks ApprovedBankAccounts for account_number and optionally
+// enforces that the account belongs to the expected bank/entity.
+// If expectedEntityName is empty, it still enforces the account's entity is allowed by context.
+func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBankName, expectedEntityName string) bool {
+	accountNumber = strings.TrimSpace(accountNumber)
+	expectedBankName = strings.TrimSpace(expectedBankName)
+	expectedEntityName = strings.TrimSpace(expectedEntityName)
+	if accountNumber == "" {
+		return false
+	}
+
+	v := ctx.Value("ApprovedBankAccounts")
+	if v == nil {
+		return true
+	}
+	accounts, ok := v.([]map[string]string)
+	if !ok {
+		return true
+	}
+
+	for _, a := range accounts {
+		if !strings.EqualFold(strings.TrimSpace(a["account_number"]), accountNumber) {
+			continue
+		}
+
+		accBank := strings.TrimSpace(a["bank_name"])
+		accEntity := strings.TrimSpace(a["entity_name"])
+
+		// Account must belong to an entity the user is allowed for.
+		if strings.TrimSpace(accEntity) != "" {
+			if !api.IsEntityAllowed(ctx, accEntity) {
+				return false
+			}
+		}
+
+		// If caller provided an expected entity, enforce match.
+		if expectedEntityName != "" && accEntity != "" {
+			if !strings.EqualFold(accEntity, expectedEntityName) {
+				return false
+			}
+		}
+
+		// If caller provided an expected bank, enforce match.
+		if expectedBankName != "" && accBank != "" {
+			if !strings.EqualFold(accBank, expectedBankName) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	return false
 }

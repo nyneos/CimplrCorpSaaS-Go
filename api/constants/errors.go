@@ -54,6 +54,7 @@ const (
 	ErrCurrencyAlreadyExists = "Currency with code %s already exists in the system"
 	ErrCurrencyCreateFailed  = "Failed to create currency. Please check if the currency code already exists"
 	ErrCurrencyUpdateFailed  = "Failed to update currency. Please verify the currency ID and try again"
+	ErrCurrencyNotAllowed    = "Currency not allowed for this operation"
 )
 
 // ============================================================================
@@ -61,16 +62,18 @@ const (
 // ============================================================================
 
 const (
-	ErrNoBanks           = "No approved banks found in the system"
-	ErrInvalidBank       = "Invalid bank specified"
-	ErrBankNotFound      = "Bank not found in the system"
-	ErrBankNotApproved   = "Bank is not approved for use"
-	ErrBankNotActive     = "Bank is not active in the system"
-	ErrBankDeleted       = "Bank has been deleted"
-	ErrBankRequired      = "Bank name or ID is required"
-	ErrBankAlreadyExists = "Bank with name %s already exists in the system"
-	ErrBankCreateFailed  = "Failed to create bank. Please check if the bank already exists"
-	ErrBankUpdateFailed  = "Failed to update bank. Please verify the bank ID and try again"
+	ErrNoBanks               = "No approved banks found in the system"
+	ErrInvalidBank           = "Invalid bank specified"
+	ErrBankNotFound          = "Bank not found in the system"
+	ErrBankNotApproved       = "Bank is not approved for use"
+	ErrBankNotActive         = "Bank is not active in the system"
+	ErrBankDeleted           = "Bank has been deleted"
+	ErrBankRequired          = "Bank name or ID is required"
+	ErrBankAlreadyExists     = "Bank with name %s already exists in the system"
+	ErrBankCreateFailed      = "Failed to create bank. Please check if the bank already exists"
+	ErrBankUpdateFailed      = "Failed to update bank. Please verify the bank ID and try again"
+	ErrBankInvalidOrInactive = "Invalid or inactive bank"
+	ErrBankNotAllowed        = "Bank not allowed"
 )
 
 // ============================================================================
@@ -78,17 +81,22 @@ const (
 // ============================================================================
 
 const (
-	ErrNoBankAccounts           = "No bank accounts found"
-	ErrNoBankAccountsForEntity  = "No bank accounts found for the selected entity"
-	ErrNoBankAccountsForBank    = "No bank accounts found for the selected bank"
-	ErrBankAccountNotFound      = "Bank account not found or you don't have access to it"
-	ErrBankAccountNotApproved   = "Bank account is pending approval"
-	ErrBankAccountNotActive     = "Bank account is not active"
-	ErrBankAccountDeleted       = "Bank account has been deleted"
-	ErrBankAccountRequired      = "Bank account information is required"
-	ErrBankAccountAlreadyExists = "Bank account already exists in the system"
-	ErrBankAccountCreateFailed  = "Failed to create bank account"
-	ErrBankAccountUpdateFailed  = "'. Please contact your administrator."
+	ErrNoBankAccounts            = "No bank accounts found"
+	ErrNoBankAccountsForEntity   = "No bank accounts found for the selected entity"
+	ErrNoBankAccountsForBank     = "No bank accounts found for the selected bank"
+	ErrBankAccountNotFound       = "Bank account not found or you don't have access to it"
+	ErrBankAccountNotApproved    = "Bank account is pending approval"
+	ErrBankAccountNotActive      = "Bank account is not active"
+	ErrBankAccountDeleted        = "Bank account has been deleted"
+	ErrBankAccountRequired       = "Bank account information is required"
+	ErrBankAccountAlreadyExists  = "Bank account already exists in the system"
+	ErrBankAccountCreateFailed   = "Failed to create bank account"
+	ErrBankAccountUpdateFailed   = "'. Please contact your administrator."
+	ErrDBMasterBankAccountLookup = "db error while looking up account in masterbankaccount: %w"
+)
+
+const (
+	ErrBankStatementAccessDenied = "No access to this bank statement"
 )
 
 // ============================================================================

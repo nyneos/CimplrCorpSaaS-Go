@@ -748,21 +748,39 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 				// Get initiation details for unblocking
 				var folioID, dematID, schemeID sql.NullString
 				var method string
+				var entityName sql.NullString
 				if err := tx.QueryRow(ctx, `
-					SELECT folio_id, demat_id, scheme_id, method
-					FROM investment.redemption_initiation
-					WHERE redemption_id = $1
-				`, redemptionID).Scan(&folioID, &dematID, &schemeID, &method); err != nil {
+					SELECT ri.folio_id, ri.demat_id, ri.scheme_id, COALESCE(ms.method, 'FIFO') AS method, ri.entity_name
+					FROM investment.redemption_initiation ri
+					LEFT JOIN investment.masterscheme ms ON (
+						ms.scheme_id = ri.scheme_id OR
+						ms.scheme_name = ri.scheme_id OR
+						ms.internal_scheme_code = ri.scheme_id OR
+						ms.isin = ri.scheme_id
+					)
+					WHERE ri.redemption_id = $1
+				`, redemptionID).Scan(&folioID, &dematID, &schemeID, &method, &entityName); err != nil {
 					continue
 				}
 
-				// Release blocked units
+				// Default to FIFO when method is empty to ensure deterministic unblocking order
+				if strings.TrimSpace(method) == "" {
+					method = "FIFO"
+				}
+
+				// Release blocked units with entity scoping to prevent cross-entity leakage
 				unblockQuery := `
 					WITH target_transactions AS (
 						SELECT 
 							ot.id,
 							COALESCE(ot.blocked_units, 0) AS current_blocked,
-							ot.transaction_date
+							ot.transaction_date,
+							ROW_NUMBER() OVER (
+								ORDER BY 
+									CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+									CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
+									ot.id ASC
+							) AS row_num
 						FROM investment.onboard_transaction ot
 						LEFT JOIN investment.masterscheme ms ON (
 							ms.scheme_id = ot.scheme_id OR
@@ -780,13 +798,11 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 								ot.scheme_internal_code = $1
 							)
 							AND (
-								($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
-								($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+								($2::text IS NOT NULL AND ot.folio_id = $2) OR
+								($3::text IS NOT NULL AND ot.demat_id = $3)
 							)
+							AND ($6::text IS NULL OR ot.entity_name = $6)
 							AND COALESCE(ot.blocked_units, 0) > 0
-						ORDER BY 
-							CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-							CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
 					),
 					unblocking_allocation AS (
 						SELECT 
@@ -795,7 +811,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 							LEAST(
 								current_blocked,
 								$5 - COALESCE(SUM(LEAST(current_blocked, $5)) OVER (
-									ORDER BY transaction_date
+									ORDER BY row_num
 									ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 								), 0)
 							) AS units_to_unblock_here
@@ -807,12 +823,15 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 					WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
 				`
 
-				var folioIDStr, dematIDStr *string
+				var folioIDStr, dematIDStr, entityNameStr *string
 				if folioID.Valid {
 					folioIDStr = &folioID.String
 				}
 				if dematID.Valid {
 					dematIDStr = &dematID.String
+				}
+				if entityName.Valid {
+					entityNameStr = &entityName.String
 				}
 
 				if _, err := tx.Exec(ctx, unblockQuery,
@@ -821,6 +840,7 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 					nullIfEmptyStringPtr(dematIDStr),
 					method,
 					actualUnits,
+					nullIfEmptyStringPtr(entityNameStr),
 				); err != nil {
 					// Log error but continue
 				}
@@ -1230,9 +1250,9 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 	// Use a transient batch ID (do not persist an `onboard_batch` row)
 	batchID := uuid.New().String()
 
-	// Fetch redemption confirmation details with related redemption initiation and scheme info
-	// NOTE: redemption_initiation stores string identifiers in scheme_id/folio_id/demat_id, not UUIDs
-	// We need to resolve these to actual master table IDs
+	// Fetch redemption confirmation details with related redemption initiation and resolved master data.
+	// Important: initiation folio_id/demat_id/scheme_id are string identifiers and may be non-unique (e.g. folio_number="1").
+	// We must resolve deterministically (prefer exact IDs; otherwise constrain by entity_name) to avoid cross-entity fanout.
 	fetchQ := `
 		SELECT 
 			rc.redemption_confirm_id,
@@ -1251,37 +1271,84 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			mr.requested_date,
 			mr.by_amount,
 			mr.by_units,
-			mr.method,
+			s.method,
 			mr.entity_name,
 			
-			-- Resolve actual scheme details
-			COALESCE(s.scheme_id::text, s2.scheme_id::text, s3.scheme_id::text, s4.scheme_id::text) AS resolved_scheme_id,
-			COALESCE(s.scheme_name, s2.scheme_name, s3.scheme_name, s4.scheme_name) AS scheme_name,
-			COALESCE(s.isin, s2.isin, s3.isin, s4.isin) AS isin,
-			COALESCE(s.internal_scheme_code, s2.internal_scheme_code, s3.internal_scheme_code, s4.internal_scheme_code) AS internal_scheme_code,
-			-- Resolve actual folio details
-			f.folio_id::text AS resolved_folio_id,
+			s.resolved_scheme_id,
+			s.scheme_name,
+			s.isin,
+			s.internal_scheme_code,
+			
+			f.resolved_folio_id,
 			f.folio_number,
-			f.entity_name AS folio_entity_name,
-			-- Resolve actual demat details
-			d.demat_id::text AS resolved_demat_id,
+			f.folio_entity_name,
+			
+			d.resolved_demat_id,
 			d.demat_account_number,
-			d.entity_name AS demat_entity_name
+			d.demat_entity_name
 		FROM investment.redemption_confirmation rc
 		JOIN investment.redemption_initiation mr ON rc.redemption_id = mr.redemption_id
-		-- Resolve scheme by trying multiple match strategies
-		LEFT JOIN investment.masterscheme s ON s.scheme_id::text = mr.scheme_id
-		LEFT JOIN investment.masterscheme s2 ON s2.scheme_name = mr.scheme_id
-		LEFT JOIN investment.masterscheme s3 ON s3.internal_scheme_code = mr.scheme_id
-		LEFT JOIN investment.masterscheme s4 ON s4.isin = mr.scheme_id
-		-- Resolve folio by trying folio_id or folio_number
-		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = mr.folio_id OR f.folio_number = mr.folio_id)
-		-- Resolve demat by trying demat_id or demat_account_number
-		LEFT JOIN investment.masterdemataccount d ON (
-			d.demat_id::text = mr.demat_id OR 
-			d.demat_account_number = mr.demat_id OR
-			d.default_settlement_account = mr.demat_id
-		)
+		LEFT JOIN LATERAL (
+			SELECT
+				ms.scheme_id::text AS resolved_scheme_id,
+				ms.scheme_name,
+				ms.isin,
+				ms.internal_scheme_code,
+				COALESCE(ms.method, 'FIFO') AS method
+			FROM investment.masterscheme ms
+			WHERE
+				ms.scheme_id::text = mr.scheme_id
+				OR ms.scheme_name = mr.scheme_id
+				OR ms.internal_scheme_code = mr.scheme_id
+				OR ms.isin = mr.scheme_id
+			ORDER BY
+				CASE
+					WHEN ms.scheme_id::text = mr.scheme_id THEN 0
+					WHEN ms.scheme_name = mr.scheme_id THEN 1
+					WHEN ms.internal_scheme_code = mr.scheme_id THEN 2
+					WHEN ms.isin = mr.scheme_id THEN 3
+					ELSE 4
+				END
+			LIMIT 1
+		) s ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT
+				mf.folio_id::text AS resolved_folio_id,
+				mf.folio_number,
+				mf.entity_name AS folio_entity_name
+			FROM investment.masterfolio mf
+			WHERE
+				mf.folio_id::text = mr.folio_id
+				OR (
+					mr.folio_id IS NOT NULL
+					AND mf.folio_number = mr.folio_id
+					AND (mr.entity_name IS NULL OR mf.entity_name = mr.entity_name)
+				)
+			ORDER BY
+				CASE WHEN mf.folio_id::text = mr.folio_id THEN 0 ELSE 1 END,
+				CASE WHEN mr.entity_name IS NOT NULL AND mf.entity_name = mr.entity_name THEN 0 ELSE 1 END,
+				mf.folio_id
+			LIMIT 1
+		) f ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT
+				md.demat_id::text AS resolved_demat_id,
+				md.demat_account_number,
+				md.entity_name AS demat_entity_name
+			FROM investment.masterdemataccount md
+			WHERE
+				md.demat_id::text = mr.demat_id
+				OR (
+					mr.demat_id IS NOT NULL
+					AND (md.demat_account_number = mr.demat_id OR md.default_settlement_account = mr.demat_id)
+					AND (mr.entity_name IS NULL OR md.entity_name = mr.entity_name)
+				)
+			ORDER BY
+				CASE WHEN md.demat_id::text = mr.demat_id THEN 0 ELSE 1 END,
+				CASE WHEN mr.entity_name IS NOT NULL AND md.entity_name = mr.entity_name THEN 0 ELSE 1 END,
+				md.demat_id
+			LIMIT 1
+		) d ON TRUE
 		WHERE rc.redemption_confirm_id = ANY($1)
 			AND rc.status = 'CONFIRMED'
 	`
@@ -1423,14 +1490,21 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			return nil, fmt.Errorf("transaction insert failed: %w", err)
 		}
 
-		// Release blocked units since SELL transaction is now created
-		// The SELL transaction will subtract from total units, so we need to remove from blocked_units too
+		// Release blocked units since SELL transaction is now created.
+		// CRITICAL: Use resolved folio_id/demat_id (UUIDs) AND entity_name filter to prevent cross-entity leakage.
+		// Without entity filter, non-unique values like folio_number="1" can match across multiple entities.
 		unblockQuery := `
 			WITH target_transactions AS (
 				SELECT 
 					ot.id,
 					COALESCE(ot.blocked_units, 0) AS current_blocked,
-					ot.transaction_date
+					ot.transaction_date,
+					ROW_NUMBER() OVER (
+						ORDER BY 
+							CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
+							CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC,
+							ot.id ASC
+					) AS row_num
 				FROM investment.onboard_transaction ot
 				LEFT JOIN investment.masterscheme ms ON (
 					ms.scheme_id = ot.scheme_id OR
@@ -1448,13 +1522,11 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 						ot.scheme_internal_code = $1
 					)
 					AND (
-						($2::text IS NOT NULL AND (ot.folio_id = $2 OR ot.folio_number = $2)) OR
-						($3::text IS NOT NULL AND (ot.demat_id = $3 OR ot.demat_acc_number = $3))
+						($2::text IS NOT NULL AND ot.folio_id = $2) OR
+						($3::text IS NOT NULL AND ot.demat_id = $3)
 					)
+					AND ($6::text IS NULL OR ot.entity_name = $6)
 					AND COALESCE(ot.blocked_units, 0) > 0
-				ORDER BY 
-					CASE WHEN $4 = 'FIFO' THEN ot.transaction_date END ASC,
-					CASE WHEN $4 = 'LIFO' THEN ot.transaction_date END DESC
 			),
 			unblocking_allocation AS (
 				SELECT 
@@ -1463,7 +1535,7 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 					LEAST(
 						current_blocked,
 						$5 - COALESCE(SUM(LEAST(current_blocked, $5)) OVER (
-							ORDER BY transaction_date
+							ORDER BY row_num
 							ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
 						), 0)
 					) AS units_to_unblock_here
@@ -1475,15 +1547,28 @@ func processRedemptionConfirmations(pgxPool *pgxpool.Pool, ctx context.Context, 
 			WHERE ot.id = ua.id AND ua.units_to_unblock_here > 0
 		`
 
-		if _, err := tx.Exec(ctx, unblockQuery,
-			cd.SchemeIdentifier,
-			cd.FolioIdentifier,
-			cd.DematIdentifier,
-			cd.Method,
-			cd.ActualUnits,
-		); err != nil {
-			// Log error but don't fail the transaction - SELL is already created
-			// This prevents double subtraction from portfolio
+		resolvedSchemeKey := ""
+		if cd.ResolvedSchemeID != nil {
+			resolvedSchemeKey = *cd.ResolvedSchemeID
+		}
+		if resolvedSchemeKey != "" {
+			// Ensure we have a deterministic method; fallback to FIFO when not set
+			methodStr := cd.Method
+			if strings.TrimSpace(methodStr) == "" {
+				methodStr = "FIFO"
+			}
+
+			if _, err := tx.Exec(ctx, unblockQuery,
+				resolvedSchemeKey,
+				nullIfEmptyStringPtr(cd.ResolvedFolioID),
+				nullIfEmptyStringPtr(cd.ResolvedDematID),
+				methodStr,
+				cd.ActualUnits,
+				entityName,
+			); err != nil {
+				// Log error but don't fail the transaction - SELL is already created
+				// This prevents double subtraction from portfolio
+			}
 		}
 
 		totalTransactions++

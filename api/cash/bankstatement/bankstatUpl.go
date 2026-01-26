@@ -103,7 +103,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			constants.DateFormat,
 			"02/01/06",
 			"02/01/2006",
-			"02-01-2006",
+			constants.DateFormatAlt,
 			"01/02/2006",
 			"01-02-2006",
 			"2006/01/02",

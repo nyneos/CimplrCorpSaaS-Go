@@ -2,8 +2,8 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/auth"
 	exposures "CimplrCorpSaas/api/fx/exposures"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +19,76 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// getUserFriendlyPayableReceivableError returns a user-friendly error message and HTTP status code
+func getUserFriendlyPayableReceivableError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := err.Error()
+	errLower := strings.ToLower(errMsg)
+
+	// Unique constraint violations
+	if strings.Contains(errLower, "unique_type_code_not_deleted") {
+		return "Type code already exists and is not deleted. Please use a different code.", http.StatusOK
+	}
+	if strings.Contains(errLower, "unique_type_name_not_deleted") {
+		return "Type name already exists and is not deleted. Please use a different name.", http.StatusOK
+	}
+
+	// Check constraints
+	if strings.Contains(errLower, "masterpayablereceivabletype_status_check") {
+		return "Status must be either 'Active' or 'Inactive'.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterpayablereceivabletype_old_status_check") {
+		return "Old status must be either 'Active' or 'Inactive'.", http.StatusOK
+	}
+
+	// Audit action check constraints
+	if strings.Contains(errLower, "auditactionpayablereceivable_actiontype_check") {
+		return "Action type must be one of: CREATE, EDIT, DELETE.", http.StatusOK
+	}
+	if strings.Contains(errLower, "auditactionpayablereceivable_processing_status_check") {
+		return "Processing status must be one of: PENDING_APPROVAL, PENDING_EDIT_APPROVAL, PENDING_DELETE_APPROVAL, APPROVED, REJECTED, CANCELLED.", http.StatusOK
+	}
+
+	// Foreign key violations
+	if strings.Contains(errLower, "foreign key") || strings.Contains(errLower, "fk_") || strings.Contains(errLower, "_fkey") {
+		if strings.Contains(errLower, "type_id") {
+			return "Payable/Receivable type does not exist or has been deleted.", http.StatusOK
+		}
+		return "Referenced record does not exist. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations
+	if strings.Contains(errLower, "not null") || strings.Contains(errLower, "null value") {
+		if strings.Contains(errLower, "type_name") {
+			return "Type name is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "status") {
+			return "Status is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "direction") {
+			return "Direction is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "business_unit_division") {
+			return "Business unit/division is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "default_currency") {
+			return "Default currency is required.", http.StatusOK
+		}
+		return "A required field is missing. Please check your input.", http.StatusOK
+	}
+
+	// Connection errors
+	if strings.Contains(errLower, "connection") || strings.Contains(errLower, "timeout") {
+		return fmt.Sprintf("%s: Database connection issue. Please try again.", context), http.StatusServiceUnavailable
+	}
+
+	// Default error
+	return fmt.Sprintf("%s: %s", context, errMsg), http.StatusInternalServerError
+}
 
 type PayableReceivableRequest struct {
 	Status                    string   `json:"status"`
@@ -68,24 +138,32 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []PayableReceivableRequest `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Name
-				break
-			}
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
 		}
-		if createdBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		createdBy := session.Name
+
+		ctx := r.Context()
+		// Get middleware-provided context for validation
+		entities := api.GetEntityNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+		if len(currCodes) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No accessible currencies found")
 			return
 		}
 
-		ctx := context.Background()
 		created := make([]map[string]interface{}, 0)
 
 		for _, rrow := range req.Rows {
@@ -108,6 +186,26 @@ func CreatePayableReceivableTypes(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(missing) > 0 {
 				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: fmt.Sprintf("missing required fields: %s", strings.Join(missing, ", "))})
 				continue
+			}
+
+			// Validate business_unit_division (entity)
+			if !api.IsEntityAllowed(ctx, rrow.BusinessUnitDivision) {
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized business_unit_division (entity)", "type_name": rrow.TypeName})
+				continue
+			}
+
+			// Validate default_currency
+			if !api.IsCurrencyAllowed(ctx, rrow.DefaultCurrency) {
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized currency", "type_name": rrow.TypeName})
+				continue
+			}
+
+			// Validate cash_flow_category if provided
+			if strings.TrimSpace(rrow.CashFlowCategory) != "" {
+				if len(categories) > 0 && !api.IsCashFlowCategoryAllowed(ctx, rrow.CashFlowCategory) {
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized cash_flow_category", "type_name": rrow.TypeName})
+					continue
+				}
 			}
 
 			tx, err := pgxPool.Begin(ctx)
@@ -245,22 +343,26 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
+		entities := api.GetEntityNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			return
+		}
 
 		query := `
 			SELECT
@@ -292,11 +394,21 @@ func GetPayableReceivableNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) a ON TRUE
 			WHERE NOT (UPPER(a.processing_status) = 'APPROVED' AND m.is_deleted = true)
+				AND m.business_unit_division = ANY($1)
+				AND m.default_currency = ANY($2)
+				AND (m.cash_flow_category IS NULL OR m.cash_flow_category = ANY($3))
+			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 
-		rows, err := pgxPool.Query(ctx, query)
+		rows, err := pgxPool.Query(ctx, query, entities, currCodes, categories)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to fetch payable/receivable types")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -574,24 +686,27 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
-		valid := false
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
 
 		ctx := r.Context()
+		entities := api.GetEntityNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			return
+		}
+
 		q := `
 			WITH latest AS (
 				SELECT DISTINCT ON (type_id) type_id, processing_status
@@ -602,11 +717,20 @@ func GetApprovedActivePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			FROM masterpayablereceivabletype m
 			JOIN latest l ON l.type_id = m.type_id
 			WHERE UPPER(l.processing_status) = 'APPROVED' AND UPPER(m.status) = 'ACTIVE' AND m.is_deleted = false
+				AND m.business_unit_division = ANY($1)
+				AND m.default_currency = ANY($2)
+				AND (m.cash_flow_category IS NULL OR m.cash_flow_category = ANY($3))
 		`
 
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, entities, currCodes, categories)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to fetch approved types")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -650,24 +774,25 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
-			return
-		}
-		// get updated_by
-		updatedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				updatedBy = s.Name
-				break
-			}
-		}
-		if updatedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		updatedBy := session.Name
+
 		ctx := r.Context()
+		entities := api.GetEntityNamesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if row.TypeID == "" {
@@ -792,6 +917,26 @@ func UpdatePayableReceivableBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"segment":                     existingSegment,
 				}
 
+				// Validate entity, currency, category if being updated
+				if val, ok := row.Fields["business_unit_division"]; ok {
+					if valStr := fmt.Sprint(val); !api.IsEntityAllowed(ctx, valStr) {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized business_unit_division: " + valStr, "type_id": row.TypeID})
+						return
+					}
+				}
+				if val, ok := row.Fields["default_currency"]; ok {
+					if valStr := fmt.Sprint(val); !api.IsCurrencyAllowed(ctx, valStr) {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + valStr, "type_id": row.TypeID})
+						return
+					}
+				}
+				if val, ok := row.Fields["cash_flow_category"]; ok {
+					if valStr := fmt.Sprint(val); valStr != "" && !api.IsCashFlowCategoryAllowed(ctx, valStr) {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized cash_flow_category: " + valStr, "type_id": row.TypeID})
+						return
+					}
+				}
+
 				for k, v := range row.Fields {
 					if oldVal, ok := existingMap[k]; ok {
 						// generic two-column update: <col>=$n, old_<col>=$n+1
@@ -867,22 +1012,16 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
-		// validate session / user
-		requestedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				requestedBy = s.Name
-				break
-			}
-		}
-		if requestedBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		requestedBy := session.Name
 
 		if len(req.TypeIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "type_ids required")
@@ -892,7 +1031,13 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		committed := false
@@ -918,7 +1063,13 @@ func DeletePayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := tx.Commit(ctx); err != nil {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyPayableReceivableError(err, "Failed to save deletion request")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		committed = true
@@ -939,22 +1090,18 @@ func BulkRejectPayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
+
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1046,22 +1193,17 @@ func BulkApprovePayableReceivableActions(pgxPool *pgxpool.Pool) http.HandlerFunc
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		checkerBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				checkerBy = s.Name
-				break
-			}
-		}
-		if checkerBy == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
 			return
 		}
+		checkerBy := session.Name
+
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		committed := false
@@ -1175,16 +1317,20 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		userName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if userName == "" {
+
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			return
+		}
+		userName := session.Name
+
+		entities := api.GetEntityNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		categories := api.GetCashFlowCategoryNamesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
 			return
 		}
 
@@ -1246,7 +1392,13 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				errMsg, statusCode := getUserFriendlyPayableReceivableError(err, constants.ErrTxStartFailed)
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			committed := false
@@ -1334,6 +1486,64 @@ func UploadPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
 				return
+			}
+
+			// Validate staged data for entity, currency, category authorization
+			hasBusinessUnit := false
+			hasCurrency := false
+			hasCategory := false
+			for _, col := range mappedTargets {
+				if col == "business_unit_division" {
+					hasBusinessUnit = true
+				}
+				if col == "default_currency" {
+					hasCurrency = true
+				}
+				if col == "cash_flow_category" {
+					hasCategory = true
+				}
+			}
+
+			if hasBusinessUnit {
+				var invalidEntity string
+				checkEntityQ := `SELECT business_unit_division FROM input_payablereceivable_table WHERE upload_batch_id = $1 AND business_unit_division IS NOT NULL AND business_unit_division != '' AND NOT (UPPER(TRIM(business_unit_division)) = ANY($2)) LIMIT 1`
+				entitiesUpper := make([]string, len(entities))
+				for i, e := range entities {
+					entitiesUpper[i] = strings.ToUpper(strings.TrimSpace(e))
+				}
+				if err := tx.QueryRow(ctx, checkEntityQ, batchID, entitiesUpper).Scan(&invalidEntity); err == nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized business_unit_division in upload: "+invalidEntity)
+					return
+				}
+			}
+
+			if hasCurrency {
+				var invalidCurr string
+				checkCurrQ := `SELECT default_currency FROM input_payablereceivable_table WHERE upload_batch_id = $1 AND default_currency IS NOT NULL AND default_currency != '' AND NOT (UPPER(TRIM(default_currency)) = ANY($2)) LIMIT 1`
+				currCodesUpper := make([]string, len(currCodes))
+				for i, c := range currCodes {
+					currCodesUpper[i] = strings.ToUpper(strings.TrimSpace(c))
+				}
+				if err := tx.QueryRow(ctx, checkCurrQ, batchID, currCodesUpper).Scan(&invalidCurr); err == nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized default_currency in upload: "+invalidCurr)
+					return
+				}
+			}
+
+			if hasCategory {
+				var invalidCat string
+				checkCatQ := `SELECT cash_flow_category FROM input_payablereceivable_table WHERE upload_batch_id = $1 AND cash_flow_category IS NOT NULL AND cash_flow_category != '' AND NOT (UPPER(TRIM(cash_flow_category)) = ANY($2)) LIMIT 1`
+				categoriesUpper := make([]string, len(categories))
+				for i, c := range categories {
+					categoriesUpper[i] = strings.ToUpper(strings.TrimSpace(c))
+				}
+				if err := tx.QueryRow(ctx, checkCatQ, batchID, categoriesUpper).Scan(&invalidCat); err == nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusForbidden, "Invalid or unauthorized cash_flow_category in upload: "+invalidCat)
+					return
+				}
 			}
 
 			// Build insert/select expressions using mapped target columns

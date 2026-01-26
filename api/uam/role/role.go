@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
@@ -215,12 +216,12 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string `json:"user_id"`
-			RoleIds []int  `json:"roleIds"`
+			RoleIds []string `json:"roleIds"`
 			// ApprovedBy      string `json:"approved_by"`
-			ApprovalComment string `json:"approval_comment"`
+			ApprovalComment string `json:"approval_comment,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.RoleIds) == 0 {
-			respondWithError(w, http.StatusBadRequest, "user_id, roleIds are required")
+			respondWithError(w, http.StatusBadRequest, "user_id, roleIds are required"+err.Error())
 			return
 		}
 		// Middleware: check business units
@@ -238,10 +239,10 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		toDelete := []int{}
-		toApprove := []int{}
+		toDelete := []string{}
+		toApprove := []string{}
 		for rows.Next() {
-			var id int
+			var id string
 			var status string
 			rows.Scan(&id, &status)
 			if status == constants.StatusCodeDeleteApproval {
@@ -319,9 +320,9 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
-			ID     int    `json:"id"`
+			ID     string `json:"id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.ID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || strings.TrimSpace(req.ID) == "" {
 			respondWithError(w, http.StatusBadRequest, "user_id and id are required")
 			return
 		}
@@ -365,7 +366,7 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID  string `json:"user_id"`
-			RoleIds []int  `json:"roleIds"`
+			RoleIds []string  `json:"roleIds"`
 			// RejectedBy       string `json:"rejected_by"`
 			RejectionComment string `json:"rejection_comment"`
 		}

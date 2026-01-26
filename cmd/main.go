@@ -33,7 +33,7 @@ func InitDB() (*sql.DB, error) {
 }
 
 func main() {
-	_ = godotenv.Load("/.env")
+	_ = godotenv.Load(".env")
 
 	fmt.Println("ENV CHECK:")
 	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
@@ -115,3 +115,4 @@ func main() {
 		appmanager.GetPgxPool().Close()
 	}
 }
+

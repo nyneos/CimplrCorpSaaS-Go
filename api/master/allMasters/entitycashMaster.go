@@ -24,6 +24,82 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// getUserFriendlyEntityCashError returns a user-friendly error message and HTTP status code
+func getUserFriendlyEntityCashError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := err.Error()
+	errLower := strings.ToLower(errMsg)
+
+	// Unique constraint violations
+	if strings.Contains(errLower, "unique_entity_name_not_deleted") {
+		return "Entity name already exists and is not deleted. Please use a different name.", http.StatusOK
+	}
+	if strings.Contains(errLower, "idx_masterentitycash_name") {
+		return "Entity name already exists. Please use a different name.", http.StatusOK
+	}
+	if strings.Contains(errLower, "uq_parent_child") {
+		return "This parent-child entity relationship already exists.", http.StatusOK
+	}
+
+	// Check constraints
+	if strings.Contains(errLower, "masterentitycash_entity_level_check") {
+		return "Entity level must be 0, 1, 2, or 3.", http.StatusOK
+	}
+	if strings.Contains(errLower, "masterentitycash_old_entity_level_check") {
+		return "Old entity level must be 0, 1, 2, or 3.", http.StatusOK
+	}
+
+	// Audit action check constraints
+	if strings.Contains(errLower, "auditactionentity_actiontype_check") {
+		return "Action type must be one of: CREATE, EDIT, DELETE.", http.StatusOK
+	}
+	if strings.Contains(errLower, "auditactionentity_processing_status_check") {
+		return "Processing status must be one of: PENDING_APPROVAL, PENDING_EDIT_APPROVAL, PENDING_DELETE_APPROVAL, APPROVED, REJECTED, CANCELLED.", http.StatusOK
+	}
+
+	// Foreign key violations
+	if strings.Contains(errLower, "foreign key") || strings.Contains(errLower, "fk_") || strings.Contains(errLower, "_fkey") {
+		if strings.Contains(errLower, "entity_id") {
+			return "Entity does not exist or has been deleted.", http.StatusOK
+		}
+		if strings.Contains(errLower, "parent_entity") {
+			return "Parent entity does not exist or has been deleted.", http.StatusOK
+		}
+		return "Referenced record does not exist. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations
+	if strings.Contains(errLower, "not null") || strings.Contains(errLower, "null value") {
+		if strings.Contains(errLower, "entity_name") {
+			return "Entity name is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "entity_level") {
+			return "Entity level is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "country") {
+			return "Country is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "base_operating_currency") {
+			return "Base operating currency is required.", http.StatusOK
+		}
+		if strings.Contains(errLower, "active_status") {
+			return "Active status is required.", http.StatusOK
+		}
+		return "A required field is missing. Please check your input.", http.StatusOK
+	}
+
+	// Connection errors
+	if strings.Contains(errLower, "connection") || strings.Contains(errLower, "timeout") {
+		return fmt.Sprintf("%s: Database connection issue. Please try again.", context), http.StatusServiceUnavailable
+	}
+
+	// Default error
+	return fmt.Sprintf("%s: %s", context, errMsg), http.StatusInternalServerError
+}
+
 type CashEntityMasterRequest struct {
 	EntityName       string `json:"entity_name"`
 	ParentEntityName string `json:"parent_entity_name"`
@@ -73,9 +149,33 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		ctx := r.Context()
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		accessibleEntityNames := api.GetEntityNamesFromCtx(ctx)
+
 		entityIDs := make(map[string]string)
 		inserted := []map[string]interface{}{}
 		for _, entity := range req.Entities {
+			// Validate currency
+			if entity.BaseOperatingCurrency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, entity.BaseOperatingCurrency) {
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized base_operating_currency: " + entity.BaseOperatingCurrency, "entity_name": entity.EntityName})
+				continue
+			}
+
+			// Validate parent entity exists in user's accessible entities (not just approved)
+			if entity.ParentEntityName != "" {
+				parentAllowed := false
+				for _, name := range accessibleEntityNames {
+					if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(entity.ParentEntityName)) {
+						parentAllowed = true
+						break
+					}
+				}
+				if !parentAllowed {
+					inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent entity not in your accessible hierarchy: " + entity.ParentEntityName, "entity_name": entity.EntityName})
+					continue
+				}
+			}
 
 			const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 			b := make([]byte, 8)
@@ -94,7 +194,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE(NULLIF($18, ''), 'Inactive'), $19, $20
 ) RETURNING entity_id`
 			var newEntityID string
-			err := pgxPool.QueryRow(r.Context(), query,
+			err := pgxPool.QueryRow(ctx, query,
 				entityId,
 				entity.EntityName,
 				entity.EntityShortName,
@@ -126,7 +226,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			auditQuery := `INSERT INTO auditactionentity (
 				entity_id, actiontype, processing_status, reason, requested_by, requested_at
 			) VALUES ($1, $2, $3, $4, $5, now())`
-			if _, auditErr := pgxPool.Exec(r.Context(), auditQuery,
+			if _, auditErr := pgxPool.Exec(ctx, auditQuery,
 				newEntityID,
 				"CREATE",
 				"PENDING_APPROVAL",
@@ -199,7 +299,14 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		start := time.Now()
 
-		// === 1️⃣ Fetch entities with latest audit info
+		// Get user's accessible entities from context
+		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		if len(accessibleEntityIDs) == 0 {
+			api.RespondWithPayload(w, true, "No entities accessible with your current permissions", []map[string]interface{}{})
+			return
+		}
+
+		// === 1️⃣ Fetch entities with latest audit info - FILTERED by user's accessible entities
 		entityQuery := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.entity_id)
@@ -223,10 +330,12 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
 				a.checker_by, a.checker_at, a.checker_comment, a.reason
 			FROM masterentitycash m
-			LEFT JOIN latest_audit a ON a.entity_id = m.entity_id;
+			LEFT JOIN latest_audit a ON a.entity_id = m.entity_id
+			WHERE m.entity_id = ANY($1)
+			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 
-		rows, err := pgxPool.Query(ctx, entityQuery)
+		rows, err := pgxPool.Query(ctx, entityQuery, accessibleEntityIDs)
 		if err != nil {
 			http.Error(w, constants.ErrQueryFailed+err.Error(), 500)
 			return
@@ -515,6 +624,8 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
 			return
 		}
+
+		reqCtx := r.Context()
 		var results []map[string]interface{}
 		relationshipsAdded := []map[string]interface{}{}
 		for _, entity := range req.Entities {
@@ -522,6 +633,38 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Missing entity_id"})
 				continue
 			}
+
+			// Validate currency if being updated
+			if val, ok := entity.Fields["base_operating_currency"]; ok {
+				if valStr := fmt.Sprint(val); valStr != "" && !api.IsCurrencyAllowed(reqCtx, valStr) {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized base_operating_currency: " + valStr, "entity_id": entity.EntityID})
+					continue
+				}
+			}
+
+			// Validate parent if being updated
+			if val, ok := entity.Fields["parent_entity_name"]; ok {
+				parentName := strings.TrimSpace(fmt.Sprint(val))
+				if parentName != "" {
+					var parentExists bool
+					parentCheckQ := `SELECT EXISTS(
+						SELECT 1 FROM masterentitycash m
+						LEFT JOIN LATERAL (
+							SELECT processing_status FROM auditactionentity
+							WHERE entity_id = m.entity_id
+							ORDER BY requested_at DESC LIMIT 1
+						) a ON TRUE
+						WHERE m.entity_name = $1
+						AND UPPER(a.processing_status) = 'APPROVED'
+						AND UPPER(m.active_status) = 'ACTIVE'
+					)`
+					if err := pgxPool.QueryRow(reqCtx, parentCheckQ, parentName).Scan(&parentExists); err != nil || !parentExists {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent entity not found or not approved: " + parentName, "entity_id": entity.EntityID})
+						continue
+					}
+				}
+			}
+
 			ctx := r.Context()
 			tx, txErr := pgxPool.Begin(ctx)
 			if txErr != nil {
@@ -848,7 +991,13 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch all relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer relRows.Close()
@@ -886,7 +1035,13 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Mark all for delete approval
 		rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, allToDelete)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities for deletion")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -953,7 +1108,13 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch all relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk reject")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer relRows.Close()
@@ -992,7 +1153,13 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `UPDATE auditactionentity SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) RETURNING action_id, entity_id`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to reject entity actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -1048,7 +1215,13 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch all relationships
 		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships for bulk approve")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer relRows.Close()
@@ -1099,8 +1272,14 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				descendants := getAllDescendants([]string{eid})
 				rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, descendants)
 				if err != nil {
-					anyError = err
-					break
+					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities as deleted")
+					if statusCode == http.StatusOK {
+						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					} else {
+						api.RespondWithError(w, statusCode, errMsg)
+					}
+					return
 				}
 				defer rows.Close()
 				for rows.Next() {
@@ -1116,8 +1295,14 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Also update the audit rows for these descendants: mark their delete actions as APPROVED
 				auditRows, aerr := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = ANY($3) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, descendants)
 				if aerr != nil {
-					anyError = aerr
-					break
+					errMsg, statusCode := getUserFriendlyEntityCashError(aerr, "Failed to approve delete actions")
+					if statusCode == http.StatusOK {
+						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					} else {
+						api.RespondWithError(w, statusCode, errMsg)
+					}
+					return
 				}
 				defer auditRows.Close()
 				for auditRows.Next() {
@@ -1134,8 +1319,14 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Approve only this entity: update auditactionentity processing_status
 				rows, err := pgxPool.Query(ctx, `UPDATE auditactionentity SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE entity_id = $3 AND processing_status != 'PENDING_DELETE_APPROVAL' RETURNING action_id, entity_id`, checkerBy, req.Comment, eid)
 				if err != nil {
-					anyError = err
-					break
+					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to approve entity action")
+					if statusCode == http.StatusOK {
+						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					} else {
+						api.RespondWithError(w, statusCode, errMsg)
+					}
+					return
 				}
 				defer rows.Close()
 				for rows.Next() {
@@ -1203,7 +1394,19 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
+		// Get user's accessible entities from context
+		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		if len(accessibleEntityIDs) == 0 {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: true,
+				"results":              []map[string]interface{}{},
+			})
+			return
+		}
+
 		parentLevel := req.Level - 1
+		// Only return entities at the requested level that user has access to, are approved and active
 		query := `
 			SELECT m.entity_name, m.entity_id
 			FROM masterentitycash m
@@ -1215,12 +1418,14 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) a ON TRUE
 			WHERE m.entity_level = $1
+			  AND m.entity_id = ANY($2)
 			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
 			  AND LOWER(m.active_status) = 'active'
 			  AND COALESCE(LOWER(a.processing_status),'') = 'approved'
+			ORDER BY m.entity_name
 		`
 
-		rows, err := pgxPool.Query(ctx, query, parentLevel)
+		rows, err := pgxPool.Query(ctx, query, parentLevel, accessibleEntityIDs)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1250,11 +1455,17 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check for iteration errors
 		if err := rows.Err(); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   err.Error(),
-			})
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Error during result iteration")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				w.WriteHeader(statusCode)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   errMsg,
+				})
+			}
 			return
 		}
 
@@ -1266,7 +1477,7 @@ func FindParentCashEntityAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GET handler to fetch all entity_id, entity_name, entity_short_name for all cash entities, requiring user_id in body
+// GET handler to fetch all entity_id, entity_name, entity_short_name for user's accessible cash entities
 func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1276,22 +1487,34 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
+
 		ctx := r.Context()
+
+		// Get user's accessible entities from context (hierarchy-based filtering)
+		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		if len(accessibleEntityIDs) == 0 {
+			api.RespondWithPayload(w, true, "No entities accessible with your current permissions", []map[string]interface{}{})
+			return
+		}
+
+		// Only return entities user has access to (from their hierarchy)
 		query := `
 			SELECT m.entity_id, m.entity_name, m.entity_short_name
 			FROM masterentitycash m
-			LEFT JOIN LATERAL (
-				SELECT processing_status
-				FROM auditactionentity a
-				WHERE a.entity_id = m.entity_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) a ON TRUE
-			WHERE m.active_status = 'Active' AND (m.is_deleted = false OR m.is_deleted IS NULL) AND a.processing_status = 'APPROVED'
+			WHERE m.entity_id = ANY($1)
+			  AND m.active_status = 'Active' 
+			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
+			ORDER BY m.entity_name
 		`
-		rows, err := pgxPool.Query(ctx, query)
+		rows, err := pgxPool.Query(ctx, query, accessibleEntityIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity names")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -1423,7 +1646,13 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			committed := false
@@ -1434,14 +1663,26 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"input_entitycash"}, columns, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to stage data: "+err.Error())
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to stage data")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 
 			// read mapping from upload_mapping_entity
 			mapRows, err := tx.Query(ctx, `SELECT source_column_name, target_field_name FROM upload_mapping_entity`)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Mapping error")
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch column mapping")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			mapping := make(map[string]string)
@@ -1483,7 +1724,13 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			insertSQL := fmt.Sprintf(`INSERT INTO masterentitycash (%s) SELECT %s FROM input_entitycash s WHERE s.upload_batch_id = $1 RETURNING entity_id`, tgtColsStr, srcColsStr)
 			rows2, err := tx.Query(ctx, insertSQL, batchID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Final insert error: "+err.Error())
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, "Final insert error")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			var newIDs []string
@@ -1499,7 +1746,13 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(newIDs) > 0 {
 				auditSQL := `INSERT INTO auditactionentity (entity_id, actiontype, processing_status, reason, requested_by, requested_at) SELECT entity_id, 'CREATE', 'PENDING_APPROVAL', NULL, $1, now() FROM masterentitycash WHERE entity_id = ANY($2)`
 				if _, err := tx.Exec(ctx, auditSQL, userName, newIDs); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit actions: "+err.Error())
+					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to insert audit actions")
+					if statusCode == http.StatusOK {
+						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					} else {
+						api.RespondWithError(w, statusCode, errMsg)
+					}
 					return
 				}
 			}
@@ -1508,7 +1761,13 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if len(newIDs) > 0 {
 				relRows2, err := tx.Query(ctx, `SELECT entity_id, parent_entity_name FROM masterentitycash WHERE entity_id = ANY($1)`, newIDs)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch parent info: "+err.Error())
+					errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch parent info")
+					if statusCode == http.StatusOK {
+						w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+						json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+					} else {
+						api.RespondWithError(w, statusCode, errMsg)
+					}
 					return
 				}
 				for relRows2.Next() {
@@ -1534,7 +1793,13 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			committed = true
@@ -1589,12 +1854,24 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// 2) parse multipart & file (supports CSV and XLSX via shared parser)
 		if err := r.ParseMultipartForm(128 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "parse multipart: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to parse multipart form")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		f, fh, err := r.FormFile("file")
 		if err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "file required: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "File is required")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer f.Close()
@@ -1606,6 +1883,11 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		header := normalizeHeader(records[0])
 		dataRows := records[1:]
+
+		// Get user's accessible entities and currencies from context
+		ctx = r.Context()
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+		accessibleEntityNames := api.GetEntityNamesFromCtx(ctx)
 
 		// allowed columns mapping (extend if needed)
 		allowed := map[string]bool{
@@ -1634,7 +1916,13 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// 3) start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer func() {
@@ -1653,13 +1941,51 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// create temp table like master (safe with ON COMMIT DROP)
 		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_me (LIKE masterentitycash INCLUDING DEFAULTS) ON COMMIT DROP`); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Temp table failed: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to create temp table")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 
 		// Build copyRows in memory (simpler and supports XLSX)
 		copyRows := make([][]interface{}, 0, len(dataRows))
-		for _, rec := range dataRows {
+		skipped := 0
+		for rowIdx, rec := range dataRows {
+			// Validate currency if present
+			currencyCol := headerPos["base_operating_currency"]
+			if currencyCol < len(rec) {
+				currency := strings.TrimSpace(rec[currencyCol])
+				if currency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, currency) {
+					log.Printf("[UploadEntitySimple] Row %d skipped: invalid currency %s", rowIdx+2, currency)
+					skipped++
+					continue
+				}
+			}
+
+			// Validate parent entity if present
+			parentCol := headerPos["parent_entity_name"]
+			if parentCol < len(rec) {
+				parentName := strings.TrimSpace(rec[parentCol])
+				if parentName != "" && len(accessibleEntityNames) > 0 {
+					parentAllowed := false
+					for _, name := range accessibleEntityNames {
+						if strings.EqualFold(strings.TrimSpace(name), parentName) {
+							parentAllowed = true
+							break
+						}
+					}
+					if !parentAllowed {
+						log.Printf("[UploadEntitySimple] Row %d skipped: parent entity not in accessible hierarchy: %s", rowIdx+2, parentName)
+						skipped++
+						continue
+					}
+				}
+			}
+
 			row := make([]interface{}, len(copyCols))
 			for j, col := range copyCols {
 				if pos, ok := headerPos[col]; ok && pos < len(rec) {
@@ -1676,10 +2002,15 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			copyRows = append(copyRows, row)
 		}
 		rowsCopied := len(copyRows)
-		skipped := 0
 		tStart := time.Now()
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_me"}, copyCols, pgx.CopyFromRows(copyRows)); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "COPY failed")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		log.Printf("[UploadEntitySimple] COPY rows=%d elapsed=%v skipped=%d", rowsCopied, time.Since(tStart), skipped)
@@ -1712,7 +2043,13 @@ FROM tmp_me t
 LEFT JOIN masterentitycash m ON m.entity_name = t.entity_name
 WHERE m.entity_name IS NULL;
 `); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Insert failed")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		log.Printf("[UploadEntitySimple] insert elapsed=%v", time.Since(t1))
@@ -1763,7 +2100,13 @@ AND (
 	m.parent_entity_name IS DISTINCT FROM t.parent_entity_name
 );
 `); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrUpdateFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		log.Printf("[UploadEntitySimple] update elapsed=%v", time.Since(t2))
@@ -1789,7 +2132,13 @@ SET entity_level = a.lvl,
 FROM affected a
 WHERE m.entity_id = a.entity_id;
 `); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Hierarchy failed: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Hierarchy sync failed")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		log.Printf("[UploadEntitySimple] hierarchy elapsed=%v", time.Since(t3))
@@ -1805,7 +2154,13 @@ WHERE (p.entity_name IN (SELECT entity_name FROM tmp_me)
        OR c.entity_name IN (SELECT entity_name FROM tmp_me))
 ON CONFLICT (parent_entity_name, child_entity_name) DO NOTHING;
 `); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Relationships failed: "+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Relationships sync failed")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		log.Printf("[UploadEntitySimple] relationships elapsed=%v", time.Since(t4))
@@ -1819,14 +2174,26 @@ FROM masterentitycash m
 WHERE m.entity_name IN (SELECT entity_name FROM tmp_me)
 ON CONFLICT DO NOTHING;
 `, userName); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrAuditInsertFailed)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		log.Printf("[UploadEntitySimple] audit elapsed=%v", time.Since(t5))
 
 		// commit
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		tx = nil

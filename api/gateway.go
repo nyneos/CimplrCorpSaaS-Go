@@ -6,6 +6,11 @@ import (
 	"CimplrCorpSaas/internal/dashboard"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,7 +33,7 @@ const (
 	contentTypeJSON                 = constants.ContentTypeJSON
 	allowOriginAll                  = "*"
 	allowMethodsAll                 = "GET, POST, PUT, DELETE, OPTIONS"
-	allowHeadersAll                 = "Content-Type, Authorization"
+	allowHeadersAll                 = "*"
 	errAuthServiceUnavailable       = "Auth service unavailable"
 	errMethodNotAllowed             = constants.ErrMethodNotAllowed
 )
@@ -51,6 +56,10 @@ var (
 	authService     *auth.AuthService
 	authServiceOnce sync.Once
 )
+
+func isDevMode() bool {
+	return strings.EqualFold(os.Getenv("DEVEL_MODE"), "true")
+}
 
 // SetAuthService allows wiring the AuthService from main/manager
 func SetAuthService(svc *auth.AuthService) {
@@ -238,6 +247,208 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// encResponseWriter captures handler output so we can encrypt it if requested.
+type encResponseWriter struct {
+	http.ResponseWriter
+	buf    bytes.Buffer
+	status int
+}
+
+func (erw *encResponseWriter) Header() http.Header {
+	return erw.ResponseWriter.Header()
+}
+
+func (erw *encResponseWriter) WriteHeader(code int) {
+	erw.status = code
+}
+
+func (erw *encResponseWriter) Write(b []byte) (int, error) {
+	return erw.buf.Write(b)
+}
+
+// decryptPayload unwraps AES-GCM encrypted request bodies when X-Payload-Enc=aes-gcm is present.
+func decryptPayload(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isDevMode() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodGet || r.Header.Get("X-Payload-Enc") == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get("X-Payload-Enc") != "aes-gcm" {
+			writeJSONError(w, "unsupported encryption")
+			return
+		}
+
+		keyB64 := os.Getenv("PAYLOAD_ENC_KEY")
+		key, err := base64.StdEncoding.DecodeString(keyB64)
+		if keyB64 == "" || err != nil || len(key) != 32 {
+			writeJSONError(w, "encryption key not configured")
+			return
+		}
+
+		var raw map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			writeJSONError(w, "invalid encrypted payload")
+			return
+		}
+
+		var ct, iv, tag []byte
+		if ed, ok := raw["ED"]; ok {
+			parts := strings.Split(ed, ":")
+			if len(parts) != 3 {
+				writeJSONError(w, "invalid ED format")
+				return
+			}
+			var err error
+			if iv, err = hexDecode(parts[0]); err != nil {
+				writeJSONError(w, "invalid iv")
+				return
+			}
+			if tag, err = hexDecode(parts[1]); err != nil {
+				writeJSONError(w, "invalid tag")
+				return
+			}
+			if ct, err = hexDecode(parts[2]); err != nil {
+				writeJSONError(w, "invalid ciphertext")
+				return
+			}
+		} else {
+			wrap := struct {
+				Ciphertext string `json:"ciphertext"`
+				IV         string `json:"iv"`
+				Tag        string `json:"tag"`
+			}{}
+			if b, err := json.Marshal(raw); err == nil {
+				_ = json.Unmarshal(b, &wrap)
+			}
+			ct, err = base64.StdEncoding.DecodeString(wrap.Ciphertext)
+			if err != nil {
+				writeJSONError(w, "invalid ciphertext")
+				return
+			}
+			iv, err = base64.StdEncoding.DecodeString(wrap.IV)
+			if err != nil {
+				writeJSONError(w, "invalid iv")
+				return
+			}
+			tag, err = base64.StdEncoding.DecodeString(wrap.Tag)
+			if err != nil {
+				writeJSONError(w, "invalid tag")
+				return
+			}
+		}
+
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			writeJSONError(w, "cipher init failed")
+			return
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			writeJSONError(w, "cipher init failed")
+			return
+		}
+		if len(iv) != gcm.NonceSize() {
+			writeJSONError(w, "invalid iv size")
+			return
+		}
+
+		ciphertextWithTag := append(ct, tag...)
+		plaintext, err := gcm.Open(nil, iv, ciphertextWithTag, nil)
+		if err != nil {
+			writeJSONError(w, "decryption failed")
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(plaintext))
+		r.ContentLength = int64(len(plaintext))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// encryptResponse encrypts response bodies when X-Response-Enc=aes-gcm is requested.
+func encryptResponse(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isDevMode() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		shouldEncrypt := r.Header.Get("X-Response-Enc") == "aes-gcm"
+		if !shouldEncrypt {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		erw := &encResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(erw, r)
+		status := erw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		keyB64 := os.Getenv("PAYLOAD_ENC_KEY")
+		key, err := base64.StdEncoding.DecodeString(keyB64)
+		if keyB64 == "" || err != nil || len(key) != 32 {
+			writeJSONError(w, "encryption key not configured")
+			return
+		}
+
+		ciphertext, err := encryptBytes(erw.buf.Bytes(), key)
+		if err != nil {
+			writeJSONError(w, "encryption failed")
+			return
+		}
+
+		// Remove stale length/encoding headers because the body is now rewritten
+		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Encoding")
+		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+		w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
+		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+		w.Header().Set(headerContentType, contentTypeJSON)
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]string{"ED": ciphertext})
+	})
+}
+
+func encryptBytes(plain []byte, key []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	iv := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(iv); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nil, iv, plain, nil) // ciphertext||tag
+	if len(sealed) < gcm.Overhead() {
+		return "", fmt.Errorf("invalid sealed length")
+	}
+	ct := sealed[:len(sealed)-gcm.Overhead()]
+	tag := sealed[len(sealed)-gcm.Overhead():]
+	return fmt.Sprintf("%x:%x:%x", iv, tag, ct), nil
+}
+
+func writeJSONError(w http.ResponseWriter, msg string) {
+	w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+	w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
+	w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+	w.Header().Set(headerContentType, contentTypeJSON)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"success": false, "error": msg})
+}
+
+func hexDecode(s string) ([]byte, error) {
+	return hex.DecodeString(s)
+}
+
 // LoggingMiddleware is a middleware for logging HTTP requests
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -361,11 +572,17 @@ func StartGateway() {
 	if port == "" {
 		port = "8081"
 	}
-	log.Printf("API Gateway started on :%s", port)
-	// err := http.ListenAndServe(":"+port, mux)
-	handler := stripPathPrefix(LoggingMiddleware(mux))
-	err := http.ListenAndServe(":"+port, handler)
-
+	log.Printf("API Gateway listening on :%s", port)
+	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
+	cert := os.Getenv("TLS_CERT")
+	key := os.Getenv("TLS_KEY")
+	var err error
+	if cert != "" && key != "" {
+		err = http.ListenAndServeTLS(":"+port, cert, key, handler)
+	} else {
+		log.Printf("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
+		err = http.ListenAndServe(":"+port, handler)
+	}
 	if err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
 	}

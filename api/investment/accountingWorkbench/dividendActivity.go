@@ -112,6 +112,15 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Auto-calculate reinvest_units if not provided for REINVESTMENT transactions
+		reinvestUnits := req.ReinvestUnits
+		if strings.ToUpper(req.TransactionType) == "REINVESTMENT" || strings.ToUpper(req.TransactionType) == "REINVEST" {
+			if reinvestUnits == 0 && req.ReinvestNAV > 0 {
+				// Calculate units = dividend_amount / reinvest_nav
+				reinvestUnits = req.DividendAmount / req.ReinvestNAV
+			}
+		}
+
 		// Insert Dividend record
 		var dividendID string
 		if err := tx.QueryRow(ctx, `
@@ -122,7 +131,7 @@ func CreateDividendSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING dividend_id
 		`, activityID, req.SchemeID, nullIfEmptyString(req.FolioID), req.ExDate, req.RecordDate,
 			req.PaymentDate, req.TransactionType, req.DividendAmount,
-			nullIfZeroFloat(req.ReinvestNAV), nullIfZeroFloat(req.ReinvestUnits)).Scan(&dividendID); err != nil {
+			nullIfZeroFloat(req.ReinvestNAV), nullIfZeroFloat(reinvestUnits)).Scan(&dividendID); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Dividend insert failed: "+err.Error())
 			return
 		}
@@ -244,6 +253,15 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Auto-calculate reinvest_units if not provided for REINVESTMENT transactions
+			reinvestUnits := row.ReinvestUnits
+			if strings.ToUpper(row.TransactionType) == "REINVESTMENT" || strings.ToUpper(row.TransactionType) == "REINVEST" {
+				if reinvestUnits == 0 && row.ReinvestNAV > 0 {
+					// Calculate units = dividend_amount / reinvest_nav
+					reinvestUnits = row.DividendAmount / row.ReinvestNAV
+				}
+			}
+
 			var dividendID string
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO investment.accounting_dividend (
@@ -253,7 +271,7 @@ func CreateDividendBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				RETURNING dividend_id
 			`, activityID, row.SchemeID, nullIfEmptyString(row.FolioID), row.ExDate, row.RecordDate,
 				row.PaymentDate, row.TransactionType, row.DividendAmount,
-				nullIfZeroFloat(row.ReinvestNAV), nullIfZeroFloat(row.ReinvestUnits)).Scan(&dividendID); err != nil {
+				nullIfZeroFloat(row.ReinvestNAV), nullIfZeroFloat(reinvestUnits)).Scan(&dividendID); err != nil {
 				results = append(results, map[string]interface{}{"success": false, "error": "Dividend insert failed: " + err.Error()})
 				continue
 			}
@@ -382,6 +400,28 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Auto-recalculate reinvest_units if transaction_type is REINVESTMENT and reinvest_units is 0
+		var transactionType string
+		var dividendAmount, reinvestNAV, reinvestUnits float64
+		err = tx.QueryRow(ctx, `
+			SELECT transaction_type, dividend_amount, COALESCE(reinvest_nav, 0), COALESCE(reinvest_units, 0)
+			FROM investment.accounting_dividend
+			WHERE dividend_id = $1
+		`, req.DividendID).Scan(&transactionType, &dividendAmount, &reinvestNAV, &reinvestUnits)
+
+		if err == nil {
+			if (strings.ToUpper(transactionType) == "REINVESTMENT" || strings.ToUpper(transactionType) == "REINVEST") &&
+				reinvestUnits == 0 && reinvestNAV > 0 {
+				// Auto-calculate units = dividend_amount / reinvest_nav
+				calculatedUnits := dividendAmount / reinvestNAV
+				_, _ = tx.Exec(ctx, `
+					UPDATE investment.accounting_dividend
+					SET reinvest_units = $1
+					WHERE dividend_id = $2
+				`, calculatedUnits, req.DividendID)
+			}
+		}
+
 		// Audit
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, reason, requested_by, requested_at)
@@ -431,20 +471,20 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				d.dividend_id,
 				d.activity_id,
 				act.activity_type,
-				TO_CHAR(act.effective_date, 'YYYY-MM-DD') AS effective_date,
-				TO_CHAR(act.accounting_period, 'YYYY-MM-DD') AS accounting_period,
+				TO_CHAR(NULLIF(act.effective_date::text, '')::date, 'YYYY-MM-DD') AS effective_date,
+				COALESCE(act.accounting_period::text, '') AS accounting_period,
 				act.data_source,
 				act.status,
 				d.scheme_id,
 				d.old_scheme_id,
 				COALESCE(d.folio_id,'') AS folio_id,
 				COALESCE(d.old_folio_id,'') AS old_folio_id,
-				TO_CHAR(d.ex_date, 'YYYY-MM-DD') AS ex_date,
-				TO_CHAR(d.old_ex_date, 'YYYY-MM-DD') AS old_ex_date,
-				TO_CHAR(d.record_date, 'YYYY-MM-DD') AS record_date,
-				TO_CHAR(d.old_record_date, 'YYYY-MM-DD') AS old_record_date,
-				TO_CHAR(d.payment_date, 'YYYY-MM-DD') AS payment_date,
-				TO_CHAR(d.old_payment_date, 'YYYY-MM-DD') AS old_payment_date,
+				TO_CHAR(NULLIF(d.ex_date::text, '')::date, 'YYYY-MM-DD') AS ex_date,
+				TO_CHAR(NULLIF(d.old_ex_date::text, '')::date, 'YYYY-MM-DD') AS old_ex_date,
+				TO_CHAR(NULLIF(d.record_date::text, '')::date, 'YYYY-MM-DD') AS record_date,
+				TO_CHAR(NULLIF(d.old_record_date::text, '')::date, 'YYYY-MM-DD') AS old_record_date,
+				TO_CHAR(NULLIF(d.payment_date::text, '')::date, 'YYYY-MM-DD') AS payment_date,
+				TO_CHAR(NULLIF(d.old_payment_date::text, '')::date, 'YYYY-MM-DD') AS old_payment_date,
 				d.transaction_type,
 				COALESCE(d.old_transaction_type,'') AS old_transaction_type,
 				d.dividend_amount,
@@ -454,15 +494,15 @@ func GetDividendsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(d.reinvest_units,0) AS reinvest_units,
 				COALESCE(d.old_reinvest_units,0) AS old_reinvest_units,
 				d.is_deleted,
-				TO_CHAR(d.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(d.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.accounting_dividend d

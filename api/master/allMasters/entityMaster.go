@@ -1,7 +1,8 @@
 package allMaster
 
 import (
-	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -154,27 +155,47 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSON})
 			return
 		}
-		// Get created_by from session
-		createdBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				createdBy = s.Email
-				break
-			}
+
+		// Get session from context
+		session := middlewares.GetSessionFromContext(r.Context())
+		if session == nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSession})
+			return
 		}
-		// if createdBy == "" {
-		// 	w.WriteHeader(http.StatusBadRequest)
-		// 	json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidSessionCapitalized})
-		// 	return
-		// }
+		createdBy := session.Email
+
+		ctx := r.Context()
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
 		// Insert entities
 		entityIDs := make(map[string]string) // name -> id
 		inserted := []map[string]interface{}{}
 		for _, entity := range req.Entities {
+			// Validate currency
+			if entity.DefaultCurrency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, entity.DefaultCurrency) {
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + entity.DefaultCurrency, "entity_name": entity.EntityName})
+				continue
+			}
+			if entity.ReportingCurrency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, entity.ReportingCurrency) {
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized reporting_currency: " + entity.ReportingCurrency, "entity_name": entity.EntityName})
+				continue
+			}
+
+			// Validate parent entity exists in approved entities
+			if entity.ParentName != "" {
+				var parentExists int
+				parentCheckQ := `SELECT 1 FROM masterentity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)`
+				err := db.QueryRow(parentCheckQ, entity.ParentName).Scan(&parentExists)
+				if err != nil {
+					inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent entity not found or not approved: " + entity.ParentName, "entity_name": entity.EntityName})
+					continue
+				}
+			}
+
 			entityId := "E" + strings.ToUpper(uuid.New().String()[:8])
 			query := `INSERT INTO masterentity (
 				entity_id, entity_name, parentname, is_top_level_entity, address, contact_phone, contact_email, registration_number, pan_gst, legal_entity_identifier, tax_identification_number, default_currency, associated_business_units, reporting_currency, unique_identifier, legal_entity_type, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, is_deleted, approval_status, level, comments, company_name, created_by, updated_by, created_at
@@ -211,7 +232,7 @@ func CreateAndSyncEntities(db *sql.DB) http.HandlerFunc {
 				createdBy,
 			).Scan(&newEntityID)
 			if err != nil {
-				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_name": entity.EntityName})
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityCreateFailed, "entity_name": entity.EntityName})
 				continue
 			}
 			entityIDs[entity.EntityName] = newEntityID
@@ -269,7 +290,7 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 		entitiesRows, err := db.Query("SELECT * FROM masterentity")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer entitiesRows.Close()
@@ -304,7 +325,7 @@ func GetEntityHierarchy(db *sql.DB) http.HandlerFunc {
 		relRows, err := db.Query("SELECT * FROM entityrelationships")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer relRows.Close()
@@ -452,7 +473,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 			rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Delete-Approved', is_deleted = true, comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToApprove), req.Comments)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
 				return
 			}
 			defer rows.Close()
@@ -475,7 +496,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 			rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Approved', comments = $2 WHERE entity_id = $1 RETURNING *`, id, req.Comments)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
 				return
 			}
 			defer rows.Close()
@@ -489,7 +510,7 @@ func ApproveEntity(db *sql.DB) http.HandlerFunc {
 				scanErr := rows.Scan(valPtrs...)
 				if scanErr != nil {
 					w.WriteHeader(http.StatusInternalServerError)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: scanErr.Error()})
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseScanFailed})
 					return
 				}
 				entity := map[string]interface{}{}
@@ -551,7 +572,7 @@ func RejectEntitiesBulk(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(`UPDATE masterentity SET approval_status = 'Rejected', comments = $2 WHERE entity_id = ANY($1) RETURNING *`, pq.Array(allToReject), req.Comments)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
 			return
 		}
 		defer rows.Close()
@@ -600,7 +621,7 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(query, args...)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
 			return
 		}
 		defer rows.Close()
@@ -614,7 +635,7 @@ func UpdateEntity(db *sql.DB) http.HandlerFunc {
 			scanErr := rows.Scan(valPtrs...)
 			if scanErr != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: scanErr.Error()})
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseScanFailed})
 				return
 			}
 			entity := map[string]interface{}{}
@@ -635,7 +656,7 @@ func GetAllEntityNames(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query("SELECT entity_name FROM masterentity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND is_deleted = false")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer rows.Close()
@@ -665,7 +686,7 @@ func DeleteEntity(db *sql.DB) http.HandlerFunc {
 		relRows, err := db.Query(`SELECT parent_entity_id, child_entity_id FROM entityrelationships`)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer relRows.Close()
@@ -706,7 +727,7 @@ func DeleteEntity(db *sql.DB) http.HandlerFunc {
 		)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrEntityUpdateFailed})
 			return
 		}
 		defer rows.Close()
@@ -755,7 +776,7 @@ func FindParentAtLevel(db *sql.DB) http.HandlerFunc {
 		rows, err := db.Query(query, strconv.Itoa(parentLevel), fmt.Sprintf("Level %d", parentLevel))
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer rows.Close()
@@ -789,7 +810,7 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 			return
 		} else if errRole != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errRole.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		// Get permissions for hierarchical page
@@ -797,7 +818,7 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		rows, errPerm := db.Query(query, roleId)
 		if errPerm != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errPerm.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer rows.Close()
@@ -828,7 +849,7 @@ func GetRenderVarsHierarchical(db *sql.DB) http.HandlerFunc {
 		entitiesRows, err := db.Query("SELECT * FROM masterentity")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrDatabaseQueryFailed})
 			return
 		}
 		defer entitiesRows.Close()

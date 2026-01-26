@@ -19,6 +19,99 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// getUserFriendlyCostProfitCenterError converts database errors to user-friendly messages
+// Returns (error message, HTTP status code)
+// Known/expected errors return 200 with error message, unexpected errors return 500/503
+func getUserFriendlyCostProfitCenterError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errStr := err.Error()
+
+	// Duplicate centre name - Known error, return 200 for frontend to show message
+	if strings.Contains(errStr, "unique_centre_name_not_deleted") {
+		return "Centre name already exists. Please use a different name.", http.StatusOK
+	}
+
+	// Duplicate centre code - Known error, return 200
+	if strings.Contains(errStr, "unique_centre_code_not_deleted") {
+		return "Centre code already exists. Please use a different code.", http.StatusOK
+	}
+
+	// Duplicate parent-child relationship - Known error, return 200
+	if strings.Contains(errStr, "uq_parent_child_code") {
+		return "This parent-child relationship already exists.", http.StatusOK
+	}
+
+	// Generic duplicate key - Known error, return 200
+	if strings.Contains(errStr, constants.ErrDuplicateKey) || strings.Contains(errStr, "unique") {
+		return "This cost/profit centre already exists in the system.", http.StatusOK
+	}
+
+	// Foreign key violations - Known error, return 200
+	if strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "fkey") {
+		if strings.Contains(errStr, "auditactioncostprofitcenter_fk") {
+			return "Cannot perform this operation. Centre is referenced in audit actions.", http.StatusOK
+		}
+		return "Invalid reference. The related record does not exist.", http.StatusOK
+	}
+
+	// Check constraint violations - Known error, return 200
+	if strings.Contains(errStr, "check constraint") {
+		if strings.Contains(errStr, "centre_type_check") || strings.Contains(errStr, "mastercostprofitcenter_type_check") {
+			return "Invalid centre type. Must be 'Cost Centre' or 'Profit Centre'.", http.StatusOK
+		}
+		if strings.Contains(errStr, "status_check") || strings.Contains(errStr, "mastercostprofitcenter_status_check") {
+			return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
+		}
+		if strings.Contains(errStr, "source_check") || strings.Contains(errStr, "mastercostprofitcenter_source_check") {
+			return "Invalid source. Must be 'ERP', 'Manual', or 'Upload'.", http.StatusOK
+		}
+		if strings.Contains(errStr, "centre_level_check") || strings.Contains(errStr, "mastercostprofitcenter_centre_level_check") {
+			return "Invalid centre level. Must be 0, 1, 2, or 3.", http.StatusOK
+		}
+		if strings.Contains(errStr, "actiontype_check") {
+			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
+		}
+		if strings.Contains(errStr, "processing_status_check") {
+			return "Invalid processing status.", http.StatusOK
+		}
+		return "Invalid data provided. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations - Known error, return 200
+	if strings.Contains(errStr, "null value") || strings.Contains(errStr, "violates not-null") {
+		if strings.Contains(errStr, "centre_code") {
+			return "Centre code is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "centre_name") {
+			return "Centre name is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "centre_type") {
+			return "Centre type is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "status") {
+			return "Status is required.", http.StatusOK
+		}
+		if strings.Contains(errStr, "centre_level") {
+			return "Centre level is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Connection errors - SERVER ERROR (503 Service Unavailable)
+	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
+		return "Database connection error. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Return original error with context - SERVER ERROR (500)
+	if context != "" {
+		return context + ": " + errStr, http.StatusInternalServerError
+	}
+	return errStr, http.StatusInternalServerError
+}
+
 // Minimal request shape
 type CostProfitCenterRequest struct {
 	CentreCode string `json:"centre_code"`
@@ -126,7 +219,14 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
+		entities := api.GetEntityNamesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
 		created := make([]map[string]interface{}, 0)
 
 		for _, rrow := range req.Rows {
@@ -135,18 +235,42 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Validate entity
+			if rrow.EntityCode != "" && !api.IsEntityAllowed(ctx, rrow.EntityCode) {
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized entity_name: " + rrow.EntityCode, "centre_code": rrow.CentreCode})
+				continue
+			}
+
+			// Validate currency
+			if rrow.DefaultCurrency != "" && !api.IsCurrencyAllowed(ctx, rrow.DefaultCurrency) {
+				created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + rrow.DefaultCurrency, "centre_code": rrow.CentreCode})
+				continue
+			}
+
 			// Compute parent and level
 			centreLevel := rrow.CentreLevel
 			isTop := rrow.IsTopLevelCentre
 			if strings.TrimSpace(rrow.ParentCode) != "" {
+				// Validate parent exists in approved cost/profit centers
 				var plevel int
-				if err := pgxPool.QueryRow(ctx, `SELECT centre_level FROM mastercostprofitcenter WHERE centre_code=$1`, rrow.ParentCode).Scan(&plevel); err == nil {
-					centreLevel = plevel + 1
-					isTop = false
-				} else {
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_centre_code not found", "centre_code": rrow.CentreCode})
+				var parentExists bool
+				parentCheckQ := `SELECT centre_level, EXISTS(
+					SELECT 1 FROM mastercostprofitcenter m
+					LEFT JOIN LATERAL (
+						SELECT processing_status FROM auditactioncostprofitcenter
+						WHERE centre_id = m.centre_id
+						ORDER BY requested_at DESC LIMIT 1
+					) a ON TRUE
+					WHERE m.centre_code = $1
+					AND UPPER(a.processing_status) = 'APPROVED'
+					AND UPPER(m.status) = 'ACTIVE'
+				) FROM mastercostprofitcenter WHERE centre_code=$1`
+				if err := pgxPool.QueryRow(ctx, parentCheckQ, rrow.ParentCode).Scan(&plevel, &parentExists); err != nil || !parentExists {
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_centre_code not found or not approved: " + rrow.ParentCode, "centre_code": rrow.CentreCode})
 					continue
 				}
+				centreLevel = plevel + 1
+				isTop = false
 			}
 
 			tx, err := pgxPool.Begin(ctx)
@@ -226,11 +350,13 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					rrow.SageDeptCode,
 					rrow.SageCostCentreCode,
 				).Scan(&centreID); err != nil {
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "centre_code": rrow.CentreCode})
+					errMsg, _ := getUserFriendlyCostProfitCenterError(err, "Failed to create centre")
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "centre_code": rrow.CentreCode})
 					return
 				}
 				if err != nil {
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "centre_code": rrow.CentreCode})
+					errMsg, _ := getUserFriendlyCostProfitCenterError(err, "Failed to create centre")
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "centre_code": rrow.CentreCode})
 					return
 				}
 
@@ -254,7 +380,8 @@ func CreateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				if err := tx.Commit(ctx); err != nil {
-					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrCommitFailed + err.Error(), "centre_id": centreID})
+					errMsg, _ := getUserFriendlyCostProfitCenterError(err, "Failed to commit transaction")
+					created = append(created, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "centre_id": centreID})
 					return
 				}
 				committed = true
@@ -299,7 +426,7 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := r.Context()
 		results := []map[string]interface{}{}
 		for _, row := range req.Rows {
 			if strings.TrimSpace(row.CentreID) == "" {
@@ -308,7 +435,8 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "begin failed: " + err.Error(), "centre_id": row.CentreID})
+				errMsg, _ := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg, "centre_id": row.CentreID})
 				continue
 			}
 			committed := false
@@ -349,6 +477,45 @@ func UpdateAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "fetch failed: " + err.Error(), "centre_id": row.CentreID})
 					return
+				}
+
+				// Validate entity if being updated
+				if val, ok := row.Fields["entity_name"]; ok {
+					if valStr := fmt.Sprint(val); valStr != "" && !api.IsEntityAllowed(ctx, valStr) {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized entity_name: " + valStr, "centre_id": row.CentreID})
+						return
+					}
+				}
+
+				// Validate currency if being updated
+				if val, ok := row.Fields["default_currency"]; ok {
+					if valStr := fmt.Sprint(val); valStr != "" && !api.IsCurrencyAllowed(ctx, valStr) {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized default_currency: " + valStr, "centre_id": row.CentreID})
+						return
+					}
+				}
+
+				// Validate parent if being updated
+				if val, ok := row.Fields["parent_centre_code"]; ok {
+					parentCode := strings.TrimSpace(fmt.Sprint(val))
+					if parentCode != "" {
+						var parentExists bool
+						parentCheckQ := `SELECT EXISTS(
+							SELECT 1 FROM mastercostprofitcenter m
+							LEFT JOIN LATERAL (
+								SELECT processing_status FROM auditactioncostprofitcenter
+								WHERE centre_id = m.centre_id
+								ORDER BY requested_at DESC LIMIT 1
+							) a ON TRUE
+							WHERE m.centre_code = $1
+							AND UPPER(a.processing_status) = 'APPROVED'
+							AND UPPER(m.status) = 'ACTIVE'
+						)`
+						if err := tx.QueryRow(ctx, parentCheckQ, parentCode).Scan(&parentExists); err != nil || !parentExists {
+							results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "parent_centre_code not found or not approved: " + parentCode, "centre_id": row.CentreID})
+							return
+						}
+					}
 				}
 
 				var sets []string
@@ -732,7 +899,13 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxStartFailed+err.Error())
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, constants.ErrTxStartFailed)
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			committed := false
@@ -873,7 +1046,13 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			relRows, err := tx.Query(ctx, relQuery, batchID)
 			if err != nil {
 				tx.Rollback(ctx)
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to read relationship inputs: "+err.Error())
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to read relationship inputs")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			defer relRows.Close()
@@ -949,7 +1128,13 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to commit upload transaction")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 			committed = true
@@ -983,6 +1168,15 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		ctx := r.Context()
+		entities := api.GetEntityNamesFromCtx(ctx)
+		currCodes := api.GetCurrencyCodesFromCtx(ctx)
+
+		if len(entities) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "rows": []map[string]interface{}{}})
+			return
+		}
+
 		q := `
             WITH latest AS (
                 SELECT DISTINCT ON (centre_id) centre_id, processing_status
@@ -993,8 +1187,10 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
             FROM mastercostprofitcenter m
             JOIN latest l ON l.centre_id = m.centre_id
             WHERE UPPER(l.processing_status) = 'APPROVED' AND UPPER(m.status) = 'ACTIVE' AND is_deleted = false
+				AND (m.entity_name IS NULL OR m.entity_name = ANY($1))
+				AND (m.default_currency IS NULL OR m.default_currency = ANY($2))
         `
-		rows, err := pgxPool.Query(ctx, q)
+		rows, err := pgxPool.Query(ctx, q, entities, currCodes)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1016,26 +1212,79 @@ func GetApprovedActiveCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc 
 func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID   string `json:"user_id"`
+			Entity   string `json:"entity,omitempty"`   // Optional entity filter
+			Currency string `json:"currency,omitempty"` // Optional currency filter
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		ctx := r.Context()
+		session := api.GetSessionFromCtx(ctx)
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
-		ctx := r.Context()
-		query := `
+		// Get accessible entities from middleware context
+		entities := api.GetEntityNamesFromCtx(ctx)
+		if len(entities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
+		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - UserID: %s, Accessible Entities: %v, Requested Entity: %s, Requested Currency: %s",
+			req.UserID, entities, req.Entity, req.Currency)
+
+		// Build WHERE clause with filters
+		whereClauses := []string{"1=1"}
+		args := []interface{}{}
+		argPos := 1
+
+		// Entity filter - check against accessible entities
+		if req.Entity != "" {
+			// Verify user has access to requested entity
+			hasAccess := false
+			for _, e := range entities {
+				if strings.EqualFold(e, req.Entity) {
+					hasAccess = true
+					break
+				}
+			}
+			if !hasAccess {
+				log.Printf("[DEBUG] User %s does not have access to entity: %s", req.UserID, req.Entity)
+				api.RespondWithError(w, http.StatusForbidden, "You don't have access to the requested entity")
+				return
+			}
+			whereClauses = append(whereClauses, fmt.Sprintf("LOWER(m.entity_name) = LOWER($%d)", argPos))
+			args = append(args, req.Entity)
+			argPos++
+		} else {
+			// No specific entity requested, filter by all accessible entities
+			placeholders := []string{}
+			for _, entity := range entities {
+				placeholders = append(placeholders, fmt.Sprintf("LOWER($%d)", argPos))
+				args = append(args, strings.ToLower(entity))
+				argPos++
+			}
+			whereClauses = append(whereClauses, fmt.Sprintf("LOWER(m.entity_name) IN (%s)", strings.Join(placeholders, ",")))
+		}
+
+		// Currency filter
+		if req.Currency != "" {
+			whereClauses = append(whereClauses, fmt.Sprintf("LOWER(m.default_currency) = LOWER($%d)", argPos))
+			args = append(args, req.Currency)
+			argPos++
+		}
+
+		whereClause := strings.Join(whereClauses, " AND ")
+
+		log.Printf("[DEBUG] WHERE clause: %s", whereClause)
+		log.Printf("[DEBUG] Query args: %v", args)
+
+		query := fmt.Sprintf(`
             SELECT 
                 m.centre_id, m.centre_code, m.centre_name, m.centre_type, m.parent_centre_code, 
                 m.entity_name, m.status, m.source, m.erp_type,
@@ -1071,10 +1320,19 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
                 ORDER BY requested_at DESC
                 LIMIT 1
             ) a ON TRUE
-        `
-		rows, err := pgxPool.Query(ctx, query)
+            WHERE %s
+		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
+		`, whereClause)
+
+		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithResult(w, false, err.Error())
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch centre hierarchy")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -1376,6 +1634,10 @@ func GetCostProfitCenterHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				topLevel = append(topLevel, e)
 			}
 		}
+
+		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - Total centres in entityMap: %d, Top-level centres: %d", len(entityMap), len(topLevel))
+		log.Printf("[DEBUG] GetCostProfitCenterHierarchy - Returning %d top-level items", len(topLevel))
+
 		api.RespondWithPayload(w, true, "", topLevel)
 	}
 }
@@ -1390,47 +1652,72 @@ func FindParentCostProfitCenterAtLevel(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+
+		ctx := r.Context()
+		session := api.GetSessionFromCtx(ctx)
+		if session == nil || session.UserID != req.UserID {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionCapitalized)
 			return
 		}
 
-		parentLevel := req.Level - 1
-		q := `
-			SELECT m.centre_name, m.centre_id, m.centre_code
+		// Get accessible entities from middleware context
+		entities := api.GetEntityNamesFromCtx(ctx)
+		if len(entities) == 0 {
+			api.RespondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
+		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - UserID: %s, Level: %d, Accessible Entities: %v", req.UserID, req.Level, entities)
+
+		// Build entity filter
+		args := []interface{}{req.Level - 1}
+		argPos := 2
+		placeholders := []string{}
+		for _, entity := range entities {
+			placeholders = append(placeholders, fmt.Sprintf("LOWER($%d)", argPos))
+			args = append(args, strings.ToLower(entity))
+			argPos++
+		}
+		entityFilter := fmt.Sprintf("LOWER(m.entity_name) IN (%s)", strings.Join(placeholders, ","))
+
+		q := fmt.Sprintf(`
+			SELECT m.centre_name, m.centre_id, m.centre_code, m.entity_name
 			FROM mastercostprofitcenter m
-			LEFT JOIN LATERAL (
-				SELECT processing_status
-				FROM auditactioncostprofitcenter a
-				WHERE a.centre_id = m.centre_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) a ON TRUE
 			WHERE m.centre_level = $1
 			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
-			  AND LOWER(m.status) = 'active'
-			  AND a.processing_status = 'APPROVED'
-		`
-		rows, err := pgxPool.Query(context.Background(), q, parentLevel)
+			  AND %s
+		`, entityFilter)
+
+		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Query: %s", q)
+		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Args: %v", args)
+
+		rows, err := pgxPool.Query(context.Background(), q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to fetch parent centres")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
 		results := []map[string]interface{}{}
 		for rows.Next() {
-			var name, id, code string
-			if err := rows.Scan(&name, &id, &code); err == nil {
-				results = append(results, map[string]interface{}{"centre_name": name, "centre_id": id, "centre_code": code})
+			var name, id, code, entity string
+			if err := rows.Scan(&name, &id, &code, &entity); err == nil {
+				results = append(results, map[string]interface{}{
+					"centre_name": name,
+					"centre_id":   id,
+					"centre_code": code,
+					"entity_name": entity,
+				})
 			}
 		}
+
+		log.Printf("[DEBUG] FindParentCostProfitCenterAtLevel - Found %d results", len(results))
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
 	}
@@ -1633,7 +1920,13 @@ func BulkRejectCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id`
 		rows2, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to reject centre actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows2.Close()
@@ -1751,7 +2044,13 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		query := `UPDATE auditactioncostprofitcenter SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE centre_id = ANY($3) RETURNING action_id, centre_id, actiontype`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+			errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to approve centre actions")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
 			return
 		}
 		defer rows.Close()
@@ -1772,7 +2071,13 @@ func BulkApproveCostProfitCenterActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		if len(deleteIDs) > 0 {
 			updQ := `UPDATE mastercostprofitcenter SET is_deleted=true WHERE centre_id = ANY($1)`
 			if _, err := pgxPool.Exec(ctx, updQ, deleteIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to set is_deleted: "+err.Error())
+				errMsg, statusCode := getUserFriendlyCostProfitCenterError(err, "Failed to mark centres as deleted")
+				if statusCode == http.StatusOK {
+					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+				} else {
+					api.RespondWithError(w, statusCode, errMsg)
+				}
 				return
 			}
 		}

@@ -123,7 +123,7 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	// Fetch MTM data
 	rows, err := tx.Query(ctx, `
 		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.curr_nav,
-		       m.prev_nav, m.units, m.unrealized_gain_loss
+			   m.prev_nav, m.units, m.unrealized_gain_loss
 		FROM investment.accounting_mtm m
 		WHERE m.activity_id = $1
 	`, activityID)
@@ -132,17 +132,30 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 	}
 	defer rows.Close()
 
+	// Read rows into memory first so we can preload related data in bulk
+	var mtmRecords []map[string]interface{}
+	schemeSet := map[string]bool{}
+	var folioIDs []string
+	var dematIDs []string
 	for rows.Next() {
 		var mtmID, schemeID string
 		var folioID, dematID *string
 		var currNav, prevNav, units, unrealizedGL float64
 
 		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan MTM data failed: %w", err)
 		}
 
-		// Prepare data map
-		data := map[string]interface{}{
+		schemeSet[schemeID] = true
+		if folioID != nil && *folioID != "" {
+			folioIDs = append(folioIDs, *folioID)
+		}
+		if dematID != nil && *dematID != "" {
+			dematIDs = append(dematIDs, *dematID)
+		}
+
+		mtmRecords = append(mtmRecords, map[string]interface{}{
 			"mtm_id":               mtmID,
 			"scheme_id":            schemeID,
 			"folio_id":             folioID,
@@ -151,10 +164,26 @@ func generateMTMJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 			"cost_nav":             prevNav,
 			"total_units":          units,
 			"unrealized_gain_loss": unrealizedGL,
-		}
+		})
+	}
 
-		// Generate journal entry
-		je, err := GenerateJournalEntryForMTM(ctx, tx, settings, activityID, data)
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Convert scheme set to list
+	schemeIDs := make([]string, 0, len(schemeSet))
+	for s := range schemeSet {
+		schemeIDs = append(schemeIDs, s)
+	}
+
+	// Preload scheme names and bank accounts to avoid per-row queries
+	schemeCache, _ := preloadSchemeNames(ctx, tx, schemeIDs)
+	bankCache, _ := preloadBankAccountsForFoliosAndDemats(ctx, tx, folioIDs, dematIDs)
+
+	// Process records after closing rows
+	for _, data := range mtmRecords {
+		je, err := GenerateJournalEntryForMTMUsingCache(ctx, tx, settings, activityID, data, schemeCache, bankCache)
 		if err != nil {
 			return fmt.Errorf("generate MTM journal failed: %w", err)
 		}
@@ -361,7 +390,7 @@ func generateFVOJournal(ctx context.Context, pool *pgxpool.Pool, settings *Setti
 func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID string) error {
 	rows, err := tx.Query(ctx, `
 		SELECT m.mtm_id, m.scheme_id, m.folio_id, m.demat_id, m.curr_nav,
-		       m.prev_nav, m.units, m.unrealized_gain_loss
+			   m.prev_nav, m.units, m.unrealized_gain_loss
 		FROM investment.accounting_mtm m
 		WHERE m.activity_id = $1
 	`, activityID)
@@ -371,6 +400,9 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 
 	// Read all rows first to free connection
 	var mtmRecords []map[string]interface{}
+	schemeSet := map[string]bool{}
+	var folioIDs []string
+	var dematIDs []string
 	for rows.Next() {
 		var mtmID, schemeID string
 		var folioID, dematID *string
@@ -379,6 +411,14 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		if err := rows.Scan(&mtmID, &schemeID, &folioID, &dematID, &currNav, &prevNav, &units, &unrealizedGL); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan MTM data failed: %w", err)
+		}
+
+		schemeSet[schemeID] = true
+		if folioID != nil && *folioID != "" {
+			folioIDs = append(folioIDs, *folioID)
+		}
+		if dematID != nil && *dematID != "" {
+			dematIDs = append(dematIDs, *dematID)
 		}
 
 		mtmRecords = append(mtmRecords, map[string]interface{}{
@@ -398,9 +438,18 @@ func generateMTMJournalInTx(ctx context.Context, tx DBExecutor, settings *Settin
 		return err
 	}
 
+	// Convert scheme set to list
+	schemeIDs := make([]string, 0, len(schemeSet))
+	for s := range schemeSet {
+		schemeIDs = append(schemeIDs, s)
+	}
+
+	schemeCache, _ := preloadSchemeNames(ctx, tx, schemeIDs)
+	bankCache, _ := preloadBankAccountsForFoliosAndDemats(ctx, tx, folioIDs, dematIDs)
+
 	// Process records after closing rows
 	for _, data := range mtmRecords {
-		je, err := GenerateJournalEntryForMTM(ctx, tx, settings, activityID, data)
+		je, err := GenerateJournalEntryForMTMUsingCache(ctx, tx, settings, activityID, data, schemeCache, bankCache)
 		if err != nil {
 			return fmt.Errorf("generate MTM journal failed: %w", err)
 		}
@@ -481,63 +530,9 @@ func generateDividendJournalInTx(ctx context.Context, tx DBExecutor, settings *S
 
 // generateCorporateActionJournalInTx generates journal entries for Corporate Action within existing transaction
 func generateCorporateActionJournalInTx(ctx context.Context, tx DBExecutor, settings *SettingsCache, activityID, subtype string) error {
-	rows, err := tx.Query(ctx, `
-		SELECT ca.ca_id, ca.action_type, ca.source_scheme_id,
-		       ca.target_scheme_id, ca.new_scheme_name, ca.ratio_new, ca.ratio_old,
-		       ca.conversion_ratio, ca.bonus_units
-		FROM investment.accounting_corporate_action ca
-		WHERE ca.activity_id = $1
-	`, activityID)
-	if err != nil {
-		return fmt.Errorf("fetch Corporate Action data failed: %w", err)
-	}
-
-	// Read all rows first to free connection
-	var caRecords []map[string]interface{}
-	for rows.Next() {
-		var caID, actionType, sourceSchemeID string
-		var targetSchemeID, newSchemeName *string
-		var ratioNew, ratioOld, conversionRatio, bonusUnits *float64
-
-		if err := rows.Scan(&caID, &actionType, &sourceSchemeID, &targetSchemeID, &newSchemeName, &ratioNew, &ratioOld, &conversionRatio, &bonusUnits); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan Corporate Action data failed: %w", err)
-		}
-
-		caRecords = append(caRecords, map[string]interface{}{
-			"corporate_action_id": caID,
-			"action_type":         actionType,
-			"source_scheme_id":    sourceSchemeID,
-			"target_scheme_id":    targetSchemeID,
-			"new_scheme_name":     newSchemeName,
-			"ratio_new":           ratioNew,
-			"ratio_old":           ratioOld,
-			"conversion_ratio":    conversionRatio,
-			"bonus_units":         bonusUnits,
-		})
-	}
-	rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	// Process records after closing rows
-	for _, data := range caRecords {
-		je, err := GenerateJournalEntryForCorporateAction(ctx, tx, settings, activityID, data)
-		if err != nil {
-			return fmt.Errorf("generate Corporate Action journal failed: %w", err)
-		}
-
-		// Corporate actions may not generate journal entries (handled by processor)
-		if je != nil {
-			if err := SaveJournalEntry(ctx, tx, je); err != nil {
-				return fmt.Errorf("save Corporate Action journal failed: %w", err)
-			}
-		}
-	}
-
-	return nil
+	// Use new comprehensive journal generation for corporate actions
+	// This handles SPLIT, BONUS, MERGER with proper accounting entries
+	return GenerateCorporateActionJournals(ctx, tx, activityID)
 }
 
 // generateFVOJournalInTx generates journal entries for FVO within existing transaction
@@ -1114,6 +1109,65 @@ func BulkApproveActivityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("corporate action processing failed for activity %s: %v", actID, err))
 							return
 						}
+
+						// Refresh portfolio snapshots after corporate action
+						// Get affected schemes from the activity
+						rows, err := tx.Query(ctx, `
+							SELECT DISTINCT source_scheme_id FROM investment.accounting_corporate_action
+							WHERE activity_id = $1
+							UNION
+							SELECT DISTINCT target_scheme_id FROM investment.accounting_corporate_action
+							WHERE activity_id = $1 AND target_scheme_id IS NOT NULL
+						`, actID)
+						if err == nil {
+							var affectedSchemes []string
+							for rows.Next() {
+								var schemeID string
+								if err := rows.Scan(&schemeID); err == nil {
+									affectedSchemes = append(affectedSchemes, schemeID)
+								}
+							}
+							rows.Close()
+
+							// Refresh portfolio for affected schemes
+							if len(affectedSchemes) > 0 {
+								if err := RefreshPortfolioAfterCorporateAction(ctx, tx, affectedSchemes, ""); err != nil {
+									api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("portfolio refresh failed for activity %s: %v", actID, err))
+									return
+								}
+							}
+						}
+
+					case "DIVIDEND":
+						// Process dividend reinvestment (creates buy transactions)
+						if err := ProcessDividendReinvestment(ctx, tx, actID); err != nil {
+							api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("dividend reinvestment processing failed for activity %s: %v", actID, err))
+							return
+						}
+
+						// Refresh portfolio after dividend reinvestment
+						rows, err := tx.Query(ctx, `
+							SELECT DISTINCT scheme_id FROM investment.accounting_dividend
+							WHERE activity_id = $1 AND LOWER(transaction_type) IN ('reinvest', 'reinvestment')
+						`, actID)
+						if err == nil {
+							var affectedSchemes []string
+							for rows.Next() {
+								var schemeID string
+								if err := rows.Scan(&schemeID); err == nil {
+									affectedSchemes = append(affectedSchemes, schemeID)
+								}
+							}
+							rows.Close()
+
+							if len(affectedSchemes) > 0 {
+								if err := RefreshPortfolioAfterCorporateAction(ctx, tx, affectedSchemes, ""); err != nil {
+									api.RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("portfolio refresh after dividend failed for activity %s: %v", actID, err))
+									return
+								}
+							}
+						}
+
 					case "FVO":
 						// Process FVO NAV override (updates masterscheme NAV)
 						if err := ProcessFVONavOverride(ctx, tx, actID); err != nil {
@@ -1319,7 +1373,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'units', mt.units,
 							'prev_nav', mt.prev_nav,
 							'curr_nav', mt.curr_nav,
-							'nav_date', TO_CHAR(mt.nav_date, 'YYYY-MM-DD'),
+							'nav_date', TO_CHAR(NULLIF(mt.nav_date::text, '')::date, 'YYYY-MM-DD'),
 							'prev_value', mt.prev_value,
 							'curr_value', mt.curr_value,
 							'unrealized_gain_loss', mt.unrealized_gain_loss,
@@ -1347,9 +1401,9 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'dividend_amount', dv.dividend_amount,
 							'reinvest_units', COALESCE(dv.reinvest_units, 0),
 							'reinvest_nav', COALESCE(dv.reinvest_nav, 0),
-							'record_date', TO_CHAR(dv.record_date, 'YYYY-MM-DD'),
-							'ex_date', TO_CHAR(dv.ex_date, 'YYYY-MM-DD'),
-							'payment_date', TO_CHAR(dv.payment_date, 'YYYY-MM-DD')
+							'record_date', TO_CHAR(NULLIF(dv.record_date::text, '')::date, 'YYYY-MM-DD'),
+							'ex_date', TO_CHAR(NULLIF(dv.ex_date::text, '')::date, 'YYYY-MM-DD'),
+							'payment_date', TO_CHAR(NULLIF(dv.payment_date::text, '')::date, 'YYYY-MM-DD')
 						)
 					) AS dividend_records
 				FROM investment.accounting_dividend dv
@@ -1366,7 +1420,7 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							'fvo_id', fv.fvo_id,
 							'scheme_id', fv.scheme_id,
 							'scheme_name', COALESCE(sch.scheme_name, fv.scheme_id),
-							'valuation_date', TO_CHAR(fv.valuation_date, 'YYYY-MM-DD'),
+							'valuation_date', TO_CHAR(NULLIF(fv.valuation_date::text, '')::date, 'YYYY-MM-DD'),
 							'market_nav', COALESCE(fv.market_nav, 0),
 							'override_nav', fv.override_nav,
 							'variance', COALESCE(fv.variance, 0),
@@ -1412,8 +1466,8 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.old_activity_type,
 				COALESCE(m.activity_subtype,'') AS activity_subtype,
 				COALESCE(m.old_activity_subtype,'') AS old_activity_subtype,
-				TO_CHAR(m.effective_date, 'YYYY-MM-DD') AS effective_date,
-				TO_CHAR(m.old_effective_date, 'YYYY-MM-DD') AS old_effective_date,
+				TO_CHAR(NULLIF(m.effective_date::text, '')::date, 'YYYY-MM-DD') AS effective_date,
+				TO_CHAR(NULLIF(m.old_effective_date::text, '')::date, 'YYYY-MM-DD') AS old_effective_date,
 				COALESCE(m.accounting_period, '') AS accounting_period,
 				COALESCE(m.old_accounting_period, '') AS old_accounting_period,
 				m.data_source,
@@ -1421,15 +1475,15 @@ func GetActivitiesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.status,
 				COALESCE(m.old_status,'') AS old_status,
 				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(m.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason,
 				

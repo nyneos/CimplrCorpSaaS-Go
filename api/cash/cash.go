@@ -8,6 +8,8 @@ import (
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
+	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/travel"
 	"context"
 	"database/sql"
 	"fmt"
@@ -30,26 +32,33 @@ func StartCashService(db *sql.DB) {
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
-	mux.Handle("/cash/upload-bank-statement", bankstatement.UploadBankStatementV2Handler(db))
+	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db)))
+
+	// New streaming preview and management endpoints
+	mux.Handle("/cash/preview", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV3Handler(db)))
+	mux.Handle("/cash/recalculate", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecalculateHandler(db)))
+	mux.Handle("/cash/commit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CommitHandler(db)))
+	mux.Handle("/cash/get-pdf", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetPDFMetadataHandler(db)))
+	mux.Handle("/cash/download-pdf", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadPDFHandler(db)))
 	// Category Master APIs
-	mux.Handle("/cash/category/create", bankstatement.CreateTransactionCategoryHandler(db))
-	mux.Handle("/cash/category/list", bankstatement.ListTransactionCategoriesHandler(db))
-	mux.Handle("/cash/category/user-list", bankstatement.ListCategoriesForUserHandler(db))
-	mux.Handle("/cash/category/scope/create", bankstatement.CreateRuleScopeHandler(db))
-	mux.Handle("/cash/category/rule/create", bankstatement.CreateCategoryRuleHandler(db))
-	mux.Handle("/cash/category/rule-component/create", bankstatement.CreateCategoryRuleComponentHandler(db))
-	mux.Handle("/cash/category/delete", bankstatement.DeleteMultipleTransactionCategoriesHandler(db))
-	mux.Handle("/cash/transactions/map-category", bankstatement.MapTransactionsToCategoryHandler(db))
-	mux.Handle("/cash/transactions/categorize-uncategorized", bankstatement.CategorizeUncategorizedTransactionsHandler(db))
+	mux.Handle("/cash/category/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateTransactionCategoryHandler(db)))
+	mux.Handle("/cash/category/list", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ListTransactionCategoriesHandler(db)))
+	mux.Handle("/cash/category/user-list", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ListCategoriesForUserHandler(db)))
+	mux.Handle("/cash/category/scope/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateRuleScopeHandler(db)))
+	mux.Handle("/cash/category/rule/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateCategoryRuleHandler(db)))
+	mux.Handle("/cash/category/rule-component/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateCategoryRuleComponentHandler(db)))
+	mux.Handle("/cash/category/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteMultipleTransactionCategoriesHandler(db)))
+	mux.Handle("/cash/transactions/map-category", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MapTransactionsToCategoryHandler(db)))
+	mux.Handle("/cash/transactions/categorize-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CategorizeUncategorizedTransactionsHandler(db)))
 	// V2 Bank Statement APIs
-	mux.Handle("/cash/bank-statements/v2/get", bankstatement.GetAllBankStatementsHandler(db))
-	mux.Handle("/cash/bank-statements/v2/transactions", bankstatement.GetBankStatementTransactionsHandler(db))
-	mux.Handle("/cash/bank-statements/v2/recompute-kpis", bankstatement.RecomputeBankStatementSummaryHandler(db))
-	mux.Handle("/cash/bank-statements/v2/approve", bankstatement.ApproveBankStatementHandler(db))
-	mux.Handle("/cash/bank-statements/v2/reject", bankstatement.RejectBankStatementHandler(db))
-	mux.Handle("/cash/bank-statements/v2/delete", bankstatement.DeleteBankStatementHandler(db))
+	mux.Handle("/cash/bank-statements/v2/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetAllBankStatementsHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionsHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/recompute-kpis", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecomputeBankStatementSummaryHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveBankStatementHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectBankStatementHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteBankStatementHandler(db)))
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
-	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db))
+	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db)))
 	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))
 	mux.Handle("/cash/bank-statements/bulk-approve", bankstatement.BulkApproveBankStatements(pgxPool))
 	mux.Handle("/cash/bank-statements/bulk-reject", bankstatement.BulkRejectBankStatements(pgxPool))
@@ -77,13 +86,19 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/fund-planning/bulk-delete", api.BusinessUnitMiddleware(db)(fundplanning.BulkRequestDeleteFundPlans(pgxPool)))
 	mux.Handle("/cash/fund-planning/bank-accounts", api.BusinessUnitMiddleware(db)(fundplanning.GetApprovedBankAccountsForFundPlanning(pgxPool)))
 
-	// Sweep configuration routes
-	mux.Handle("/cash/sweep-config/create", api.BusinessUnitMiddleware(db)(sweepconfig.CreateSweepConfiguration(pgxPool)))
-	mux.Handle("/cash/sweep-config/update", api.BusinessUnitMiddleware(db)(sweepconfig.UpdateSweepConfiguration(pgxPool)))
-	mux.Handle("/cash/sweep-config/all", api.BusinessUnitMiddleware(db)(sweepconfig.GetSweepConfigurations(pgxPool)))
-	mux.Handle("/cash/sweep-config/bulk-approve", api.BusinessUnitMiddleware(db)(sweepconfig.BulkApproveSweepConfigurations(pgxPool)))
-	mux.Handle("/cash/sweep-config/bulk-reject", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRejectSweepConfigurations(pgxPool)))
-	mux.Handle("/cash/sweep-config/request-delete", api.BusinessUnitMiddleware(db)(sweepconfig.BulkRequestDeleteSweepConfigurations(pgxPool)))
+	// Sweep configuration routes (load entity, bank and approved accounts into context)
+	mux.Handle("/cash/sweep-config/create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CreateSweepConfiguration(pgxPool)))
+	mux.Handle("/cash/sweep-config/update", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepConfiguration(pgxPool)))
+	mux.Handle("/cash/sweep-config/all", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config/request-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRequestDeleteSweepConfigurations(pgxPool)))
+
+	// Sweep execution and monitoring routes (require prevalidation: entities, banks, accounts, currencies)
+	mux.Handle("/cash/sweep-config/execution-logs", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepExecutionLogs(pgxPool)))
+	mux.Handle("/cash/sweep-config/statistics", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepStatistics(pgxPool)))
+	mux.Handle("/cash/sweep-config/manual-trigger", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweep(pgxPool)))
+
 	// Cash flow projection routes
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))
@@ -97,13 +112,18 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/cashflow-projection/upload", api.BusinessUnitMiddleware(db)(projection.UploadCashflowProposalSimple(pgxPool)))
 
 	//bank balance
-	mux.Handle("/cash/bank-balances/create", api.BusinessUnitMiddleware(db)(bankbalances.CreateBankBalance(pgxPool)))
-	mux.Handle("/cash/bank-balances/bulk-approve", api.BusinessUnitMiddleware(db)(bankbalances.BulkApproveBankBalances(pgxPool)))
-	mux.Handle("/cash/bank-balances/bulk-reject", api.BusinessUnitMiddleware(db)(bankbalances.BulkRejectBankBalances(pgxPool)))
-	mux.Handle("/cash/bank-balances/bulk-delete", api.BusinessUnitMiddleware(db)(bankbalances.BulkRequestDeleteBankBalances(pgxPool)))
-	mux.Handle("/cash/bank-balances/all", api.BusinessUnitMiddleware(db)(bankbalances.GetBankBalances(pgxPool)))
-	mux.Handle("/cash/bank-balances/upload", api.BusinessUnitMiddleware(db)(bankbalances.UploadBankBalances(pgxPool)))
-	mux.Handle("/cash/bank-balances/update", api.BusinessUnitMiddleware(db)(bankbalances.UpdateBankBalance(pgxPool)))
+	mux.Handle("/cash/bank-balances/create", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.CreateBankBalance(pgxPool)))
+	mux.Handle("/cash/bank-balances/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.BulkApproveBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.BulkRejectBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.BulkRequestDeleteBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/all", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/upload", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UploadBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/update", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UpdateBankBalance(pgxPool)))
+
+	// Travel package endpoints
+	mux.Handle("/cash/package/create", (travel.CreatePackageHandler(db)))
+	mux.Handle("/cash/package", (travel.GetPackageHandler(db)))
+	mux.Handle("/cash/package/delete", (travel.DeletePackageHandler(db)))
 
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))

@@ -21,14 +21,19 @@ const (
 	ErrTxBeginFailed      = "TX begin failed: "
 	ErrInvalidRequestBody = "Invalid request body"
 	// ErrNoAccessibleBusinessUnit      = "No accessible business units found"
-	ErrFailedToQuery          = "Failed to query"
-	ErrPleaseLogin            = "Please login to continue."
-	ErrScanFailed             = "scan failed"
-	ErrScanFailedPrefix       = "scan failed: "
-	ErrMethodNotAllowed       = "Method Not Allowed"
-	ErrUserIIsRequired        = "user_id is required"
-	ErrRequiredColumnNotFound = "required column '%s' not found in header"
-	ErrIndexRequired          = "index required"
+	ErrFailedToQuery             = "Failed to query"
+	ErrPleaseLogin               = "Please login to continue."
+	ErrScanFailed                = "scan failed"
+	ErrScanFailedPrefix          = "scan failed: "
+	ErrMethodNotAllowed          = "Method Not Allowed"
+	ErrUserIIsRequired           = "user_id is required"
+	ErrRequiredColumnNotFound    = "required column '%s' not found in header"
+	ErrIndexRequired             = "index required"
+	ErrReferenceRequired         = "your reference is required"
+	ErrDebitCreditReference      = "debit/credit reference"
+	ErrDebitCreditReferenceAlt   = "debit credit reference"
+	ErrDebitCreditReferenceShort = "debit credit ref"
+	ErrDebitCreditReference2     = "debit/credit ref"
 )
 
 // General internal/server/upload error messages
@@ -57,6 +62,7 @@ const (
 	ErrSettingKeyRequired             = "setting_key parameter is required"
 	ErrSettingNotFound                = "Setting not found"
 	ErrBankStatementAlreadyExists     = "Bank Statement Transactions exist in system delete them first"
+	ErrTransactionHeaderRowNotFound   = "transaction header row not found in Excel file"
 )
 
 // Additional common messages used across handlers
@@ -123,9 +129,10 @@ const (
 
 // Content Types
 const (
-	ContentTypeJSON      = "application/json"
-	ContentTypeText      = "Content-Type"
-	ContentTypeMultipart = "multipart/form-data"
+	ContentTypeJSON        = "application/json"
+	ContentTypeText        = "Content-Type"
+	ContentTypeMultipart   = "multipart/form-data"
+	ErrFailedToPrepareFile = "Failed to prepare file for parsing"
 )
 
 // Generic keys and small common tokens
@@ -182,6 +189,7 @@ const (
 	ErrAMCNotFoundOrNotApprovedActive     = "AMC not found or not approved/active: "
 	ErrUnableToUpdateParentAccountBalance = "Unable to update parent account balance"
 	ErrUnableToLogSweepExecution          = "Unable to log sweep execution"
+	ErrClosingBalance                     = "closing balance"
 )
 const (
 	StatusCodeAwaitingApproval = "Awaiting-Approval"
@@ -197,17 +205,39 @@ const (
 )
 
 const (
-	QuerryCounterpartyName = "COALESCE(m.counterparty_name, 'Generic')"
-	QuerryGeneric          = "'Generic'"
-	VendorPayment          = "'Vendor Payment'"
-	ExposureBucketing      = "exposure-bucketing"
-	ExposureUpload         = "exposure-upload"
-	QuerryEntityName       = " AND cpi.entity_name = $%d"
-	QuerryCurrencyCode     = " AND cp.currency_code = $%d"
-	QuerryFplCurrency      = " AND fpl.currency = $%d"
-	QuerryFilterGroup      = " AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d"
-	QuerryBankName         = "(b.bank_name IS NULL OR b.bank_name = ANY($%d))"
-	QuerryCurrency         = "(a.currency IS NULL OR a.currency = ANY($%d))"
+	QuerryCounterpartyName         = "COALESCE(m.counterparty_name, 'Generic')"
+	QuerryGeneric                  = "'Generic'"
+	VendorPayment                  = "'Vendor Payment'"
+	ExposureBucketing              = "exposure-bucketing"
+	ExposureUpload                 = "exposure-upload"
+	QuerryEntity                   = " AND eh.entity = ANY($%d)"
+	QuerryHighUnhedgedExposure     = "High Unhedged Exposure"
+	QuerryWhereClause              = "WHERE eh.entity = ANY($2) AND"
+	QuerryCurrency2                = " AND eh.currency = ANY($%d)"
+	QuerryEntityName               = " AND cpi.entity_name = $%d"
+	QuerryCurrencyCode             = " AND cp.currency_code = $%d"
+	QuerryFplCurrency              = " AND fpl.currency = $%d"
+	QuerryFilterGroup              = " AND fg.primary_key = 'entity_name' AND fg.primary_value = $%d"
+	QuerryBankName                 = "(b.bank_name IS NULL OR b.bank_name = ANY($%d))"
+	QuerryCurrency                 = "(a.currency IS NULL OR a.currency = ANY($%d))"
+	QuerryEntityNameLower          = " AND lower(trim(c.entity_name)) = ANY($%d)"
+	QuerryBankNameLower            = " AND lower(trim(c.bank_name)) = ANY($%d)"
+	FormatInvestmentID             = "INV-%s"
+	FormatInvestmentName           = "Investment - %s"
+	FormatMTMGain                  = "MTM gain - %s"
+	FormatMTMLoss                  = "MTM loss - %s"
+	FormatLogMore                  = "  ... (%d more) ...\n"
+	NBSP                           = "\u00A0"
+	TransactionPostedDate          = "txn posted date"
+	TransactionPostingDate         = "posting date"
+	TransactionPostedDateAlt       = "posted date"
+	CreditAmount                   = "credit amt"
+	DebitAmount                    = "debit amt"
+	ClosingBalance                 = "closing balance"
+	BalanceCarriedForward          = "balance carried forward"
+	ErrFailedToInsertBankStatement = "failed to insert bank statement: %w"
+	ErrNoAccessToBankStatement     = "No access to this bank statement"
+	ErrFailedToInsertAuditAction   = "failed to insert audit action: %w"
 )
 
 var (

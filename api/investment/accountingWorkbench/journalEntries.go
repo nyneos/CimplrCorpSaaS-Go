@@ -210,7 +210,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM gain - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
@@ -223,7 +223,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM gain - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
 		})
 
 		je.TotalDebit = roundedAmount
@@ -244,7 +244,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM loss - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
 		})
 
 		je.Lines = append(je.Lines, JournalEntryLine{
@@ -257,7 +257,7 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 			SchemeID:      schemeID,
 			FolioID:       folioID,
 			DematID:       dematID,
-			Narration:     fmt.Sprintf("MTM loss - %s", schemeName),
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
 		})
 
 		je.TotalDebit = roundedAmount
@@ -268,6 +268,235 @@ func GenerateJournalEntryForMTM(ctx context.Context, executor DBExecutor, settin
 	}
 
 	return je, nil
+}
+
+// GenerateJournalEntryForMTMUsingCache behaves like GenerateJournalEntryForMTM but uses
+// preloaded schemeName and bankAccount caches to avoid repeated DB queries when
+// generating many MTM journal entries in a batch.
+func GenerateJournalEntryForMTMUsingCache(ctx context.Context, executor DBExecutor, settings *SettingsCache, activityID string, mtmData map[string]interface{}, schemeCache map[string]string, bankCache map[string]*BankAccountInfo) (*JournalEntry, error) {
+	unrealizedGL := parseFloat(mtmData["unrealized_gain_loss"])
+	schemeID := parseString(mtmData["scheme_id"])
+
+	// Handle pointer types for folio_id and demat_id
+	var folioID, dematID string
+	if fid := mtmData["folio_id"]; fid != nil {
+		if ptr, ok := fid.(*string); ok && ptr != nil {
+			folioID = *ptr
+		} else {
+			folioID = parseString(fid)
+		}
+	}
+	if did := mtmData["demat_id"]; did != nil {
+		if ptr, ok := did.(*string); ok && ptr != nil {
+			dematID = *ptr
+		} else {
+			dematID = parseString(did)
+		}
+	}
+
+	// Resolve scheme name from cache, fallback to schemeID
+	schemeName := schemeID
+	if n, ok := schemeCache[schemeID]; ok && n != "" {
+		schemeName = n
+	}
+
+	// Fetch bank account from cache
+	var bankAccount *BankAccountInfo
+	if folioID != "" {
+		if b, ok := bankCache["folio:"+folioID]; ok {
+			bankAccount = b
+		}
+	} else if dematID != "" {
+		if b, ok := bankCache["demat:"+dematID]; ok {
+			bankAccount = b
+		}
+	}
+
+	if bankAccount == nil {
+		// Fallback to original behaviour to return clear error
+		if folioID != "" {
+			return nil, fmt.Errorf("failed to get folio bank account: no cached account for folio %s", folioID)
+		}
+		if dematID != "" {
+			return nil, fmt.Errorf("failed to get demat bank account: no cached account for demat %s", dematID)
+		}
+		return nil, fmt.Errorf("neither folio_id nor demat_id provided for MTM activity")
+	}
+
+	je := &JournalEntry{
+		ActivityID: activityID,
+		EntityID:   bankAccount.EntityName, // Use entity from bank account
+		EntityName: bankAccount.EntityName,
+		FolioID:    folioID,
+		DematID:    dematID,
+		EntryDate:  time.Now(),
+		Lines:      []JournalEntryLine{},
+	}
+
+	roundedAmount := RoundAmount(math.Abs(unrealizedGL), settings.CurrencyPrecision)
+
+	if unrealizedGL > 0 {
+		// MTM Gain
+		je.EntryType = "MTM_GAIN"
+		je.Description = fmt.Sprintf("MTM Gain on %s", schemeName)
+
+		je.Lines = append(je.Lines, JournalEntryLine{
+			LineNumber:    1,
+			AccountNumber: bankAccount.AccountNumber,
+			AccountName:   bankAccount.AccountName + " - " + bankAccount.BankName,
+			AccountType:   "ASSET",
+			DebitAmount:   roundedAmount,
+			CreditAmount:  0,
+			SchemeID:      schemeID,
+			FolioID:       folioID,
+			DematID:       dematID,
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
+		})
+
+		je.Lines = append(je.Lines, JournalEntryLine{
+			LineNumber:    2,
+			AccountNumber: "4101",
+			AccountName:   "Unrealized Gain on Investments",
+			AccountType:   "INCOME",
+			DebitAmount:   0,
+			CreditAmount:  roundedAmount,
+			SchemeID:      schemeID,
+			FolioID:       folioID,
+			DematID:       dematID,
+			Narration:     fmt.Sprintf(constants.FormatMTMGain, schemeName),
+		})
+
+		je.TotalDebit = roundedAmount
+		je.TotalCredit = roundedAmount
+
+	} else if unrealizedGL < 0 {
+		// MTM Loss
+		je.EntryType = "MTM_LOSS"
+		je.Description = fmt.Sprintf("MTM Loss on %s", schemeName)
+
+		je.Lines = append(je.Lines, JournalEntryLine{
+			LineNumber:    1,
+			AccountNumber: "5101",
+			AccountName:   "Unrealized Loss on Investments",
+			AccountType:   "EXPENSE",
+			DebitAmount:   roundedAmount,
+			CreditAmount:  0,
+			SchemeID:      schemeID,
+			FolioID:       folioID,
+			DematID:       dematID,
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
+		})
+
+		je.Lines = append(je.Lines, JournalEntryLine{
+			LineNumber:    2,
+			AccountNumber: bankAccount.AccountNumber,
+			AccountName:   bankAccount.AccountName + " - " + bankAccount.BankName,
+			AccountType:   "ASSET",
+			DebitAmount:   0,
+			CreditAmount:  roundedAmount,
+			SchemeID:      schemeID,
+			FolioID:       folioID,
+			DematID:       dematID,
+			Narration:     fmt.Sprintf(constants.FormatMTMLoss, schemeName),
+		})
+
+		je.TotalDebit = roundedAmount
+		je.TotalCredit = roundedAmount
+	} else {
+		return nil, nil
+	}
+
+	return je, nil
+}
+
+// preloadSchemeNames fetches scheme names for a set of scheme IDs
+func preloadSchemeNames(ctx context.Context, executor DBExecutor, schemeIDs []string) (map[string]string, error) {
+	res := map[string]string{}
+	if len(schemeIDs) == 0 {
+		return res, nil
+	}
+	rows, err := executor.Query(ctx, `SELECT scheme_id, scheme_name FROM investment.masterscheme WHERE scheme_id = ANY($1)`, schemeIDs)
+	if err != nil {
+		return res, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+		res[id] = name
+	}
+	return res, nil
+}
+
+// preloadBankAccountsForFoliosAndDemats fetches bank account info for given folio and demat IDs
+func preloadBankAccountsForFoliosAndDemats(ctx context.Context, executor DBExecutor, folioIDs, dematIDs []string) (map[string]*BankAccountInfo, error) {
+	cache := map[string]*BankAccountInfo{}
+
+	if len(folioIDs) > 0 {
+		q := `
+		SELECT f.folio_id,
+			   COALESCE(ba.account_number, '') AS account_number,
+			   COALESCE(ba.account_nickname, '') AS account_name,
+			   COALESCE(b.bank_name, '') AS bank_name,
+			   COALESCE(e.entity_name, ec.entity_name, '') AS entity_name
+		FROM investment.masterfolio f
+		LEFT JOIN public.masterbankaccount ba ON (
+			ba.account_number = f.default_redemption_account
+			OR ba.account_id = f.default_redemption_account
+			OR ba.account_nickname = f.default_redemption_account
+		)
+		LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+		LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+		WHERE f.folio_id = ANY($1)
+		`
+		rows, err := executor.Query(ctx, q, folioIDs)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var fid, accNum, accName, bankName, entityName string
+				if err := rows.Scan(&fid, &accNum, &accName, &bankName, &entityName); err != nil {
+					continue
+				}
+				cache["folio:"+fid] = &BankAccountInfo{AccountNumber: accNum, AccountName: accName, BankName: bankName, EntityName: entityName}
+			}
+		}
+	}
+
+	if len(dematIDs) > 0 {
+		q := `
+		SELECT d.demat_id,
+			   COALESCE(ba.account_number, '') AS account_number,
+			   COALESCE(ba.account_nickname, '') AS account_name,
+			   COALESCE(b.bank_name, '') AS bank_name,
+			   COALESCE(e.entity_name, ec.entity_name, '') AS entity_name
+		FROM investment.masterdemataccount d
+		LEFT JOIN public.masterbankaccount ba ON (
+			ba.account_number = d.default_settlement_account
+			OR ba.account_id = d.default_settlement_account
+			OR ba.account_nickname = d.default_settlement_account
+		)
+		LEFT JOIN public.masterbank b ON b.bank_id = ba.bank_id
+		LEFT JOIN public.masterentity e ON e.entity_id::text = ba.entity_id
+		LEFT JOIN public.masterentitycash ec ON ec.entity_id::text = ba.entity_id
+		WHERE d.demat_id = ANY($1)
+		`
+		rows, err := executor.Query(ctx, q, dematIDs)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var did, accNum, accName, bankName, entityName string
+				if err := rows.Scan(&did, &accNum, &accName, &bankName, &entityName); err != nil {
+					continue
+				}
+				cache["demat:"+did] = &BankAccountInfo{AccountNumber: accNum, AccountName: accName, BankName: bankName, EntityName: entityName}
+			}
+		}
+	}
+
+	return cache, nil
 }
 
 // GenerateJournalEntryForDividend creates journal entry for dividend activity

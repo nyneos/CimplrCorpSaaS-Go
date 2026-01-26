@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
@@ -1009,8 +1010,10 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var receivableIDsToDelete []string
 
 		delPayQuery := `DELETE FROM auditactionpayable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, payable_id`
-		delPayRows, _ := pgxPool.Query(ctx, delPayQuery, actionIDs)
-		if delPayRows != nil {
+		delPayRows, err := pgxPool.Query(ctx, delPayQuery, actionIDs)
+		if err != nil {
+			log.Printf("[WARN] failed to delete auditactionpayable rows: %v", err)
+		} else {
 			defer delPayRows.Close()
 			for delPayRows.Next() {
 				var aid, pid string
@@ -1021,8 +1024,10 @@ func BulkApproveTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		delRecQuery := `DELETE FROM auditactionreceivable WHERE action_id = ANY($1) AND processing_status = 'PENDING_DELETE_APPROVAL' RETURNING action_id, receivable_id`
-		delRecRows, _ := pgxPool.Query(ctx, delRecQuery, actionIDs)
-		if delRecRows != nil {
+		delRecRows, err := pgxPool.Query(ctx, delRecQuery, actionIDs)
+		if err != nil {
+			log.Printf("[WARN] failed to delete auditactionreceivable rows: %v", err)
+		} else {
 			defer delRecRows.Close()
 			for delRecRows.Next() {
 				var aid, rid string

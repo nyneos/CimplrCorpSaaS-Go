@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"strings"
@@ -109,9 +110,10 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Step 1: Get role_id
-		var roleID int
+		// Step 1: Get role_id (string IDs supported)
+		var roleID string
 		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, req.RoleName).Scan(&roleID); err != nil {
+			log.Print(err.Error())
 			respondWithError(w, http.StatusNotFound, "role not found")
 			return
 		}
@@ -262,7 +264,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Step 4: Bulk upsert role_permissions
-		roleIDs := []int{}
+		roleIDs := []string{}
 		permIDs := []int{}
 		alloweds := []bool{}
 
@@ -278,19 +280,18 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 				alloweds = append(alloweds, p.Allowed)
 			}
 		}
-
 		if len(roleIDs) > 0 {
 			_, err = tx.Exec(`
-			INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
-			SELECT UNNEST($1::int[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
-			ON CONFLICT (role_id, permission_id)
-			DO UPDATE SET
-			  allowed = EXCLUDED.allowed,
-			  status = CASE
-			    WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
-			    ELSE role_permissions.status
-			  END
-			`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
+						INSERT INTO public.role_permissions (role_id, permission_id, allowed, status)
+						SELECT UNNEST($1::text[]), UNNEST($2::int[]), UNNEST($3::bool[]), 'pending'
+						ON CONFLICT (role_id, permission_id)
+						DO UPDATE SET
+							allowed = EXCLUDED.allowed,
+							status = CASE
+								WHEN role_permissions.allowed IS DISTINCT FROM EXCLUDED.allowed THEN 'pending'
+								ELSE role_permissions.status
+							END
+						`, pq.Array(roleIDs), pq.Array(permIDs), pq.Array(alloweds))
 			if err != nil {
 				respondWithError(w, http.StatusInternalServerError, "role_permissions upsert failed: "+err.Error())
 				return
@@ -360,37 +361,40 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 		userID := r.Context().Value("user_id")
 
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID   string `json:"user_id"`
+			RoleName string `json:"roleName,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"success":false,"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
 
-		if ctxUserID, ok := userID.(string); ok && ctxUserID != "" {
-			req.UserID = ctxUserID
-		}
-		if req.UserID == "" {
-			http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
-			return
-		}
+		roleName := strings.TrimSpace(req.RoleName)
+		if roleName == "" {
+			if ctxUserID, ok := userID.(string); ok && ctxUserID != "" {
+				req.UserID = ctxUserID
+			}
+			if req.UserID == "" {
+				http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
+				return
+			}
 
-		// Get roleName from active session
-		roleName := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
-			if s.UserID == req.UserID {
-				roleName = s.Role
-				break
+			// Get roleName from active session
+			sessions := auth.GetActiveSessions()
+			for _, s := range sessions {
+				if s.UserID == req.UserID {
+					roleName = s.Role
+					break
+				}
+			}
+			if roleName == "" {
+				http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
+				return
 			}
 		}
-		if roleName == "" {
-			http.Error(w, `{"success":false,"error":"Role not found in session"}`, http.StatusUnauthorized)
-			return
-		}
 
-		// Get role_id
-		var roleID int
+		// Get role_id (string supported)
+		var roleID string
 		if err := db.QueryRow(`SELECT id FROM roles WHERE name = $1`, roleName).Scan(&roleID); err != nil {
 			if err == sql.ErrNoRows {
 				http.Error(w, `{"success":false,"error":"Role not found"}`, http.StatusNotFound)
@@ -400,51 +404,48 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		// IMPORTANT: drive from public.permissions so pages are never empty.
+		// If role_permissions has no APPROVED rows yet, everything stays false.
 		query := `
-		WITH rp_data AS (
-			SELECT 
-				p.page_name,
-			NULLIF(p.tab_name, '') AS tab_name,
-			p.action,
-			COALESCE(rp.allowed, false) AS allowed
-			FROM role_permissions rp
-			JOIN permissions p ON rp.permission_id = p.id
-			JOIN roles r ON rp.role_id = r.id
-			WHERE rp.role_id = $1
-			  AND LOWER(rp.status) = 'approved'
-			  AND LOWER(r.status) = 'approved'
-		),
-		action_json AS (
-			SELECT 
-				page_name,
-				tab_name,
-				jsonb_object_agg(action, allowed) AS actions
-			FROM rp_data
-			GROUP BY page_name, tab_name
-		),
-		page_json AS (
-			SELECT 
-				page_name,
-				jsonb_build_object(
-					'pagePermissions',
-					COALESCE(
-						(SELECT actions FROM action_json WHERE page_name = ad.page_name AND tab_name IS NULL),
-						'{}'::jsonb
-					),
-					'tabs',
-					COALESCE(
-						(
-							SELECT jsonb_object_agg(tab_name, actions)
-							FROM action_json
-							WHERE page_name = ad.page_name AND tab_name IS NOT NULL
-						),
-						'{}'::jsonb
-					)
-				) AS page_data
-			FROM (SELECT DISTINCT page_name FROM rp_data) ad
-		)
-		SELECT jsonb_object_agg(page_name, page_data)
-		FROM page_json;
+			WITH page_json AS (
+				SELECT
+					p.page_name,
+					jsonb_build_object(
+						'pagePermissions',
+							COALESCE((
+								SELECT jsonb_object_agg(subp.action, COALESCE(subrp.allowed, false))
+								FROM public.permissions subp
+								LEFT JOIN public.role_permissions subrp
+									ON subrp.permission_id = subp.id
+									AND subrp.role_id = $1
+									AND LOWER(subrp.status) = 'approved'
+								WHERE subp.page_name = p.page_name
+									AND (subp.tab_name IS NULL OR subp.tab_name = '')
+							), '{}'::jsonb),
+						'tabs',
+							COALESCE((
+								SELECT jsonb_object_agg(tab_group.tab_name, tab_group.tab_actions)
+								FROM (
+									SELECT
+										subp2.tab_name,
+										jsonb_object_agg(subp2.action, COALESCE(subrp2.allowed, false)) AS tab_actions
+									FROM public.permissions subp2
+									LEFT JOIN public.role_permissions subrp2
+										ON subrp2.permission_id = subp2.id
+										AND subrp2.role_id = $1
+										AND LOWER(subrp2.status) = 'approved'
+									WHERE subp2.page_name = p.page_name
+										AND subp2.tab_name IS NOT NULL
+										AND subp2.tab_name <> ''
+									GROUP BY subp2.tab_name
+								) AS tab_group
+							), '{}'::jsonb)
+					) AS page_data
+				FROM public.permissions p
+				GROUP BY p.page_name
+			)
+			SELECT COALESCE(jsonb_object_agg(page_name, page_data), '{}'::jsonb)
+			FROM page_json;
 		`
 
 		var pagesJSON sql.NullString
@@ -495,8 +496,8 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get role_id
-		var roleID int
+		// Get role_id (string supported)
+		var roleID string
 		err := db.QueryRow("SELECT id FROM roles WHERE name = $1", req.RoleName).Scan(&roleID)
 		if err == sql.ErrNoRows {
 			respondWithError(w, http.StatusNotFound, "Role not found")
@@ -524,7 +525,8 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 		// Collect updated permissions
 		updatedPermissions := []map[string]interface{}{}
 		for rows.Next() {
-			var roleID, permissionID int
+			var roleID string
+			var permissionID int
 			var allowed bool
 			var status string
 			if err := rows.Scan(&roleID, &permissionID, &allowed, &status); err != nil {
@@ -574,7 +576,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 
 		rolesStatus := []map[string]interface{}{}
 		for rows.Next() {
-			var roleID int
+			var roleID string
 			var status string
 			if err := rows.Scan(&roleID, &status); err != nil {
 				continue

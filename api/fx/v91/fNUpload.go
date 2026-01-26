@@ -1231,7 +1231,7 @@ package exposures
 // 		"DocumentCurrency": {"document currency", "currency", "waers"},
 // 		"DocumentNumber":   {"document number", "belnr", "document", "docno"},
 // 		"DocumentDate":     {"document date", "bldat"},
-// 		"PostingDate":      {"posting date", "budat"},
+// 		"PostingDate":      {constants.TransactionPostingDate, "budat"},
 // 		"NetDueDate":       {"net due date", "due date", "baseline date", "clearing date"},
 // 		"AmountDoc":        {"amount", "wrbtr", "amount in doc. curr.", "amount in doc curr", "amount in local currency", "amount in local curr"},
 // 	}

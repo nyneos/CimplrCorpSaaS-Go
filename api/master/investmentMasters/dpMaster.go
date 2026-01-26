@@ -17,6 +17,78 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// getUserFriendlyDPError converts database errors into user-friendly messages
+// Returns (user-friendly message, HTTP status code)
+func getUserFriendlyDPError(err error, context string) (string, int) {
+	if err == nil {
+		return "", http.StatusOK
+	}
+
+	errMsg := err.Error()
+
+	// Unique constraint violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "unique_dp_code_not_deleted") ||
+		strings.Contains(errMsg, "dp_code") && strings.Contains(errMsg, constants.ErrAlreadyExists) {
+		return "DP code already exists. Please use a different code.", http.StatusOK
+	}
+	if strings.Contains(errMsg, constants.ErrDuplicateKey) {
+		return "This DP already exists in the system.", http.StatusOK
+	}
+
+	// Foreign key violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "foreign key") || strings.Contains(errMsg, "fkey") {
+		if strings.Contains(errMsg, "auditactiondp") {
+			return "Cannot perform this operation. DP reference is invalid or has been deleted.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "folio") || strings.Contains(errMsg, "demat") {
+			return "Cannot perform this operation. DP is referenced by other records (folios, demat accounts).", http.StatusOK
+		}
+		return "Invalid reference. The related record does not exist.", http.StatusOK
+	}
+
+	// Check constraint violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "check constraint") {
+		if strings.Contains(errMsg, "status_check") || strings.Contains(errMsg, "masterdp_status_ck") {
+			return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "depository_check") || strings.Contains(errMsg, "masterdepositoryparticipant_depository_check") {
+			return "Invalid depository. Must be 'NSDL' or 'CDSL'.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "actiontype_check") || strings.Contains(errMsg, "auditactiondp_actiontype_ck") {
+			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "processing_status_check") || strings.Contains(errMsg, "auditactiondp_processing_status_ck") {
+			return "Invalid processing status.", http.StatusOK
+		}
+		return "Invalid data provided. Please check your input.", http.StatusOK
+	}
+
+	// Not null violations (HTTP 200 - user errors)
+	if strings.Contains(errMsg, "null value") || strings.Contains(errMsg, "violates not-null") {
+		if strings.Contains(errMsg, "dp_name") {
+			return "DP name is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "dp_code") {
+			return "DP code is required.", http.StatusOK
+		}
+		if strings.Contains(errMsg, "depository") {
+			return "Depository is required.", http.StatusOK
+		}
+		return "Required field is missing.", http.StatusOK
+	}
+
+	// Connection errors (HTTP 503 Service Unavailable)
+	if strings.Contains(errMsg, "connection") || strings.Contains(errMsg, "timeout") {
+		return "Database connection error. Please try again.", http.StatusServiceUnavailable
+	}
+
+	// Return original error with context (HTTP 500)
+	if context != "" {
+		return context + ": " + errMsg, http.StatusInternalServerError
+	}
+	return errMsg, http.StatusInternalServerError
+}
+
 type CreateDPRequestSingle struct {
 	UserID     string `json:"user_id"`
 	DPName     string `json:"dp_name"`
@@ -73,7 +145,8 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// parse multipart
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFailedToParseForm+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrFailedToParseForm)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		files := r.MultipartForm.File["file"]
@@ -156,7 +229,8 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// transaction: COPY -> set source -> audit insert
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+				msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailed)
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			committed := false
@@ -169,7 +243,8 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
 
 			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"investment", "masterdepositoryparticipant"}, validCols, pgx.CopyFromRows(copyRows)); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "COPY failed: "+err.Error())
+				msg, status := getUserFriendlyDPError(err, "COPY failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 
@@ -180,7 +255,8 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					SET source = 'Upload'
 					WHERE dp_code = ANY($1)
 				`, dpCodes); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Failed to set source: "+err.Error())
+					msg, status := getUserFriendlyDPError(err, "Failed to set source")
+					api.RespondWithError(w, status, msg)
 					return
 				}
 			}
@@ -193,13 +269,15 @@ func UploadDPSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					FROM investment.masterdepositoryparticipant
 					WHERE dp_code = ANY($2)
 				`, userName, dpCodes); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+					msg, status := getUserFriendlyDPError(err, constants.ErrAuditInsertFailed)
+					api.RespondWithError(w, status, msg)
 					return
 				}
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+				msg, status := getUserFriendlyDPError(err, constants.ErrCommitFailedCapitalized)
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			committed = true
@@ -261,7 +339,8 @@ func CreateDPSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -276,7 +355,8 @@ func CreateDPSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.QueryRow(ctx, insertQ,
 			req.DPName, req.DPCode, req.Depository, defaultIfEmpty(req.Status, "Active"),
 		).Scan(&dpID); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
+			msg, status := getUserFriendlyDPError(err, "Insert failed")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -285,12 +365,14 @@ func CreateDPSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())
 		`, dpID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrAuditInsertFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrCommitFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -338,7 +420,8 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -352,7 +435,8 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		var oldVals [4]interface{}
 		if err := tx.QueryRow(ctx, sel, req.DPID).Scan(&oldVals[0], &oldVals[1], &oldVals[2], &oldVals[3]); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "fetch failed: "+err.Error())
+			msg, status := getUserFriendlyDPError(err, "fetch failed")
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -397,7 +481,8 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.masterdepositoryparticipant SET %s WHERE dp_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.DPID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrUpdateFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -406,12 +491,14 @@ func UpdateDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now())
 		`, req.DPID, req.Reason, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrAuditInsertFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -464,7 +551,7 @@ func UpdateDPBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
-				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrTxBeginFailedCapitalized + err.Error()})
+				results = append(results, map[string]interface{}{constants.ValueSuccess: false, "dp_id": row.DPID, constants.ValueError: constants.ErrTxBeginFailedCapitalized})
 				continue
 			}
 			defer tx.Rollback(ctx)
@@ -578,7 +665,8 @@ func DeleteDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -588,13 +676,15 @@ func DeleteDP(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				INSERT INTO investment.auditactiondp (dp_id, actiontype, processing_status, reason, requested_by, requested_at)
 				VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())
 			`, id, req.Reason, requestedBy); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "insert failed: "+err.Error())
+				msg, status := getUserFriendlyDPError(err, "insert failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.DPIDs})
@@ -631,7 +721,8 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -644,7 +735,8 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.DPIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -686,7 +778,8 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toApprove); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "approve update failed: "+err.Error())
+				msg, status := getUserFriendlyDPError(err, "approve update failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
@@ -697,7 +790,8 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
 				WHERE action_id = ANY($3)
 			`, checkerBy, req.Comment, toDeleteActionIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "mark deleted failed: "+err.Error())
+				msg, status := getUserFriendlyDPError(err, "mark deleted failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			if _, err := tx.Exec(ctx, `
@@ -705,13 +799,15 @@ func BulkApproveDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SET is_deleted=true, status='Inactive'
 				WHERE dp_id = ANY($1)
 			`, deleteMasterIDs); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "master soft-delete failed: "+err.Error())
+				msg, status := getUserFriendlyDPError(err, "master soft-delete failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -752,7 +848,8 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := context.Background()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrTxBeginFailedCapitalized)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -765,7 +862,8 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := tx.Query(ctx, sel, req.DPIDs)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -809,12 +907,14 @@ func BulkRejectDPActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 			WHERE action_id = ANY($3)
 		`, checkerBy, req.Comment, actionIDs); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrUpdateFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrCommitFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 
@@ -845,7 +945,8 @@ func GetApprovedActiveDPs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()
@@ -914,7 +1015,8 @@ func GetDPsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			msg, status := getUserFriendlyDPError(err, constants.ErrQueryFailed)
+			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer rows.Close()

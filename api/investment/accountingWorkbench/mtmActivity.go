@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -162,6 +163,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DataSource       string `json:"data_source"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("CreateMTMBulk: invalid JSON request: %v", err)
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
@@ -269,6 +271,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userEmail == "" {
+			log.Printf("CreateMTMBulk: invalid session for user_id=%s", req.UserID)
 			api.RespondWithError(w, http.StatusUnauthorized, "Invalid user session")
 			return
 		}
@@ -278,6 +281,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Single transaction for entire batch
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			log.Printf("CreateMTMBulk: failed to begin transaction: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailedCapitalized+err.Error())
 			return
 		}
@@ -295,10 +299,9 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					ms.internal_scheme_code AS ms_internal_code
 				FROM investment.onboard_transaction t
 				LEFT JOIN investment.masterscheme ms ON (
-					ms.scheme_id = t.scheme_id 
-					OR ms.internal_scheme_code = t.scheme_internal_code 
-					OR ms.isin = t.scheme_id
-				)
+  (t.scheme_id IS NOT NULL AND ms.scheme_id = t.scheme_id)
+  OR (t.scheme_internal_code IS NOT NULL AND ms.internal_scheme_code = t.scheme_internal_code)
+)
 				WHERE t.transaction_date <= $1::date  -- Only transactions up to start of accounting period
 				  AND LOWER(COALESCE(t.transaction_type,'')) IN ('buy','purchase','subscription','sell','redemption')
 			)
@@ -360,6 +363,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		holdingsRows, err := tx.Query(ctx, holdingsQuery, startDate)
 		if err != nil {
+			log.Printf("CreateMTMBulk: holdings query failed: %v", err)
 			api.RespondWithError(w, http.StatusInternalServerError, "Holdings fetch failed: "+err.Error())
 			return
 		}
@@ -381,6 +385,7 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for holdingsRows.Next() {
 			var h HoldingData
 			if err := holdingsRows.Scan(&h.FolioNumber, &h.DematAccNumber, &h.SchemeID, &h.SchemeName, &h.ISIN, &h.InternalCode, &h.Units, &h.AvgNAV); err != nil {
+				log.Printf("CreateMTMBulk: holdings scan failed: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError, "Holdings scan failed: "+err.Error())
 				return
 			}
@@ -423,20 +428,14 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		results := make([]map[string]interface{}, 0, len(holdings))
+		hadError := false
 
 		// STEP 2: For each holding, fetch historical NAV and calculate MTM
 		for _, h := range holdings {
-			// Use avg_nav as previous NAV (cost basis)
-			prevNAV := h.AvgNAV
-			if prevNAV <= 0 {
-				results = append(results, map[string]interface{}{
-					"success":     false,
-					"scheme_id":   h.SchemeID,
-					"scheme_name": h.SchemeName,
-					"error":       "Invalid avg_nav (prev_nav <= 0)",
-				})
-				continue
-			}
+			// Determine previous NAV (prev_nav). Prefer the previous day's market NAV (relative
+			// to the end NAV date). Fall back to amfi_nav_staging, and finally to avg_nav (cost basis).
+			var prevNAV float64
+			// We'll compute prevNAV after we have actualEndDate (set below when fetching end NAV).
 
 			// Try to fetch current/end-of-month NAV from MFapi.in using ISIN or internal code
 			// MFapi uses scheme_code which maps to AMFI codes
@@ -479,7 +478,24 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if err := json.Unmarshal(body, &apiResp); err == nil && len(apiResp.Data) > 0 {
 						// Get the latest NAV from the period (last entry)
 						lastEntry := apiResp.Data[len(apiResp.Data)-1]
-						actualEndDate = lastEntry.Date
+						// Parse possible MFAPI date formats into YYYY-MM-DD
+						parsed := time.Time{}
+						var parseErr error
+						// Try a few common formats MFAPI returns
+						for _, f := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
+							parsed, parseErr = time.Parse(f, lastEntry.Date)
+							if parseErr == nil {
+								break
+							}
+						}
+						if parseErr != nil {
+							// If we cannot parse, log and mark as fetch error
+							log.Printf("CreateMTMBulk: unable to parse NAV date '%s' for scheme %s: %v", lastEntry.Date, amfiCode, parseErr)
+							navFetchError = "Invalid NAV date format"
+						} else {
+							actualEndDate = parsed.Format(constants.DateFormat)
+						}
+
 						if navVal, err := strconv.ParseFloat(lastEntry.NAV, 64); err == nil {
 							endNAV = navVal
 						} else {
@@ -499,23 +515,33 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// If MFapi failed, try local amfi_nav_staging as fallback
 			if endNAV == 0 {
-				var localNAV float64
-				if err := tx.QueryRow(ctx, `
-					SELECT COALESCE(nav_value, 0) 
-					FROM investment.amfi_nav_staging 
-					WHERE scheme_code = $1 
-						AND nav_date BETWEEN $2::date AND $3::date
-					ORDER BY nav_date DESC 
-					LIMIT 1
-				`, h.SchemeID, startDate, endDate).Scan(&localNAV); err == nil && localNAV > 0 {
-					endNAV = localNAV
-					actualEndDate = endDate
-					navFetchError = "" // Clear error, fallback succeeded
+				// Try to use numeric AMFI code (amfiCode) for fallback staging table
+				if amfiCode != "" {
+					if amfiInt, err := strconv.ParseInt(amfiCode, 10, 64); err == nil {
+						var localNAV float64
+						if err := tx.QueryRow(ctx, `
+							SELECT COALESCE(nav_value, 0) 
+							FROM investment.amfi_nav_staging 
+							WHERE scheme_code = $1 
+								AND nav_date BETWEEN $2::date AND $3::date
+							ORDER BY nav_date DESC 
+							LIMIT 1
+						`, amfiInt, startDate, endDate).Scan(&localNAV); err == nil && localNAV > 0 {
+							endNAV = localNAV
+							actualEndDate = endDate
+							navFetchError = "" // Clear error, fallback succeeded
+						} else if err != nil {
+							log.Printf("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s: %v", amfiInt, h.SchemeID, err)
+						}
+					} else {
+						log.Printf("CreateMTMBulk: amfiCode '%s' for scheme %s is not numeric, cannot query amfi_nav_staging", amfiCode, h.SchemeID)
+					}
 				}
 			}
 
 			// If still no end NAV, record error and skip
 			if endNAV == 0 {
+				log.Printf("CreateMTMBulk: unable to fetch end NAV for scheme %s (%s): %s", h.SchemeID, h.SchemeName, navFetchError)
 				results = append(results, map[string]interface{}{
 					"success":     false,
 					"scheme_id":   h.SchemeID,
@@ -525,7 +551,103 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Calculate MTM values (average cost → current market NAV)
+			// At this point endNAV and actualEndDate should be set. Choose prevNAV as
+			// the most recent available market NAV on or before actualEndDate.
+			// Strategy:
+			// 1. Query MFapi for a small historical window (last 7 days up to actualEndDate)
+			//    and pick the latest entry with date <= actualEndDate.
+			// 2. Fallback to investment.amfi_nav_staging with `nav_date <= actualEndDate` ordered desc.
+			// 3. Final fallback to avg_nav (cost basis).
+			if actualEndDate != "" {
+				parsedEnd, perr := time.Parse(constants.DateFormat, actualEndDate)
+				if perr == nil {
+					startRange := parsedEnd.AddDate(0, 0, -7).Format(constants.DateFormat)
+					// Try MFapi for range startRange..actualEndDate
+					if amfiCode != "" {
+						apiRangeURL := fmt.Sprintf("https://api.mfapi.in/mf/%s?startDate=%s&endDate=%s", amfiCode, startRange, actualEndDate)
+						if respRange, err := http.Get(apiRangeURL); err == nil && respRange.StatusCode == 200 {
+							defer respRange.Body.Close()
+							bodyRange, _ := io.ReadAll(respRange.Body)
+							var apiRangeResp struct {
+								Data []struct {
+									Date string `json:"date"`
+									NAV  string `json:"nav"`
+								} `json:"data"`
+							}
+							if err := json.Unmarshal(bodyRange, &apiRangeResp); err == nil && len(apiRangeResp.Data) > 0 {
+								// Find the latest entry with date <= parsedEnd
+								var bestDate time.Time
+								var bestNAV float64
+								for _, e := range apiRangeResp.Data {
+									var d time.Time
+									var dErr error
+									for _, f := range []string{constants.DateFormat, constants.DateFormatAlt, "02-Jan-2006", "02-Jan-06"} {
+										d, dErr = time.Parse(f, e.Date)
+										if dErr == nil {
+											break
+										}
+									}
+									if dErr != nil {
+										continue
+									}
+									if d.After(parsedEnd) {
+										continue
+									}
+									if bestDate.IsZero() || d.After(bestDate) {
+										if navVal, nErr := strconv.ParseFloat(e.NAV, 64); nErr == nil {
+											bestDate = d
+											bestNAV = navVal
+										}
+									}
+								}
+								if !bestDate.IsZero() {
+									prevNAV = bestNAV
+								}
+							}
+						} else if respRange != nil {
+							log.Printf("CreateMTMBulk: MFapi range returned status %d for amfiCode=%s", respRange.StatusCode, amfiCode)
+						} else if err != nil {
+							log.Printf("CreateMTMBulk: MFapi range request failed for amfiCode=%s: %v", amfiCode, err)
+						}
+					}
+
+					// Fallback to staging: latest nav_date <= actualEndDate
+					if prevNAV == 0 && amfiCode != "" {
+						if amfiInt, err := strconv.ParseInt(amfiCode, 10, 64); err == nil {
+							var stagedPrev float64
+							if err := tx.QueryRow(ctx, `
+								SELECT COALESCE(nav_value,0) FROM investment.amfi_nav_staging
+								WHERE scheme_code = $1 AND nav_date <= $2::date
+								ORDER BY nav_date DESC LIMIT 1
+							`, amfiInt, actualEndDate).Scan(&stagedPrev); err == nil && stagedPrev > 0 {
+								prevNAV = stagedPrev
+							} else if err != nil {
+								log.Printf("CreateMTMBulk: amfi_nav_staging lookup failed for amfiCode=%d scheme=%s up to date=%s: %v", amfiInt, h.SchemeID, actualEndDate, err)
+							}
+						}
+					}
+				} else {
+					log.Printf("CreateMTMBulk: cannot parse actualEndDate '%s' for scheme %s: %v", actualEndDate, h.SchemeID, perr)
+				}
+			}
+
+			// Final fallback to avg_nav (cost basis) if prevNAV is still zero or invalid
+			if prevNAV <= 0 {
+				prevNAV = h.AvgNAV
+				if prevNAV <= 0 {
+					results = append(results, map[string]interface{}{
+						"success":     false,
+						"scheme_id":   h.SchemeID,
+						"scheme_name": h.SchemeName,
+						"error":       "Invalid avg_nav (prev_nav fallback <= 0)",
+					})
+					hadError = true
+					log.Printf("CreateMTMBulk: no valid prev_nav found for scheme %s; avg_nav also invalid", h.SchemeID)
+					continue
+				}
+			}
+
+			// Calculate MTM values (previous NAV -> current market NAV)
 			prevValue := h.Units * prevNAV
 			currValue := h.Units * endNAV
 			unrealizedGL := currValue - prevValue
@@ -538,14 +660,18 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var folioID, dematID *string
 			if h.FolioNumber != "" {
 				var fid string
-				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 LIMIT 1`, h.FolioNumber).Scan(&fid); err == nil {
+				if err := tx.QueryRow(ctx, `SELECT folio_id FROM investment.masterfolio WHERE folio_number = $1 AND COALESCE(is_deleted,false) = false LIMIT 1`, h.FolioNumber).Scan(&fid); err == nil {
 					folioID = &fid
+				} else {
+					log.Printf("CreateMTMBulk: no active folio_id found for folio_number=%s: %v", h.FolioNumber, err)
 				}
 			}
 			if h.DematAccNumber != "" {
 				var did string
-				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number = $1 LIMIT 1`, h.DematAccNumber).Scan(&did); err == nil {
+				if err := tx.QueryRow(ctx, `SELECT demat_id FROM investment.masterdemataccount WHERE demat_account_number = $1 AND COALESCE(is_deleted,false) = false LIMIT 1`, h.DematAccNumber).Scan(&did); err == nil {
 					dematID = &did
+				} else {
+					log.Printf("CreateMTMBulk: no active demat_id found for demat_account_number=%s: %v", h.DematAccNumber, err)
 				}
 			}
 
@@ -559,12 +685,20 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, activityID, h.SchemeID, folioID, dematID,
 				h.Units, prevNAV, endNAV, actualEndDate,
 				prevValue, currValue, unrealizedGL, unrealizedGLPct).Scan(&mtmID); err != nil {
+				// Mark that we encountered a DB error for this row. Rollback will be performed
+				// before attempting any further audit/commit operations so we don't try to execute
+				// commands on an aborted transaction.
+				hadError = true
+				log.Printf("CreateMTMBulk: failed to insert MTM row for scheme %s: %v", h.SchemeID, err)
 				results = append(results, map[string]interface{}{
 					"success":     false,
 					"scheme_id":   h.SchemeID,
 					"scheme_name": h.SchemeName,
 					"error":       constants.ErrMTMInsertFailed + err.Error(),
 				})
+				// continue processing remaining holdings to collect errors/results, but
+				// we will rollback and return the aggregated results below instead of
+				// attempting the audit insert on a possibly-aborted transaction.
 				continue
 			}
 
@@ -582,16 +716,39 @@ func CreateMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
+		// If any per-row insert failed, the transaction may be in an error state.
+		// Abort and return partial results instead of trying to insert audit record
+		// on an aborted transaction (which causes SQLSTATE 25P02).
+		if hadError {
+			// Log detailed row errors for debugging
+			for _, r := range results {
+				if success, ok := r["success"].(bool); ok && !success {
+					log.Printf("CreateMTMBulk: row error detail: scheme=%v error=%v", r["scheme_id"], r["error"])
+				}
+			}
+			log.Printf("CreateMTMBulk: encountered row-level errors, rolling back transaction. activity_id=%s", activityID)
+			_ = tx.Rollback(ctx)
+			api.RespondWithPayload(w, api.IsBulkSuccess(results), "Partial results due to row-level errors", map[string]any{
+				"activity_id":       activityID,
+				"accounting_period": req.AccountingPeriod,
+				"holdings_found":    len(holdings),
+				"mtm_records":       results,
+			})
+			return
+		}
+
 		// Create single audit trail for batch
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO investment.auditactionaccountingactivity (activity_id, actiontype, processing_status, requested_by, requested_at)
 			VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())
 		`, activityID, userEmail); err != nil {
+			log.Printf("CreateMTMBulk: failed to insert audit row for activity_id=%s: %v", activityID, err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			log.Printf("CreateMTMBulk: failed to commit transaction for activity_id=%s: %v", activityID, err)
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
@@ -753,8 +910,8 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.mtm_id,
 				m.activity_id,
 				act.activity_type,
-				TO_CHAR(act.effective_date, 'YYYY-MM-DD') AS effective_date,
-				TO_CHAR(act.accounting_period, 'YYYY-MM-DD') AS accounting_period,
+				TO_CHAR(NULLIF(act.effective_date::text, '')::date, 'YYYY-MM-DD') AS effective_date,
+				COALESCE(act.accounting_period::text, '') AS accounting_period,
 				act.data_source,
 				act.status,
 				
@@ -774,8 +931,8 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.old_prev_nav,0) AS old_prev_nav,
 				m.curr_nav,
 				COALESCE(m.old_curr_nav,0) AS old_curr_nav,
-				TO_CHAR(m.nav_date, 'YYYY-MM-DD') AS nav_date,
-				TO_CHAR(m.old_nav_date, 'YYYY-MM-DD') AS old_nav_date,
+				TO_CHAR(NULLIF(m.nav_date::text, '')::date, 'YYYY-MM-DD') AS nav_date,
+				TO_CHAR(NULLIF(m.old_nav_date::text, '')::date, 'YYYY-MM-DD') AS old_nav_date,
 				m.prev_value,
 				COALESCE(m.old_prev_value,0) AS old_prev_value,
 				m.curr_value,
@@ -785,15 +942,15 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.unrealized_gain_loss_pct,0) AS unrealized_gain_loss_pct,
 				COALESCE(m.old_unrealized_gain_loss_pct,0) AS old_unrealized_gain_loss_pct,
 				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+				TO_CHAR(NULLIF(m.updated_at::text, '')::timestamp, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
 				
 				COALESCE(l.actiontype,'') AS action_type,
 				COALESCE(l.processing_status,'') AS processing_status,
 				COALESCE(l.action_id::text,'') AS action_id,
 				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+				TO_CHAR(NULLIF(l.requested_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+				TO_CHAR(NULLIF(l.checker_at::text, '')::timestamp,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
 				COALESCE(l.checker_comment,'') AS checker_comment,
 				COALESCE(l.reason,'') AS reason
 			FROM investment.accounting_mtm m
@@ -839,31 +996,42 @@ func GetMTMWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // MTMPreviewRecord represents a single MTM calculation preview
 type MTMPreviewRecord struct {
-	SchemeID        string          `json:"scheme_id"`
-	SchemeName      string          `json:"scheme_name"`
-	ISIN            string          `json:"isin"`
-	InternalCode    string          `json:"internal_code"`
-	FolioNumber     string          `json:"folio_number"`
-	DematAccNumber  string          `json:"demat_acc_number"`
-	Units           float64         `json:"units"`
-	AvgNAV          float64         `json:"avg_nav"`
-	PrevNAV         float64         `json:"prev_nav"`
-	CurrNAV         float64         `json:"curr_nav"`
-	NAVDate         string          `json:"nav_date"`
-	PrevValue       float64         `json:"prev_value"`
-	CurrValue       float64         `json:"curr_value"`
-	UnrealizedGL    float64         `json:"unrealized_gain_loss"`
-	UnrealizedGLPct float64         `json:"unrealized_gain_loss_pct"`
-	NAVSource       string          `json:"nav_source"` // "MFapi" or "Local"
-	Success         bool            `json:"success"`
-	Error           string          `json:"error,omitempty"`
-	HistoricalNAVs  []HistoricalNAV `json:"historical_navs,omitempty"`
+	SchemeID        string               `json:"scheme_id"`
+	SchemeName      string               `json:"scheme_name"`
+	ISIN            string               `json:"isin"`
+	InternalCode    string               `json:"internal_code"`
+	FolioNumber     string               `json:"folio_number"`
+	DematAccNumber  string               `json:"demat_acc_number"`
+	Units           float64              `json:"units"`
+	AvgNAV          float64              `json:"avg_nav"`
+	PrevNAV         float64              `json:"prev_nav"`
+	CurrNAV         float64              `json:"curr_nav"`
+	NAVDate         string               `json:"nav_date"`
+	PrevValue       float64              `json:"prev_value"`
+	CurrValue       float64              `json:"curr_value"`
+	UnrealizedGL    float64              `json:"unrealized_gain_loss"`
+	UnrealizedGLPct float64              `json:"unrealized_gain_loss_pct"`
+	NAVSource       string               `json:"nav_source"` // "MFapi" or "Local"
+	Success         bool                 `json:"success"`
+	Error           string               `json:"error,omitempty"`
+	HistoricalNAVs  []HistoricalNAV      `json:"historical_navs,omitempty"`
+	Transactions    []TransactionSummary `json:"transactions,omitempty"`
 }
 
 // HistoricalNAV represents historical NAV data point
 type HistoricalNAV struct {
 	Date string  `json:"date"`
 	NAV  float64 `json:"nav"`
+}
+
+// TransactionSummary represents a single transaction that contributes to a holding
+type TransactionSummary struct {
+	TransactionDate string  `json:"transaction_date"`
+	TransactionType string  `json:"transaction_type"`
+	NAV             float64 `json:"nav"`
+	Units           float64 `json:"units"`
+	Amount          float64 `json:"amount"`
+	Reference       string  `json:"reference,omitempty"`
 }
 
 // MTMCommitRecord represents the payload for committing MTM records
@@ -887,9 +1055,10 @@ type MTMCommitRecord struct {
 func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID           string `json:"user_id"`
-			AccountingPeriod string `json:"accounting_period"` // Text format: "JAN 2025", "FEB 2025", etc. or "YYYY-MM"
-			IncludeHistory   bool   `json:"include_history"`   // Whether to fetch historical NAV data
+			UserID              string `json:"user_id"`
+			AccountingPeriod    string `json:"accounting_period"`    // Text format: "JAN 2025", "FEB 2025", etc. or "YYYY-MM"
+			IncludeHistory      bool   `json:"include_history"`      // Whether to fetch historical NAV data
+			IncludeTransactions bool   `json:"include_transactions"` // Whether to include underlying transactions per holding
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1179,7 +1348,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							endParsed, _ := time.Parse(constants.DateFormat, endDate)
 
 							for _, entry := range apiResp.Data {
-								entryDate, err := time.Parse("02-01-2006", entry.Date) // MFapi format: DD-MM-YYYY
+								entryDate, err := time.Parse(constants.DateFormatAlt, entry.Date) // MFapi format: DD-MM-YYYY
 								if err != nil {
 									continue
 								}
@@ -1270,6 +1439,40 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if preview.PrevValue > 0 {
 				preview.UnrealizedGLPct = (preview.UnrealizedGL / preview.PrevValue) * 100
 			}
+			// Optionally fetch underlying transactions that contributed to this holding
+			if req.IncludeTransactions {
+				txRows, err := pgxPool.Query(ctx, `
+					SELECT transaction_date, COALESCE(transaction_type,''), COALESCE(nav,0), COALESCE(units,0), COALESCE(amount,0)
+					FROM investment.onboard_transaction
+					WHERE (scheme_id = $1 OR scheme_internal_code = $1 OR scheme_id = $1)
+					  AND COALESCE(folio_number,'') = $2
+					  AND COALESCE(demat_acc_number,'') = $3
+					  AND transaction_date <= $4::date
+					  AND LOWER(COALESCE(transaction_type,'')) NOT IN ('sell','redemption')
+					ORDER BY transaction_date ASC
+				`, h.SchemeID, h.FolioNumber, h.DematAccNumber, endDate)
+				if err == nil {
+					defer txRows.Close()
+					txs := make([]TransactionSummary, 0)
+					for txRows.Next() {
+						var td time.Time
+						var ttype string
+						var tnav, tunits, tamt float64
+						if err := txRows.Scan(&td, &ttype, &tnav, &tunits, &tamt); err == nil {
+							txs = append(txs, TransactionSummary{
+								TransactionDate: td.Format(constants.DateFormat),
+								TransactionType: ttype,
+								NAV:             tnav,
+								Units:           tunits,
+								Amount:          tunits * tnav,
+							})
+						}
+					}
+					preview.Transactions = txs
+				} else {
+					log.Printf("PreviewMTMBulk: transactions query failed for scheme=%s folio=%s demat=%s: %v", h.SchemeID, h.FolioNumber, h.DematAccNumber, err)
+				}
+			}
 			preview.Success = true
 			preview.HistoricalNAVs = historicalNAVs
 
@@ -1298,7 +1501,7 @@ func PreviewMTMBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"failure_count":       failureCount,
 			"total_unrealized_gl": totalUnrealizedGL,
 			"include_history":     req.IncludeHistory,
-			"mtm_preview_records": previews,
+			"records":             previews,
 		})
 	}
 }

@@ -314,9 +314,20 @@ func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Get columns for each table
-		headerColsRes, _ := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
-		lineColsRes, _ := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
+		headerColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_headers'`)
+		if err != nil {
+			log.Printf("[ERROR] failed to query header columns: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
+			return
+		}
 		defer headerColsRes.Close()
+
+		lineColsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'exposure_line_items'`)
+		if err != nil {
+			log.Printf("[ERROR] failed to query line columns: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "failed to read table metadata")
+			return
+		}
 		defer lineColsRes.Close()
 
 		var headerCols, lineCols []string
@@ -1171,89 +1182,94 @@ func ApproveMultipleExposureHeaders(db *sql.DB) http.HandlerFunc {
 
 		// Approve remaining headers
 		if len(toApprove) > 0 {
-			appRows, _ := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
-			approvedHeaders := []map[string]interface{}{}
-			appCols, _ := appRows.Columns()
-			for appRows.Next() {
-				vals := make([]interface{}, len(appCols))
-				valPtrs := make([]interface{}, len(appCols))
-				for i := range vals {
-					valPtrs[i] = &vals[i]
+			appRows, err := tx.Query(`UPDATE exposure_headers SET approval_status = 'Approved', approved_by = $1, approval_comment = $2, approved_at = NOW() WHERE exposure_header_id = ANY($3::uuid[]) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
+			if err != nil {
+				log.Printf("[WARN] approving exposure headers failed: %v", err)
+			} else {
+				defer appRows.Close()
+				approvedHeaders := []map[string]interface{}{}
+				appCols, _ := appRows.Columns()
+				for appRows.Next() {
+					vals := make([]interface{}, len(appCols))
+					valPtrs := make([]interface{}, len(appCols))
+					for i := range vals {
+						valPtrs[i] = &vals[i]
+					}
+					if err := appRows.Scan(valPtrs...); err != nil {
+						continue
+					}
+					rowMap := map[string]interface{}{}
+					for i, col := range appCols {
+						rowMap[col] = parseDBValue(col, vals[i])
+					}
+					approvedHeaders = append(approvedHeaders, rowMap)
 				}
-				if err := appRows.Scan(valPtrs...); err != nil {
-					continue
+				appRows.Close()
+				results["approved"] = approvedHeaders
+				// Rollover logic
+				for _, h := range approvedHeaders {
+					var parentDocNo string
+					var typeStr string
+					var addDetails map[string]interface{}
+					if v, ok := h["exposure_type"].(string); ok {
+						typeStr = strings.ToLower(v)
+					}
+					if v, ok := h["additional_header_details"].(map[string]interface{}); ok {
+						addDetails = v
+					}
+					if typeStr == "lc" && addDetails != nil {
+						if lc, ok := addDetails["input_letters_of_credit"].(map[string]interface{}); ok {
+							if linked, ok := lc["linked_po_so_number"].(string); ok {
+								parentDocNo = linked
+							}
+						}
+					} else if typeStr == "grn" && addDetails != nil {
+						if grn, ok := addDetails["input_grn"].(map[string]interface{}); ok {
+							if linked, ok := grn["linked_id"].(string); ok {
+								parentDocNo = linked
+							}
+						}
+					} else if typeStr == "creditors" && addDetails != nil {
+						if cred, ok := addDetails["input_creditors"].(map[string]interface{}); ok {
+							if linked, ok := cred["linked_id"].(string); ok {
+								parentDocNo = linked
+							}
+						}
+					} else if typeStr == "debitors" && addDetails != nil {
+						if deb, ok := addDetails["input_debitors"].(map[string]interface{}); ok {
+							if linked, ok := deb["linked_id"].(string); ok {
+								parentDocNo = linked
+							}
+						}
+					}
+					if parentDocNo != "" {
+						var parentId string
+						err := tx.QueryRow(`SELECT exposure_header_id FROM exposure_headers WHERE document_id = $1 LIMIT 1`, parentDocNo).Scan(&parentId)
+						if err == nil {
+							amt := 0.0
+							if v, ok := h["total_original_amount"].(float64); ok {
+								amt = math.Abs(v)
+							}
+							_, _ = tx.Exec(`UPDATE exposure_headers SET total_open_amount = total_open_amount - $1, status = 'Rolled' WHERE exposure_header_id = $2`, amt, parentId)
+							_, _ = tx.Exec(`UPDATE exposure_headers SET status = 'Rolled' WHERE exposure_header_id = $1`, h["exposure_header_id"])
+							_, _ = tx.Exec(`INSERT INTO exposure_rollover_log (parent_header_id, child_header_id, rollover_amount, rollover_date, created_at) VALUES ($1, $2, $3, CURRENT_DATE, NOW())`, parentId, h["exposure_header_id"], amt)
+							if rolled, ok := results["rolled"].([]map[string]interface{}); ok {
+								rolled = append(rolled, h)
+								results["rolled"] = rolled
+							}
+						}
+					}
 				}
-				rowMap := map[string]interface{}{}
-				for i, col := range appCols {
-					rowMap[col] = parseDBValue(col, vals[i])
-				}
-				approvedHeaders = append(approvedHeaders, rowMap)
 			}
-			appRows.Close()
-			results["approved"] = approvedHeaders
-			// Rollover logic
-			for _, h := range approvedHeaders {
-				var parentDocNo string
-				var typeStr string
-				var addDetails map[string]interface{}
-				if v, ok := h["exposure_type"].(string); ok {
-					typeStr = strings.ToLower(v)
-				}
-				if v, ok := h["additional_header_details"].(map[string]interface{}); ok {
-					addDetails = v
-				}
-				if typeStr == "lc" && addDetails != nil {
-					if lc, ok := addDetails["input_letters_of_credit"].(map[string]interface{}); ok {
-						if linked, ok := lc["linked_po_so_number"].(string); ok {
-							parentDocNo = linked
-						}
-					}
-				} else if typeStr == "grn" && addDetails != nil {
-					if grn, ok := addDetails["input_grn"].(map[string]interface{}); ok {
-						if linked, ok := grn["linked_id"].(string); ok {
-							parentDocNo = linked
-						}
-					}
-				} else if typeStr == "creditors" && addDetails != nil {
-					if cred, ok := addDetails["input_creditors"].(map[string]interface{}); ok {
-						if linked, ok := cred["linked_id"].(string); ok {
-							parentDocNo = linked
-						}
-					}
-				} else if typeStr == "debitors" && addDetails != nil {
-					if deb, ok := addDetails["input_debitors"].(map[string]interface{}); ok {
-						if linked, ok := deb["linked_id"].(string); ok {
-							parentDocNo = linked
-						}
-					}
-				}
-				if parentDocNo != "" {
-					var parentId string
-					err := tx.QueryRow(`SELECT exposure_header_id FROM exposure_headers WHERE document_id = $1 LIMIT 1`, parentDocNo).Scan(&parentId)
-					if err == nil {
-						amt := 0.0
-						if v, ok := h["total_original_amount"].(float64); ok {
-							amt = math.Abs(v)
-						}
-						_, _ = tx.Exec(`UPDATE exposure_headers SET total_open_amount = total_open_amount - $1, status = 'Rolled' WHERE exposure_header_id = $2`, amt, parentId)
-						_, _ = tx.Exec(`UPDATE exposure_headers SET status = 'Rolled' WHERE exposure_header_id = $1`, h["exposure_header_id"])
-						_, _ = tx.Exec(`INSERT INTO exposure_rollover_log (parent_header_id, child_header_id, rollover_amount, rollover_date, created_at) VALUES ($1, $2, $3, CURRENT_DATE, NOW())`, parentId, h["exposure_header_id"], amt)
-						if rolled, ok := results["rolled"].([]map[string]interface{}); ok {
-							rolled = append(rolled, h)
-							results["rolled"] = rolled
-						}
-					}
-				}
-			}
+			tx.Commit()
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: true,
+				"deleted":              results["deleted"],
+				"approved":             results["approved"],
+				"rolled":               results["rolled"],
+				"skipped":              results["skipped"],
+			})
 		}
-		tx.Commit()
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			constants.ValueSuccess: true,
-			"deleted":              results["deleted"],
-			"approved":             results["approved"],
-			"rolled":               results["rolled"],
-			"skipped":              results["skipped"],
-		})
 	}
 }
 
