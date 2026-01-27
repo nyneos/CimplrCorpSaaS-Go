@@ -108,7 +108,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			argPos++
 		}
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND sweep_id = $%d", argPos)
+			query += fmt.Sprintf(" AND l.sweep_id = $%d", argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}
