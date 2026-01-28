@@ -22,9 +22,9 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
-    "sort"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -2641,13 +2641,13 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 // categorization pipeline for each account independently.
 //
 // Behaviour:
-// - Expects a multipart form upload with a single CSV file field (commonly `file`).
-// - Requires `multi=true` form field to be set; UploadBankStatementV2Handler will
-//   delegate to this handler when present.
-// - Parses CSV (robust to header name variations), groups rows by account number,
-//   builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
-//   and calls UploadBankStatementV2WithCategorization for each account.
-// - Aggregates results per-account and isolates failures to the account level.
+//   - Expects a multipart form upload with a single CSV file field (commonly `file`).
+//   - Requires `multi=true` form field to be set; UploadBankStatementV2Handler will
+//     delegate to this handler when present.
+//   - Parses CSV (robust to header name variations), groups rows by account number,
+//     builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
+//     and calls UploadBankStatementV2WithCategorization for each account.
+//   - Aggregates results per-account and isolates failures to the account level.
 func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -2777,12 +2777,12 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			}
 
 			var rowsTxns []struct {
-				dt        time.Time
-				valueDate time.Time
-				desc      string
+				dt         time.Time
+				valueDate  time.Time
+				desc       string
 				withdrawal float64
-				deposit   float64
-				rawClose  string
+				deposit    float64
+				rawClose   string
 			}
 			var minDate, maxDate time.Time
 			var openingBalance, closingBalance float64
@@ -2836,12 +2836,12 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 				}
 
 				rowsTxns = append(rowsTxns, struct {
-					dt        time.Time
-					valueDate time.Time
-					desc      string
+					dt         time.Time
+					valueDate  time.Time
+					desc       string
 					withdrawal float64
-					deposit   float64
-					rawClose  string
+					deposit    float64
+					rawClose   string
 				}{dt: dt, valueDate: dt, desc: descCell, withdrawal: w, deposit: d, rawClose: closeStr})
 
 				if minDate.IsZero() || dt.Before(minDate) {

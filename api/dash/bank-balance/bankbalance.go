@@ -59,16 +59,16 @@ func normalizeUpperTrimSlice(in []string) []string {
 func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	// Spot rates for conversion (INR stays 1.0 to avoid double converting)
 	var spotRates = map[string]float64{
-		"USD": 1.0,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"RMB": 0.14,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"JPY": 0.0067,
-		"SEK": 0.095,
+		"USD": 90.0,
+		"AUD": 60.5,
+		"CAD": 66.8,
+		"CHF": 101.0,
+		"CNY": 13.42,
+		"RMB": 13.42,
+		"EUR": 98.0,
+		"GBP": 114.0,
+		"JPY": 0.60,
+		"SEK": 8.6,
 		"INR": 1.0,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -236,16 +236,16 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	// Spot rates for conversion (INR = 1.0 baseline)
 	var spotRates = map[string]float64{
-		"USD": 1.0,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"RMB": 0.14,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"JPY": 0.0067,
-		"SEK": 0.095,
+		"USD": 90.0,
+		"AUD": 60.5,
+		"CAD": 66.8,
+		"CHF": 101.0,
+		"CNY": 13.42,
+		"RMB": 13.42,
+		"EUR": 98.0,
+		"GBP": 114.0,
+		"JPY": 0.60,
+		"SEK": 8.6,
 		"INR": 1.0,
 	}
 
@@ -458,16 +458,16 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetCurrencyWiseBalancesFromManual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	var spotRates = map[string]float64{
-		"USD": 1.0,
-		"AUD": 0.68,
-		"CAD": 0.75,
-		"CHF": 1.1,
-		"CNY": 0.14,
-		"RMB": 0.14,
-		"EUR": 1.09,
-		"GBP": 1.28,
-		"JPY": 0.0067,
-		"SEK": 0.095,
+		"USD": 90.0,
+		"AUD": 60.5,
+		"CAD": 66.8,
+		"CHF": 101.0,
+		"CNY": 13.42,
+		"RMB": 13.42,
+		"EUR": 98.0,
+		"GBP": 114.0,
+		"JPY": 0.60,
+		"SEK": 8.6,
 		"INR": 1.0,
 	}
 
