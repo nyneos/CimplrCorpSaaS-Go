@@ -197,7 +197,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			query := `INSERT INTO masterentitycash (
 	entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, pan_gst, legal_entity_identifier, legal_entity_type, reporting_currency, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, associated_business_units, comments, unique_identifier, is_top_level_entity, is_deleted
 ) VALUES (
-	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE(NULLIF($17, ''), 'Inactive'), $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
+	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE(NULLIF($17, ''), 'Inactive'), $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
 ) RETURNING entity_id`
 			var newEntityID string
 			err := pgxPool.QueryRow(ctx, query,
