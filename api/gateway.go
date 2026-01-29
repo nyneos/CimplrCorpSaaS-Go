@@ -466,7 +466,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 			b, _ := io.ReadAll(r.Body)
 			body = string(b)
 			r.Body = io.NopCloser(bytes.NewBuffer(b))
-			// If there is a user_id field, call authService to log different-IP requests
+			// If there is a user_id field, track activity and log different-IP requests
 			if authService != nil && len(b) > 0 {
 				var raw map[string]interface{}
 				if err := json.Unmarshal(b, &raw); err == nil {
@@ -479,6 +479,8 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 							userID = fmt.Sprintf("%.0f", v)
 						}
 						if userID != "" {
+							// Update activity timestamp for inactivity-based session timeout
+							authService.UpdateActivity(userID)
 							clientIP := extractClientIP(r)
 							go authService.LogDifferentIPRequest(userID, clientIP)
 						}
