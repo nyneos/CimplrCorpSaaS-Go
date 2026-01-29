@@ -107,9 +107,9 @@ func timeToString(t *time.Time) string {
 func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (NormalizedExposure, error)) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{` + constants.ValueSuccess + `:true,"rows":[`))
+	// write JSON prefix with proper success key
+	w.Write([]byte("{\"" + constants.ValueSuccess + "\":true,\"rows\":["))
 
-	enc := json.NewEncoder(w)
 	first := true
 
 	for rows.Next() {
@@ -122,7 +122,16 @@ func StreamRowsAsPayload(w http.ResponseWriter, rows pgx.Rows, build func() (Nor
 			w.Write([]byte(`,`))
 		}
 		first = false
-		_ = enc.Encode(item)
+		// encode without adding an extra newline between elements
+		b, jerr := json.Marshal(item)
+		if jerr != nil {
+			log.Printf("[STREAM] json marshal error: %v", jerr)
+			continue
+		}
+		_, _ = w.Write(b)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[STREAM] rows error: %v", err)
 	}
 
 	w.Write([]byte(`]}`))
@@ -186,6 +195,13 @@ func GetAllExposures(pool *pgxpool.Pool) http.HandlerFunc {
 
 		query += ` AND file_hash = $` + strconv.Itoa(len(args)+1)
 		args = append(args, payload.FileHash)
+
+		// enforce middleware-approved entity names when available
+		if allowed := api.GetEntityNamesFromCtx(ctx); len(allowed) > 0 {
+			query += ` AND entity = ANY($` + strconv.Itoa(len(args)+1) + `)`
+			args = append(args, allowed)
+			log.Printf("[FB-DASH] applying entity filter from prevalidation: %d allowed", len(allowed))
+		}
 
 		rows, err := pool.Query(ctx, query, args...)
 		if err != nil {
@@ -417,6 +433,14 @@ func GetExposuresByYear(pool *pgxpool.Pool) http.HandlerFunc {
 				EXTRACT(YEAR FROM document_date) = $` + strconv.Itoa(argIndex) + `
 			)`
 			args = append(args, year)
+		}
+
+		// enforce middleware-approved entity names when available
+		if allowed := api.GetEntityNamesFromCtx(ctx); len(allowed) > 0 {
+			query += ` AND entity = ANY($` + strconv.Itoa(argIndex) + `)`
+			args = append(args, allowed)
+			argIndex++
+			log.Printf("[FB-DASH] applying entity filter (by year) from prevalidation: %d allowed", len(allowed))
 		}
 
 		query += " ORDER BY value_date DESC"

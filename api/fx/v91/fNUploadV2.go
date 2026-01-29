@@ -234,16 +234,27 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// build entity map
+		// build entity map (use masterentitycash + canonical fields)
 		entityMap := map[string]string{}
 		{
-			rows, err := pool.Query(ctx, `
-	SELECT COALESCE(NULLIF(unique_identifier,''), entity_id) AS uid,
-	       TRIM(entity_name),
-	       TRIM(COALESCE(company_name, entity_name, '')) AS cname,
-	       TRIM(entity_id)
-	FROM public.masterentity
-	WHERE is_deleted IS NOT TRUE`)
+			allowedIDs := api.GetEntityIDsFromCtx(ctx)
+			// Base SQL
+			baseSQL := `
+		SELECT COALESCE(NULLIF(me.unique_identifier,''), me.entity_id) AS uid,
+			   TRIM(me.entity_name),
+			   TRIM(COALESCE(me.entity_short_name, me.entity_name, '')) AS cname,
+			   TRIM(me.entity_id)
+		FROM public.masterentitycash me
+		WHERE COALESCE(me.is_deleted, false) IS NOT TRUE`
+			var rows pgx.Rows
+			var err error
+			if len(allowedIDs) > 0 {
+				// restrict masterentitycash load to approved entity ids from prevalidation middleware
+				rows, err = pool.Query(ctx, baseSQL+" AND me.entity_id = ANY($1)", allowedIDs)
+				log.Printf("[FBUP-ENT] restricting entityMap load to %d approved entity IDs", len(allowedIDs))
+			} else {
+				rows, err = pool.Query(ctx, baseSQL)
+			}
 			if err == nil {
 				for rows.Next() {
 					var uid, entityName, companyName, eid string
@@ -263,6 +274,8 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 				rows.Close()
+			} else {
+				log.Printf("[FUBG]: error querying masterentitycash: %v", err)
 			}
 		}
 
@@ -288,6 +301,26 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			rowsCur.Close()
+		}
+
+		// Debug: inspect entityMap contents and SQL-derived keys
+		{
+			log.Printf("[FBUP-ENT] entityMap built, count=%d", len(entityMap))
+			// presence check for common company codes seen in test files (e.g. '3700')
+			if v, ok := entityMap["3700"]; ok {
+				log.Printf("[FBUP-ENT] entityMap contains key '3700' -> %s", v)
+			} else {
+				log.Printf("[FBUP-ENT] entityMap does NOT contain key '3700' (this is likely why many rows are non-qualified)")
+			}
+			// print up to 12 sample entries to inspect format
+			sample := 0
+			for k, v := range entityMap {
+				if sample >= 12 {
+					break
+				}
+				log.Printf("[FBUP-ENT] sample[%d] key='%s' -> entity='%s'", sample, k, v)
+				sample++
+			}
 		}
 
 		results := make([]UploadResult, 0, len(files))
