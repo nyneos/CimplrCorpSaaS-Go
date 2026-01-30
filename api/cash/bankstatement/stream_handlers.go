@@ -922,6 +922,24 @@ func CommitHandler(db *sql.DB) http.Handler {
 				narration = *t.Narration
 			}
 
+			// Parse dates into time.Time when possible so JSON uses RFC3339 timestamps
+			var tranDateVal interface{}
+			var valueDateVal interface{}
+			if t.TranDate != nil && strings.TrimSpace(*t.TranDate) != "" {
+				if pd, err := time.Parse(constants.DateFormat, *t.TranDate); err == nil {
+					tranDateVal = pd
+				} else {
+					tranDateVal = *t.TranDate
+				}
+			}
+			if t.ValueDate != nil && strings.TrimSpace(*t.ValueDate) != "" {
+				if pd, err := time.Parse(constants.DateFormat, *t.ValueDate); err == nil {
+					valueDateVal = pd
+				} else {
+					valueDateVal = *t.ValueDate
+				}
+			}
+
 			// Match category
 			wdNull := sql.NullFloat64{Valid: wd > 0, Float64: wd}
 			depNull := sql.NullFloat64{Valid: dep > 0, Float64: dep}
@@ -936,11 +954,10 @@ func CommitHandler(db *sql.DB) http.Handler {
 
 				txMap := map[string]interface{}{
 					"index":       i,
-					"tran_date":   t.TranDate,
-					"value_date":  t.ValueDate,
+					"tran_date":   tranDateVal,
+					"value_date":  valueDateVal,
 					"narration":   narration,
-					"withdrawal":  wd,
-					"deposit":     dep,
+					"amount":       map[string]interface{}{"withdrawal": wd, "deposit": dep},
 					"balance":     t.Balance,
 					"category_id": catID,
 				}
@@ -949,11 +966,10 @@ func CommitHandler(db *sql.DB) http.Handler {
 				ungroupedTxns++
 				uncategorized = append(uncategorized, map[string]interface{}{
 					"index":      i,
-					"tran_date":  t.TranDate,
-					"value_date": t.ValueDate,
+					"tran_date":  tranDateVal,
+					"value_date": valueDateVal,
 					"narration":  narration,
-					"withdrawal": wd,
-					"deposit":    dep,
+					"amount":      map[string]interface{}{"withdrawal": wd, "deposit": dep},
 					"balance":    t.Balance,
 				})
 			}

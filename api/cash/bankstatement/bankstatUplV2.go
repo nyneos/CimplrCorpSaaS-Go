@@ -4869,14 +4869,15 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 			}
 			categoryTxns[catID] = append(categoryTxns[catID], txMap)
 		} else {
+			// Keep shape consistent with upload flow: nested `amount` and time.Time dates
 			uncategorized = append(uncategorized, map[string]interface{}{
-				"index":            i,
-				"transaction_date": txnDate.Format(constants.DateFormat),
-				"value_date":       valDate.Format(constants.DateFormat),
-				"description":      txn.Description,
-				"withdrawal":       txn.Withdrawal,
-				"deposit":          txn.Deposit,
-				"balance":          txn.Balance,
+				"index":       i,
+				"tran_id":     t.TranID.String,
+				"description": t.Description,
+				"transaction_date": t.TransactionDate,
+				"value_date":       t.ValueDate,
+				"amount":           map[string]interface{}{"withdrawal": t.WithdrawalAmount.Float64, "deposit": t.DepositAmount.Float64},
+				"balance":          t.Balance.Float64,
 			})
 		}
 	}
