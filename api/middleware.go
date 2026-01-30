@@ -121,27 +121,27 @@ func GetUserIDFromCtx(ctx context.Context) string {
 func IsEntityAllowed(ctx context.Context, entityIdentifier string) bool {
 	entityNames := GetEntityNamesFromCtx(ctx)
 	entityIDs := GetEntityIDsFromCtx(ctx)
-	
+
 	if len(entityNames) == 0 && len(entityIDs) == 0 {
 		return false
 	}
-	
+
 	identifierUpper := strings.ToUpper(strings.TrimSpace(entityIdentifier))
-	
+
 	// Check against entity IDs first
 	for _, id := range entityIDs {
 		if strings.ToUpper(strings.TrimSpace(id)) == identifierUpper {
 			return true
 		}
 	}
-	
+
 	// Check against entity names
 	for _, name := range entityNames {
 		if strings.ToUpper(strings.TrimSpace(name)) == identifierUpper {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -258,58 +258,57 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 
-		// Find root entity id - check both masterentitycash and masterentity
-		var rootEntityId string
-		
-		// Try 1: Exact match in masterentitycash
-		query := `SELECT entity_id FROM masterentitycash 
+			// Find root entity id - check both masterentitycash and masterentity
+			var rootEntityId string
+
+			// Try 1: Exact match in masterentitycash
+			query := `SELECT entity_id FROM masterentitycash 
 			WHERE entity_name = $1 
 			AND (is_deleted = false OR is_deleted IS NULL) 
 			AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')`
-		err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-		
-		// Try 2: Case-insensitive match in masterentitycash
-		if err != nil {
-			query = `SELECT entity_id FROM masterentitycash 
+			err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+
+			// Try 2: Case-insensitive match in masterentitycash
+			if err != nil {
+				query = `SELECT entity_id FROM masterentitycash 
 				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')
 				LIMIT 1`
-			err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-		}
-		
-		// Try 3: Exact match in masterentity (fallback)
-		if err != nil {
-			query = `SELECT entity_id FROM masterEntity 
+				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+			}
+
+			// Try 3: Exact match in masterentity (fallback)
+			if err != nil {
+				query = `SELECT entity_id FROM masterEntity 
 				WHERE entity_name = $1 
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR approval_status ILIKE 'approved')`
-			err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-		}
-		
-		// Try 4: Case-insensitive match in masterentity (final fallback)
-		if err != nil {
-			query = `SELECT entity_id FROM masterEntity 
+				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+			}
+
+			// Try 4: Case-insensitive match in masterentity (final fallback)
+			if err != nil {
+				query = `SELECT entity_id FROM masterEntity 
 				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
 				AND (is_deleted = false OR is_deleted IS NULL) 
 				AND (is_top_level_entity = TRUE OR approval_status ILIKE 'approved')
 				LIMIT 1`
-			err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-		}
-		
-		if err != nil {
-			log.Printf("[ERROR] Business unit entity NOT FOUND in masterentitycash OR masterentity for userBu: '%s' (error: %v)", userBu, err)
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   "Business unit '" + userBu + "' not found in system. Please contact administrator.",
-			})
-			return
-		}
-		
-		
-		// Try FIRST query: masterentitycash with cashentityrelationships
-		rows1, err1 := db.Query(`
+				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
+			}
+
+			if err != nil {
+				log.Printf("[ERROR] Business unit entity NOT FOUND in masterentitycash OR masterentity for userBu: '%s' (error: %v)", userBu, err)
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Business unit '" + userBu + "' not found in system. Please contact administrator.",
+				})
+				return
+			}
+
+			// Try FIRST query: masterentitycash with cashentityrelationships
+			rows1, err1 := db.Query(`
                WITH RECURSIVE descendants AS (
                     SELECT entity_id, entity_name 
                     FROM masterentitycash 
@@ -326,26 +325,26 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
                 )
                 SELECT DISTINCT entity_id, entity_name FROM descendants
             `, rootEntityId)
-		
-		var buNames []string
-		var buEntityIDs []string
-		
-		// Process first query results
-		if err1 == nil {
-			defer rows1.Close()
-			for rows1.Next() {
-				var entityID, entityName string
-				if err := rows1.Scan(&entityID, &entityName); err == nil {
-					buEntityIDs = append(buEntityIDs, entityID)
-					buNames = append(buNames, entityName)
+
+			var buNames []string
+			var buEntityIDs []string
+
+			// Process first query results
+			if err1 == nil {
+				defer rows1.Close()
+				for rows1.Next() {
+					var entityID, entityName string
+					if err := rows1.Scan(&entityID, &entityName); err == nil {
+						buEntityIDs = append(buEntityIDs, entityID)
+						buNames = append(buNames, entityName)
+					}
 				}
+			} else {
+				log.Printf("[WARN] masterentitycash query failed: %v", err1)
 			}
-		} else {
-			log.Printf("[WARN] masterentitycash query failed: %v", err1)
-		}
-		
-		// Try SECOND query: masterentity with entityRelationships
-		rows2, err2 := db.Query(`
+
+			// Try SECOND query: masterentity with entityRelationships
+			rows2, err2 := db.Query(`
                WITH RECURSIVE descendants AS (
                     SELECT entity_id, entity_name 
                     FROM masterEntity 
@@ -361,44 +360,43 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
                 )
                 SELECT DISTINCT entity_id, entity_name FROM descendants
             `, rootEntityId)
-		
-		// Process second query results
-		if err2 == nil {
-			defer rows2.Close()
-			for rows2.Next() {
-				var entityID, entityName string
-				if err := rows2.Scan(&entityID, &entityName); err == nil {
-					// Avoid duplicates
-					exists := false
-					for _, id := range buEntityIDs {
-						if id == entityID {
-							exists = true
-							break
+
+			// Process second query results
+			if err2 == nil {
+				defer rows2.Close()
+				for rows2.Next() {
+					var entityID, entityName string
+					if err := rows2.Scan(&entityID, &entityName); err == nil {
+						// Avoid duplicates
+						exists := false
+						for _, id := range buEntityIDs {
+							if id == entityID {
+								exists = true
+								break
+							}
+						}
+						if !exists {
+							buEntityIDs = append(buEntityIDs, entityID)
+							buNames = append(buNames, entityName)
 						}
 					}
-					if !exists {
-						buEntityIDs = append(buEntityIDs, entityID)
-						buNames = append(buNames, entityName)
-					}
 				}
+			} else {
+				log.Printf("[WARN] masterentity query failed: %v", err2)
 			}
-		} else {
-			log.Printf("[WARN] masterentity query failed: %v", err2)
-		}
-		
-		
-		// If BOTH queries failed or returned nothing, error out
-		if len(buNames) == 0 {
-			log.Printf("[ERROR] No accessible business units found in either table for rootEntityId: %s", rootEntityId)
-			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				constants.ValueSuccess: false,
-				constants.ValueError:   "No accessible business units found",
-			})
-			return
-		}
+
+			// If BOTH queries failed or returned nothing, error out
+			if len(buNames) == 0 {
+				log.Printf("[ERROR] No accessible business units found in either table for rootEntityId: %s", rootEntityId)
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					constants.ValueSuccess: false,
+					constants.ValueError:   "No accessible business units found",
+				})
+				return
+			}
 			// Attach to context and call next
-			
+
 			ctx := context.WithValue(r.Context(), BusinessUnitsKey, buNames)
 			ctx = context.WithValue(ctx, EntityIDsKey, buEntityIDs)
 			next.ServeHTTP(w, r.WithContext(ctx))

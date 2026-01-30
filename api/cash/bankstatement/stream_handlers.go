@@ -957,7 +957,8 @@ func CommitHandler(db *sql.DB) http.Handler {
 					"tran_date":   tranDateVal,
 					"value_date":  valueDateVal,
 					"narration":   narration,
-					"amount":       map[string]interface{}{"withdrawal": wd, "deposit": dep},
+					"withdrawal":  wd,
+					"deposit":     dep,
 					"balance":     t.Balance,
 					"category_id": catID,
 				}
@@ -969,7 +970,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 					"tran_date":  tranDateVal,
 					"value_date": valueDateVal,
 					"narration":  narration,
-					"amount":      map[string]interface{}{"withdrawal": wd, "deposit": dep},
+					"amount":     map[string]interface{}{"withdrawal": wd, "deposit": dep},
 					"balance":    t.Balance,
 				})
 			}

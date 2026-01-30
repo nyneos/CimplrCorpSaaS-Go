@@ -91,25 +91,25 @@ func normalizeOrderType(orderType string) string {
 func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                      string  `json:"user_id"`
-			InternalReferenceID         string  `json:"internal_reference_id"`
-			EntityLevel0                string  `json:"entity_level_0"`
-			EntityLevel1                string  `json:"entity_level_1"`
-			EntityLevel2                string  `json:"entity_level_2"`
-			EntityLevel3                string  `json:"entity_level_3"`
-			LocalCurrency               string  `json:"local_currency"`
-			OrderType                   string  `json:"order_type"`
-			TransactionType             string  `json:"transaction_type"`
-			Counterparty                string  `json:"counterparty"`
-			ModeOfDelivery              string  `json:"mode_of_delivery"`
-			DeliveryPeriod              string  `json:"delivery_period"`
-			AddDate                     string  `json:"add_date"`
-			SettlementDate              string  `json:"settlement_date"`
-			MaturityDate                string  `json:"maturity_date"`
-			DeliveryDate                string  `json:"delivery_date"`
-			CurrencyPair                string  `json:"currency_pair"`
-			BaseCurrency                string  `json:"base_currency"`
-			QuoteCurrency               string  `json:"quote_currency"`
+			UserID                      string      `json:"user_id"`
+			InternalReferenceID         string      `json:"internal_reference_id"`
+			EntityLevel0                string      `json:"entity_level_0"`
+			EntityLevel1                string      `json:"entity_level_1"`
+			EntityLevel2                string      `json:"entity_level_2"`
+			EntityLevel3                string      `json:"entity_level_3"`
+			LocalCurrency               string      `json:"local_currency"`
+			OrderType                   string      `json:"order_type"`
+			TransactionType             string      `json:"transaction_type"`
+			Counterparty                string      `json:"counterparty"`
+			ModeOfDelivery              string      `json:"mode_of_delivery"`
+			DeliveryPeriod              string      `json:"delivery_period"`
+			AddDate                     string      `json:"add_date"`
+			SettlementDate              string      `json:"settlement_date"`
+			MaturityDate                string      `json:"maturity_date"`
+			DeliveryDate                string      `json:"delivery_date"`
+			CurrencyPair                string      `json:"currency_pair"`
+			BaseCurrency                string      `json:"base_currency"`
+			QuoteCurrency               string      `json:"quote_currency"`
 			BookingAmount               json.Number `json:"booking_amount"`
 			ValueType                   string      `json:"value_type"`
 			ActualValueBaseCurrency     json.Number `json:"actual_value_base_currency"`
@@ -120,11 +120,11 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			ValueQuoteCurrency          json.Number `json:"value_quote_currency"`
 			InterveningRateQuoteToLocal json.Number `json:"intervening_rate_quote_to_local"`
 			ValueLocalCurrency          json.Number `json:"value_local_currency"`
-			InternalDealer              string  `json:"internal_dealer"`
-			CounterpartyDealer          string  `json:"counterparty_dealer"`
-			Remarks                     string  `json:"remarks"`
-			Narration                   string  `json:"narration"`
-			TransactionTimestamp        string  `json:"transaction_timestamp"`
+			InternalDealer              string      `json:"internal_dealer"`
+			CounterpartyDealer          string      `json:"counterparty_dealer"`
+			Remarks                     string      `json:"remarks"`
+			Narration                   string      `json:"narration"`
+			TransactionTimestamp        string      `json:"transaction_timestamp"`
 		}
 		dec := json.NewDecoder(r.Body)
 		dec.UseNumber()

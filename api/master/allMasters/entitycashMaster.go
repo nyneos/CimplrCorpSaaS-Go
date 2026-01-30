@@ -106,31 +106,31 @@ type CashEntityMasterRequest struct {
 	EntityShortName  string `json:"entity_short_name"`
 	EntityLevel      int    `json:"entity_level"`
 	// ParentEntityName           string `json:"parent_entity_name"`
-	EntityRegistrationNumber string `json:"entity_registration_number"`
-	Country                  string `json:"country"`
-	BaseOperatingCurrency    string `json:"base_operating_currency"`
-	TaxIdentificationNumber  string `json:"tax_identification_number"`
-	AddressLine1             string `json:"address_line1"`
-	AddressLine2             string `json:"address_line2"`
-	City                     string `json:"city"`
-	StateProvince            string `json:"state_province"`
-	PostalCode               string `json:"postal_code"`
-	ContactPersonName        string `json:"contact_person_name"`
-	ContactPersonEmail       string `json:"contact_person_email"`
-	ContactPersonPhone       string `json:"contact_person_phone"`
-	ActiveStatus             string `json:"active_status"`
-	IsTopLevelEntity         bool   `json:"is_top_level_entity"`
-	IsDeleted                bool   `json:"is_deleted"`
-	PanGST                   string `json:"pan_gst"`
-	LegalEntityIdentifier    string `json:"legal_entity_identifier"`
-	LegalEntityType          string `json:"legal_entity_type"`
-	ReportingCurrency        string `json:"reporting_currency"`
-	FxTradingAuthority       string `json:"fx_trading_authority"`
-	InternalFxTradingLimit   string `json:"internal_fx_trading_limit"`
+	EntityRegistrationNumber  string `json:"entity_registration_number"`
+	Country                   string `json:"country"`
+	BaseOperatingCurrency     string `json:"base_operating_currency"`
+	TaxIdentificationNumber   string `json:"tax_identification_number"`
+	AddressLine1              string `json:"address_line1"`
+	AddressLine2              string `json:"address_line2"`
+	City                      string `json:"city"`
+	StateProvince             string `json:"state_province"`
+	PostalCode                string `json:"postal_code"`
+	ContactPersonName         string `json:"contact_person_name"`
+	ContactPersonEmail        string `json:"contact_person_email"`
+	ContactPersonPhone        string `json:"contact_person_phone"`
+	ActiveStatus              string `json:"active_status"`
+	IsTopLevelEntity          bool   `json:"is_top_level_entity"`
+	IsDeleted                 bool   `json:"is_deleted"`
+	PanGST                    string `json:"pan_gst"`
+	LegalEntityIdentifier     string `json:"legal_entity_identifier"`
+	LegalEntityType           string `json:"legal_entity_type"`
+	ReportingCurrency         string `json:"reporting_currency"`
+	FxTradingAuthority        string `json:"fx_trading_authority"`
+	InternalFxTradingLimit    string `json:"internal_fx_trading_limit"`
 	AssociatedTreasuryContact string `json:"associated_treasury_contact"`
-	AssociatedBusinessUnits  string `json:"associated_business_units"`
-	Comments                 string `json:"comments"`
-	UniqueIdentifier         string `json:"unique_identifier"`
+	AssociatedBusinessUnits   string `json:"associated_business_units"`
+	Comments                  string `json:"comments"`
+	UniqueIdentifier          string `json:"unique_identifier"`
 }
 
 type CashEntityBulkRequest struct {
@@ -406,18 +406,18 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		hideIDs := make(map[string]bool)
 		allIDs := []string{}
 
-			for rows.Next() {
+		for rows.Next() {
 			var (
-				id, name, shortName, parentName, regNum, country, baseCur, taxID sql.NullString
-				panGST, legalEntityIdentifier, legalEntityType, reportingCurrency, fxTradingAuthority, internalFxTradingLimit, associatedTreasuryContact, associatedBusinessUnits, comments, uniqueIdentifier sql.NullString
-				addr1, addr2, city, state, postal, contactName, contactEmail, contactPhone sql.NullString
-				active sql.NullString
-				oldName, oldShort, oldParent, oldReg, oldCountry, oldBaseCur, oldTax, oldAddr1, oldAddr2, oldCity, oldState, oldPostal, oldContactName, oldContactEmail, oldContactPhone, oldActive sql.NullString
+				id, name, shortName, parentName, regNum, country, baseCur, taxID                                                                                                                                                            sql.NullString
+				panGST, legalEntityIdentifier, legalEntityType, reportingCurrency, fxTradingAuthority, internalFxTradingLimit, associatedTreasuryContact, associatedBusinessUnits, comments, uniqueIdentifier                               sql.NullString
+				addr1, addr2, city, state, postal, contactName, contactEmail, contactPhone                                                                                                                                                  sql.NullString
+				active                                                                                                                                                                                                                      sql.NullString
+				oldName, oldShort, oldParent, oldReg, oldCountry, oldBaseCur, oldTax, oldAddr1, oldAddr2, oldCity, oldState, oldPostal, oldContactName, oldContactEmail, oldContactPhone, oldActive                                         sql.NullString
 				oldPanGST, oldLegalEntityIdentifier, oldLegalEntityType, oldReportingCurrency, oldFxTradingAuthority, oldInternalFxTradingLimit, oldAssociatedTreasuryContact, oldAssociatedBusinessUnits, oldComments, oldUniqueIdentifier sql.NullString
-				procStatus, reqBy, actType, actID, checkerBy, checkerComment, reason sql.NullString
-				level, oldLevel  sql.NullInt64
-				reqAt, checkerAt sql.NullTime
-				isTop, isDel     bool
+				procStatus, reqBy, actType, actID, checkerBy, checkerComment, reason                                                                                                                                                        sql.NullString
+				level, oldLevel                                                                                                                                                                                                             sql.NullInt64
+				reqAt, checkerAt                                                                                                                                                                                                            sql.NullTime
+				isTop, isDel                                                                                                                                                                                                                bool
 			)
 
 			if err := rows.Scan(
@@ -441,69 +441,69 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			data := map[string]interface{}{
-				"entity_id":                      id.String,
-				"entity_name":                    name.String,
-				"entity_short_name":              shortName.String,
-				"entity_level":                   level.Int64,
-				"parent_entity_name":             parentName.String,
-				"entity_registration_number":     regNum.String,
-				"country":                        country.String,
-				"base_operating_currency":        baseCur.String,
-				"tax_identification_number":      taxID.String,
-				"pan_gst":                        panGST.String,
-				"legal_entity_identifier":        legalEntityIdentifier.String,
-				"legal_entity_type":              legalEntityType.String,
-				"reporting_currency":             reportingCurrency.String,
-				"fx_trading_authority":           fxTradingAuthority.String,
-				"internal_fx_trading_limit":      internalFxTradingLimit.String,
-				"associated_treasury_contact":    associatedTreasuryContact.String,
-				"associated_business_units":      associatedBusinessUnits.String,
-				"comments":                       comments.String,
-				"unique_identifier":              uniqueIdentifier.String,
-				"address_line1":                  addr1.String,
-				"address_line2":                  addr2.String,
-				"city":                           city.String,
-				"state_province":                 state.String,
-				"postal_code":                    postal.String,
-				"contact_person_name":            contactName.String,
-				"contact_person_email":           contactEmail.String,
-				"contact_person_phone":           contactPhone.String,
-				"active_status":                  active.String,
-				"old_entity_name":                oldName.String,
-				"old_entity_short_name":          oldShort.String,
-				"old_entity_level":               oldLevel.Int64,
-				"old_parent_entity_name":         oldParent.String,
-				"old_entity_registration_number": oldReg.String,
-				"old_country":                    oldCountry.String,
-				"old_base_operating_currency":    oldBaseCur.String,
-				"old_tax_identification_number":  oldTax.String,
-				"old_address_line1":              oldAddr1.String,
-				"old_address_line2":              oldAddr2.String,
-				"old_city":                       oldCity.String,
-				"old_state_province":             oldState.String,
-				"old_postal_code":                oldPostal.String,
-				"old_contact_person_name":        oldContactName.String,
-				"old_contact_person_email":       oldContactEmail.String,
-				"old_contact_person_phone":       oldContactPhone.String,
-				"old_active_status":              oldActive.String,
-				"old_pan_gst":                   oldPanGST.String,
-				"old_legal_entity_identifier":   oldLegalEntityIdentifier.String,
-				"old_legal_entity_type":         oldLegalEntityType.String,
-				"old_reporting_currency":        oldReportingCurrency.String,
-				"old_fx_trading_authority":      oldFxTradingAuthority.String,
-				"old_internal_fx_trading_limit": oldInternalFxTradingLimit.String,
+				"entity_id":                       id.String,
+				"entity_name":                     name.String,
+				"entity_short_name":               shortName.String,
+				"entity_level":                    level.Int64,
+				"parent_entity_name":              parentName.String,
+				"entity_registration_number":      regNum.String,
+				"country":                         country.String,
+				"base_operating_currency":         baseCur.String,
+				"tax_identification_number":       taxID.String,
+				"pan_gst":                         panGST.String,
+				"legal_entity_identifier":         legalEntityIdentifier.String,
+				"legal_entity_type":               legalEntityType.String,
+				"reporting_currency":              reportingCurrency.String,
+				"fx_trading_authority":            fxTradingAuthority.String,
+				"internal_fx_trading_limit":       internalFxTradingLimit.String,
+				"associated_treasury_contact":     associatedTreasuryContact.String,
+				"associated_business_units":       associatedBusinessUnits.String,
+				"comments":                        comments.String,
+				"unique_identifier":               uniqueIdentifier.String,
+				"address_line1":                   addr1.String,
+				"address_line2":                   addr2.String,
+				"city":                            city.String,
+				"state_province":                  state.String,
+				"postal_code":                     postal.String,
+				"contact_person_name":             contactName.String,
+				"contact_person_email":            contactEmail.String,
+				"contact_person_phone":            contactPhone.String,
+				"active_status":                   active.String,
+				"old_entity_name":                 oldName.String,
+				"old_entity_short_name":           oldShort.String,
+				"old_entity_level":                oldLevel.Int64,
+				"old_parent_entity_name":          oldParent.String,
+				"old_entity_registration_number":  oldReg.String,
+				"old_country":                     oldCountry.String,
+				"old_base_operating_currency":     oldBaseCur.String,
+				"old_tax_identification_number":   oldTax.String,
+				"old_address_line1":               oldAddr1.String,
+				"old_address_line2":               oldAddr2.String,
+				"old_city":                        oldCity.String,
+				"old_state_province":              oldState.String,
+				"old_postal_code":                 oldPostal.String,
+				"old_contact_person_name":         oldContactName.String,
+				"old_contact_person_email":        oldContactEmail.String,
+				"old_contact_person_phone":        oldContactPhone.String,
+				"old_active_status":               oldActive.String,
+				"old_pan_gst":                     oldPanGST.String,
+				"old_legal_entity_identifier":     oldLegalEntityIdentifier.String,
+				"old_legal_entity_type":           oldLegalEntityType.String,
+				"old_reporting_currency":          oldReportingCurrency.String,
+				"old_fx_trading_authority":        oldFxTradingAuthority.String,
+				"old_internal_fx_trading_limit":   oldInternalFxTradingLimit.String,
 				"old_associated_treasury_contact": oldAssociatedTreasuryContact.String,
-				"old_associated_business_units": oldAssociatedBusinessUnits.String,
-				"old_comments":                  oldComments.String,
-				"old_unique_identifier":         oldUniqueIdentifier.String,
-				"is_top_level_entity":            isTop,
-				"is_deleted":                     isDel,
-				"processing_status":              procStatus.String,
-				"action_type":                    actType.String,
-				"action_id":                      actID.String,
-				"checker_by":                     checkerBy.String,
-				"checker_comment":                checkerComment.String,
-				"reason":                         reason.String,
+				"old_associated_business_units":   oldAssociatedBusinessUnits.String,
+				"old_comments":                    oldComments.String,
+				"old_unique_identifier":           oldUniqueIdentifier.String,
+				"is_top_level_entity":             isTop,
+				"is_deleted":                      isDel,
+				"processing_status":               procStatus.String,
+				"action_type":                     actType.String,
+				"action_id":                       actID.String,
+				"checker_by":                      checkerBy.String,
+				"checker_comment":                 checkerComment.String,
+				"reason":                          reason.String,
 				"checker_at": func() string {
 					if checkerAt.Valid {
 						return checkerAt.Time.Format(constants.DateTimeFormat)
@@ -1731,7 +1731,7 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Only return entities user has access to (from their hierarchy)
-				query := `
+		query := `
 						SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
 						FROM masterentitycash m
 						WHERE m.entity_id = ANY($1)

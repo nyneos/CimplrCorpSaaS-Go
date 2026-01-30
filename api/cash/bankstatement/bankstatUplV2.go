@@ -692,8 +692,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// 3. Extract account number, entity id, and name from header
 	var accountNumber, entityID, accountName string
 
-	// If custom mapping is enabled, use mapped column names for header extraction
-	if useMapping && mappings != nil {
+	// If custom mapping is provided, attempt to extract account number and name using the mapped header names.
+	if mappings != nil {
 		// Search for custom mapped headers in first 20 rows
 		for i := 0; i < len(rows) && i < 20; i++ {
 			for j, cell := range rows[i] {
@@ -720,8 +720,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 		}
-	} else {
-		// Use default extraction logic when not using custom mapping
+	}
+
+	// If account number wasn't found via mapping (or no mapping provided), proceed with the regular extraction logic.
+	if accountNumber == "" {
+		// Use default extraction logic when not using custom mapping or when mapping failed
 		if isCSV {
 			// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
 			for i := 0; i < 20 && i < len(rows); i++ {
@@ -747,11 +750,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 		}
-	} // End of custom mapping vs default extraction block
+	}
 
-	// Only run fallback extraction when NOT using custom mapping
-	// When custom mapping is enabled, we should ONLY use the provided mappings
-	if accountNumber == "" && !(useMapping && mappings != nil) {
+	// If account number still not found via mapping/header scan, run fallback extraction
+	if accountNumber == "" {
 		// Fallback: try to extract account number from the first 20 header rows
 		// Handles cases like "Account Number: 36013001" in a single cell,
 		// label in one cell and value in adjacent or next-row cell, or merged cells.
@@ -1080,12 +1082,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
 
-		// If custom mapping is enabled, use custom column names directly
-		if useMapping && mappings != nil {
+		// Base mapping: index header names by their trimmed text
+		for idx, col := range headerRow {
+			colIdx[strings.TrimSpace(col)] = idx
+		}
+
+		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
+		if mappings != nil {
 			for idx, col := range headerRow {
 				normCol := strings.TrimSpace(col)
 
-				// Map custom names to standard internal names
+				// Map custom names to standard internal names only when provided
 				if mappings.TranID != "" && strings.EqualFold(normCol, mappings.TranID) {
 					colIdx[tranIDHeader] = idx
 				}
@@ -1109,281 +1116,272 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					colIdx[balanceHeader] = idx
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping applied: %v", colIdx)
-		} else {
-			// Original column mapping logic
-			for idx, col := range headerRow {
-				colIdx[strings.TrimSpace(col)] = idx
+			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied: %v", colIdx)
+		}
+		// Verbose header/column dump for Excel branch as well: index, header,
+		// normalized token, numeric-sample and first few sample cells.
+		sampleValuesLimit := 5
+		for idx, col := range headerRow {
+			norm := strings.ToLower(strings.TrimSpace(col))
+			norm = strings.ReplaceAll(norm, ",", "")
+			norm = strings.ReplaceAll(norm, ".", "")
+			norm = strings.ReplaceAll(norm, "/", " ")
+			norm = strings.Join(strings.Fields(norm), " ")
+			// do a quick numeric sample across the next 20 rows
+			countSamples := 0
+			numCount := 0
+			for r := txnHeaderIdx + 1; r < len(rows) && countSamples < 20; r++ {
+				row := rows[r]
+				if idx >= len(row) {
+					countSamples++
+					continue
+				}
+				cell := strings.TrimSpace(row[idx])
+				if cell == "" {
+					countSamples++
+					continue
+				}
+				clean := cleanAmount(cell)
+				if _, err := strconv.ParseFloat(clean, 64); err == nil {
+					numCount++
+				}
+				countSamples++
 			}
+			numericSample := false
+			if countSamples > 0 && numCount*2 >= countSamples {
+				numericSample = true
+			}
+			// collect sample cells
+			samples := []string{}
+			for r := txnHeaderIdx + 1; r < len(rows) && len(samples) < sampleValuesLimit; r++ {
+				row := rows[r]
+				if idx < len(row) {
+					samples = append(samples, row[idx])
+				} else {
+					samples = append(samples, "")
+				}
+			}
+			log.Printf("[BANK-UPLOAD-DEBUG] excel-header-col idx=%d header=%q norm=%q numericSample=%v samples=%q", idx, col, norm, numericSample, samples)
 		}
 
-		// Only run the verbose header/column dump and auto-detection if NOT using custom mapping
-		if !(useMapping && mappings != nil) {
-			// Verbose header/column dump for Excel branch as well: index, header,
-			// normalized token, numeric-sample and first few sample cells.
-			sampleValuesLimit := 5
-			for idx, col := range headerRow {
-				norm := strings.ToLower(strings.TrimSpace(col))
-				norm = strings.ReplaceAll(norm, ",", "")
-				norm = strings.ReplaceAll(norm, ".", "")
-				norm = strings.ReplaceAll(norm, "/", " ")
-				norm = strings.Join(strings.Fields(norm), " ")
-				// do a quick numeric sample across the next 20 rows
-				countSamples := 0
-				numCount := 0
-				for r := txnHeaderIdx + 1; r < len(rows) && countSamples < 20; r++ {
-					row := rows[r]
-					if idx >= len(row) {
-						countSamples++
-						continue
-					}
-					cell := strings.TrimSpace(row[idx])
-					if cell == "" {
-						countSamples++
-						continue
-					}
-					clean := cleanAmount(cell)
-					if _, err := strconv.ParseFloat(clean, 64); err == nil {
-						numCount++
-					}
-					countSamples++
+		// Add flexible column name mappings for CSV as well
+		findColContaining := func(keywords ...string) int {
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				if strings.Contains(lcName, "ref") {
+					continue
 				}
-				numericSample := false
-				if countSamples > 0 && numCount*2 >= countSamples {
-					numericSample = true
-				}
-				// collect sample cells
-				samples := []string{}
-				for r := txnHeaderIdx + 1; r < len(rows) && len(samples) < sampleValuesLimit; r++ {
-					row := rows[r]
-					if idx < len(row) {
-						samples = append(samples, row[idx])
-					} else {
-						samples = append(samples, "")
+				for _, kw := range keywords {
+					if strings.Contains(lcName, strings.ToLower(kw)) {
+						return idx
 					}
 				}
-				log.Printf("[BANK-UPLOAD-DEBUG] excel-header-col idx=%d header=%q norm=%q numericSample=%v samples=%q", idx, col, norm, numericSample, samples)
 			}
+			return -1
+		}
 
-			// Add flexible column name mappings for CSV as well
-			findColContaining := func(keywords ...string) int {
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					if strings.Contains(lcName, "ref") {
-						continue
-					}
-					for _, kw := range keywords {
-						if strings.Contains(lcName, strings.ToLower(kw)) {
-							return idx
-						}
-					}
-				}
-				return -1
+		// helper to check if a column looks numeric by sampling a few data rows
+		sampleNumericColumn = func(colIdxNum int) bool {
+			if colIdxNum < 0 {
+				return false
 			}
-
-			// helper to check if a column looks numeric by sampling a few data rows
-			sampleNumericColumn = func(colIdxNum int) bool {
-				if colIdxNum < 0 {
-					return false
-				}
-				samples := 0
-				numericCount := 0
-				for r := txnHeaderIdx + 1; r < len(rows) && samples < 100; r++ {
-					row := rows[r]
-					if colIdxNum >= len(row) {
-						samples++
-						continue
-					}
-					cell := strings.TrimSpace(row[colIdxNum])
-					if cell == "" {
-						samples++
-						continue
-					}
-					clean := cleanAmount(cell)
-					if _, err := strconv.ParseFloat(clean, 64); err == nil {
-						numericCount++
-					}
+			samples := 0
+			numericCount := 0
+			for r := txnHeaderIdx + 1; r < len(rows) && samples < 100; r++ {
+				row := rows[r]
+				if colIdxNum >= len(row) {
 					samples++
+					continue
 				}
-				// consider numeric if at least one sampled cell looks numeric
-				return samples > 0 && numericCount > 0
+				cell := strings.TrimSpace(row[colIdxNum])
+				if cell == "" {
+					samples++
+					continue
+				}
+				clean := cleanAmount(cell)
+				if _, err := strconv.ParseFloat(clean, 64); err == nil {
+					numericCount++
+				}
+				samples++
 			}
+			// consider numeric if at least one sampled cell looks numeric
+			return samples > 0 && numericCount > 0
+		}
 
-			// find amount-like column for CSV: avoid 'ref' columns and prefer numeric columns
-			findAmountLikeCSV = func() int {
-				best := -1
-				// prefer explicit Debit/Credit headers that are numeric
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(strings.TrimSpace(colName))
-					if lcName == "debit" || lcName == "credit" || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit") {
-						if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") || strings.Contains(lcName, constants.ErrReferenceRequired) {
-							continue
-						}
-						if sampleNumericColumn(idx) {
-							return idx
-						}
+		// find amount-like column for CSV: avoid 'ref' columns and prefer numeric columns
+		findAmountLikeCSV = func() int {
+			best := -1
+			// prefer explicit Debit/Credit headers that are numeric
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(strings.TrimSpace(colName))
+				if lcName == "debit" || lcName == "credit" || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit") {
+					if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") || strings.Contains(lcName, constants.ErrReferenceRequired) {
+						continue
+					}
+					if sampleNumericColumn(idx) {
+						return idx
+					}
+					best = idx
+				}
+			}
+			// fallback: any header containing 'amount' that is numeric
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				if strings.Contains(lcName, "amount") {
+					if sampleNumericColumn(idx) {
+						return idx
+					}
+					if best == -1 {
 						best = idx
 					}
 				}
-				// fallback: any header containing 'amount' that is numeric
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					if strings.Contains(lcName, "amount") {
-						if sampleNumericColumn(idx) {
-							return idx
-						}
-						if best == -1 {
-							best = idx
-						}
-					}
-				}
-				return best
 			}
-			// Force remap Description column: remove any auto-mapped description columns
-			// and explicitly set to Debit/Credit Ref if present
-			delete(colIdx, "Description")
-			delete(colIdx, "Detail Description")
+			return best
+		}
+		// Force remap Description column: remove any auto-mapped description columns
+		// and explicitly set to Debit/Credit Ref if present
+		delete(colIdx, "Description")
+		delete(colIdx, "Detail Description")
 
-			// Special finder that INCLUDES ref columns (override the default findColContaining)
-			findDescriptionCol := func(keywords ...string) int {
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					for _, kw := range keywords {
-						if strings.Contains(lcName, strings.ToLower(kw)) {
-							return idx
-						}
+		// Special finder that INCLUDES ref columns (override the default findColContaining)
+		findDescriptionCol := func(keywords ...string) int {
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				for _, kw := range keywords {
+					if strings.Contains(lcName, strings.ToLower(kw)) {
+						return idx
 					}
 				}
-				return -1
 			}
+			return -1
+		}
 
-			if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
-				colIdx["Description"] = idx
-				log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
-			} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
-				colIdx["Description"] = idx
-				log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
+		if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
+			colIdx["Description"] = idx
+			log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
+		} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+			colIdx["Description"] = idx
+			log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
+		}
+		if _, exists := colIdx["Date"]; !exists {
+			if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") {
+				colIdx["Date"] = idx
 			}
-			if _, exists := colIdx["Date"]; !exists {
-				if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") {
-					colIdx["Date"] = idx
+		}
+		if _, exists := colIdx["Balance"]; !exists {
+			if idx := findColContaining("balance"); idx >= 0 {
+				colIdx["Balance"] = idx
+				colIdx[balanceHeader] = idx // Also set balanceHeader for CSV path compatibility
+			}
+		} else {
+			// Balance exists, also map it to balanceHeader
+			colIdx[balanceHeader] = colIdx["Balance"]
+		}
+		// If Value Date is absent in CSV headers, fall back to the primary Date column
+		if _, exists := colIdx[valueDateHeader]; !exists {
+			if idx, ok := colIdx["Date"]; ok {
+				colIdx[valueDateHeader] = idx
+			}
+		}
+		// Choose Debit and Credit columns robustly by combining header keywords
+		// and numeric sampling. Prefer distinct numeric columns and skip
+		// reference columns like "Debit/Credit Ref".
+		findDebitCreditCols = func() (int, int) {
+			// scores: headerScore (higher if header explicitly mentions debit/credit), numericScore (1 if column looks numeric)
+			type cand struct {
+				idx         int
+				headerScore int
+				numeric     bool
+			}
+			cands := map[int]*cand{}
+			for colName, idx := range colIdx {
+				lc := strings.ToLower(strings.TrimSpace(colName))
+				// skip obvious reference columns
+				if strings.Contains(lc, "ref") || strings.Contains(lc, "reference") || strings.Contains(lc, constants.ErrReferenceRequired) {
+					continue
+				}
+				hdrScore := 0
+				if strings.Contains(lc, "withdrawal") || strings.Contains(lc, "debit") || strings.Contains(lc, "dr") {
+					hdrScore += 3
+				}
+				if strings.Contains(lc, "deposit") || strings.Contains(lc, "credit") || strings.Contains(lc, "cr") {
+					hdrScore += 3
+				}
+				if strings.Contains(lc, "amount") {
+					hdrScore += 1
+				}
+				// record candidate only if header suggests amounts or numeric sampling passes
+				numeric := sampleNumericColumn(idx)
+				if hdrScore > 0 || numeric {
+					cands[idx] = &cand{idx: idx, headerScore: hdrScore, numeric: numeric}
 				}
 			}
-			if _, exists := colIdx["Balance"]; !exists {
-				if idx := findColContaining("balance"); idx >= 0 {
-					colIdx["Balance"] = idx
-					colIdx[balanceHeader] = idx // Also set balanceHeader for CSV path compatibility
+			// pick withdrawal (debit) candidate
+			bestW, bestD := -1, -1
+			bestWScore := -1
+			for _, cc := range cands {
+				score := cc.headerScore
+				if cc.numeric {
+					score += 2
 				}
-			} else {
-				// Balance exists, also map it to balanceHeader
-				colIdx[balanceHeader] = colIdx["Balance"]
+				hdr := strings.ToLower(strings.TrimSpace(headerRow[cc.idx]))
+				// prefer explicit debit/withdrawal headers
+				if score > bestWScore && (hdr == "debit" || hdr == "withdrawal" || strings.Contains(hdr, "withdrawal") || (strings.Contains(hdr, "debit") && !strings.Contains(hdr, "credit"))) {
+					bestW = cc.idx
+					bestWScore = score
+				}
 			}
-			// If Value Date is absent in CSV headers, fall back to the primary Date column
-			if _, exists := colIdx[valueDateHeader]; !exists {
-				if idx, ok := colIdx["Date"]; ok {
-					colIdx[valueDateHeader] = idx
+			// pick deposit (credit) candidate
+			bestDScore := -1
+			for _, cc := range cands {
+				if cc.idx == bestW {
+					continue
+				}
+				score := cc.headerScore
+				if cc.numeric {
+					score += 2
+				}
+				hdr := strings.ToLower(strings.TrimSpace(headerRow[cc.idx]))
+				if score > bestDScore && (hdr == "credit" || hdr == "deposit" || strings.Contains(hdr, "deposit") || (strings.Contains(hdr, "credit") && !strings.Contains(hdr, "debit"))) {
+					bestD = cc.idx
+					bestDScore = score
 				}
 			}
-			// Choose Debit and Credit columns robustly by combining header keywords
-			// and numeric sampling. Prefer distinct numeric columns and skip
-			// reference columns like "Debit/Credit Ref".
-			findDebitCreditCols = func() (int, int) {
-				// scores: headerScore (higher if header explicitly mentions debit/credit), numericScore (1 if column looks numeric)
-				type cand struct {
-					idx         int
-					headerScore int
-					numeric     bool
-				}
-				cands := map[int]*cand{}
-				for colName, idx := range colIdx {
-					lc := strings.ToLower(strings.TrimSpace(colName))
-					// skip obvious reference columns
-					if strings.Contains(lc, "ref") || strings.Contains(lc, "reference") || strings.Contains(lc, constants.ErrReferenceRequired) {
-						continue
-					}
-					hdrScore := 0
-					if strings.Contains(lc, "withdrawal") || strings.Contains(lc, "debit") || strings.Contains(lc, "dr") {
-						hdrScore += 3
-					}
-					if strings.Contains(lc, "deposit") || strings.Contains(lc, "credit") || strings.Contains(lc, "cr") {
-						hdrScore += 3
-					}
-					if strings.Contains(lc, "amount") {
-						hdrScore += 1
-					}
-					// record candidate only if header suggests amounts or numeric sampling passes
-					numeric := sampleNumericColumn(idx)
-					if hdrScore > 0 || numeric {
-						cands[idx] = &cand{idx: idx, headerScore: hdrScore, numeric: numeric}
-					}
-				}
-				// pick withdrawal (debit) candidate
-				bestW, bestD := -1, -1
-				bestWScore := -1
+			// If still missing, try to fallback to any numeric candidates
+			if bestW == -1 {
 				for _, cc := range cands {
-					score := cc.headerScore
 					if cc.numeric {
-						score += 2
-					}
-					hdr := strings.ToLower(strings.TrimSpace(headerRow[cc.idx]))
-					// prefer explicit debit/withdrawal headers
-					if score > bestWScore && (hdr == "debit" || hdr == "withdrawal" || strings.Contains(hdr, "withdrawal") || (strings.Contains(hdr, "debit") && !strings.Contains(hdr, "credit"))) {
 						bestW = cc.idx
-						bestWScore = score
+						break
 					}
 				}
-				// pick deposit (credit) candidate
-				bestDScore := -1
+			}
+			if bestD == -1 {
 				for _, cc := range cands {
-					if cc.idx == bestW {
-						continue
-					}
-					score := cc.headerScore
-					if cc.numeric {
-						score += 2
-					}
-					hdr := strings.ToLower(strings.TrimSpace(headerRow[cc.idx]))
-					if score > bestDScore && (hdr == "credit" || hdr == "deposit" || strings.Contains(hdr, "deposit") || (strings.Contains(hdr, "credit") && !strings.Contains(hdr, "debit"))) {
+					if cc.idx != bestW && cc.numeric {
 						bestD = cc.idx
-						bestDScore = score
+						break
 					}
 				}
-				// If still missing, try to fallback to any numeric candidates
-				if bestW == -1 {
-					for _, cc := range cands {
-						if cc.numeric {
-							bestW = cc.idx
-							break
-						}
-					}
-				}
-				if bestD == -1 {
-					for _, cc := range cands {
-						if cc.idx != bestW && cc.numeric {
-							bestD = cc.idx
-							break
-						}
-					}
-				}
-				return bestW, bestD
 			}
+			return bestW, bestD
+		}
 
-			wIdx, dIdx := findDebitCreditCols()
-			log.Printf("[BANK-UPLOAD-DEBUG] findDebitCreditCols returned: Withdrawal=%d, Deposit=%d", wIdx, dIdx)
-			log.Printf("[BANK-UPLOAD-DEBUG] Headers: %v", headerRow)
-			if wIdx >= 0 {
-				log.Printf("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
-				colIdx["Withdrawal"] = wIdx
-				colIdx[withdrawalAmtHeader] = wIdx
-			}
-			if dIdx >= 0 {
-				log.Printf("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
-				colIdx["Deposit"] = dIdx
-				colIdx[depositAmtHeader] = dIdx
-			}
-			log.Printf("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
-				colIdx["Date"], colIdx["Description"], colIdx["Withdrawal"], colIdx["Deposit"], colIdx["Balance"])
-		} // End of auto-detection block when not using custom mapping
+		wIdx, dIdx := findDebitCreditCols()
+		log.Printf("[BANK-UPLOAD-DEBUG] findDebitCreditCols returned: Withdrawal=%d, Deposit=%d", wIdx, dIdx)
+		log.Printf("[BANK-UPLOAD-DEBUG] Headers: %v", headerRow)
+		if wIdx >= 0 {
+			log.Printf("[BANK-UPLOAD-DEBUG] Setting Withdrawal to column %d (header: %s)", wIdx, headerRow[wIdx])
+			colIdx["Withdrawal"] = wIdx
+			colIdx[withdrawalAmtHeader] = wIdx
+		}
+		if dIdx >= 0 {
+			log.Printf("[BANK-UPLOAD-DEBUG] Setting Deposit to column %d (header: %s)", dIdx, headerRow[dIdx])
+			colIdx["Deposit"] = dIdx
+			colIdx[depositAmtHeader] = dIdx
+		}
+		log.Printf("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
+			colIdx["Date"], colIdx["Description"], colIdx["Withdrawal"], colIdx["Deposit"], colIdx["Balance"])
 
 		// Flexible required columns: ensure we have Date, a description column, and at least one amount column
 		hasDate := false
@@ -1457,12 +1455,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
 
-		// If custom mapping is enabled, use custom column names directly
-		if useMapping && mappings != nil {
+		// Base mapping: index header names by their trimmed text
+		for idx, col := range headerRow {
+			colIdx[strings.TrimSpace(col)] = idx
+		}
+
+		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
+		if mappings != nil {
 			for idx, col := range headerRow {
 				normCol := strings.TrimSpace(col)
 
-				// Map custom names to standard internal names
+				// Map custom names to standard internal names only when provided
 				if mappings.TranID != "" && strings.EqualFold(normCol, mappings.TranID) {
 					colIdx[tranIDHeader] = idx
 				}
@@ -1484,259 +1487,250 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					colIdx[balanceHeader] = idx
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping applied for Excel: %v", colIdx)
-		} else {
-			// Original Excel column mapping logic
-			for idx, col := range headerRow {
-				colIdx[strings.TrimSpace(col)] = idx
+			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied for Excel: %v", colIdx)
+		}
+		// Add flexible column name mappings for common variations
+		// This allows matching "Detail Description" when code looks for "Description"
+		findColContaining := func(keywords ...string) int {
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				for _, kw := range keywords {
+					if strings.Contains(lcName, strings.ToLower(kw)) {
+						return idx
+					}
+				}
+			}
+			return -1
+		}
+
+		// Normalize common variants so downstream parsing does not miss dates.
+		if _, ok := colIdx[transactionDateHeader]; !ok {
+			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
+				colIdx[transactionDateHeader] = idx
+			}
+		}
+		if _, ok := colIdx["PostedDate"]; !ok {
+			if idx := findColContaining(constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
+				colIdx["PostedDate"] = idx
+			}
+		}
+		if _, ok := colIdx[valueDateHeader]; !ok {
+			if idx := findColContaining("value date", "value-date", "val date"); idx >= 0 {
+				colIdx[valueDateHeader] = idx
 			}
 		}
 
-		// Only run flexible column name mappings if NOT using custom mapping
-		if !(useMapping && mappings != nil) {
-			// Add flexible column name mappings for common variations
-			// This allows matching "Detail Description" when code looks for "Description"
-			findColContaining := func(keywords ...string) int {
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					for _, kw := range keywords {
-						if strings.Contains(lcName, strings.ToLower(kw)) {
-							return idx
-						}
-					}
-				}
-				return -1
-			}
+		// detect possible cr/dr indicator and amount column separately
+		crDrIdx := -1
+		amountIdx := -1
 
-			// Normalize common variants so downstream parsing does not miss dates.
-			if _, ok := colIdx[transactionDateHeader]; !ok {
-				if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
-					colIdx[transactionDateHeader] = idx
+		// helper to find amount-like columns (prefer explicit "amount" or exact "Debit"/"Credit")
+		findAmountLike := func() int {
+			// prefer any header containing "amount"
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				if strings.Contains(lcName, "amount") {
+					return idx
 				}
 			}
-			if _, ok := colIdx["PostedDate"]; !ok {
-				if idx := findColContaining(constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
-					colIdx["PostedDate"] = idx
+			// then prefer exact matches for Debit or Credit
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(strings.TrimSpace(colName))
+				if lcName == "debit" || lcName == "credit" || lcName == constants.DebitAmount || lcName == constants.CreditAmount {
+					return idx
 				}
 			}
-			if _, ok := colIdx[valueDateHeader]; !ok {
-				if idx := findColContaining("value date", "value-date", "val date"); idx >= 0 {
-					colIdx[valueDateHeader] = idx
+			// otherwise, pick a debit/credit-like column only if it is NOT a reference column
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				if (strings.Contains(lcName, "debit") || strings.Contains(lcName, "credit") || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit")) && !strings.Contains(lcName, "ref") && !strings.Contains(lcName, "reference") && !strings.Contains(lcName, constants.ErrReferenceRequired) {
+					return idx
 				}
 			}
+			return -1
+		}
 
-			// detect possible cr/dr indicator and amount column separately
-			crDrIdx := -1
-			amountIdx := -1
+		// helper to find Cr/Dr indicator columns
+		findCrDrLike := func() int {
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(colName)
+				if strings.Contains(lcName, "cr/dr") || strings.Contains(lcName, "crdr") || strings.Contains(lcName, "cr / dr") || strings.TrimSpace(lcName) == "cr" || strings.TrimSpace(lcName) == "dr" || strings.Contains(lcName, "credit/debit") || strings.Contains(lcName, "debit/credit") {
+					return idx
+				}
+			}
+			return -1
+		}
 
-			// helper to find amount-like columns (prefer explicit "amount" or exact "Debit"/"Credit")
-			findAmountLike := func() int {
-				// prefer any header containing "amount"
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					if strings.Contains(lcName, "amount") {
-						return idx
-					}
-				}
-				// then prefer exact matches for Debit or Credit
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(strings.TrimSpace(colName))
-					if lcName == "debit" || lcName == "credit" || lcName == constants.DebitAmount || lcName == constants.CreditAmount {
-						return idx
-					}
-				}
-				// otherwise, pick a debit/credit-like column only if it is NOT a reference column
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					if (strings.Contains(lcName, "debit") || strings.Contains(lcName, "credit") || strings.Contains(lcName, "withdrawal") || strings.Contains(lcName, "deposit")) && !strings.Contains(lcName, "ref") && !strings.Contains(lcName, "reference") && !strings.Contains(lcName, constants.ErrReferenceRequired) {
-						return idx
-					}
-				}
-				return -1
+		// Map standard names to flexible column indices
+		if _, exists := colIdx["Description"]; !exists {
+			// Prefer explicit description column when present
+			if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+				colIdx["Description"] = idx
+			} else if idx := findColContaining(constants.ErrDebitCreditReference2, constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
+				colIdx["Description"] = idx
 			}
+		}
+		if _, exists := colIdx[transactionRemarksHeader]; !exists {
+			// Prefer Debit/Credit Ref header if present for transaction remarks
+			// Try variations with slash and space
+			if idx := findColContaining(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
+				colIdx[transactionRemarksHeader] = idx
+				log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
+			} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+				colIdx[transactionRemarksHeader] = idx
+				log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Transaction Remarks", idx)
+			}
+		}
+		if _, exists := colIdx["Date"]; !exists {
+			if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") && !strings.Contains(strings.ToLower(headerRow[idx]), "posted") {
+				colIdx["Date"] = idx
+			}
+		}
+		if _, exists := colIdx[valueDateHeader]; !exists {
+			// Try "Value Date", "Txn Posted Date", or any date column
+			if idx := findColContaining("value date", constants.TransactionPostedDate); idx >= 0 {
+				colIdx[valueDateHeader] = idx
+			} else if idx := findColContaining("date"); idx >= 0 {
+				colIdx[valueDateHeader] = idx
+			}
+		}
+		if _, exists := colIdx[transactionDateHeader]; !exists {
+			// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
+			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
+				colIdx[transactionDateHeader] = idx
+			} else if idx := findColContaining("date"); idx >= 0 {
+				colIdx[transactionDateHeader] = idx
+			}
+		}
+		// Ensure we have a generic Date mapping; prefer value/transaction date when explicit Date is absent.
+		if _, exists := colIdx["Date"]; !exists {
+			if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") && !strings.Contains(strings.ToLower(headerRow[idx]), "posted") {
+				colIdx["Date"] = idx
+			} else if idx, ok := colIdx[valueDateHeader]; ok {
+				colIdx["Date"] = idx
+			} else if idx, ok := colIdx[transactionDateHeader]; ok {
+				colIdx["Date"] = idx
+			}
+		}
+		// Normalize posted date column
+		if _, exists := colIdx["PostedDate"]; !exists {
+			if idx := findColContaining(constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
+				colIdx["PostedDate"] = idx
+			}
+		}
+		if _, exists := colIdx[tranIDHeader]; !exists {
+			// Prefer explicit "Transaction ID" over generic "No." by ordering keywords
+			if idx := findColContaining("transaction id", "tran id", "txn id", "reference"); idx >= 0 {
+				colIdx[tranIDHeader] = idx
+			} else if idx := findColContaining("no.", "sl.", "sl no"); idx >= 0 {
+				colIdx[tranIDHeader] = idx
+			}
+		}
 
-			// helper to find Cr/Dr indicator columns
-			findCrDrLike := func() int {
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(colName)
-					if strings.Contains(lcName, "cr/dr") || strings.Contains(lcName, "crdr") || strings.Contains(lcName, "cr / dr") || strings.TrimSpace(lcName) == "cr" || strings.TrimSpace(lcName) == "dr" || strings.Contains(lcName, "credit/debit") || strings.Contains(lcName, "debit/credit") {
-						return idx
-					}
-				}
-				return -1
-			}
+		// Prefer explicit amount-like column, but only if we don't have separate debit/credit columns
+		amountIdx = findAmountLike()
 
-			// Map standard names to flexible column indices
-			if _, exists := colIdx["Description"]; !exists {
-				// Prefer explicit description column when present
-				if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
-					colIdx["Description"] = idx
-				} else if idx := findColContaining(constants.ErrDebitCreditReference2, constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
-					colIdx["Description"] = idx
-				}
-			}
-			if _, exists := colIdx[transactionRemarksHeader]; !exists {
-				// Prefer Debit/Credit Ref header if present for transaction remarks
-				// Try variations with slash and space
-				if idx := findColContaining(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
-					colIdx[transactionRemarksHeader] = idx
-					log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
-				} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
-					colIdx[transactionRemarksHeader] = idx
-					log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Transaction Remarks", idx)
-				}
-			}
-			if _, exists := colIdx["Date"]; !exists {
-				if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") && !strings.Contains(strings.ToLower(headerRow[idx]), "posted") {
-					colIdx["Date"] = idx
-				}
-			}
-			if _, exists := colIdx[valueDateHeader]; !exists {
-				// Try "Value Date", "Txn Posted Date", or any date column
-				if idx := findColContaining("value date", constants.TransactionPostedDate); idx >= 0 {
-					colIdx[valueDateHeader] = idx
-				} else if idx := findColContaining("date"); idx >= 0 {
-					colIdx[valueDateHeader] = idx
-				}
-			}
-			if _, exists := colIdx[transactionDateHeader]; !exists {
-				// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
-				if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
-					colIdx[transactionDateHeader] = idx
-				} else if idx := findColContaining("date"); idx >= 0 {
-					colIdx[transactionDateHeader] = idx
-				}
-			}
-			// Ensure we have a generic Date mapping; prefer value/transaction date when explicit Date is absent.
-			if _, exists := colIdx["Date"]; !exists {
-				if idx := findColContaining("date"); idx >= 0 && !strings.Contains(strings.ToLower(headerRow[idx]), "value") && !strings.Contains(strings.ToLower(headerRow[idx]), "posted") {
-					colIdx["Date"] = idx
-				} else if idx, ok := colIdx[valueDateHeader]; ok {
-					colIdx["Date"] = idx
-				} else if idx, ok := colIdx[transactionDateHeader]; ok {
-					colIdx["Date"] = idx
-				}
-			}
-			// Normalize posted date column
-			if _, exists := colIdx["PostedDate"]; !exists {
-				if idx := findColContaining(constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
-					colIdx["PostedDate"] = idx
-				}
-			}
-			if _, exists := colIdx[tranIDHeader]; !exists {
-				// Prefer explicit "Transaction ID" over generic "No." by ordering keywords
-				if idx := findColContaining("transaction id", "tran id", "txn id", "reference"); idx >= 0 {
-					colIdx[tranIDHeader] = idx
-				} else if idx := findColContaining("no.", "sl.", "sl no"); idx >= 0 {
-					colIdx[tranIDHeader] = idx
-				}
-			}
+		// Detect Cr/Dr indicator column (if present)
+		if crDrIdx = findCrDrLike(); crDrIdx >= 0 {
+			colIdx["CrDr"] = crDrIdx
+		}
 
-			// Prefer explicit amount-like column, but only if we don't have separate debit/credit columns
-			amountIdx = findAmountLike()
-
-			// Detect Cr/Dr indicator column (if present)
-			if crDrIdx = findCrDrLike(); crDrIdx >= 0 {
-				colIdx["CrDr"] = crDrIdx
+		// First try to find separate withdrawal/deposit columns
+		if _, exists := colIdx[withdrawalAmtHeader]; !exists {
+			// Look for exact "Debit" or "Withdrawal" column (exclude "Debit/Credit Ref")
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(strings.TrimSpace(colName))
+				// Skip reference columns
+				if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") {
+					continue
+				}
+				// Exact match for debit or withdrawal
+				if lcName == "debit" || lcName == "withdrawal" || lcName == constants.DebitAmount || lcName == "withdrawal amt" {
+					colIdx[withdrawalAmtHeader] = idx
+					break
+				}
 			}
+		}
+		if _, exists := colIdx[depositAmtHeader]; !exists {
+			// Look for exact "Credit" or "Deposit" column (exclude "Debit/Credit Ref")
+			for colName, idx := range colIdx {
+				lcName := strings.ToLower(strings.TrimSpace(colName))
+				// Skip reference columns
+				if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") {
+					continue
+				}
+				// Exact match for credit or deposit
+				if lcName == "credit" || lcName == "deposit" || lcName == constants.CreditAmount || lcName == "deposit amt" {
+					colIdx[depositAmtHeader] = idx
+					break
+				}
+			}
+		}
 
-			// First try to find separate withdrawal/deposit columns
+		// If we still don't have both withdrawal and deposit columns, and we have an amount column with Cr/Dr indicator,
+		// then map both to the amount column (sign will be determined by Cr/Dr)
+		if amountIdx >= 0 && crDrIdx >= 0 {
 			if _, exists := colIdx[withdrawalAmtHeader]; !exists {
-				// Look for exact "Debit" or "Withdrawal" column (exclude "Debit/Credit Ref")
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(strings.TrimSpace(colName))
-					// Skip reference columns
-					if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") {
-						continue
-					}
-					// Exact match for debit or withdrawal
-					if lcName == "debit" || lcName == "withdrawal" || lcName == constants.DebitAmount || lcName == "withdrawal amt" {
-						colIdx[withdrawalAmtHeader] = idx
-						break
-					}
-				}
+				colIdx[withdrawalAmtHeader] = amountIdx
 			}
 			if _, exists := colIdx[depositAmtHeader]; !exists {
-				// Look for exact "Credit" or "Deposit" column (exclude "Debit/Credit Ref")
-				for colName, idx := range colIdx {
-					lcName := strings.ToLower(strings.TrimSpace(colName))
-					// Skip reference columns
-					if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") {
-						continue
-					}
-					// Exact match for credit or deposit
-					if lcName == "credit" || lcName == "deposit" || lcName == constants.CreditAmount || lcName == "deposit amt" {
-						colIdx[depositAmtHeader] = idx
-						break
-					}
-				}
+				colIdx[depositAmtHeader] = amountIdx
 			}
-
-			// If we still don't have both withdrawal and deposit columns, and we have an amount column with Cr/Dr indicator,
-			// then map both to the amount column (sign will be determined by Cr/Dr)
-			if amountIdx >= 0 && crDrIdx >= 0 {
-				if _, exists := colIdx[withdrawalAmtHeader]; !exists {
-					colIdx[withdrawalAmtHeader] = amountIdx
-				}
-				if _, exists := colIdx[depositAmtHeader]; !exists {
-					colIdx[depositAmtHeader] = amountIdx
-				}
+		}
+		if _, exists := colIdx[balanceHeader]; !exists {
+			if idx := findColContaining("balance", "available balance"); idx >= 0 {
+				colIdx[balanceHeader] = idx
 			}
-			if _, exists := colIdx[balanceHeader]; !exists {
-				if idx := findColContaining("balance", "available balance"); idx >= 0 {
-					colIdx[balanceHeader] = idx
-				}
+		}
+		if _, exists := colIdx["Balance"]; !exists {
+			if idx := findColContaining("balance", "available balance"); idx >= 0 {
+				colIdx["Balance"] = idx
 			}
-			if _, exists := colIdx["Balance"]; !exists {
-				if idx := findColContaining("balance", "available balance"); idx >= 0 {
-					colIdx["Balance"] = idx
-				}
+		}
+		if _, exists := colIdx["Withdrawal"]; !exists {
+			if idx := findColContaining("withdrawal", "debit", "dr"); idx >= 0 {
+				colIdx["Withdrawal"] = idx
 			}
-			if _, exists := colIdx["Withdrawal"]; !exists {
-				if idx := findColContaining("withdrawal", "debit", "dr"); idx >= 0 {
-					colIdx["Withdrawal"] = idx
-				}
+		}
+		if _, exists := colIdx["Deposit"]; !exists {
+			if idx := findColContaining("deposit", "credit", "cr"); idx >= 0 {
+				colIdx["Deposit"] = idx
 			}
-			if _, exists := colIdx["Deposit"]; !exists {
-				if idx := findColContaining("deposit", "credit", "cr"); idx >= 0 {
-					colIdx["Deposit"] = idx
-				}
+		}
+		// If we still don't have a dedicated remarks column, mirror Description so parsing works for title-style layouts
+		if _, exists := colIdx[transactionRemarksHeader]; !exists {
+			if idx, ok := colIdx["Description"]; ok {
+				colIdx[transactionRemarksHeader] = idx
 			}
-			// If we still don't have a dedicated remarks column, mirror Description so parsing works for title-style layouts
-			if _, exists := colIdx[transactionRemarksHeader]; !exists {
-				if idx, ok := colIdx["Description"]; ok {
-					colIdx[transactionRemarksHeader] = idx
-				}
+		}
+		// Helper to safely get a column index or -1 when missing
+		getIdx := func(key string) int {
+			if v, ok := colIdx[key]; ok {
+				return v
 			}
-			// Helper to safely get a column index or -1 when missing
-			getIdx := func(key string) int {
-				if v, ok := colIdx[key]; ok {
-					return v
-				}
-				return -1
+			return -1
+		}
+		log.Printf("[BANK-UPLOAD-DEBUG] Column mapping: Date=%d, ValueDate=%d, TranID=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d, CrDr=%d, Amount=%d",
+			getIdx("Date"), getIdx(valueDateHeader), getIdx(tranIDHeader), getIdx(transactionRemarksHeader), getIdx(withdrawalAmtHeader), getIdx(depositAmtHeader), getIdx(balanceHeader), getIdx("CrDr"), amountIdx)
+		// Flexible required columns for Excel as well: need Date and (Description or amount column)
+		hasDate := false
+		hasDesc := false
+		hasAmount := false
+		for col := range colIdx {
+			lc := strings.ToLower(col)
+			if strings.Contains(lc, "date") {
+				hasDate = true
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Column mapping: Date=%d, ValueDate=%d, TranID=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d, CrDr=%d, Amount=%d",
-				getIdx("Date"), getIdx(valueDateHeader), getIdx(tranIDHeader), getIdx(transactionRemarksHeader), getIdx(withdrawalAmtHeader), getIdx(depositAmtHeader), getIdx(balanceHeader), getIdx("CrDr"), amountIdx)
-			// Flexible required columns for Excel as well: need Date and (Description or amount column)
-			hasDate := false
-			hasDesc := false
-			hasAmount := false
-			for col := range colIdx {
-				lc := strings.ToLower(col)
-				if strings.Contains(lc, "date") {
-					hasDate = true
-				}
-				if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") {
-					hasDesc = true
-				}
-				if lc == "withdrawal" || lc == "deposit" || lc == "debit" || lc == "credit" || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") || strings.Contains(lc, "amount") {
-					hasAmount = true
-				}
+			if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") {
+				hasDesc = true
 			}
-			if !hasDate || (!hasDesc && !hasAmount) {
-				return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
+			if lc == "withdrawal" || lc == "deposit" || lc == "debit" || lc == "credit" || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") || strings.Contains(lc, "amount") {
+				hasAmount = true
 			}
-		} // End of auto-detection block when not using custom mapping for Excel
+		}
+		if !hasDate || (!hasDesc && !hasAmount) {
+			return nil, errors.New(constants.ErrTransactionHeaderRowNotFound)
+		}
 	}
 
 	// KPI maps
@@ -4037,6 +4031,15 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 				})
 				return
 			}
+
+			// Validate that account_number mapping exists when mapping mode is requested
+			if mappings != nil && strings.TrimSpace(mappings.AccountNumber) == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": "Column-Mappings must include 'Account Number' when mapping is enabled",
+				})
+				return
+			}
 		}
 
 		// Log available form fields for debugging
@@ -4871,9 +4874,9 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		} else {
 			// Keep shape consistent with upload flow: nested `amount` and time.Time dates
 			uncategorized = append(uncategorized, map[string]interface{}{
-				"index":       i,
-				"tran_id":     t.TranID.String,
-				"description": t.Description,
+				"index":            i,
+				"tran_id":          t.TranID.String,
+				"description":      t.Description,
 				"transaction_date": t.TransactionDate,
 				"value_date":       t.ValueDate,
 				"amount":           map[string]interface{}{"withdrawal": t.WithdrawalAmount.Float64, "deposit": t.DepositAmount.Float64},
