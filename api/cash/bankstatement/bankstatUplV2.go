@@ -2374,10 +2374,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		} else {
 			uncategorized = append(uncategorized, map[string]interface{}{
-				"tran_id":     tranID.String,
-				"description": description,
-				"value_date":  valueDate,
-				"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"index":             rowNum,
+				"tran_id":           tranID.String,
+				"tran_date":         transactionDate,
+				"transaction_date":  transactionDate,
+				"description":       description,
+				"value_date":        valueDate,
+				"amount":            map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"balance":           balance.Float64,
 			})
 		}
 		// Recalculate balance using a running cumulative that starts from the first available balance.
@@ -2574,11 +2578,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			k := buildTxnKey(t.AccountNumber, t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount)
 			if existingTxnKeys[k] {
 				// Already present in DB from earlier statements -> under review
+				// normalize dates to RFC3339 strings
+				vDate := ""
+				if !t.ValueDate.IsZero() {
+					vDate = t.ValueDate.Format(time.RFC3339)
+				}
+				trxDate := ""
+				if !t.TransactionDate.IsZero() {
+					trxDate = t.TransactionDate.Format(time.RFC3339)
+				}
 				reviewTransactions = append(reviewTransactions, map[string]interface{}{
 					"account_number":    t.AccountNumber,
 					"tran_id":           t.TranID.String,
-					"value_date":        t.ValueDate,
-					"transaction_date":  t.TransactionDate,
+					"value_date":        vDate,
+					"transaction_date":  trxDate,
 					"description":       t.Description,
 					"withdrawal_amount": t.WithdrawalAmount.Float64,
 					"deposit_amount":    t.DepositAmount.Float64,
@@ -2727,10 +2740,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			delete(foundCategoryIDs, rule.CategoryID)
 		}
 	}
+	// Prepare statement date coverage as RFC3339 strings when possible
+	startStr := ""
+	endStr := ""
+	if len(transactions) > 0 && !transactions[0].ValueDate.IsZero() {
+		startStr = transactions[0].ValueDate.Format(time.RFC3339)
+	}
+	if !statementPeriodEnd.IsZero() {
+		endStr = statementPeriodEnd.Format(time.RFC3339)
+	}
+
 	result := map[string]interface{}{
 		"pages_processed":                 1, // Excel = 1 sheet
 		"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
-		"statement_date_coverage":         map[string]interface{}{"start": transactions[0].ValueDate, "end": statementPeriodEnd},
+		"statement_date_coverage":         map[string]interface{}{"start": startStr, "end": endStr},
 		"category_kpis":                   kpiCats,
 		"categories_found":                foundCategories,
 		"uncategorized":                   uncategorized,
@@ -3449,15 +3472,19 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 					"balance":           balance.Float64,
 					"category_id":       catID,
 				})
-			} else {
-				uncategorized = append(uncategorized, map[string]interface{}{
-					"tran_id":     tranID.String,
-					"description": description,
-					"value_date":  valueDate,
-					"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
-				})
-				ungroupedTxns++
-			}
+				} else {
+					uncategorized = append(uncategorized, map[string]interface{}{
+						"tran_id":           tranID.String,
+						"transaction_id":    transactionID,
+						"tran_date":         transactionDate,
+						"transaction_date":  transactionDate,
+						"description":       description,
+						"value_date":        valueDate,
+						"amount":            map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+						"balance":           balance.Float64,
+					})
+					ungroupedTxns++
+				}
 		}
 
 		// Build KPI and category metadata, mirroring the upload response
@@ -3499,10 +3526,18 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
 			ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
 		}
+		startStr := ""
+		endStr := ""
+		if !statementPeriodStart.IsZero() {
+			startStr = statementPeriodStart.Format(time.RFC3339)
+		}
+		if !statementPeriodEnd.IsZero() {
+			endStr = statementPeriodEnd.Format(time.RFC3339)
+		}
 		result := map[string]interface{}{
 			"pages_processed":                 1,
 			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
-			"statement_date_coverage":         map[string]interface{}{"start": statementPeriodStart, "end": statementPeriodEnd},
+			"statement_date_coverage":         map[string]interface{}{"start": startStr, "end": endStr},
 			"category_kpis":                   kpiCats,
 			"categories_found":                foundCategories,
 			"uncategorized":                   uncategorized,

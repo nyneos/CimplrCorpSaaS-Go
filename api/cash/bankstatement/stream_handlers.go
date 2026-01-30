@@ -953,25 +953,28 @@ func CommitHandler(db *sql.DB) http.Handler {
 				creditSum[catID] += dep
 
 				txMap := map[string]interface{}{
-					"index":       i,
-					"tran_date":   tranDateVal,
-					"value_date":  valueDateVal,
-					"narration":   narration,
-					"withdrawal":  wd,
-					"deposit":     dep,
-					"balance":     t.Balance,
-					"category_id": catID,
+					"index":             i,
+					"tran_date":         tranDateVal,
+					"transaction_date":  tranDateVal,
+					"value_date":        valueDateVal,
+					"description":       narration,
+					"withdrawal_amount": wd,
+					"deposit_amount":    dep,
+					"balance":           t.Balance,
+					"category_id":       catID,
 				}
 				categoryTxns[catID] = append(categoryTxns[catID], txMap)
 			} else {
 				ungroupedTxns++
 				uncategorized = append(uncategorized, map[string]interface{}{
-					"index":      i,
-					"tran_date":  tranDateVal,
-					"value_date": valueDateVal,
-					"narration":  narration,
-					"amount":     map[string]interface{}{"withdrawal": wd, "deposit": dep},
-					"balance":    t.Balance,
+					"index":            i,
+					"tran_date":        tranDateVal,
+					"transaction_date": tranDateVal,
+					"value_date":       valueDateVal,
+					"description":      narration,
+					// "tran_id":    t.TranID,
+					"amount":  map[string]interface{}{"withdrawal": wd, "deposit": dep},
+					"balance": t.Balance,
 				})
 			}
 		}
@@ -1027,7 +1030,89 @@ func CommitHandler(db *sql.DB) http.Handler {
 		for _, unc := range uncategorized {
 			// Check if this transaction has a balance mismatch
 			// We can identify review-worthy transactions as those in uncategorized list
-			reviewTransactions = append(reviewTransactions, unc)
+			// Normalize to TransactionUnderReview shape
+			tranDate := ""
+			if v, ok := unc["tran_date"]; ok {
+				switch t := v.(type) {
+				case time.Time:
+					tranDate = t.Format(time.RFC3339)
+				case string:
+					tranDate = t
+				}
+			}
+			if v, ok := unc["transaction_date"]; ok && tranDate == "" {
+				switch t := v.(type) {
+				case time.Time:
+					tranDate = t.Format(time.RFC3339)
+				case string:
+					tranDate = t
+				}
+			}
+			valueDate := ""
+			if v, ok := unc["value_date"]; ok {
+				switch t := v.(type) {
+				case time.Time:
+					valueDate = t.Format(time.RFC3339)
+				case string:
+					valueDate = t
+				}
+			}
+			desc := ""
+			if v, ok := unc["description"]; ok {
+				if s, ok2 := v.(string); ok2 {
+					desc = s
+				}
+			}
+			tranID := ""
+			if v, ok := unc["tran_id"]; ok {
+				if s, ok2 := v.(string); ok2 {
+					tranID = s
+				}
+			}
+			balance := 0.0
+			if v, ok := unc["balance"]; ok {
+				switch b := v.(type) {
+				case float64:
+					balance = b
+				case sql.NullFloat64:
+					if b.Valid {
+						balance = b.Float64
+					}
+				}
+			}
+			dep := 0.0
+			wd := 0.0
+			if v, ok := unc["amount"]; ok {
+				if m, ok2 := v.(map[string]interface{}); ok2 {
+					if d, ok3 := m["deposit"]; ok3 {
+						switch dv := d.(type) {
+						case float64:
+							dep = dv
+						case int:
+							dep = float64(dv)
+						}
+					}
+					if w, ok3 := m["withdrawal"]; ok3 {
+						switch wv := w.(type) {
+						case float64:
+							wd = wv
+						case int:
+							wd = float64(wv)
+						}
+					}
+				}
+			}
+			reviewTransactions = append(reviewTransactions, map[string]interface{}{
+				"account_number":    accountNumber,
+				"balance":           balance,
+				"category_id":       nil,
+				"deposit_amount":    dep,
+				"description":       desc,
+				"tran_id":           tranID,
+				"transaction_date":  tranDate,
+				"value_date":        valueDate,
+				"withdrawal_amount": wd,
+			})
 		}
 
 		// Build response matching V2 format
