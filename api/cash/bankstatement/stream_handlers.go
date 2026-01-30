@@ -329,7 +329,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 
 		// Check for existing checksum inside the transaction to avoid races.
 		var existingID sql.NullString
-		err = tx.QueryRowContext(ctx, `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`, checksum).Scan(&existingID)
+		// err = tx.QueryRowContext(ctx, `SELECT id FROM cimplrcorpsaas.bank_pdf_uploads WHERE checksum_sha256 = $1 LIMIT 1`, checksum).Scan(&existingID)
 		if err == nil && existingID.Valid {
 			// already exists — rollback and return
 			if rerr := tx.Rollback(); rerr != nil {
