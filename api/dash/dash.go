@@ -63,42 +63,42 @@ func StartDashService(db *sql.DB) {
 
 	// Business Unit/Currency Exposure Dashboard
 	// mux.Handle("/dash/bu-curr-exp-dashboard", http.HandlerFunc(buCurrExpDash.GetDashboard(db)))
-	mux.Handle("/dash/bu-curr-exp-dashboard", api.BusinessUnitMiddleware(db)(buCurrExpDash.GetDashboard(db)))
+	mux.Handle("/dash/bu-curr-exp-dashboard", middlewares.PreValidationMiddleware(pgxPool)(buCurrExpDash.GetDashboard(db)))
 
 	// CFO Dashboard Endpoints
 	// --- Forward Dashboard Routes ---
-	mux.Handle("/dash/cfo/fwd/waht", api.BusinessUnitMiddleware(db)(cfo.GetAvgForwardMaturity(db)))
-	mux.Handle("/dash/cfo/fwd/buysell", api.BusinessUnitMiddleware(db)(cfo.GetForwardBuySellTotals(db)))
-	mux.Handle("/dash/cfo/fwd/localcurr", api.BusinessUnitMiddleware(db)(cfo.GetUserCurrency(db)))
-	mux.Handle("/dash/cfo/fwd/active-forwards", api.BusinessUnitMiddleware(db)(cfo.GetActiveForwardsCount(db)))
-	mux.Handle("/dash/cfo/fwd/recent-trades-dashboard", api.BusinessUnitMiddleware(db)(cfo.GetRecentTradesDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/total-usd-sum", api.BusinessUnitMiddleware(db)(cfo.GetTotalUsdSumDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/open-to-booking-ratio", api.BusinessUnitMiddleware(db)(cfo.GetOpenAmountToBookingRatioDashboard(db)))
+	mux.Handle("/dash/cfo/fwd/waht", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetAvgForwardMaturity(db)))
+	mux.Handle("/dash/cfo/fwd/buysell", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetForwardBuySellTotals(db)))
+	mux.Handle("/dash/cfo/fwd/localcurr", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetUserCurrency(db)))
+	mux.Handle("/dash/cfo/fwd/active-forwards", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetActiveForwardsCount(db)))
+	mux.Handle("/dash/cfo/fwd/recent-trades-dashboard", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetRecentTradesDashboard(db)))
+	mux.Handle("/dash/cfo/fwd/total-usd-sum", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetTotalUsdSumDashboard(db)))
+	mux.Handle("/dash/cfo/fwd/open-to-booking-ratio", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetOpenAmountToBookingRatioDashboard(db)))
 	// mux.Handle("/dash/cfo/fwd/total-bank-margin", api.BusinessUnitMiddleware(db)(cfo.GetTotalBankMarginDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/total-usd-sum-by-currency", api.BusinessUnitMiddleware(db)(cfo.GetTotalUsdSumByCurrencyDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/forward-booking-maturity-buckets", api.BusinessUnitMiddleware(db)(cfo.GetForwardBookingMaturityBucketsDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/maturity-buckets", api.BusinessUnitMiddleware(db)(cfo.GetMaturityBucketsDashboard(db)))
-	mux.Handle("/dash/cfo/fwd/rollover-counts", api.BusinessUnitMiddleware(db)(cfo.GetRolloverCountsByCurrency(db)))
-	mux.Handle("/dash/cfo/fwd/total-bankmargin", api.BusinessUnitMiddleware(db)(cfo.GetTotalBankMarginFromForwardBookings(db)))
-	mux.Handle("/dash/cfo/fwd/hedge-ratio", api.BusinessUnitMiddleware(db)(cfo.GetOpenAmountToBookingRatioSimple(db)))
-	mux.Handle("/dash/cfo/fwd/bank-trades", api.BusinessUnitMiddleware(db)(cfo.GetBankTradesData(db)))
+	mux.Handle("/dash/cfo/fwd/total-usd-sum-by-currency", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetTotalUsdSumByCurrencyDashboard(db)))
+	mux.Handle("/dash/cfo/fwd/forward-booking-maturity-buckets", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetForwardBookingMaturityBucketsDashboard(db)))
+	mux.Handle("/dash/cfo/fwd/maturity-buckets", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetMaturityBucketsDashboard(db)))
+	mux.Handle("/dash/cfo/fwd/rollover-counts", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetRolloverCountsByCurrency(db)))
+	mux.Handle("/dash/cfo/fwd/total-bankmargin", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetTotalBankMarginFromForwardBookings(db)))
+	mux.Handle("/dash/cfo/fwd/hedge-ratio", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetOpenAmountToBookingRatioSimple(db)))
+	mux.Handle("/dash/cfo/fwd/bank-trades", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetBankTradesData(db)))
 
 	// --- Exposure Dashboard Routes ---
-	mux.Handle("/dash/cfo/exp/total-open-amount-usd", api.BusinessUnitMiddleware(db)(cfo.GetTotalOpenAmountUsdSumFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/payables-by-currency", api.BusinessUnitMiddleware(db)(cfo.GetPayablesByCurrencyFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/receivables-by-currency", api.BusinessUnitMiddleware(db)(cfo.GetReceivablesByCurrencyFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/amount-by-currency", api.BusinessUnitMiddleware(db)(cfo.GetAmountByCurrencyFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/business-unit-currency-summary", api.BusinessUnitMiddleware(db)(cfo.GetBusinessUnitCurrencySummaryFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/maturity-expiry-summary", api.BusinessUnitMiddleware(db)(cfo.GetMaturityExpirySummaryFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/maturity-expiry-count-7-days", api.BusinessUnitMiddleware(db)(cfo.GetMaturityExpiryCount7DaysFromHeaders(db)))
-	mux.Handle("/dash/cfo/exp/waet", api.BusinessUnitMiddleware(db)(cfo.GetAvgExposureMaturity(db)))
+	mux.Handle("/dash/cfo/exp/total-open-amount-usd", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetTotalOpenAmountUsdSumFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/payables-by-currency", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetPayablesByCurrencyFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/receivables-by-currency", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetReceivablesByCurrencyFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/amount-by-currency", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetAmountByCurrencyFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/business-unit-currency-summary", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetBusinessUnitCurrencySummaryFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/maturity-expiry-summary", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetMaturityExpirySummaryFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/maturity-expiry-count-7-days", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetMaturityExpiryCount7DaysFromHeaders(db)))
+	mux.Handle("/dash/cfo/exp/waet", middlewares.PreValidationMiddleware(pgxPool)(cfo.GetAvgExposureMaturity(db)))
 
 	// --- FX Ops Dashboard Routes ---
 	// Top Currencies
-	mux.Handle("/dash/fx-ops/top-currencies-from-headers", api.BusinessUnitMiddleware(db)(fxops.GetTopCurrenciesFromHeaders(db)))
-	mux.Handle("/dash/fx-ops/ready-for-settlement", api.BusinessUnitMiddleware(db)(fxops.GetForwardBookingsMaturingTodayCount(db)))
-	mux.Handle("/dash/fx-ops/daily-traded-volume", api.BusinessUnitMiddleware(db)(fxops.GetTodayBookingAmountSum(db)))
-	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", api.BusinessUnitMiddleware(db)(fxops.GetMaturityBucketsByCurrencyPair(db)))
+	mux.Handle("/dash/fx-ops/top-currencies-from-headers", middlewares.PreValidationMiddleware(pgxPool)(fxops.GetTopCurrenciesFromHeaders(db)))
+	mux.Handle("/dash/fx-ops/ready-for-settlement", middlewares.PreValidationMiddleware(pgxPool)(fxops.GetForwardBookingsMaturingTodayCount(db)))
+	mux.Handle("/dash/fx-ops/daily-traded-volume", middlewares.PreValidationMiddleware(pgxPool)(fxops.GetTodayBookingAmountSum(db)))
+	mux.Handle("/dash/fx-ops/maturity-buckets-currencypair", middlewares.PreValidationMiddleware(pgxPool)(fxops.GetMaturityBucketsByCurrencyPair(db)))
 	// Comprehensive FX Ops Dashboard (with filters)
 	mux.Handle("/dash/landingpage/dashboard", api.BusinessUnitMiddleware(db)(landingpage.GetFXOpsDashboard(db)))
 	// Home/Landing dashboard (liquidity + investments + risk)
@@ -109,18 +109,18 @@ func StartDashService(db *sql.DB) {
 
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
-	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
-	mux.Handle("/dash/hedge/fwd/forward-bookings", api.BusinessUnitMiddleware(db)(hedgeproposal.GetForwardBookingsDashboard(db)))
+	mux.Handle("/dash/hedge/fwd/bu-maturity-currency-summary", middlewares.PreValidationMiddleware(pgxPool)(hedgeproposal.GetForwardBookingMaturityBucketsDashboard(db)))
+	mux.Handle("/dash/hedge/fwd/forward-bookings", middlewares.PreValidationMiddleware(pgxPool)(hedgeproposal.GetForwardBookingsDashboard(db)))
 	// Exposure Dashboard
-	mux.Handle("/dash/hedge/exp/bu-maturity-currency-summary", api.BusinessUnitMiddleware(db)(hedgeproposal.GetBuMaturityCurrencySummaryJoinedFromHeaders(db)))
-	mux.Handle("/dash/hedge/exp/exposure-rows", api.BusinessUnitMiddleware(db)(hedgeproposal.GetExposureRowsDashboard(db)))
+	mux.Handle("/dash/hedge/exp/bu-maturity-currency-summary", middlewares.PreValidationMiddleware(pgxPool)(hedgeproposal.GetBuMaturityCurrencySummaryJoinedFromHeaders(db)))
+	mux.Handle("/dash/hedge/exp/exposure-rows", middlewares.PreValidationMiddleware(pgxPool)(hedgeproposal.GetExposureRowsDashboard(db)))
 
 	//Liquidity Snapshot
-	mux.Handle("/dash/liquidity/total-cash-balance-by-entity", api.BusinessUnitMiddleware(db)(liqsnap.TotalCashBalanceByEntityHandler(pgxPool)))
-	mux.Handle("/dash/liquidity/liquidity-coverage-ratio", api.BusinessUnitMiddleware(db)(liqsnap.LiquidityCoverageRatioHandler(pgxPool)))
-	mux.Handle("/dash/liquidity/entity-currency-wise-cash", api.BusinessUnitMiddleware(db)(liqsnap.EntityCurrencyWiseCashHandler(pgxPool)))
-	mux.Handle("/dash/liquidity/kpi", api.BusinessUnitMiddleware(db)(liqsnap.KpiCardsHandler(pgxPool)))
-	mux.Handle("/dash/liquidity/daily", api.BusinessUnitMiddleware(db)(liqsnap.DetailedDailyCashFlowHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/total-cash-balance-by-entity", middlewares.PreValidationMiddleware(pgxPool)(liqsnap.TotalCashBalanceByEntityHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/liquidity-coverage-ratio", middlewares.PreValidationMiddleware(pgxPool)(liqsnap.LiquidityCoverageRatioHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/entity-currency-wise-cash", middlewares.PreValidationMiddleware(pgxPool)(liqsnap.EntityCurrencyWiseCashHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/kpi", middlewares.PreValidationMiddleware(pgxPool)(liqsnap.KpiCardsHandler(pgxPool)))
+	mux.Handle("/dash/liquidity/daily", middlewares.PreValidationMiddleware(pgxPool)(liqsnap.DetailedDailyCashFlowHandler(pgxPool)))
 
 	// Investment Overview KPIs
 	mux.Handle("/dash/investment/overview/kpis", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetInvestmentOverviewKPIs(pgxPool)))
@@ -163,33 +163,33 @@ func StartDashService(db *sql.DB) {
 	// Investment: Consolidated Risk Gauge (entity-level)
 	mux.Handle("/dash/investment/overview/consolidated", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetConsolidatedRisk(pgxPool)))
 	// Cashflow Forecast (monthly aggregated projections + KPIs)
-	mux.Handle("/dash/cash/forecast/monthly", api.BusinessUnitMiddleware(db)(cashflowforecast.GetCashflowForecastHandler(pgxPool)))
-	mux.Handle("/dash/cash/forecast/kpi", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastKPIsHandler(pgxPool)))
-	mux.Handle("/dash/cash/forecast/rows", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastRowsHandler(pgxPool)))
-	mux.Handle("/dash/cash/forecast/categories", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastCategorySumsHandler(pgxPool)))
-	mux.Handle("/dash/cash/forecast/daily", api.BusinessUnitMiddleware(db)(cashflowforecast.GetForecastDailyHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/monthly", middlewares.PreValidationMiddleware(pgxPool)(cashflowforecast.GetCashflowForecastHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/kpi", middlewares.PreValidationMiddleware(pgxPool)(cashflowforecast.GetForecastKPIsHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/rows", middlewares.PreValidationMiddleware(pgxPool)(cashflowforecast.GetForecastRowsHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/categories", middlewares.PreValidationMiddleware(pgxPool)(cashflowforecast.GetForecastCategorySumsHandler(pgxPool)))
+	mux.Handle("/dash/cash/forecast/daily", middlewares.PreValidationMiddleware(pgxPool)(cashflowforecast.GetForecastDailyHandler(pgxPool)))
 
 	// Forecast vs Actual
-	mux.Handle("/dash/forecast-vs-actual/rows", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualRowsHandler(pgxPool)))
-	mux.Handle("/dash/forecast-vs-actual/kpi", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualKPIHandler(pgxPool)))
-	mux.Handle("/dash/forecast-vs-actual/by-date", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualByDateHandler(pgxPool)))
-	mux.Handle("/dash/forecast-vs-actual/by-month", api.BusinessUnitMiddleware(db)(forecastVsActual.GetForecastVsActualByMonthHandler(pgxPool)))
+	mux.Handle("/dash/forecast-vs-actual/rows", middlewares.PreValidationMiddleware(pgxPool)(forecastVsActual.GetForecastVsActualRowsHandler(pgxPool)))
+	mux.Handle("/dash/forecast-vs-actual/kpi", middlewares.PreValidationMiddleware(pgxPool)(forecastVsActual.GetForecastVsActualKPIHandler(pgxPool)))
+	mux.Handle("/dash/forecast-vs-actual/by-date", middlewares.PreValidationMiddleware(pgxPool)(forecastVsActual.GetForecastVsActualByDateHandler(pgxPool)))
+	mux.Handle("/dash/forecast-vs-actual/by-month", middlewares.PreValidationMiddleware(pgxPool)(forecastVsActual.GetForecastVsActualByMonthHandler(pgxPool)))
 
 	// --- Reports Dashboard Routes ---
-	mux.Handle("/dash/reports/exposure-summary", api.BusinessUnitMiddleware(db)(reports.GetExposureSummary(db)))
-	mux.Handle("/dash/reports/linked-summary-by-category", api.BusinessUnitMiddleware(db)(reports.GetLinkedSummaryByCategory(db)))
+	mux.Handle("/dash/reports/exposure-summary", middlewares.PreValidationMiddleware(pgxPool)(reports.GetExposureSummary(db)))
+	mux.Handle("/dash/reports/linked-summary-by-category", middlewares.PreValidationMiddleware(pgxPool)(reports.GetLinkedSummaryByCategory(db)))
 
 	// Projection Pipeline Dashboard
-	mux.Handle("/dash/projection-pipeline/kpi", api.BusinessUnitMiddleware(db)(projectiondash.GetProjectionPipelineKPI(pgxPool)))
-	mux.Handle("/dash/projection-pipeline/detailed", api.BusinessUnitMiddleware(db)(projectiondash.GetDetailedPipeline(pgxPool)))
-	mux.Handle("/dash/projection-pipeline/by-entity", api.BusinessUnitMiddleware(db)(projectiondash.GetProjectionByEntity(pgxPool)))
+	mux.Handle("/dash/projection-pipeline/kpi", middlewares.PreValidationMiddleware(pgxPool)(projectiondash.GetProjectionPipelineKPI(pgxPool)))
+	mux.Handle("/dash/projection-pipeline/detailed", middlewares.PreValidationMiddleware(pgxPool)(projectiondash.GetDetailedPipeline(pgxPool)))
+	mux.Handle("/dash/projection-pipeline/by-entity", middlewares.PreValidationMiddleware(pgxPool)(projectiondash.GetProjectionByEntity(pgxPool)))
 
 	// Payables / Receivables dashboard rows
-	mux.Handle("/dash/payrec/rows", api.BusinessUnitMiddleware(db)(payablereceivabledash.GetPayablesReceivables(pgxPool)))
-	mux.Handle("/dash/payrec/forecast", api.BusinessUnitMiddleware(db)(payablereceivabledash.GetPayRecForecast(pgxPool)))
+	mux.Handle("/dash/payrec/rows", middlewares.PreValidationMiddleware(pgxPool)(payablereceivabledash.GetPayablesReceivables(pgxPool)))
+	mux.Handle("/dash/payrec/forecast", middlewares.PreValidationMiddleware(pgxPool)(payablereceivabledash.GetPayRecForecast(pgxPool)))
 
 	// Planned Inflow/Outflow Dashboard
-	mux.Handle("/dash/planned-inflow-outflow", api.BusinessUnitMiddleware(db)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
+	mux.Handle("/dash/planned-inflow-outflow", middlewares.PreValidationMiddleware(pgxPool)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
 
 	log.Println("Dashboard Service started on :4143")
 	err = http.ListenAndServe(":4143", mux)

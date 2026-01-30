@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -82,10 +83,14 @@ func GetExposureSummary(db *sql.DB) http.HandlerFunc {
 		for expRows.Next() {
 			var e Exposure
 			err := expRows.Scan(&e.ExposureHeaderID, &e.CompanyCode, &e.Entity, &e.Entity1, &e.Entity2, &e.Entity3, &e.ExposureType, &e.DocumentID, &e.DocumentDate, &e.CounterpartyName, &e.Currency, &e.TotalOriginalAmount, &e.TotalOpenAmount, &e.ValueDate)
-			if err == nil {
-				exposures = append(exposures, e)
-				exposureIds = append(exposureIds, e.ExposureHeaderID)
-			}
+				if err == nil {
+					// Skip exposures whose currency is not approved by PreValidation
+					if !api.CtxHasApprovedCurrency(r.Context(), e.Currency) {
+						continue
+					}
+					exposures = append(exposures, e)
+					exposureIds = append(exposureIds, e.ExposureHeaderID)
+				}
 		}
 		expRows.Close()
 		// 4. Fetch all hedged values in one query
@@ -229,7 +234,7 @@ type ForwardCancellation struct {
 	EntityLevel3       *string   `json:"entity_level_3,omitempty"`
 }
 
-func fetchForwardBookings(db *sql.DB, buNames []string) ([]ForwardBooking, error) {
+func fetchForwardBookings(ctx context.Context, db *sql.DB, buNames []string) ([]ForwardBooking, error) {
 	rows, err := db.Query(`
 		SELECT
 			system_transaction_id, internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3,
@@ -241,9 +246,9 @@ func fetchForwardBookings(db *sql.DB, buNames []string) ([]ForwardBooking, error
 		FROM forward_bookings
 		WHERE entity_level_0 = ANY($1)
 	`, pq.Array(buNames))
-	if err != nil {
-		return nil, err
-	}
+		if err != nil {
+			return nil, err
+		}
 	defer rows.Close()
 
 	var list []ForwardBooking
@@ -266,6 +271,12 @@ func fetchForwardBookings(db *sql.DB, buNames []string) ([]ForwardBooking, error
 			fb.InternalReferenceID = &v
 		} else {
 			fb.InternalReferenceID = nil
+		}
+		// Apply currency scoping: skip bookings whose base currency is not approved
+		if fb.BaseCurrency != nil {
+			if !api.CtxHasApprovedCurrency(ctx, *fb.BaseCurrency) {
+				continue
+			}
 		}
 		list = append(list, fb)
 	}
@@ -349,7 +360,7 @@ func GetLinkedSummaryByCategory(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		bookings, err := fetchForwardBookings(db, buNames)
+		bookings, err := fetchForwardBookings(r.Context(), db, buNames)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusInternalServerError)

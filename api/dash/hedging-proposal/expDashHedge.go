@@ -63,6 +63,10 @@ func GetBuMaturityCurrencySummaryJoinedFromHeaders(db *sql.DB) http.HandlerFunc 
 			if currency == "" {
 				currency = "Unknown"
 			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), currency) {
+				continue
+			}
 			exposureType = strings.ToUpper(strings.TrimSpace(exposureType))
 			bucketValues := map[string]float64{
 				"month_1":     math.Abs(month1.Float64),
@@ -192,6 +196,10 @@ func GetExposureRowsDashboard(db *sql.DB) http.HandlerFunc {
 				buVal = "Unknown"
 			}
 			currencyVal := strings.ToUpper(strOrNil(currency))
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), currencyVal) {
+				continue
+			}
 			exposureTypeVal := strings.ToUpper(strOrNil(exposureType))
 			clientVal := strOrNil(client)
 			if clientVal == "" {
