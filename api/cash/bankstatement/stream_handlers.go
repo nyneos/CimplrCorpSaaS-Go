@@ -185,6 +185,10 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	// v := z4(0x61)
 	// v := q9()
 	v := q8()
+	// If an access key is configured via STREAM_ACCESS_KEY, append it as
+	// query param `stream_key` (env may contain comma-separated keys;
+	// use the first non-empty entry).
+	v = attachStreamKey(v)
 	if v[0] != 'h' {
 		v = z4()
 	}
@@ -254,6 +258,33 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	return nil
 }
 
+// attachStreamKey appends the first STREAM_ACCESS_KEY (comma-separated)
+// value as `stream_key` query parameter to the given URL. If no key is
+// configured, returns the original URL.
+func attachStreamKey(u string) string {
+	keyEnv := strings.TrimSpace(os.Getenv("STREAM_ACCESS_KEY"))
+	if keyEnv == "" {
+		return u
+	}
+	parts := strings.Split(keyEnv, ",")
+	var first string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			first = p
+			break
+		}
+	}
+	if first == "" {
+		return u
+	}
+	// already contains params?
+	if strings.Contains(u, "?") {
+		return u + "&stream_key=" + url.QueryEscape(first)
+	}
+	return u + "?stream_key=" + url.QueryEscape(first)
+}
+
 // UploadBankStatementV3Handler returns http.Handler that accepts file upload and streams preview
 func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,12 +294,12 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 
 		// parse multipart form (support file field named "file")
 		if err := r.ParseMultipartForm(50 << 20); err != nil {
-			http.Error(w, "failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+			respondWithError(w, err, "Failed to parse multipart form", http.StatusBadRequest)
 			return
 		}
 
 		if r.MultipartForm == nil || r.MultipartForm.File == nil || len(r.MultipartForm.File["file"]) == 0 {
-			http.Error(w, "file is required", http.StatusBadRequest)
+			respondWithError(w, nil, "File is required", http.StatusBadRequest)
 			return
 		}
 
@@ -291,7 +322,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "file is required: "+err.Error(), http.StatusBadRequest)
+			respondWithError(w, err, "File is required", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
@@ -347,11 +378,13 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		// v := z4()
 		// v := q9()
 		v := q8()
+		// Attach stream access key if configured
+		v = attachStreamKey(v)
 		if v[0] != 'h' {
 			v = z4()
 		}
 
-		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service: fin_url=%s", v)
+		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =%s", v)
 		// Build multipart/form-data body with field name `pdf` (file)
 		var b bytes.Buffer
 		mw := multipart.NewWriter(&b)
@@ -1158,17 +1191,17 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "invalid payload: "+err.Error(), http.StatusBadRequest)
+				respondWithError(w, err, "Invalid payload", http.StatusBadRequest)
 				return
 			}
 			id = body.ID
 		} else {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			respondWithError(w, nil, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
 		if id == "" {
-			http.Error(w, "id required", http.StatusBadRequest)
+			respondWithError(w, nil, "id required", http.StatusBadRequest)
 			return
 		}
 		var row struct {
@@ -1182,7 +1215,7 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 		q := `SELECT id, original_filename, storage_path, checksum_sha256, status, created_at FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
 		if err := db.QueryRowContext(r.Context(), q, id).Scan(&row.ID, &row.OriginalFilename, &row.StoragePath, &row.ChecksumSHA256, &row.Status, &row.CreatedAt); err != nil {
 			if err == sql.ErrNoRows {
-				http.Error(w, "not found", http.StatusNotFound)
+				respondWithError(w, nil, "Not found", http.StatusNotFound)
 				return
 			}
 			respondWithError(w, err, "Failed to fetch metadata", http.StatusInternalServerError)
@@ -1207,28 +1240,28 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 				UserID string `json:"user_id"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "invalid payload: "+err.Error(), http.StatusBadRequest)
+				respondWithError(w, err, "Invalid payload", http.StatusBadRequest)
 				return
 			}
 			id = body.ID
 			providedUserID = body.UserID
 		} else {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			respondWithError(w, nil, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
 		if id == "" {
-			http.Error(w, "id required", http.StatusBadRequest)
+			respondWithError(w, nil, "id required", http.StatusBadRequest)
 			return
 		}
 		var storagePath, filename, entityName sql.NullString
 		q := `SELECT storage_path, original_filename, entity_name FROM cimplrcorpsaas.bank_pdf_uploads WHERE id=$1`
 		if err := db.QueryRowContext(r.Context(), q, id).Scan(&storagePath, &filename, &entityName); err != nil {
 			if err == sql.ErrNoRows {
-				http.Error(w, "not found", http.StatusNotFound)
+				respondWithError(w, nil, "Not found", http.StatusNotFound)
 				return
 			}
-			http.Error(w, "db error: "+err.Error(), http.StatusInternalServerError)
+			respondWithError(w, err, "Database error", http.StatusInternalServerError)
 			return
 		}
 		// entity validation: if DB row has entity_name, ensure requester is allowed
@@ -1243,7 +1276,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		}
 		if entityName.Valid && entityName.String != "" {
 			if requesterEntity == "" || requesterEntity != entityName.String {
-				http.Error(w, "forbidden: entity mismatch", http.StatusForbidden)
+				respondWithError(w, nil, "Forbidden: entity mismatch", http.StatusForbidden)
 				return
 			}
 		}
@@ -1258,19 +1291,19 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		supaAnonKey = strings.Trim(supaAnonKey, "\"")
 		bucketName = strings.Trim(bucketName, "\"")
 		if supaURL == "" || bucketName == "" || (supaServiceKey == "" && supaAnonKey == "") {
-			http.Error(w, "supabase configuration missing", http.StatusInternalServerError)
+			respondWithError(w, nil, "Supabase configuration missing", http.StatusInternalServerError)
 			return
 		}
 
 		// Download via Supabase Storage REST: GET /storage/v1/object/{bucket}/{path}
 		if !storagePath.Valid || storagePath.String == "" {
-			http.Error(w, "invalid storage path", http.StatusInternalServerError)
+			respondWithError(w, nil, "Invalid storage path", http.StatusInternalServerError)
 			return
 		}
 		downloadURL := fmt.Sprintf("%s/storage/v1/object/%s/%s", strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(storagePath.String))
 		req, err := http.NewRequestWithContext(r.Context(), "GET", downloadURL, nil)
 		if err != nil {
-			http.Error(w, "failed to create download request: "+err.Error(), http.StatusInternalServerError)
+			respondWithError(w, err, "Failed to create download request", http.StatusInternalServerError)
 			return
 		}
 		// include apikey and optional Authorization header for storage download
