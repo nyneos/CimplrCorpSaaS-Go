@@ -67,6 +67,10 @@ func GetTopCurrenciesFromHeaders(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 			cur := strings.ToUpper(currency.String)
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), cur) {
+				continue
+			}
 			val := math.Abs(amount.Float64)
 			usdValue := val * (rates[cur])
 			currencyTotals[cur] += usdValue
@@ -158,8 +162,13 @@ func GetTodayBookingAmountSum(db *sql.DB) http.HandlerFunc {
 				return
 			}
 
-			// Handle missing or unknown currency conversion rate
+			// enforce prevalidated currency scope
 			cur := strings.ToUpper(currency.String)
+			if !api.CtxHasApprovedCurrency(r.Context(), cur) {
+				continue
+			}
+
+			// Handle missing or unknown currency conversion rate
 			rate, found := rates[cur]
 			if !found {
 				rate = 1.0 // Default to 1 if no rate is found
@@ -260,8 +269,11 @@ func GetMaturityBucketsByCurrencyPair(db *sql.DB) http.HandlerFunc {
 			if len(currencyPair) >= 3 {
 				curr = strings.ToUpper(currencyPair[:3])
 			}
+			// enforce prevalidated currency scope for the extracted base currency
+			if !api.CtxHasApprovedCurrency(r.Context(), curr) {
+				continue
+			}
 			rate := rates[curr]
-			// rate := rates[currencyPair]
 			if rate == 0 {
 				rate = 1.0
 			}

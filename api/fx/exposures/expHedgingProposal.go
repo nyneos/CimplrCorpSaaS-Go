@@ -95,7 +95,7 @@ func GetHedgingProposalsAggregated(db *sql.DB) http.HandlerFunc {
 			}
 			rowMap := map[string]interface{}{}
 			for i, col := range cols {
-				rowMap[col] = vals[i]
+				rowMap[col] = parseDBValue(col, vals[i])
 			}
 			proposals = append(proposals, rowMap)
 		}

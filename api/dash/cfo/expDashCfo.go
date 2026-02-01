@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -53,6 +54,7 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
+		log.Printf("%v", pq.Array(buNames))
 		query := `SELECT total_open_amount, currency FROM exposure_headers WHERE entity = ANY($1) AND (approval_status = 'Approved' OR approval_status = 'approved')`
 		rows, err := db.QueryContext(r.Context(), query, pq.Array(buNames))
 		if err != nil {
@@ -65,6 +67,10 @@ func GetTotalOpenAmountUsdSumFromHeaders(db *sql.DB) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
+				continue
+			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
 				continue
 			}
 			val := math.Abs(amount.Float64)
@@ -104,6 +110,10 @@ func GetPayablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 			var amount sql.NullFloat64
 			var currency sql.NullString
 			if err := rows.Scan(&amount, &currency); err != nil {
+				continue
+			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
 				continue
 			}
 			val := math.Abs(amount.Float64)
@@ -149,6 +159,10 @@ func GetReceivablesByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 			if err := rows.Scan(&amount, &currency); err != nil {
 				continue
 			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
+				continue
+			}
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			currencyTotals[cur] += val * (rates[cur])
@@ -192,6 +206,10 @@ func GetAmountByCurrencyFromHeaders(db *sql.DB) http.HandlerFunc {
 			if err := rows.Scan(&amount, &currency); err != nil {
 				continue
 			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
+				continue
+			}
 			val := math.Abs(amount.Float64)
 			cur := strings.ToUpper(currency.String)
 			currencyTotals[cur] += val * (rates[cur])
@@ -233,6 +251,10 @@ func GetBusinessUnitCurrencySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			var entity, currency sql.NullString
 			var amount sql.NullFloat64
 			if err := rows.Scan(&entity, &currency, &amount); err != nil {
+				continue
+			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
 				continue
 			}
 			bu := entity.String
@@ -300,6 +322,10 @@ func GetMaturityExpirySummaryFromHeaders(db *sql.DB) http.HandlerFunc {
 			var currency sql.NullString
 			var docDate sql.NullTime
 			if err := rows.Scan(&amount, &currency, &docDate); err != nil {
+				continue
+			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
 				continue
 			}
 			val := math.Abs(amount.Float64)
@@ -374,6 +400,10 @@ func GetAvgExposureMaturity(db *sql.DB) http.HandlerFunc {
 			var documentDate sql.NullTime
 			var daysToMaturity sql.NullInt64
 			if err := rows.Scan(&amount, &currency, &documentDate, &daysToMaturity); err != nil {
+				continue
+			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency.String)) {
 				continue
 			}
 			rate := rates[strings.ToUpper(currency.String)]

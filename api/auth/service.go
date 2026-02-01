@@ -246,6 +246,9 @@ func (a *AuthService) GetActiveSessions() []*UserSession {
 	return sessions
 }
 
+// sessionCleaner removes inactive sessions based on SessionTimeout.
+// Sessions are expired after SessionTimeout minutes of inactivity.
+// Note: Call UpdateActivity(userID) on each user request to track activity.
 func (a *AuthService) sessionCleaner() {
 	period := time.Duration(a.SessionCleanerPeriod) * time.Minute
 	if period <= 0 {
@@ -265,15 +268,15 @@ func (a *AuthService) sessionCleaner() {
 					if sess.LastLoginTime != "" {
 						if t, err := time.Parse(time.RFC3339, sess.LastLoginTime); err == nil {
 							if t.Before(cutoff) {
-								// Send SSE notification before removing session
+								// Send SSE notification before removing session due to inactivity
 								go func(userID string) {
-									dashboard.SendToUser(userID, []byte(`{"type":"session_expired","reason":"session_expired"}`))
+									dashboard.SendToUser(userID, []byte(`{"type":"session_expired","reason":"inactivity"}`))
 								}(sess.UserID)
 
 								delete(a.users, sid)
 								delete(a.userPointers, sess.UserID)
 								if logger.GlobalLogger != nil {
-									logger.GlobalLogger.LogAudit(fmt.Sprintf("Session expired and removed: %s (user: %s)", sid, sess.Email))
+									logger.GlobalLogger.LogAudit(fmt.Sprintf("Session expired due to inactivity: %s (user: %s)", sid, sess.Email))
 								}
 							}
 						}
@@ -281,12 +284,23 @@ func (a *AuthService) sessionCleaner() {
 				}
 				a.mu.Unlock()
 			}
+			}
 		}
-	}
 }
 
 func generateSessionID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// UpdateActivity updates the last activity timestamp for a user session.
+// Call this method on every user request to enable inactivity-based session expiration.
+func (a *AuthService) UpdateActivity(userID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if session, ok := a.userPointers[userID]; ok {
+		session.LastLoginTime = time.Now().Format(time.RFC3339)
+	}
 }
 
 func (a *AuthService) LogDifferentIPRequest(userID string, clientIP string) {

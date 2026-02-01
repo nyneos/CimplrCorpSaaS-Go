@@ -106,21 +106,31 @@ type CashEntityMasterRequest struct {
 	EntityShortName  string `json:"entity_short_name"`
 	EntityLevel      int    `json:"entity_level"`
 	// ParentEntityName           string `json:"parent_entity_name"`
-	EntityRegistrationNumber string `json:"entity_registration_number"`
-	Country                  string `json:"country"`
-	BaseOperatingCurrency    string `json:"base_operating_currency"`
-	TaxIdentificationNumber  string `json:"tax_identification_number"`
-	AddressLine1             string `json:"address_line1"`
-	AddressLine2             string `json:"address_line2"`
-	City                     string `json:"city"`
-	StateProvince            string `json:"state_province"`
-	PostalCode               string `json:"postal_code"`
-	ContactPersonName        string `json:"contact_person_name"`
-	ContactPersonEmail       string `json:"contact_person_email"`
-	ContactPersonPhone       string `json:"contact_person_phone"`
-	ActiveStatus             string `json:"active_status"`
-	IsTopLevelEntity         bool   `json:"is_top_level_entity"`
-	IsDeleted                bool   `json:"is_deleted"`
+	EntityRegistrationNumber  string `json:"entity_registration_number"`
+	Country                   string `json:"country"`
+	BaseOperatingCurrency     string `json:"base_operating_currency"`
+	TaxIdentificationNumber   string `json:"tax_identification_number"`
+	AddressLine1              string `json:"address_line1"`
+	AddressLine2              string `json:"address_line2"`
+	City                      string `json:"city"`
+	StateProvince             string `json:"state_province"`
+	PostalCode                string `json:"postal_code"`
+	ContactPersonName         string `json:"contact_person_name"`
+	ContactPersonEmail        string `json:"contact_person_email"`
+	ContactPersonPhone        string `json:"contact_person_phone"`
+	ActiveStatus              string `json:"active_status"`
+	IsTopLevelEntity          bool   `json:"is_top_level_entity"`
+	IsDeleted                 bool   `json:"is_deleted"`
+	PanGST                    string `json:"pan_gst"`
+	LegalEntityIdentifier     string `json:"legal_entity_identifier"`
+	LegalEntityType           string `json:"legal_entity_type"`
+	ReportingCurrency         string `json:"reporting_currency"`
+	FxTradingAuthority        string `json:"fx_trading_authority"`
+	InternalFxTradingLimit    string `json:"internal_fx_trading_limit"`
+	AssociatedTreasuryContact string `json:"associated_treasury_contact"`
+	AssociatedBusinessUnits   string `json:"associated_business_units"`
+	Comments                  string `json:"comments"`
+	UniqueIdentifier          string `json:"unique_identifier"`
 }
 
 type CashEntityBulkRequest struct {
@@ -162,6 +172,12 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// Validate reporting currency if present
+			if entity.ReportingCurrency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, entity.ReportingCurrency) {
+				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized reporting_currency: " + entity.ReportingCurrency, "entity_name": entity.EntityName})
+				continue
+			}
+
 			// Validate parent entity exists in user's accessible entities (not just approved)
 			if entity.ParentEntityName != "" {
 				parentAllowed := false
@@ -177,25 +193,14 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-			b := make([]byte, 8)
-			for i := range b {
-				b[i] = charset[int(uuid.New().ID())%len(charset)]
-			}
-			entityId := "EC-" + string(b)
-			// query := `INSERT INTO masterentitycash (
-			// 	entity_id, entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, old_entity_name, old_entity_short_name, old_entity_level, old_parent_entity_name, old_entity_registration_number, old_country, old_base_operating_currency, old_tax_identification_number, old_address_line1, old_address_line2, old_city, old_state_province, old_postal_code, old_contact_person_name, old_contact_person_email, old_contact_person_phone, old_active_status, is_top_level_entity, is_deleted
-			// ) VALUES (
-			// 	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE(NULLIF($18, ''), 'Inactive'), NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $19, $20
-			// ) RETURNING entity_id`
+			// Let DB generate entity_id (use default). Insert all columns including newly-added ones.
 			query := `INSERT INTO masterentitycash (
-	entity_id, entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, is_top_level_entity, is_deleted
+	entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, pan_gst, legal_entity_identifier, legal_entity_type, reporting_currency, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, associated_business_units, comments, unique_identifier, is_top_level_entity, is_deleted
 ) VALUES (
-	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, COALESCE(NULLIF($18, ''), 'Inactive'), $19, $20
+	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE(NULLIF($17, ''), 'Inactive'), $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
 ) RETURNING entity_id`
 			var newEntityID string
 			err := pgxPool.QueryRow(ctx, query,
-				entityId,
 				entity.EntityName,
 				entity.EntityShortName,
 				entity.EntityLevel,
@@ -213,6 +218,16 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entity.ContactPersonEmail,
 				entity.ContactPersonPhone,
 				entity.ActiveStatus,
+				entity.PanGST,
+				entity.LegalEntityIdentifier,
+				entity.LegalEntityType,
+				entity.ReportingCurrency,
+				entity.FxTradingAuthority,
+				entity.InternalFxTradingLimit,
+				entity.AssociatedTreasuryContact,
+				entity.AssociatedBusinessUnits,
+				entity.Comments,
+				entity.UniqueIdentifier,
 				entity.IsTopLevelEntity,
 				entity.IsDeleted,
 			).Scan(&newEntityID)
@@ -301,9 +316,43 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Get user's accessible entities from context
 		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		// Debug: log accessible IDs and a small sample
 		if len(accessibleEntityIDs) == 0 {
 			api.RespondWithPayload(w, true, "No entities accessible with your current permissions", []map[string]interface{}{})
 			return
+		}
+		sampleIDs := accessibleEntityIDs
+		if len(sampleIDs) > 5 {
+			sampleIDs = sampleIDs[:5]
+		}
+		log.Printf("[DEBUG] accessible entity ids count=%d sample=%v", len(accessibleEntityIDs), sampleIDs)
+
+		// Quick DB checks to help debug mismatches between middleware IDs and stored rows
+		var matchedCount int
+		countQ := `SELECT count(*) FROM masterentitycash WHERE entity_id = ANY($1)`
+		if err := pgxPool.QueryRow(ctx, countQ, accessibleEntityIDs).Scan(&matchedCount); err != nil {
+			log.Printf("[DEBUG] failed to run count query for accessible IDs: %v", err)
+		} else {
+			log.Printf("[DEBUG] masterentitycash rows matching accessible ids: %d", matchedCount)
+		}
+		// Also fetch up to 5 matching entity_ids to show actual stored formats
+		sampleQ := `SELECT entity_id FROM masterentitycash WHERE entity_id = ANY($1) LIMIT 5`
+		if srows, serr := pgxPool.Query(ctx, sampleQ, accessibleEntityIDs); serr == nil {
+			defer srows.Close()
+			found := []string{}
+			for srows.Next() {
+				var eid sql.NullString
+				if err := srows.Scan(&eid); err == nil && eid.Valid {
+					found = append(found, eid.String)
+				}
+			}
+			if len(found) > 0 {
+				log.Printf("[DEBUG] sample entity_ids found in DB for your accessible ids: %v", found)
+			} else {
+				log.Printf("[DEBUG] no sample entity_ids found in DB for the provided accessible ids")
+			}
+		} else {
+			log.Printf("[DEBUG] sample query failed: %v", serr)
 		}
 
 		// === 1️⃣ Fetch entities with latest audit info - FILTERED by user's accessible entities
@@ -321,11 +370,13 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.entity_registration_number, m.country, m.base_operating_currency, m.tax_identification_number,
 				m.address_line1, m.address_line2, m.city, m.state_province, m.postal_code,
 				m.contact_person_name, m.contact_person_email, m.contact_person_phone, m.active_status,
+				m.pan_gst, m.legal_entity_identifier, m.legal_entity_type, m.reporting_currency, m.fx_trading_authority, m.internal_fx_trading_limit, m.associated_treasury_contact, m.associated_business_units, m.comments, m.unique_identifier,
 				m.old_entity_name, m.old_entity_short_name, m.old_entity_level, m.old_parent_entity_name,
 				m.old_entity_registration_number, m.old_country, m.old_base_operating_currency,
 				m.old_tax_identification_number, m.old_address_line1, m.old_address_line2,
 				m.old_city, m.old_state_province, m.old_postal_code, m.old_contact_person_name,
 				m.old_contact_person_email, m.old_contact_person_phone, m.old_active_status,
+				m.old_pan_gst, m.old_legal_entity_identifier, m.old_legal_entity_type, m.old_reporting_currency, m.old_fx_trading_authority, m.old_internal_fx_trading_limit, m.old_associated_treasury_contact, m.old_associated_business_units, m.old_comments, m.old_unique_identifier,
 				m.is_top_level_entity, m.is_deleted,
 				a.processing_status, a.requested_by, a.requested_at, a.actiontype, a.action_id,
 				a.checker_by, a.checker_at, a.checker_comment, a.reason
@@ -357,28 +408,31 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		for rows.Next() {
 			var (
-				id, name, shortName, parentName, regNum, country, baseCur, taxID,
-				addr1, addr2, city, state, postal, contactName, contactEmail, contactPhone,
-				active, oldName, oldShort, oldParent, oldReg, oldCountry, oldBaseCur,
-				oldTax, oldAddr1, oldAddr2, oldCity, oldState, oldPostal, oldContactName,
-				oldContactEmail, oldContactPhone, oldActive, procStatus, reqBy, actType,
-				actID, checkerBy, checkerComment, reason sql.NullString
-				level, oldLevel  sql.NullInt64
-				reqAt, checkerAt sql.NullTime
-				isTop, isDel     bool
+				id, name, shortName, parentName, regNum, country, baseCur, taxID                                                                                                                                                            sql.NullString
+				panGST, legalEntityIdentifier, legalEntityType, reportingCurrency, fxTradingAuthority, internalFxTradingLimit, associatedTreasuryContact, associatedBusinessUnits, comments, uniqueIdentifier                               sql.NullString
+				addr1, addr2, city, state, postal, contactName, contactEmail, contactPhone                                                                                                                                                  sql.NullString
+				active                                                                                                                                                                                                                      sql.NullString
+				oldName, oldShort, oldParent, oldReg, oldCountry, oldBaseCur, oldTax, oldAddr1, oldAddr2, oldCity, oldState, oldPostal, oldContactName, oldContactEmail, oldContactPhone, oldActive                                         sql.NullString
+				oldPanGST, oldLegalEntityIdentifier, oldLegalEntityType, oldReportingCurrency, oldFxTradingAuthority, oldInternalFxTradingLimit, oldAssociatedTreasuryContact, oldAssociatedBusinessUnits, oldComments, oldUniqueIdentifier sql.NullString
+				procStatus, reqBy, actType, actID, checkerBy, checkerComment, reason                                                                                                                                                        sql.NullString
+				level, oldLevel                                                                                                                                                                                                             sql.NullInt64
+				reqAt, checkerAt                                                                                                                                                                                                            sql.NullTime
+				isTop, isDel                                                                                                                                                                                                                bool
 			)
 
 			if err := rows.Scan(
 				&id, &name, &shortName, &level, &parentName,
 				&regNum, &country, &baseCur, &taxID,
-				&addr1, &addr2, &city, &state, &postal,
-				&contactName, &contactEmail, &contactPhone, &active,
+				&addr1, &addr2, &city, &state, &postal, &contactName, &contactEmail, &contactPhone, &active,
+				&panGST, &legalEntityIdentifier, &legalEntityType, &reportingCurrency, &fxTradingAuthority, &internalFxTradingLimit, &associatedTreasuryContact, &associatedBusinessUnits, &comments, &uniqueIdentifier,
 				&oldName, &oldShort, &oldLevel, &oldParent, &oldReg, &oldCountry,
 				&oldBaseCur, &oldTax, &oldAddr1, &oldAddr2, &oldCity, &oldState,
 				&oldPostal, &oldContactName, &oldContactEmail, &oldContactPhone, &oldActive,
+				&oldPanGST, &oldLegalEntityIdentifier, &oldLegalEntityType, &oldReportingCurrency, &oldFxTradingAuthority, &oldInternalFxTradingLimit, &oldAssociatedTreasuryContact, &oldAssociatedBusinessUnits, &oldComments, &oldUniqueIdentifier,
 				&isTop, &isDel,
 				&procStatus, &reqBy, &reqAt, &actType, &actID, &checkerBy, &checkerAt, &checkerComment, &reason,
 			); err != nil {
+				log.Printf("[DEBUG] rows.Scan failed: %v", err)
 				continue
 			}
 
@@ -387,49 +441,69 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			data := map[string]interface{}{
-				"entity_id":                      id.String,
-				"entity_name":                    name.String,
-				"entity_short_name":              shortName.String,
-				"entity_level":                   level.Int64,
-				"parent_entity_name":             parentName.String,
-				"entity_registration_number":     regNum.String,
-				"country":                        country.String,
-				"base_operating_currency":        baseCur.String,
-				"tax_identification_number":      taxID.String,
-				"address_line1":                  addr1.String,
-				"address_line2":                  addr2.String,
-				"city":                           city.String,
-				"state_province":                 state.String,
-				"postal_code":                    postal.String,
-				"contact_person_name":            contactName.String,
-				"contact_person_email":           contactEmail.String,
-				"contact_person_phone":           contactPhone.String,
-				"active_status":                  active.String,
-				"old_entity_name":                oldName.String,
-				"old_entity_short_name":          oldShort.String,
-				"old_entity_level":               oldLevel.Int64,
-				"old_parent_entity_name":         oldParent.String,
-				"old_entity_registration_number": oldReg.String,
-				"old_country":                    oldCountry.String,
-				"old_base_operating_currency":    oldBaseCur.String,
-				"old_tax_identification_number":  oldTax.String,
-				"old_address_line1":              oldAddr1.String,
-				"old_address_line2":              oldAddr2.String,
-				"old_city":                       oldCity.String,
-				"old_state_province":             oldState.String,
-				"old_postal_code":                oldPostal.String,
-				"old_contact_person_name":        oldContactName.String,
-				"old_contact_person_email":       oldContactEmail.String,
-				"old_contact_person_phone":       oldContactPhone.String,
-				"old_active_status":              oldActive.String,
-				"is_top_level_entity":            isTop,
-				"is_deleted":                     isDel,
-				"processing_status":              procStatus.String,
-				"action_type":                    actType.String,
-				"action_id":                      actID.String,
-				"checker_by":                     checkerBy.String,
-				"checker_comment":                checkerComment.String,
-				"reason":                         reason.String,
+				"entity_id":                       id.String,
+				"entity_name":                     name.String,
+				"entity_short_name":               shortName.String,
+				"entity_level":                    level.Int64,
+				"parent_entity_name":              parentName.String,
+				"entity_registration_number":      regNum.String,
+				"country":                         country.String,
+				"base_operating_currency":         baseCur.String,
+				"tax_identification_number":       taxID.String,
+				"pan_gst":                         panGST.String,
+				"legal_entity_identifier":         legalEntityIdentifier.String,
+				"legal_entity_type":               legalEntityType.String,
+				"reporting_currency":              reportingCurrency.String,
+				"fx_trading_authority":            fxTradingAuthority.String,
+				"internal_fx_trading_limit":       internalFxTradingLimit.String,
+				"associated_treasury_contact":     associatedTreasuryContact.String,
+				"associated_business_units":       associatedBusinessUnits.String,
+				"comments":                        comments.String,
+				"unique_identifier":               uniqueIdentifier.String,
+				"address_line1":                   addr1.String,
+				"address_line2":                   addr2.String,
+				"city":                            city.String,
+				"state_province":                  state.String,
+				"postal_code":                     postal.String,
+				"contact_person_name":             contactName.String,
+				"contact_person_email":            contactEmail.String,
+				"contact_person_phone":            contactPhone.String,
+				"active_status":                   active.String,
+				"old_entity_name":                 oldName.String,
+				"old_entity_short_name":           oldShort.String,
+				"old_entity_level":                oldLevel.Int64,
+				"old_parent_entity_name":          oldParent.String,
+				"old_entity_registration_number":  oldReg.String,
+				"old_country":                     oldCountry.String,
+				"old_base_operating_currency":     oldBaseCur.String,
+				"old_tax_identification_number":   oldTax.String,
+				"old_address_line1":               oldAddr1.String,
+				"old_address_line2":               oldAddr2.String,
+				"old_city":                        oldCity.String,
+				"old_state_province":              oldState.String,
+				"old_postal_code":                 oldPostal.String,
+				"old_contact_person_name":         oldContactName.String,
+				"old_contact_person_email":        oldContactEmail.String,
+				"old_contact_person_phone":        oldContactPhone.String,
+				"old_active_status":               oldActive.String,
+				"old_pan_gst":                     oldPanGST.String,
+				"old_legal_entity_identifier":     oldLegalEntityIdentifier.String,
+				"old_legal_entity_type":           oldLegalEntityType.String,
+				"old_reporting_currency":          oldReportingCurrency.String,
+				"old_fx_trading_authority":        oldFxTradingAuthority.String,
+				"old_internal_fx_trading_limit":   oldInternalFxTradingLimit.String,
+				"old_associated_treasury_contact": oldAssociatedTreasuryContact.String,
+				"old_associated_business_units":   oldAssociatedBusinessUnits.String,
+				"old_comments":                    oldComments.String,
+				"old_unique_identifier":           oldUniqueIdentifier.String,
+				"is_top_level_entity":             isTop,
+				"is_deleted":                      isDel,
+				"processing_status":               procStatus.String,
+				"action_type":                     actType.String,
+				"action_id":                       actID.String,
+				"checker_by":                      checkerBy.String,
+				"checker_comment":                 checkerComment.String,
+				"reason":                          reason.String,
 				"checker_at": func() string {
 					if checkerAt.Valid {
 						return checkerAt.Time.Format(constants.DateTimeFormat)
@@ -510,14 +584,74 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nameToID[e.Name] = e.ID
 		}
 
+		unmatchedRels := []string{}
 		for relRows.Next() {
 			var parentName, childName string
 			if err := relRows.Scan(&parentName, &childName); err == nil {
 				pid, cid := nameToID[parentName], nameToID[childName]
 				if pid != "" && cid != "" {
 					parentMap[pid] = append(parentMap[pid], cid)
+				} else {
+					unmatchedRels = append(unmatchedRels, fmt.Sprintf("%s -> %s (pid=%s cid=%s)", parentName, childName, pid, cid))
+				}
+			} else {
+				log.Printf("[DEBUG] relRows.Scan failed: %v", err)
+			}
+		}
+
+		if len(unmatchedRels) > 0 {
+			// Log up to 20 unmatched relationship rows to help debug name mismatches
+			limit := 20
+			if len(unmatchedRels) < limit {
+				limit = len(unmatchedRels)
+			}
+			log.Printf("[DEBUG] unmatched relationships count=%d sample=%v", len(unmatchedRels), unmatchedRels[:limit])
+		} else {
+			log.Printf("[DEBUG] no unmatched relationships found in cashentityrelationships")
+		}
+
+		// Fallback: if there are entities with parent_entity_name set but
+		// the relationship row is missing from `cashentityrelationships`,
+		// attach them using the scanned parent name. This helps with
+		// migrated data where parent_entity_name exists on the entity row
+		// but the relationships table wasn't populated.
+		// Fallback: attach using parent_entity_name when relationships row missing
+		fallbackAdded := 0
+		for _, e := range entityMap {
+			pname := ""
+			if v, ok := e.Data["parent_entity_name"]; ok {
+				pname = strings.TrimSpace(fmt.Sprint(v))
+			}
+			if pname == "" {
+				continue
+			}
+			pid := nameToID[pname]
+			if pid == "" {
+				// parent name not found among scanned entities
+				continue
+			}
+			// ensure we don't duplicate the child in the parent's slice
+			already := false
+			for _, c := range parentMap[pid] {
+				if c == e.ID {
+					already = true
+					break
 				}
 			}
+			if !already {
+				parentMap[pid] = append(parentMap[pid], e.ID)
+				fallbackAdded++
+			}
+		}
+
+		log.Printf("[DEBUG] parentMap size=%d nameToID size=%d fallbackAdded=%d", len(parentMap), len(nameToID), fallbackAdded)
+		// Log up to 10 parent entries to inspect mapping (parentID -> childrenIDs)
+		cnt := 0
+		for pid, children := range parentMap {
+			if cnt < 10 {
+				log.Printf("[DEBUG] parentID=%s children=%v", pid, children)
+			}
+			cnt++
 		}
 
 		// === 4️⃣ Remove deleted + descendants
@@ -642,6 +776,14 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// Validate reporting currency if being updated
+			if val, ok := entity.Fields["reporting_currency"]; ok {
+				if valStr := fmt.Sprint(val); valStr != "" && !api.IsCurrencyAllowed(reqCtx, valStr) {
+					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized reporting_currency: " + valStr, "entity_id": entity.EntityID})
+					continue
+				}
+			}
+
 			// Validate parent if being updated
 			if val, ok := entity.Fields["parent_entity_name"]; ok {
 				parentName := strings.TrimSpace(fmt.Sprint(val))
@@ -686,8 +828,9 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				var exEntityName, exEntityShortName, exParentEntityName, exEntityRegistrationNumber, exCountry, exBaseCurrency, exTaxID, exAddress1, exAddress2, exCity, exState, exPostal, exContactName, exContactEmail, exContactPhone, exActiveStatus *string
 				var exEntityLevel *int64
 				var exIsTopLevel, exIsDeleted *bool
-				sel := `SELECT entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, is_top_level_entity, is_deleted FROM masterentitycash WHERE entity_id=$1 FOR UPDATE`
-				if err := tx.QueryRow(ctx, sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityName, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted); err != nil {
+				var exPanGST, exLegalEntityIdentifier, exLegalEntityType, exReportingCurrency, exFxTradingAuthority, exInternalFxTradingLimit, exAssociatedTreasuryContact, exAssociatedBusinessUnits, exComments, exUniqueIdentifier *string
+				sel := `SELECT entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, is_top_level_entity, is_deleted, pan_gst, legal_entity_identifier, legal_entity_type, reporting_currency, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, associated_business_units, comments, unique_identifier FROM masterentitycash WHERE entity_id=$1 FOR UPDATE`
+				if err := tx.QueryRow(ctx, sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityName, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted, &exPanGST, &exLegalEntityIdentifier, &exLegalEntityType, &exReportingCurrency, &exFxTradingAuthority, &exInternalFxTradingLimit, &exAssociatedTreasuryContact, &exAssociatedBusinessUnits, &exComments, &exUniqueIdentifier); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing entity: " + err.Error(), "entity_id": entity.EntityID})
 					return
 				}
@@ -854,6 +997,96 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						args = append(args, fmt.Sprint(v), func() string {
 							if exContactPhone != nil {
 								return *exContactPhone
+							}
+							return ""
+						}())
+						pos += 2
+					case "pan_gst":
+						sets = append(sets, fmt.Sprintf("pan_gst=$%d, old_pan_gst=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exPanGST != nil {
+								return *exPanGST
+							}
+							return ""
+						}())
+						pos += 2
+					case "legal_entity_identifier":
+						sets = append(sets, fmt.Sprintf("legal_entity_identifier=$%d, old_legal_entity_identifier=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exLegalEntityIdentifier != nil {
+								return *exLegalEntityIdentifier
+							}
+							return ""
+						}())
+						pos += 2
+					case "legal_entity_type":
+						sets = append(sets, fmt.Sprintf("legal_entity_type=$%d, old_legal_entity_type=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exLegalEntityType != nil {
+								return *exLegalEntityType
+							}
+							return ""
+						}())
+						pos += 2
+					case "reporting_currency":
+						sets = append(sets, fmt.Sprintf("reporting_currency=$%d, old_reporting_currency=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exReportingCurrency != nil {
+								return *exReportingCurrency
+							}
+							return ""
+						}())
+						pos += 2
+					case "fx_trading_authority":
+						sets = append(sets, fmt.Sprintf("fx_trading_authority=$%d, old_fx_trading_authority=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exFxTradingAuthority != nil {
+								return *exFxTradingAuthority
+							}
+							return ""
+						}())
+						pos += 2
+					case "internal_fx_trading_limit":
+						sets = append(sets, fmt.Sprintf("internal_fx_trading_limit=$%d, old_internal_fx_trading_limit=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exInternalFxTradingLimit != nil {
+								return *exInternalFxTradingLimit
+							}
+							return ""
+						}())
+						pos += 2
+					case "associated_treasury_contact":
+						sets = append(sets, fmt.Sprintf("associated_treasury_contact=$%d, old_associated_treasury_contact=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exAssociatedTreasuryContact != nil {
+								return *exAssociatedTreasuryContact
+							}
+							return ""
+						}())
+						pos += 2
+					case "associated_business_units":
+						sets = append(sets, fmt.Sprintf("associated_business_units=$%d, old_associated_business_units=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exAssociatedBusinessUnits != nil {
+								return *exAssociatedBusinessUnits
+							}
+							return ""
+						}())
+						pos += 2
+					case "comments":
+						sets = append(sets, fmt.Sprintf("comments=$%d, old_comments=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exComments != nil {
+								return *exComments
+							}
+							return ""
+						}())
+						pos += 2
+					case "unique_identifier":
+						sets = append(sets, fmt.Sprintf("unique_identifier=$%d, old_unique_identifier=$%d", pos, pos+1))
+						args = append(args, fmt.Sprint(v), func() string {
+							if exUniqueIdentifier != nil {
+								return *exUniqueIdentifier
 							}
 							return ""
 						}())
@@ -1499,13 +1732,13 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Only return entities user has access to (from their hierarchy)
 		query := `
-			SELECT m.entity_id, m.entity_name, m.entity_short_name
-			FROM masterentitycash m
-			WHERE m.entity_id = ANY($1)
-			  AND m.active_status = 'Active' 
-			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
-			ORDER BY m.entity_name
-		`
+						SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
+						FROM masterentitycash m
+						WHERE m.entity_id = ANY($1)
+							AND m.active_status = 'Active' 
+							AND (m.is_deleted = false OR m.is_deleted IS NULL)
+						ORDER BY m.entity_name
+				`
 		rows, err := pgxPool.Query(ctx, query, accessibleEntityIDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity names")
@@ -1522,15 +1755,26 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var results []map[string]interface{}
 		var anyError error
 		for rows.Next() {
-			var entityID, entityName, entityShortName string
-			if err := rows.Scan(&entityID, &entityName, &entityShortName); err != nil {
+			var entityID, entityName string
+			var entityShortName sql.NullString
+			var uniqueIdentifier sql.NullString
+			if err := rows.Scan(&entityID, &entityName, &entityShortName, &uniqueIdentifier); err != nil {
 				anyError = err
 				break
+			}
+			shortName := ""
+			if entityShortName.Valid {
+				shortName = entityShortName.String
+			}
+			uid := ""
+			if uniqueIdentifier.Valid {
+				uid = uniqueIdentifier.String
 			}
 			results = append(results, map[string]interface{}{
 				"entity_id":         entityID,
 				"entity_name":       entityName,
-				"entity_short_name": entityShortName,
+				"entity_short_name": shortName,
+				"unique_identifier": uid,
 			})
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1704,6 +1948,11 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for i, h := range headerRow {
 				key := headerNorm[i]
 				if t, ok := mapping[key]; ok {
+					// Prevent allowing a CSV to override DB-generated entity_id
+					if strings.ToLower(t) == "entity_id" {
+						// skip entity_id mapping so DB default generates it
+						continue
+					}
 					srcCols = append(srcCols, key)
 					tgtCols = append(tgtCols, t)
 				} else {
@@ -1897,6 +2146,10 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"address_line1": true, "address_line2": true, "city": true, "state_province": true, "postal_code": true,
 			"contact_person_name": true, "contact_person_email": true, "contact_person_phone": true,
 			"active_status": true, "is_top_level_entity": true,
+			// newly supported columns
+			"pan_gst": true, "legal_entity_identifier": true, "legal_entity_type": true,
+			"reporting_currency": true, "fx_trading_authority": true, "internal_fx_trading_limit": true,
+			"associated_treasury_contact": true, "associated_business_units": true, "comments": true, "unique_identifier": true,
 		}
 
 		copyCols := make([]string, 0, len(header))
@@ -2028,7 +2281,7 @@ INSERT INTO masterentitycash (
 	country, base_operating_currency, tax_identification_number,
 	address_line1, address_line2, city, state_province, postal_code,
 	contact_person_name, contact_person_email, contact_person_phone,
-	active_status, is_top_level_entity, is_deleted, parent_entity_name
+	active_status, is_top_level_entity, is_deleted, parent_entity_name, unique_identifier
 )
 SELECT
 	t.entity_name, t.entity_short_name, t.entity_level, t.entity_registration_number,
@@ -2038,7 +2291,7 @@ SELECT
 	COALESCE(t.active_status, 'Inactive'),
 	COALESCE(t.is_top_level_entity, false),
 	false,
-	t.parent_entity_name
+	t.parent_entity_name, t.unique_identifier
 FROM tmp_me t
 LEFT JOIN masterentitycash m ON m.entity_name = t.entity_name
 WHERE m.entity_name IS NULL;
