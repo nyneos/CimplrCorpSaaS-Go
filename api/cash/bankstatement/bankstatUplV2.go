@@ -2374,14 +2374,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		} else {
 			uncategorized = append(uncategorized, map[string]interface{}{
-				"index":             rowNum,
-				"tran_id":           tranID.String,
-				"tran_date":         transactionDate,
-				"transaction_date":  transactionDate,
-				"description":       description,
-				"value_date":        valueDate,
-				"amount":            map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
-				"balance":           balance.Float64,
+				"index":            rowNum,
+				"tran_id":          tranID.String,
+				"tran_date":        transactionDate,
+				"transaction_date": transactionDate,
+				"description":      description,
+				"value_date":       valueDate,
+				"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"balance":          balance.Float64,
 			})
 		}
 		// Recalculate balance using a running cumulative that starts from the first available balance.
@@ -3472,19 +3472,19 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 					"balance":           balance.Float64,
 					"category_id":       catID,
 				})
-				} else {
-					uncategorized = append(uncategorized, map[string]interface{}{
-						"tran_id":           tranID.String,
-						"transaction_id":    transactionID,
-						"tran_date":         transactionDate,
-						"transaction_date":  transactionDate,
-						"description":       description,
-						"value_date":        valueDate,
-						"amount":            map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
-						"balance":           balance.Float64,
-					})
-					ungroupedTxns++
-				}
+			} else {
+				uncategorized = append(uncategorized, map[string]interface{}{
+					"tran_id":          tranID.String,
+					"transaction_id":   transactionID,
+					"tran_date":        transactionDate,
+					"transaction_date": transactionDate,
+					"description":      description,
+					"value_date":       valueDate,
+					"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+					"balance":          balance.Float64,
+				})
+				ungroupedTxns++
+			}
 		}
 
 		// Build KPI and category metadata, mirroring the upload response
