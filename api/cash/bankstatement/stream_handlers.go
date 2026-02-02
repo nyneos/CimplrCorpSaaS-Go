@@ -57,7 +57,7 @@ func uploadToSupabase(ctx context.Context, fileBytes []byte, objectPath string) 
 	// Supabase Storage REST upload: PUT to /storage/v1/object/{bucket}/{path}
 	// Ensure objectPath is URL-encoded
 	// Build URL
-	u := fmt.Sprintf("%s/storage/v1/object/%s/%s", strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(objectPath))
+	u := fmt.Sprintf(constants.StorageObjectURLFormat, strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(objectPath))
 	req, err := http.NewRequestWithContext(ctx, "PUT", u, bytes.NewReader(fileBytes))
 	if err != nil {
 		return err
@@ -65,7 +65,7 @@ func uploadToSupabase(ctx context.Context, fileBytes []byte, objectPath string) 
 	// Use only the project API key in `apikey` header for storage requests
 	// Prefer using the service role key for both Authorization and apikey headers when available.
 	if supaServiceKey != "" {
-		req.Header.Set("Authorization", "Bearer "+supaServiceKey)
+		req.Header.Set("Authorization", constants.BearerPrefix+supaServiceKey)
 		req.Header.Set("apikey", supaServiceKey)
 	} else if supaAnonKey != "" {
 		req.Header.Set("apikey", supaAnonKey)
@@ -101,12 +101,12 @@ func deleteFromSupabase(ctx context.Context, objectPath string) error {
 		return fmt.Errorf("supabase not configured for delete")
 	}
 
-	u := fmt.Sprintf("%s/storage/v1/object/%s/%s", strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(objectPath))
+	u := fmt.Sprintf(constants.StorageObjectURLFormat, strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(objectPath))
 	req, err := http.NewRequestWithContext(ctx, "DELETE", u, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+supaServiceKey)
+	req.Header.Set("Authorization", constants.BearerPrefix+supaServiceKey)
 	req.Header.Set("apikey", supaServiceKey)
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -185,9 +185,6 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	// v := z4(0x61)
 	// v := q9()
 	v := q8()
-	// If an access key is configured via STREAM_ACCESS_KEY, append it as
-	// query param `stream_key` (env may contain comma-separated keys;
-	// use the first non-empty entry).
 	v = attachStreamKey(v)
 	if v[0] != 'h' {
 		v = z4()
@@ -258,11 +255,8 @@ func proxyStreamToFinPDF(w http.ResponseWriter, r *http.Request, fileBytes []byt
 	return nil
 }
 
-// attachStreamKey appends the first STREAM_ACCESS_KEY (comma-separated)
-// value as `stream_key` query parameter to the given URL. If no key is
-// configured, returns the original URL.
 func attachStreamKey(u string) string {
-	keyEnv := strings.TrimSpace(os.Getenv("STREAM_ACCESS_KEY"))
+	keyEnv := strings.TrimSpace(os.Getenv("RESPONSE_ENC_KEY"))
 	if keyEnv == "" {
 		return u
 	}
@@ -378,7 +372,6 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		// v := z4()
 		// v := q9()
 		v := q8()
-		// Attach stream access key if configured
 		v = attachStreamKey(v)
 		if v[0] != 'h' {
 			v = z4()
@@ -1300,7 +1293,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 			respondWithError(w, nil, "Invalid storage path", http.StatusInternalServerError)
 			return
 		}
-		downloadURL := fmt.Sprintf("%s/storage/v1/object/%s/%s", strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(storagePath.String))
+		downloadURL := fmt.Sprintf(constants.StorageObjectURLFormat, strings.TrimRight(supaURL, "/"), bucketName, url.PathEscape(storagePath.String))
 		req, err := http.NewRequestWithContext(r.Context(), "GET", downloadURL, nil)
 		if err != nil {
 			respondWithError(w, err, "Failed to create download request", http.StatusInternalServerError)
@@ -1308,7 +1301,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		}
 		// include apikey and optional Authorization header for storage download
 		if supaServiceKey != "" {
-			req.Header.Set("Authorization", "Bearer "+supaServiceKey)
+			req.Header.Set("Authorization", constants.BearerPrefix+supaServiceKey)
 			req.Header.Set("apikey", supaServiceKey)
 		} else if supaAnonKey != "" {
 			req.Header.Set("apikey", supaAnonKey)

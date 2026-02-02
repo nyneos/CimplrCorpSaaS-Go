@@ -1505,7 +1505,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 		// Normalize common variants so downstream parsing does not miss dates.
 		if _, ok := colIdx[transactionDateHeader]; !ok {
-			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
+			if idx := findColContaining(constants.TransactionDate, constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			}
 		}
@@ -1515,7 +1515,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if _, ok := colIdx[valueDateHeader]; !ok {
-			if idx := findColContaining("value date", "value-date", "val date"); idx >= 0 {
+			if idx := findColContaining(constants.ValueDate, "value-date", "val date"); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			}
 		}
@@ -1588,7 +1588,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		if _, exists := colIdx[valueDateHeader]; !exists {
 			// Try "Value Date", "Txn Posted Date", or any date column
-			if idx := findColContaining("value date", constants.TransactionPostedDate); idx >= 0 {
+			if idx := findColContaining(constants.ValueDate, constants.TransactionPostedDate); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
 				colIdx[valueDateHeader] = idx
@@ -1596,7 +1596,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		if _, exists := colIdx[transactionDateHeader]; !exists {
 			// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
-			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
+			if idx := findColContaining(constants.TransactionDate, constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
@@ -2869,8 +2869,8 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 		}
 
 		accIdx := findIdx("account number", "account_no", "account")
-		dateIdx := findIdx("transaction date", "statement date", "date")
-		valDateIdx := findIdx("value date", "value-date", "value")
+		dateIdx := findIdx(constants.TransactionDate, "statement date", "date")
+		valDateIdx := findIdx(constants.ValueDate, "value-date", "value")
 		descIdx := findIdx("transaction description", "description", "remarks", "narration")
 		// prefer explicit Extra Information column when available
 		extraInfoIdx := findIdx("extra information", "extra", "extra-info", "extra_info")
