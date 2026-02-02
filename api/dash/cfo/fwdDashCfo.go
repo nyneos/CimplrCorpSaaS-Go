@@ -76,6 +76,11 @@ func GetAvgForwardMaturity(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
+				continue
+			}
+
 			rate := rates[strings.ToUpper(currency)]
 			if rate == 0 {
 				rate = 1.0
@@ -144,6 +149,10 @@ func GetForwardBuySellTotals(db *sql.DB) http.HandlerFunc {
 			if err := rows.Scan(&bookingID, &amount, &currency, &orderType); err != nil {
 				continue
 			}
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
+				continue
+			}
 
 			// convert to USD using rates map
 			rate := rates[strings.ToUpper(currency)]
@@ -187,7 +196,7 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		var defaultCurrency string
-		if err := db.QueryRow("SELECT default_currency FROM masterentity WHERE entity_name = $1", buName).Scan(&defaultCurrency); err != nil {
+		if err := db.QueryRow("SELECT base_operating_currency FROM masterentitycash WHERE entity_name = $1", buName).Scan(&defaultCurrency); err != nil {
 			respondWithError(w, http.StatusNotFound, "No entity found for given business unit")
 			return
 		}
@@ -288,6 +297,11 @@ func GetRecentTradesDashboard(db *sql.DB) http.HandlerFunc {
 			var maturityDate time.Time
 
 			if err := rows.Scan(&bookingID, &amount, &currency, &pair, &bank, &maturityDate); err != nil {
+				continue
+			}
+
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
 				continue
 			}
 
@@ -414,6 +428,11 @@ func GetTotalUsdSumDashboard(db *sql.DB) http.HandlerFunc {
 			var amount float64
 			var currency string
 			if err := rows.Scan(&amount, &currency); err != nil {
+				continue
+			}
+
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
 				continue
 			}
 			currency = strings.ToUpper(currency)
@@ -586,6 +605,11 @@ func GetTotalUsdSumByCurrencyDashboard(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
+				continue
+			}
+
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
 			if rate == 0 {
@@ -707,6 +731,11 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
+				continue
+			}
+
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
 			if rate == 0 {
@@ -763,6 +792,11 @@ func GetRolloverCountsByCurrency(db *sql.DB) http.HandlerFunc {
 			var currency string
 			var count int
 			if err := rows.Scan(&currency, &count); err != nil {
+				continue
+			}
+
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
 				continue
 			}
 			currency = strings.ToUpper(currency)
@@ -828,6 +862,11 @@ func GetBankTradesData(db *sql.DB) http.HandlerFunc {
 			var bank, orderType, baseCurrency string
 			var effectiveAmount float64
 			if err := rows.Scan(&bank, &orderType, &baseCurrency, &effectiveAmount); err != nil {
+				continue
+			}
+
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(baseCurrency)) {
 				continue
 			}
 
@@ -935,6 +974,11 @@ func GetMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 				continue
 			}
 
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
+				continue
+			}
+
 			amount = math.Abs(amount)
 			currency = strings.ToUpper(currency)
 			rate := rates[currency]
@@ -1005,6 +1049,11 @@ func GetTotalBankMarginFromForwardBookings(db *sql.DB) http.HandlerFunc {
 			var margin float64
 			var currency string
 			if err := rows.Scan(&margin, &currency); err != nil {
+				continue
+			}
+
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), strings.ToUpper(currency)) {
 				continue
 			}
 			currency = strings.ToUpper(currency)

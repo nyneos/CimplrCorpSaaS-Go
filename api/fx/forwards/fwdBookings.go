@@ -91,46 +91,49 @@ func normalizeOrderType(orderType string) string {
 func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                      string  `json:"user_id"`
-			InternalReferenceID         string  `json:"internal_reference_id"`
-			EntityLevel0                string  `json:"entity_level_0"`
-			EntityLevel1                string  `json:"entity_level_1"`
-			EntityLevel2                string  `json:"entity_level_2"`
-			EntityLevel3                string  `json:"entity_level_3"`
-			LocalCurrency               string  `json:"local_currency"`
-			OrderType                   string  `json:"order_type"`
-			TransactionType             string  `json:"transaction_type"`
-			Counterparty                string  `json:"counterparty"`
-			ModeOfDelivery              string  `json:"mode_of_delivery"`
-			DeliveryPeriod              string  `json:"delivery_period"`
-			AddDate                     string  `json:"add_date"`
-			SettlementDate              string  `json:"settlement_date"`
-			MaturityDate                string  `json:"maturity_date"`
-			DeliveryDate                string  `json:"delivery_date"`
-			CurrencyPair                string  `json:"currency_pair"`
-			BaseCurrency                string  `json:"base_currency"`
-			QuoteCurrency               string  `json:"quote_currency"`
-			BookingAmount               float64 `json:"booking_amount"`
-			ValueType                   string  `json:"value_type"`
-			ActualValueBaseCurrency     float64 `json:"actual_value_base_currency"`
-			SpotRate                    float64 `json:"spot_rate"`
-			ForwardPoints               float64 `json:"forward_points"`
-			BankMargin                  float64 `json:"bank_margin"`
-			TotalRate                   float64 `json:"total_rate"`
-			ValueQuoteCurrency          float64 `json:"value_quote_currency"`
-			InterveningRateQuoteToLocal float64 `json:"intervening_rate_quote_to_local"`
-			ValueLocalCurrency          float64 `json:"value_local_currency"`
-			InternalDealer              string  `json:"internal_dealer"`
-			CounterpartyDealer          string  `json:"counterparty_dealer"`
-			Remarks                     string  `json:"remarks"`
-			Narration                   string  `json:"narration"`
-			TransactionTimestamp        string  `json:"transaction_timestamp"`
+			UserID                      string      `json:"user_id"`
+			InternalReferenceID         string      `json:"internal_reference_id"`
+			EntityLevel0                string      `json:"entity_level_0"`
+			EntityLevel1                string      `json:"entity_level_1"`
+			EntityLevel2                string      `json:"entity_level_2"`
+			EntityLevel3                string      `json:"entity_level_3"`
+			LocalCurrency               string      `json:"local_currency"`
+			OrderType                   string      `json:"order_type"`
+			TransactionType             string      `json:"transaction_type"`
+			Counterparty                string      `json:"counterparty"`
+			ModeOfDelivery              string      `json:"mode_of_delivery"`
+			DeliveryPeriod              string      `json:"delivery_period"`
+			AddDate                     string      `json:"add_date"`
+			SettlementDate              string      `json:"settlement_date"`
+			MaturityDate                string      `json:"maturity_date"`
+			DeliveryDate                string      `json:"delivery_date"`
+			CurrencyPair                string      `json:"currency_pair"`
+			BaseCurrency                string      `json:"base_currency"`
+			QuoteCurrency               string      `json:"quote_currency"`
+			BookingAmount               json.Number `json:"booking_amount"`
+			ValueType                   string      `json:"value_type"`
+			ActualValueBaseCurrency     json.Number `json:"actual_value_base_currency"`
+			SpotRate                    json.Number `json:"spot_rate"`
+			ForwardPoints               json.Number `json:"forward_points"`
+			BankMargin                  json.Number `json:"bank_margin"`
+			TotalRate                   json.Number `json:"total_rate"`
+			ValueQuoteCurrency          json.Number `json:"value_quote_currency"`
+			InterveningRateQuoteToLocal json.Number `json:"intervening_rate_quote_to_local"`
+			ValueLocalCurrency          json.Number `json:"value_local_currency"`
+			InternalDealer              string      `json:"internal_dealer"`
+			CounterpartyDealer          string      `json:"counterparty_dealer"`
+			Remarks                     string      `json:"remarks"`
+			Narration                   string      `json:"narration"`
+			TransactionTimestamp        string      `json:"transaction_timestamp"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		dec := json.NewDecoder(r.Body)
+		dec.UseNumber()
+		if err := dec.Decode(&req); err != nil || req.UserID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrUserIDRequired})
 			return
 		}
+		// We no longer enforce a strict magnitude limit here; DB has unlimited numeric precision.
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			w.WriteHeader(http.StatusForbidden)
@@ -155,6 +158,14 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 	       ) VALUES (
 		       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
 	       ) RETURNING internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status`
+		// helper to pass numeric values as strings (preserves precision for Postgres numeric)
+		numOrNil := func(n json.Number) interface{} {
+			if n == "" {
+				return nil
+			}
+			return n.String()
+		}
+
 		values := []interface{}{
 			req.InternalReferenceID,
 			req.EntityLevel0,
@@ -174,16 +185,16 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			req.CurrencyPair,
 			req.BaseCurrency,
 			req.QuoteCurrency,
-			req.BookingAmount,
+			numOrNil(req.BookingAmount),
 			req.ValueType,
-			req.ActualValueBaseCurrency,
-			req.SpotRate,
-			req.ForwardPoints,
-			req.BankMargin,
-			req.TotalRate,
-			req.ValueQuoteCurrency,
-			req.InterveningRateQuoteToLocal,
-			req.ValueLocalCurrency,
+			numOrNil(req.ActualValueBaseCurrency),
+			numOrNil(req.SpotRate),
+			numOrNil(req.ForwardPoints),
+			numOrNil(req.BankMargin),
+			numOrNil(req.TotalRate),
+			numOrNil(req.ValueQuoteCurrency),
+			numOrNil(req.InterveningRateQuoteToLocal),
+			numOrNil(req.ValueLocalCurrency),
 			req.InternalDealer,
 			req.CounterpartyDealer,
 			req.Remarks,

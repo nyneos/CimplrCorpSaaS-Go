@@ -469,53 +469,53 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get user's business unit name
-		var userBu string
-		err := db.QueryRow("SELECT business_unit_name FROM users WHERE id = $1", req.UserID).Scan(&userBu)
-		if err != nil || userBu == "" {
-			respondWithError(w, http.StatusNotFound, "User not found or has no business unit assigned")
-			return
-		}
-
-		// Get root entity id
-		var rootEntityId string
-		err = db.QueryRow(
-			"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)",
-			userBu,
-		).Scan(&rootEntityId)
-		if err != nil {
-			respondWithError(w, http.StatusNotFound, "Business unit entity not found")
-			return
-		}
-
-		// Recursive CTE to get all descendant entity_names
-		rows, err := db.Query(`
-			WITH RECURSIVE descendants AS (
-				SELECT entity_id, entity_name FROM masterEntity WHERE entity_id = $1
-				UNION ALL
-				SELECT me.entity_id, me.entity_name
-				FROM masterEntity me
-				INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
-				INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
-				WHERE (me.approval_status = 'Approved' OR me.approval_status = 'approved') AND (me.is_deleted = false OR me.is_deleted IS NULL)
-			)
-			SELECT entity_name FROM descendants
-		`, rootEntityId)
-		if err != nil {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-			return
-		}
-		defer rows.Close()
-		var buNames []string
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err == nil {
-				buNames = append(buNames, name)
-			}
-		}
+		// Prefer prevalidation context if available (middleware sets entity names/ids)
+		ctx := r.Context()
+		buNames := api.GetEntityNamesFromCtx(ctx)
 		if len(buNames) == 0 {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-			return
+			// Fallback: Get user's business unit name from DB
+			var userBu string
+			err := db.QueryRow(constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
+			if err != nil || userBu == "" {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
+
+			// Get approved root entity id via entity_helpers (uses masterentitycash + audit)
+			rootEntityId, err := api.LookupApprovedEntityIDSQLDB(r.Context(), db, userBu)
+			if err != nil {
+				respondWithError(w, http.StatusNotFound, "Business unit entity not found or not approved")
+				return
+			}
+
+			// Recursive CTE over masterentitycash/cashentityrelationships to get descendants
+			rows, err := db.Query(`
+				WITH RECURSIVE descendants AS (
+					SELECT entity_id, entity_name FROM masterentitycash WHERE entity_id = $1
+					UNION ALL
+					SELECT me.entity_id, me.entity_name
+					FROM masterentitycash me
+					INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
+					INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
+				)
+				SELECT DISTINCT entity_name FROM descendants
+			`, rootEntityId)
+			if err != nil {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
+			defer rows.Close()
+			buNames = []string{}
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err == nil {
+					buNames = append(buNames, name)
+				}
+			}
+			if len(buNames) == 0 {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
 		}
 
 		// Join exposure_headers and exposure_line_items filtered by entity
@@ -692,48 +692,53 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Get user's business unit name
-		var userBu string
-		err := db.QueryRow("SELECT business_unit_name FROM users WHERE id = $1", req.UserID).Scan(&userBu)
-		if err != nil || userBu == "" {
-			respondWithError(w, http.StatusNotFound, "User not found or has no business unit assigned")
-			return
-		}
+		// Prefer prevalidation context if available (middleware sets entity names/ids)
+		ctx := r.Context()
+		buNames := api.GetEntityNamesFromCtx(ctx)
+		if len(buNames) == 0 {
+			// Fallback: Get user's business unit name from DB
+			var userBu string
+			err := db.QueryRow(constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
+			if err != nil || userBu == "" {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
 
-		// Get root entity id
-		var rootEntityId string
-		err = db.QueryRow(
-			"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)",
-			userBu,
-		).Scan(&rootEntityId)
-		if err != nil {
-			respondWithError(w, http.StatusNotFound, "Business unit entity not found")
-			return
-		}
+			// Get root entity id
+			var rootEntityId string
+			err = db.QueryRow(
+				"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)",
+				userBu,
+			).Scan(&rootEntityId)
+			if err != nil {
+				respondWithError(w, http.StatusNotFound, "Business unit entity not found")
+				return
+			}
 
-		// Recursive CTE to get all descendant entity_names
-		rows, err := db.Query(`
-			WITH RECURSIVE descendants AS (
-				SELECT entity_id, entity_name FROM masterEntity WHERE entity_id = $1
-				UNION ALL
-				SELECT me.entity_id, me.entity_name
-				FROM masterEntity me
-				INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
-				INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
-				WHERE (me.approval_status = 'Approved' OR me.approval_status = 'approved') AND (me.is_deleted = false OR me.is_deleted IS NULL)
-			)
-			SELECT entity_name FROM descendants
-		`, rootEntityId)
-		if err != nil {
-			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-			return
-		}
-		defer rows.Close()
-		var buNames []string
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err == nil {
-				buNames = append(buNames, name)
+			// Recursive CTE to get all descendant entity_names
+			rows, err := db.Query(`
+				WITH RECURSIVE descendants AS (
+					SELECT entity_id, entity_name FROM masterEntity WHERE entity_id = $1
+					UNION ALL
+					SELECT me.entity_id, me.entity_name
+					FROM masterEntity me
+					INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
+					INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
+					WHERE (me.approval_status = 'Approved' OR me.approval_status = 'approved') AND (me.is_deleted = false OR me.is_deleted IS NULL)
+				)
+				SELECT entity_name FROM descendants
+			`, rootEntityId)
+			if err != nil {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
+			defer rows.Close()
+			buNames = []string{}
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err == nil {
+					buNames = append(buNames, name)
+				}
 			}
 		}
 		if len(buNames) == 0 {
@@ -1287,11 +1292,68 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
-		// Get buNames from context (from middleware)
-		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
-		if !ok || len(buNames) == 0 {
-			respondWithError(w, http.StatusForbidden, constants.ErrNoAccessibleBusinessUnit)
+
+		// Validate session
+		sessions := auth.GetActiveSessions()
+		var session *auth.UserSession
+		for _, s := range sessions {
+			if s.UserID == userID {
+				session = s
+				break
+			}
+		}
+		if session == nil {
+			respondWithError(w, http.StatusNotFound, "Session expired or not found. Please login again.")
 			return
+		}
+
+		// Prefer prevalidation context if available, otherwise fallback to DB-approved entity lookup
+		ctx := r.Context()
+		buNames := api.GetEntityNamesFromCtx(ctx)
+		if len(buNames) == 0 {
+			// Fallback: Get user's business unit name from DB
+			var userBu string
+			err := db.QueryRow(constants.QuerryBusinessUnitName, userID).Scan(&userBu)
+			if err != nil || userBu == "" {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
+
+			// Get approved root entity id via entity_helpers (uses masterentitycash + audit)
+			rootEntityId, err := api.LookupApprovedEntityIDSQLDB(ctx, db, userBu)
+			if err != nil {
+				respondWithError(w, http.StatusNotFound, "Business unit entity not found or not approved")
+				return
+			}
+
+			// Recursive CTE over masterentitycash/cashentityrelationships to get descendants
+			rows, err := db.Query(`
+				WITH RECURSIVE descendants AS (
+					SELECT entity_id, entity_name FROM masterentitycash WHERE entity_id = $1
+					UNION ALL
+					SELECT me.entity_id, me.entity_name
+					FROM masterentitycash me
+					INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
+					INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
+				)
+				SELECT DISTINCT entity_name FROM descendants
+			`, rootEntityId)
+			if err != nil {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
+			defer rows.Close()
+			buNames = []string{}
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err == nil {
+					buNames = append(buNames, name)
+				}
+			}
+			if len(buNames) == 0 {
+				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+				return
+			}
 		}
 		// Supported file fields
 		fileFields := []struct {
@@ -1313,416 +1375,409 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 			for _, fh := range files {
 				filename := fh.Filename
 				tempFile, err := os.CreateTemp("", "upload-*")
-				// if err != nil {
-				// 	results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to save file"})
-				// 	continue
-				// }
+				if err != nil {
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToOpenFile})
+					// ensure we don't try to remove a nil file
+					if tempFile != nil {
+						tempFile.Close()
+						os.Remove(tempFile.Name())
+					}
+					continue
+				}
+				f, err := fh.Open()
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToOpenFile})
 					tempFile.Close()
 					os.Remove(tempFile.Name())
 					continue
 				}
-				for _, fh := range files {
-					filename := fh.Filename
-					tempFile, err := os.CreateTemp("", "upload-*")
+				_, _ = io.Copy(tempFile, f)
+				f.Close()
+				tempFile.Close()
+				var dataArr []map[string]interface{}
+				ext := filepath.Ext(filename)
+				if ext == ".csv" {
+					file, _ := os.Open(tempFile.Name())
+					reader := csv.NewReader(file)
+					headers, err := reader.Read()
 					if err != nil {
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to save file"})
-						continue
-					}
-					f, err := fh.Open()
-					if err != nil {
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToOpenFile})
-						tempFile.Close()
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders})
+						file.Close()
 						os.Remove(tempFile.Name())
 						continue
 					}
-					io.Copy(tempFile, f)
-					f.Close()
-					tempFile.Close()
-					var dataArr []map[string]interface{}
-					ext := filepath.Ext(filename)
-					if ext == ".csv" {
-						file, _ := os.Open(tempFile.Name())
-						reader := csv.NewReader(file)
-						headers, err := reader.Read()
+					// Clean headers - remove BOM and trim whitespace
+					for i, h := range headers {
+						// Remove UTF-8 BOM if present
+						h = strings.TrimPrefix(h, constants.ErrInvalidJSONBOM)
+						// Remove other invisible characters and trim
+						h = strings.TrimSpace(h)
+						headers[i] = h
+					}
+					for {
+						row, err := reader.Read()
 						if err != nil {
-							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders})
-							file.Close()
-							os.Remove(tempFile.Name())
-							continue
+							break
 						}
-						// Clean headers - remove BOM and trim whitespace
+						obj := map[string]interface{}{}
 						for i, h := range headers {
-							// Remove UTF-8 BOM if present
-							h = strings.TrimPrefix(h, constants.ErrInvalidJSONBOM)
-							// Remove other invisible characters and trim
-							h = strings.TrimSpace(h)
-							headers[i] = h
+							if h != "" { // Skip empty column names
+								obj[h] = row[i]
+							}
 						}
-						for {
-							row, err := reader.Read()
-							if err != nil {
+						dataArr = append(dataArr, obj)
+					}
+					file.Close()
+				} else if ext == ".xlsx" || ext == ".xls" {
+					xl, err := excelize.OpenFile(tempFile.Name())
+					if err != nil {
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to read Excel file"})
+						os.Remove(tempFile.Name())
+						continue
+					}
+					sheet := xl.GetSheetName(0)
+					rows, err := xl.GetRows(sheet)
+					if err != nil || len(rows) < 1 {
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "No data in Excel file"})
+						os.Remove(tempFile.Name())
+						continue
+					}
+					headers := rows[0]
+					// Clean headers - remove BOM and trim whitespace
+					for i, h := range headers {
+						// Remove UTF-8 BOM if present
+						h = strings.TrimPrefix(h, constants.ErrInvalidJSONBOM)
+						// Remove other invisible characters and trim
+						h = strings.TrimSpace(h)
+						headers[i] = h
+					}
+					for _, row := range rows[1:] {
+						obj := map[string]interface{}{}
+						for i, h := range headers {
+							if h != "" { // Skip empty column names
+								if i < len(row) {
+									obj[h] = row[i]
+								} else {
+									obj[h] = nil
+								}
+							}
+						}
+						dataArr = append(dataArr, obj)
+					}
+				} else {
+					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrUnsupportedFileType})
+					os.Remove(tempFile.Name())
+					continue
+				}
+				var buCol string
+				switch field.DataType {
+				case "LC":
+					buCol = "applicant_name"
+				case "PO", "SO":
+					buCol = "entity"
+				case "creditors", "debitors", "grn":
+					buCol = "company"
+				}
+				invalidRows := []map[string]interface{}{}
+				for _, row := range dataArr {
+					if buCol != "" {
+						buVal, _ := row[buCol].(string)
+						buVal = strings.TrimSpace(buVal)
+
+						// Check if buVal matches any of the allowed business units (case-insensitive and trimmed)
+						found := false
+						for _, allowedBU := range buNames {
+							if strings.EqualFold(buVal, strings.TrimSpace(allowedBU)) {
+								found = true
 								break
 							}
-							obj := map[string]interface{}{}
-							for i, h := range headers {
-								if h != "" { // Skip empty column names
-									obj[h] = row[i]
-								}
-							}
-							dataArr = append(dataArr, obj)
 						}
-						file.Close()
-					} else if ext == ".xlsx" || ext == ".xls" {
-						xl, err := excelize.OpenFile(tempFile.Name())
-						if err != nil {
-							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to read Excel file"})
-							os.Remove(tempFile.Name())
-							continue
-						}
-						sheet := xl.GetSheetName(0)
-						rows, err := xl.GetRows(sheet)
-						if err != nil || len(rows) < 1 {
-							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "No data in Excel file"})
-							os.Remove(tempFile.Name())
-							continue
-						}
-						headers := rows[0]
-						// Clean headers - remove BOM and trim whitespace
-						for i, h := range headers {
-							// Remove UTF-8 BOM if present
-							h = strings.TrimPrefix(h, constants.ErrInvalidJSONBOM)
-							// Remove other invisible characters and trim
-							h = strings.TrimSpace(h)
-							headers[i] = h
-						}
-						for _, row := range rows[1:] {
-							obj := map[string]interface{}{}
-							for i, h := range headers {
-								if h != "" { // Skip empty column names
-									if i < len(row) {
-										obj[h] = row[i]
-									} else {
-										obj[h] = nil
-									}
-								}
-							}
-							dataArr = append(dataArr, obj)
-						}
-					} else {
-						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrUnsupportedFileType})
-						os.Remove(tempFile.Name())
-						continue
-					}
-					var buCol string
-					switch field.DataType {
-					case "LC":
-						buCol = "applicant_name"
-					case "PO", "SO":
-						buCol = "entity"
-					case "creditors", "debitors", "grn":
-						buCol = "company"
-					}
-					invalidRows := []map[string]interface{}{}
-					for _, row := range dataArr {
-						if buCol != "" {
-							buVal, _ := row[buCol].(string)
-							buVal = strings.TrimSpace(buVal)
 
-							// Check if buVal matches any of the allowed business units (case-insensitive and trimmed)
-							found := false
-							for _, allowedBU := range buNames {
-								if strings.EqualFold(buVal, strings.TrimSpace(allowedBU)) {
-									found = true
+						if !found {
+							ref := "(no ref)"
+							for _, k := range []string{"reference_no", "document_no", "system_lc_number", "bank_reference"} {
+								if v, ok := row[k].(string); ok && v != "" {
+									ref = v
 									break
 								}
 							}
+							invalidRows = append(invalidRows, map[string]interface{}{
+								"reference":     ref,
+								"business_unit": buVal,
+								"field":         buCol,
+							})
+						}
+					}
+				}
+				if len(invalidRows) > 0 {
+					allowedBUs := strings.Join(buNames, ", ")
+					errorMsg := fmt.Sprintf("Access denied: %d row(s) contain business units not authorized for your account. Your account has access to: [%s]. Please verify the '%s' field values in your file.",
+						len(invalidRows), allowedBUs, buCol)
+					results = append(results, map[string]interface{}{
+						"filename":             filename,
+						constants.ValueError:   errorMsg,
+						"invalidRows":          invalidRows,
+						"allowedBusinessUnits": buNames,
+						"validationField":      buCol,
+					})
+					os.Remove(tempFile.Name())
+					continue
+				}
+				// Get table columns to validate against
+				tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
+				var validColumns map[string]bool = make(map[string]bool)
+				if err == nil {
+					defer tableColumnsRes.Close()
+					for tableColumnsRes.Next() {
+						var colName string
+						if err := tableColumnsRes.Scan(&colName); err == nil {
+							validColumns[colName] = true
+						}
+					}
+				}
 
-							if !found {
-								ref := "(no ref)"
-								for _, k := range []string{"reference_no", "document_no", "system_lc_number", "bank_reference"} {
-									if v, ok := row[k].(string); ok && v != "" {
-										ref = v
-										break
-									}
+				uploadBatchId := uuid.New().String()
+				insertedRows := 0
+				for i, row := range dataArr {
+					row["upload_batch_id"] = uploadBatchId
+					row["row_number"] = i + 1
+
+					// Normalize date fields
+					for k, v := range row {
+						if vStr, ok := v.(string); ok && vStr != "" {
+							// Check if field name suggests it's a date field
+							lowerK := strings.ToLower(k)
+							if strings.Contains(lowerK, "date") ||
+								strings.Contains(lowerK, "due") ||
+								strings.Contains(lowerK, "maturity") ||
+								strings.Contains(lowerK, "expiry") ||
+								strings.Contains(lowerK, "valid") ||
+								strings.Contains(lowerK, "created") ||
+								strings.Contains(lowerK, "updated") ||
+								strings.Contains(lowerK, "issued") ||
+								strings.Contains(lowerK, "received") ||
+								strings.Contains(lowerK, "payment") && strings.Contains(lowerK, "date") {
+								if normalized := NormalizeDate(vStr); normalized != "" {
+									row[k] = normalized
 								}
-								invalidRows = append(invalidRows, map[string]interface{}{
-									"reference":     ref,
-									"business_unit": buVal,
-									"field":         buCol,
-								})
 							}
 						}
 					}
-					if len(invalidRows) > 0 {
-						allowedBUs := strings.Join(buNames, ", ")
-						errorMsg := fmt.Sprintf("Access denied: %d row(s) contain business units not authorized for your account. Your account has access to: [%s]. Please verify the '%s' field values in your file.",
-							len(invalidRows), allowedBUs, buCol)
-						results = append(results, map[string]interface{}{
-							"filename":             filename,
-							constants.ValueError:   errorMsg,
-							"invalidRows":          invalidRows,
-							"allowedBusinessUnits": buNames,
-							"validationField":      buCol,
-						})
+
+					keys := []string{}
+					vals := []interface{}{}
+					placeholders := []string{}
+					idx := 1
+					for k, v := range row {
+						// Skip columns that don't exist in the table
+						if len(validColumns) > 0 && !validColumns[k] {
+							continue
+						}
+						keys = append(keys, k)
+						vals = append(vals, v)
+						placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
+						idx++
+					}
+					if len(keys) == 0 {
+						continue // Skip rows with no valid columns
+					}
+					query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
+					_, err := db.Exec(query, vals...)
+					if err != nil {
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
+						db.Exec(fmt.Sprintf("DELETE FROM %s WHERE upload_batch_id = $1", field.TableName), uploadBatchId)
 						os.Remove(tempFile.Name())
-						continue
+						break
 					}
-					// Get table columns to validate against
-					tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
-					var validColumns map[string]bool = make(map[string]bool)
-					if err == nil {
-						defer tableColumnsRes.Close()
-						for tableColumnsRes.Next() {
-							var colName string
-							if err := tableColumnsRes.Scan(&colName); err == nil {
-								validColumns[colName] = true
-							}
-						}
+					insertedRows++
+				}
+				mappingRows, err := db.Query(`SELECT source_column_name, target_table_name, target_field_name FROM upload_mappings WHERE exposure_type = $1 ORDER BY target_table_name, target_field_name`, field.DataType)
+				insertedFinalRows := 0
+				if err == nil {
+					defer mappingRows.Close()
+					var mappings []struct {
+						SourceCol   string
+						TargetTable string
+						TargetField string
 					}
-
-					uploadBatchId := uuid.New().String()
-					insertedRows := 0
-					for i, row := range dataArr {
-						row["upload_batch_id"] = uploadBatchId
-						row["row_number"] = i + 1
-
-						// Normalize date fields
-						for k, v := range row {
-							if vStr, ok := v.(string); ok && vStr != "" {
-								// Check if field name suggests it's a date field
-								lowerK := strings.ToLower(k)
-								if strings.Contains(lowerK, "date") ||
-									strings.Contains(lowerK, "due") ||
-									strings.Contains(lowerK, "maturity") ||
-									strings.Contains(lowerK, "expiry") ||
-									strings.Contains(lowerK, "valid") ||
-									strings.Contains(lowerK, "created") ||
-									strings.Contains(lowerK, "updated") ||
-									strings.Contains(lowerK, "issued") ||
-									strings.Contains(lowerK, "received") ||
-									strings.Contains(lowerK, "payment") && strings.Contains(lowerK, "date") {
-									if normalized := NormalizeDate(vStr); normalized != "" {
-										row[k] = normalized
-									}
-								}
-							}
-						}
-
-						keys := []string{}
-						vals := []interface{}{}
-						placeholders := []string{}
-						idx := 1
-						for k, v := range row {
-							// Skip columns that don't exist in the table
-							if len(validColumns) > 0 && !validColumns[k] {
-								continue
-							}
-							keys = append(keys, k)
-							vals = append(vals, v)
-							placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
-							idx++
-						}
-						if len(keys) == 0 {
-							continue // Skip rows with no valid columns
-						}
-						query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", field.TableName, strings.Join(keys, ", "), strings.Join(placeholders, ", "))
-						_, err := db.Exec(query, vals...)
-						if err != nil {
-							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to insert row: " + err.Error()})
-							db.Exec(fmt.Sprintf("DELETE FROM %s WHERE upload_batch_id = $1", field.TableName), uploadBatchId)
-							os.Remove(tempFile.Name())
-							break
-						}
-						insertedRows++
-					}
-					mappingRows, err := db.Query(`SELECT source_column_name, target_table_name, target_field_name FROM upload_mappings WHERE exposure_type = $1 ORDER BY target_table_name, target_field_name`, field.DataType)
-					insertedFinalRows := 0
-					if err == nil {
-						defer mappingRows.Close()
-						var mappings []struct {
+					for mappingRows.Next() {
+						var src, tgtTable, tgtField string
+						mappingRows.Scan(&src, &tgtTable, &tgtField)
+						mappings = append(mappings, struct {
 							SourceCol   string
 							TargetTable string
 							TargetField string
-						}
-						for mappingRows.Next() {
-							var src, tgtTable, tgtField string
-							mappingRows.Scan(&src, &tgtTable, &tgtField)
-							mappings = append(mappings, struct {
-								SourceCol   string
-								TargetTable string
-								TargetField string
-							}{src, tgtTable, tgtField})
-						}
-						stagedRows, err := db.Query(fmt.Sprintf(`SELECT * FROM %s WHERE upload_batch_id = $1`, field.TableName), uploadBatchId)
-						if err == nil {
-							defer stagedRows.Close()
-							stagedCols, _ := stagedRows.Columns()
-							for stagedRows.Next() {
-								stagedVals := make([]interface{}, len(stagedCols))
-								stagedPtrs := make([]interface{}, len(stagedCols))
-								for i := range stagedVals {
-									stagedPtrs[i] = &stagedVals[i]
-								}
-								stagedRows.Scan(stagedPtrs...)
-								staged := map[string]interface{}{}
-								for i, col := range stagedCols {
-									staged[col] = stagedVals[i]
-								}
-								header := map[string]interface{}{}
-								headerDetails := map[string]interface{}{}
-								for _, m := range mappings {
-									if m.TargetTable == "exposure_headers" {
-										var val interface{}
-										switch m.SourceCol {
-										case field.DataType:
-											val = field.DataType
-										case "Open":
-											val = "Open"
-										case "true":
-											val = true
-										case field.TableName:
-											val = staged
-										default:
-											val = staged[m.SourceCol]
-										}
-										if m.TargetField == "additional_header_details" {
-											headerDetails[m.SourceCol] = val
-										} else {
-											if strings.Contains(m.TargetField, "amount") {
-												switch v := val.(type) {
-												case float64:
-													val = math.Abs(v)
-												case string:
-													if f, err := strconv.ParseFloat(v, 64); err == nil {
-														val = math.Abs(f)
-													}
+						}{src, tgtTable, tgtField})
+					}
+					stagedRows, err := db.Query(fmt.Sprintf(`SELECT * FROM %s WHERE upload_batch_id = $1`, field.TableName), uploadBatchId)
+					if err == nil {
+						defer stagedRows.Close()
+						stagedCols, _ := stagedRows.Columns()
+						for stagedRows.Next() {
+							stagedVals := make([]interface{}, len(stagedCols))
+							stagedPtrs := make([]interface{}, len(stagedCols))
+							for i := range stagedVals {
+								stagedPtrs[i] = &stagedVals[i]
+							}
+							stagedRows.Scan(stagedPtrs...)
+							staged := map[string]interface{}{}
+							for i, col := range stagedCols {
+								staged[col] = stagedVals[i]
+							}
+							header := map[string]interface{}{}
+							headerDetails := map[string]interface{}{}
+							for _, m := range mappings {
+								if m.TargetTable == "exposure_headers" {
+									var val interface{}
+									switch m.SourceCol {
+									case field.DataType:
+										val = field.DataType
+									case "Open":
+										val = "Open"
+									case "true":
+										val = true
+									case field.TableName:
+										val = staged
+									default:
+										val = staged[m.SourceCol]
+									}
+									if m.TargetField == "additional_header_details" {
+										headerDetails[m.SourceCol] = val
+									} else {
+										if strings.Contains(m.TargetField, "amount") {
+											switch v := val.(type) {
+											case float64:
+												val = math.Abs(v)
+											case string:
+												if f, err := strconv.ParseFloat(v, 64); err == nil {
+													val = math.Abs(f)
 												}
 											}
-											header[m.TargetField] = val
 										}
+										header[m.TargetField] = val
 									}
 								}
-								header["additional_header_details"] = headerDetails
-								headerKeys := []string{}
-								headerVals := []interface{}{}
-								headerPlaceholders := []string{}
-								idx := 1
-								for k, v := range header {
-									headerKeys = append(headerKeys, k)
-									// Marshal map[string]interface{} to JSON for DB
-									if m, ok := v.(map[string]interface{}); ok {
-										jsonVal, err := json.Marshal(m)
-										if err != nil {
-											absorptionErrors = append(absorptionErrors, fmt.Sprintf("header marshal error for file %s, key %s: %v", filename, k, err))
-											headerVals = append(headerVals, nil)
-										} else {
-											headerVals = append(headerVals, jsonVal)
-										}
+							}
+							header["additional_header_details"] = headerDetails
+							headerKeys := []string{}
+							headerVals := []interface{}{}
+							headerPlaceholders := []string{}
+							idx := 1
+							for k, v := range header {
+								headerKeys = append(headerKeys, k)
+								// Marshal map[string]interface{} to JSON for DB
+								if m, ok := v.(map[string]interface{}); ok {
+									jsonVal, err := json.Marshal(m)
+									if err != nil {
+										absorptionErrors = append(absorptionErrors, fmt.Sprintf("header marshal error for file %s, key %s: %v", filename, k, err))
+										headerVals = append(headerVals, nil)
 									} else {
-										headerVals = append(headerVals, v)
+										headerVals = append(headerVals, jsonVal)
 									}
-									headerPlaceholders = append(headerPlaceholders, fmt.Sprintf("$%d", idx))
-									idx++
+								} else {
+									headerVals = append(headerVals, v)
 								}
-								headerInsert := fmt.Sprintf("INSERT INTO exposure_headers (%s) VALUES (%s) RETURNING exposure_header_id", strings.Join(headerKeys, ", "), strings.Join(headerPlaceholders, ", "))
-								var exposureHeaderId string
-								err := db.QueryRow(headerInsert, headerVals...).Scan(&exposureHeaderId)
-								if err != nil {
-									absorptionErrors = append(absorptionErrors, fmt.Sprintf("header insert error for file %s: %v", filename, err))
-									continue
-								}
-								insertedFinalRows++
-								line := map[string]interface{}{}
-								lineDetails := map[string]interface{}{}
-								for _, m := range mappings {
-									if m.TargetTable == "exposure_line_items" {
-										var val interface{}
-										switch m.SourceCol {
-										case field.DataType:
-											val = field.DataType
-										case "1":
-											val = 1
-										case field.TableName:
-											val = staged
-										default:
-											val = staged[m.SourceCol]
-										}
-										if m.TargetField == "additional_line_details" {
-											lineDetails[m.SourceCol] = val
-										} else {
-											if strings.Contains(m.TargetField, "amount") {
-												switch v := val.(type) {
-												case float64:
-													val = math.Abs(v)
-												case string:
-													if f, err := strconv.ParseFloat(v, 64); err == nil {
-														val = math.Abs(f)
-													}
+								headerPlaceholders = append(headerPlaceholders, fmt.Sprintf("$%d", idx))
+								idx++
+							}
+							headerInsert := fmt.Sprintf("INSERT INTO exposure_headers (%s) VALUES (%s) RETURNING exposure_header_id", strings.Join(headerKeys, ", "), strings.Join(headerPlaceholders, ", "))
+							var exposureHeaderId string
+							err := db.QueryRow(headerInsert, headerVals...).Scan(&exposureHeaderId)
+							if err != nil {
+								absorptionErrors = append(absorptionErrors, fmt.Sprintf("header insert error for file %s: %v", filename, err))
+								continue
+							}
+							insertedFinalRows++
+							line := map[string]interface{}{}
+							lineDetails := map[string]interface{}{}
+							for _, m := range mappings {
+								if m.TargetTable == "exposure_line_items" {
+									var val interface{}
+									switch m.SourceCol {
+									case field.DataType:
+										val = field.DataType
+									case "1":
+										val = 1
+									case field.TableName:
+										val = staged
+									default:
+										val = staged[m.SourceCol]
+									}
+									if m.TargetField == "additional_line_details" {
+										lineDetails[m.SourceCol] = val
+									} else {
+										if strings.Contains(m.TargetField, "amount") {
+											switch v := val.(type) {
+											case float64:
+												val = math.Abs(v)
+											case string:
+												if f, err := strconv.ParseFloat(v, 64); err == nil {
+													val = math.Abs(f)
 												}
 											}
-											line[m.TargetField] = val
 										}
+										line[m.TargetField] = val
 									}
 								}
-								// Marshal lineDetails if needed
-								if len(lineDetails) > 0 {
-									jsonVal, err := json.Marshal(lineDetails)
-									if err == nil {
-										line["additional_line_details"] = jsonVal
+							}
+							// Marshal lineDetails if needed
+							if len(lineDetails) > 0 {
+								jsonVal, err := json.Marshal(lineDetails)
+								if err == nil {
+									line["additional_line_details"] = jsonVal
+								} else {
+									absorptionErrors = append(absorptionErrors, fmt.Sprintf("line details marshal error for file %s: %v", filename, err))
+									line["additional_line_details"] = nil
+								}
+							}
+							line["exposure_header_id"] = exposureHeaderId
+							delete(line, "linked_exposure_header_id")
+							lineKeys := []string{}
+							lineVals := []interface{}{}
+							linePlaceholders := []string{}
+							idx = 1
+							for k, v := range line {
+								lineKeys = append(lineKeys, k)
+								// Marshal map[string]interface{} to JSON for DB
+								if m, ok := v.(map[string]interface{}); ok {
+									jsonVal, err := json.Marshal(m)
+									if err != nil {
+										absorptionErrors = append(absorptionErrors, fmt.Sprintf("line marshal error for file %s, key %s: %v", filename, k, err))
+										lineVals = append(lineVals, nil)
 									} else {
-										absorptionErrors = append(absorptionErrors, fmt.Sprintf("line details marshal error for file %s: %v", filename, err))
-										line["additional_line_details"] = nil
+										lineVals = append(lineVals, jsonVal)
 									}
+								} else {
+									lineVals = append(lineVals, v)
 								}
-								line["exposure_header_id"] = exposureHeaderId
-								delete(line, "linked_exposure_header_id")
-								lineKeys := []string{}
-								lineVals := []interface{}{}
-								linePlaceholders := []string{}
-								idx = 1
-								for k, v := range line {
-									lineKeys = append(lineKeys, k)
-									// Marshal map[string]interface{} to JSON for DB
-									if m, ok := v.(map[string]interface{}); ok {
-										jsonVal, err := json.Marshal(m)
-										if err != nil {
-											absorptionErrors = append(absorptionErrors, fmt.Sprintf("line marshal error for file %s, key %s: %v", filename, k, err))
-											lineVals = append(lineVals, nil)
-										} else {
-											lineVals = append(lineVals, jsonVal)
-										}
-									} else {
-										lineVals = append(lineVals, v)
-									}
-									linePlaceholders = append(linePlaceholders, fmt.Sprintf("$%d", idx))
-									idx++
-								}
-								lineInsert := fmt.Sprintf("INSERT INTO exposure_line_items (%s) VALUES (%s)", strings.Join(lineKeys, ", "), strings.Join(linePlaceholders, ", "))
-								_, err = db.Exec(lineInsert, lineVals...)
-								if err != nil {
-									absorptionErrors = append(absorptionErrors, fmt.Sprintf("line item insert error for file %s: %v", filename, err))
-								}
+								linePlaceholders = append(linePlaceholders, fmt.Sprintf("$%d", idx))
+								idx++
+							}
+							lineInsert := fmt.Sprintf("INSERT INTO exposure_line_items (%s) VALUES (%s)", strings.Join(lineKeys, ", "), strings.Join(linePlaceholders, ", "))
+							_, err = db.Exec(lineInsert, lineVals...)
+							if err != nil {
+								absorptionErrors = append(absorptionErrors, fmt.Sprintf("line item insert error for file %s: %v", filename, err))
 							}
 						}
 					}
-					success := insertedFinalRows > 0
-					msg := "Batch uploaded to staging table only"
-					if success {
-						msg = "Batch absorbed into exposures"
-					}
-					results = append(results, map[string]interface{}{
-						constants.ValueSuccess: success,
-						"filename":             filename,
-						"message":              msg,
-						"uploadBatchId":        uploadBatchId,
-						"insertedRows":         insertedRows,
-						"insertedFinalRows":    insertedFinalRows,
-					})
-					os.Remove(tempFile.Name())
 				}
+				success := insertedFinalRows > 0
+				msg := "Batch uploaded to staging table only"
+				if success {
+					msg = "Batch absorbed into exposures"
+				}
+				results = append(results, map[string]interface{}{
+					constants.ValueSuccess: success,
+					"filename":             filename,
+					"message":              msg,
+					"uploadBatchId":        uploadBatchId,
+					"insertedRows":         insertedRows,
+					"insertedFinalRows":    insertedFinalRows,
+				})
+				// always remove the temporary file for this uploaded file
+				os.Remove(tempFile.Name())
 			}
+
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		var allErrors []string

@@ -108,7 +108,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			argPos++
 		}
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND sweep_id = $%d", argPos)
+			query += fmt.Sprintf(constants.QuerrySweepID, argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}
@@ -188,7 +188,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.SweepID != "" {
-			countQuery += fmt.Sprintf(" AND l.sweep_id = $%d", countPos)
+			countQuery += fmt.Sprintf(constants.QuerrySweepID, countPos)
 			countArgs = append(countArgs, req.SweepID)
 			countPos++
 		}
@@ -291,7 +291,7 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND l.sweep_id = $%d", argPos)
+			query += fmt.Sprintf(constants.QuerrySweepID, argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}

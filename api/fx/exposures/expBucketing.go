@@ -35,7 +35,9 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 			HeaderFields     map[string]interface{} `json:"headerFields"`
 			LineItemFields   map[string]interface{} `json:"lineItemFields"`
 			BucketingFields  map[string]interface{} `json:"bucketingFields"`
-			HedgingFields    map[string]interface{} `json:"hedgingFields"`
+			// legacy/alternate payload key used by some clients
+			Fields        map[string]interface{} `json:"fields"`
+			HedgingFields map[string]interface{} `json:"hedgingFields"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ExposureHeaderID == "" {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body or exposure_header_id missing")
@@ -160,6 +162,11 @@ func UpdateExposureHeadersLineItemsBucketing(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Update exposure_bucketing
+		// Support legacy payloads that send bucketing data under `fields` key
+		if len(req.BucketingFields) == 0 && len(req.Fields) > 0 {
+			req.BucketingFields = req.Fields
+		}
+
 		if len(req.BucketingFields) > 0 {
 			setParts := []string{}
 			values := []interface{}{}

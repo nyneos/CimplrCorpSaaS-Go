@@ -158,6 +158,10 @@ func GetForwardBookingMaturityBucketsDashboard(db *sql.DB) http.HandlerFunc {
 			}
 
 			currency = strings.ToUpper(currency)
+			// enforce prevalidated currency scope
+			if !api.CtxHasApprovedCurrency(r.Context(), currency) {
+				continue
+			}
 			rate := rates[currency]
 			if rate == 0 {
 				rate = 1.0
@@ -267,6 +271,14 @@ func GetForwardBookingsDashboard(db *sql.DB) http.HandlerFunc {
 					return nt.Time.Format("2/1/2006")
 				}
 				return nil
+			}
+
+			// enforce prevalidated currency scope for the forward's base currency (FCY)
+			if fcy.Valid {
+				fcyCur := strings.ToUpper(strings.TrimSpace(fcy.String))
+				if !api.CtxHasApprovedCurrency(r.Context(), fcyCur) {
+					continue
+				}
 			}
 
 			row := ForwardRow{

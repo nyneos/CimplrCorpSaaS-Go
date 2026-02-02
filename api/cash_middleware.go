@@ -94,9 +94,9 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 
 			// Get user's business unit name from users table
 			var userBu string
-			if err := pgxPool.QueryRow(r.Context(), "SELECT business_unit_name FROM users WHERE id = $1", userID).Scan(&userBu); err != nil || userBu == "" {
+			if err := pgxPool.QueryRow(r.Context(), constants.QuerryBusinessUnitName, userID).Scan(&userBu); err != nil || userBu == "" {
 				LogError("User not found or has no business unit assigned for user_id: %s", userID)
-				RespondWithPayload(w, false, "User not found or has no business unit assigned", nil)
+				RespondWithPayload(w, false, constants.ErrNoAccessibleBusinessUnit, nil)
 				return
 			}
 

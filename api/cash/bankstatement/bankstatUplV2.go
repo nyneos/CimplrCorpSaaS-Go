@@ -22,9 +22,9 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
-    "sort"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -559,9 +559,24 @@ func parseExcelSerialDate(s string) (time.Time, error) {
 	return d, nil
 }
 
+// ColumnMappings holds custom column name mappings for flexible bank statement parsing
+type ColumnMappings struct {
+	AccountNumber    string `json:"account_number"`
+	TranID           string `json:"tran_id"`
+	ValueDate        string `json:"value_date"`
+	Description      string `json:"description"`
+	DepositAmount    string `json:"deposit_amount"`
+	WithdrawalAmount string `json:"withdrawal_amount"`
+	Balance          string `json:"balance"`
+	AccountName      string `json:"AccountName"`
+	BankName         string `json:"BankName"`
+	IFSC             string `json:"IFSC"`
+	MICR             string `json:"MICR"`
+}
+
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings) (map[string]interface{}, error) {
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
@@ -676,46 +691,68 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	// 3. Extract account number, entity id, and name from header
 	var accountNumber, entityID, accountName string
-	if isCSV {
-		// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
-		for i := 0; i < 20 && i < len(rows); i++ {
+
+	// If custom mapping is provided, attempt to extract account number and name using the mapped header names.
+	if mappings != nil {
+		// Search for custom mapped headers in first 20 rows
+		for i := 0; i < len(rows) && i < 20; i++ {
 			for j, cell := range rows[i] {
-				if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
-					accountNumber = rows[i][j+1]
+				normCell := normalizeCell(cell)
+
+				// Check for AccountNumber mapping
+				if mappings.AccountNumber != "" && strings.EqualFold(normCell, mappings.AccountNumber) {
+					if j+1 < len(rows[i]) {
+						accountNumber = extractAccountFromCell(rows[i][j+1])
+					}
+					if accountNumber == "" && i+1 < len(rows) && j < len(rows[i+1]) {
+						accountNumber = extractAccountFromCell(rows[i+1][j])
+					}
 				}
-				if (cell == "Name:" || strings.EqualFold(cell, "Account Name")) && j+1 < len(rows[i]) {
-					accountName = rows[i][j+1]
-				}
-			}
-		}
-		// If not found, try to infer from data rows (look for column header)
-		if accountNumber == "" {
-			// Find header row
-			for i, row := range rows {
-				for _, cell := range row {
-					if cell == slNoHeader {
-						// Data starts after this
-						if i+1 < len(rows) && len(rows[i+1]) > 0 {
-							// Try to get account number from a known column if present
-							// But usually not present in data, so skip
-						}
-						break
+
+				// Check for AccountName mapping
+				if mappings.AccountName != "" && strings.EqualFold(normCell, mappings.AccountName) {
+					if j+1 < len(rows[i]) {
+						accountName = normalizeCell(rows[i][j+1])
+					}
+					if accountName == "" && i+1 < len(rows) && j < len(rows[i+1]) {
+						accountName = normalizeCell(rows[i+1][j])
 					}
 				}
 			}
 		}
-	} else {
-		for i := 0; i < 20 && i < len(rows); i++ {
-			for j, cell := range rows[i] {
-				if cell == acNoHeader && j+1 < len(rows[i]) {
-					accountNumber = rows[i][j+1]
+	}
+
+	// If account number wasn't found via mapping (or no mapping provided), proceed with the regular extraction logic.
+	if accountNumber == "" {
+		// Use default extraction logic when not using custom mapping or when mapping failed
+		if isCSV {
+			// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
+			for i := 0; i < 20 && i < len(rows); i++ {
+				for j, cell := range rows[i] {
+					if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
+						accountNumber = rows[i][j+1]
+					}
+					if (cell == "Name:" || strings.EqualFold(cell, "Account Name")) && j+1 < len(rows[i]) {
+						accountName = rows[i][j+1]
+					}
 				}
-				if cell == "Name:" && j+1 < len(rows[i]) {
-					accountName = rows[i][j+1]
+			}
+		} else {
+			// For Excel/XLS files
+			for i := 0; i < 20 && i < len(rows); i++ {
+				for j, cell := range rows[i] {
+					if cell == acNoHeader && j+1 < len(rows[i]) {
+						accountNumber = rows[i][j+1]
+					}
+					if cell == "Name:" && j+1 < len(rows[i]) {
+						accountName = rows[i][j+1]
+					}
 				}
 			}
 		}
 	}
+
+	// If account number still not found via mapping/header scan, run fallback extraction
 	if accountNumber == "" {
 		// Fallback: try to extract account number from the first 20 header rows
 		// Handles cases like "Account Number: 36013001" in a single cell,
@@ -850,6 +887,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, ErrAccountNumberMissing
 			}
 		}
+	}
+
+	// If account number is still empty after extraction/fallback, return error
+	// (this catches both custom mapping failures and default extraction failures)
+	if accountNumber == "" {
+		if useMapping && mappings != nil {
+			return nil, fmt.Errorf("account number not found using custom mapping for column '%s'. Please verify the column name in your file matches exactly", mappings.AccountNumber)
+		}
+		return nil, ErrAccountNumberMissing
 	}
 
 	// Lookup entity_id and bank_name from masterbankaccount/masterbank
@@ -1035,10 +1081,43 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
+
+		// Base mapping: index header names by their trimmed text
 		for idx, col := range headerRow {
 			colIdx[strings.TrimSpace(col)] = idx
 		}
 
+		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
+		if mappings != nil {
+			for idx, col := range headerRow {
+				normCol := strings.TrimSpace(col)
+
+				// Map custom names to standard internal names only when provided
+				if mappings.TranID != "" && strings.EqualFold(normCol, mappings.TranID) {
+					colIdx[tranIDHeader] = idx
+				}
+				if mappings.ValueDate != "" && strings.EqualFold(normCol, mappings.ValueDate) {
+					colIdx[valueDateHeader] = idx
+					colIdx["Date"] = idx // Also map to "Date" for compatibility
+				}
+				if mappings.Description != "" && strings.EqualFold(normCol, mappings.Description) {
+					colIdx["Description"] = idx
+				}
+				if mappings.DepositAmount != "" && strings.EqualFold(normCol, mappings.DepositAmount) {
+					colIdx["Deposit"] = idx
+					colIdx[depositAmtHeader] = idx
+				}
+				if mappings.WithdrawalAmount != "" && strings.EqualFold(normCol, mappings.WithdrawalAmount) {
+					colIdx["Withdrawal"] = idx
+					colIdx[withdrawalAmtHeader] = idx
+				}
+				if mappings.Balance != "" && strings.EqualFold(normCol, mappings.Balance) {
+					colIdx["Balance"] = idx
+					colIdx[balanceHeader] = idx
+				}
+			}
+			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied: %v", colIdx)
+		}
 		// Verbose header/column dump for Excel branch as well: index, header,
 		// normalized token, numeric-sample and first few sample cells.
 		sampleValuesLimit := 5
@@ -1303,6 +1382,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		log.Printf("[BANK-UPLOAD-DEBUG] CSV Column mapping: Date=%d, Description=%d, Withdrawal=%d, Deposit=%d, Balance=%d",
 			colIdx["Date"], colIdx["Description"], colIdx["Withdrawal"], colIdx["Deposit"], colIdx["Balance"])
+
 		// Flexible required columns: ensure we have Date, a description column, and at least one amount column
 		hasDate := false
 		hasDesc := false
@@ -1374,8 +1454,40 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		headerRow = rows[txnHeaderIdx]
 		colIdx = map[string]int{}
+
+		// Base mapping: index header names by their trimmed text
 		for idx, col := range headerRow {
 			colIdx[strings.TrimSpace(col)] = idx
+		}
+
+		// If custom mapping provided, apply mapping fields as overrides (partial mappings allowed)
+		if mappings != nil {
+			for idx, col := range headerRow {
+				normCol := strings.TrimSpace(col)
+
+				// Map custom names to standard internal names only when provided
+				if mappings.TranID != "" && strings.EqualFold(normCol, mappings.TranID) {
+					colIdx[tranIDHeader] = idx
+				}
+				if mappings.ValueDate != "" && strings.EqualFold(normCol, mappings.ValueDate) {
+					colIdx[valueDateHeader] = idx
+					colIdx[transactionDateHeader] = idx
+				}
+				if mappings.Description != "" && strings.EqualFold(normCol, mappings.Description) {
+					colIdx["Description"] = idx
+					colIdx[transactionRemarksHeader] = idx
+				}
+				if mappings.DepositAmount != "" && strings.EqualFold(normCol, mappings.DepositAmount) {
+					colIdx[depositAmtHeader] = idx
+				}
+				if mappings.WithdrawalAmount != "" && strings.EqualFold(normCol, mappings.WithdrawalAmount) {
+					colIdx[withdrawalAmtHeader] = idx
+				}
+				if mappings.Balance != "" && strings.EqualFold(normCol, mappings.Balance) {
+					colIdx[balanceHeader] = idx
+				}
+			}
+			log.Printf("[BANK-UPLOAD-DEBUG] Custom mapping overrides applied for Excel: %v", colIdx)
 		}
 		// Add flexible column name mappings for common variations
 		// This allows matching "Detail Description" when code looks for "Description"
@@ -1393,7 +1505,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 		// Normalize common variants so downstream parsing does not miss dates.
 		if _, ok := colIdx[transactionDateHeader]; !ok {
-			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
+			if idx := findColContaining(constants.TransactionDate, constants.TransactionPostedDate, constants.TransactionPostedDateAlt, constants.TransactionPostingDate); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			}
 		}
@@ -1403,7 +1515,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if _, ok := colIdx[valueDateHeader]; !ok {
-			if idx := findColContaining("value date", "value-date", "val date"); idx >= 0 {
+			if idx := findColContaining(constants.ValueDate, "value-date", "val date"); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			}
 		}
@@ -1476,7 +1588,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		if _, exists := colIdx[valueDateHeader]; !exists {
 			// Try "Value Date", "Txn Posted Date", or any date column
-			if idx := findColContaining("value date", constants.TransactionPostedDate); idx >= 0 {
+			if idx := findColContaining(constants.ValueDate, constants.TransactionPostedDate); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
 				colIdx[valueDateHeader] = idx
@@ -1484,7 +1596,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 		if _, exists := colIdx[transactionDateHeader]; !exists {
 			// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
-			if idx := findColContaining("transaction date", constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
+			if idx := findColContaining(constants.TransactionDate, constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
@@ -2262,10 +2374,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		} else {
 			uncategorized = append(uncategorized, map[string]interface{}{
-				"tran_id":     tranID.String,
-				"description": description,
-				"value_date":  valueDate,
-				"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"index":            rowNum,
+				"tran_id":          tranID.String,
+				"tran_date":        transactionDate,
+				"transaction_date": transactionDate,
+				"description":      description,
+				"value_date":       valueDate,
+				"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"balance":          balance.Float64,
 			})
 		}
 		// Recalculate balance using a running cumulative that starts from the first available balance.
@@ -2462,11 +2578,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			k := buildTxnKey(t.AccountNumber, t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount)
 			if existingTxnKeys[k] {
 				// Already present in DB from earlier statements -> under review
+				// normalize dates to RFC3339 strings
+				vDate := ""
+				if !t.ValueDate.IsZero() {
+					vDate = t.ValueDate.Format(time.RFC3339)
+				}
+				trxDate := ""
+				if !t.TransactionDate.IsZero() {
+					trxDate = t.TransactionDate.Format(time.RFC3339)
+				}
 				reviewTransactions = append(reviewTransactions, map[string]interface{}{
 					"account_number":    t.AccountNumber,
 					"tran_id":           t.TranID.String,
-					"value_date":        t.ValueDate,
-					"transaction_date":  t.TransactionDate,
+					"value_date":        vDate,
+					"transaction_date":  trxDate,
 					"description":       t.Description,
 					"withdrawal_amount": t.WithdrawalAmount.Float64,
 					"deposit_amount":    t.DepositAmount.Float64,
@@ -2615,10 +2740,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			delete(foundCategoryIDs, rule.CategoryID)
 		}
 	}
+	// Prepare statement date coverage as RFC3339 strings when possible
+	startStr := ""
+	endStr := ""
+	if len(transactions) > 0 && !transactions[0].ValueDate.IsZero() {
+		startStr = transactions[0].ValueDate.Format(time.RFC3339)
+	}
+	if !statementPeriodEnd.IsZero() {
+		endStr = statementPeriodEnd.Format(time.RFC3339)
+	}
+
 	result := map[string]interface{}{
 		"pages_processed":                 1, // Excel = 1 sheet
 		"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
-		"statement_date_coverage":         map[string]interface{}{"start": transactions[0].ValueDate, "end": statementPeriodEnd},
+		"statement_date_coverage":         map[string]interface{}{"start": startStr, "end": endStr},
 		"category_kpis":                   kpiCats,
 		"categories_found":                foundCategories,
 		"uncategorized":                   uncategorized,
@@ -2641,13 +2776,13 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 // categorization pipeline for each account independently.
 //
 // Behaviour:
-// - Expects a multipart form upload with a single CSV file field (commonly `file`).
-// - Requires `multi=true` form field to be set; UploadBankStatementV2Handler will
-//   delegate to this handler when present.
-// - Parses CSV (robust to header name variations), groups rows by account number,
-//   builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
-//   and calls UploadBankStatementV2WithCategorization for each account.
-// - Aggregates results per-account and isolates failures to the account level.
+//   - Expects a multipart form upload with a single CSV file field (commonly `file`).
+//   - Requires `multi=true` form field to be set; UploadBankStatementV2Handler will
+//     delegate to this handler when present.
+//   - Parses CSV (robust to header name variations), groups rows by account number,
+//     builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
+//     and calls UploadBankStatementV2WithCategorization for each account.
+//   - Aggregates results per-account and isolates failures to the account level.
 func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -2734,8 +2869,8 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 		}
 
 		accIdx := findIdx("account number", "account_no", "account")
-		dateIdx := findIdx("transaction date", "statement date", "date")
-		valDateIdx := findIdx("value date", "value-date", "value")
+		dateIdx := findIdx(constants.TransactionDate, "statement date", "date")
+		valDateIdx := findIdx(constants.ValueDate, "value-date", "value")
 		descIdx := findIdx("transaction description", "description", "remarks", "narration")
 		// prefer explicit Extra Information column when available
 		extraInfoIdx := findIdx("extra information", "extra", "extra-info", "extra_info")
@@ -2777,12 +2912,12 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			}
 
 			var rowsTxns []struct {
-				dt        time.Time
-				valueDate time.Time
-				desc      string
+				dt         time.Time
+				valueDate  time.Time
+				desc       string
 				withdrawal float64
-				deposit   float64
-				rawClose  string
+				deposit    float64
+				rawClose   string
 			}
 			var minDate, maxDate time.Time
 			var openingBalance, closingBalance float64
@@ -2836,12 +2971,12 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 				}
 
 				rowsTxns = append(rowsTxns, struct {
-					dt        time.Time
-					valueDate time.Time
-					desc      string
+					dt         time.Time
+					valueDate  time.Time
+					desc       string
 					withdrawal float64
-					deposit   float64
-					rawClose  string
+					deposit    float64
+					rawClose   string
 				}{dt: dt, valueDate: dt, desc: descCell, withdrawal: w, deposit: d, rawClose: closeStr})
 
 				if minDate.IsZero() || dt.Before(minDate) {
@@ -3339,10 +3474,14 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 				})
 			} else {
 				uncategorized = append(uncategorized, map[string]interface{}{
-					"tran_id":     tranID.String,
-					"description": description,
-					"value_date":  valueDate,
-					"amount":      map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+					"tran_id":          tranID.String,
+					"transaction_id":   transactionID,
+					"tran_date":        transactionDate,
+					"transaction_date": transactionDate,
+					"description":      description,
+					"value_date":       valueDate,
+					"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+					"balance":          balance.Float64,
 				})
 				ungroupedTxns++
 			}
@@ -3387,10 +3526,18 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
 			ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
 		}
+		startStr := ""
+		endStr := ""
+		if !statementPeriodStart.IsZero() {
+			startStr = statementPeriodStart.Format(time.RFC3339)
+		}
+		if !statementPeriodEnd.IsZero() {
+			endStr = statementPeriodEnd.Format(time.RFC3339)
+		}
 		result := map[string]interface{}{
 			"pages_processed":                 1,
 			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
-			"statement_date_coverage":         map[string]interface{}{"start": statementPeriodStart, "end": statementPeriodEnd},
+			"statement_date_coverage":         map[string]interface{}{"start": startStr, "end": endStr},
 			"category_kpis":                   kpiCats,
 			"categories_found":                foundCategories,
 			"uncategorized":                   uncategorized,
@@ -3893,6 +4040,43 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			return
 		}
 
+		// Parse mapping flag
+		useMappingFlag := strings.ToLower(strings.TrimSpace(r.FormValue("mapping")))
+		useMapping := useMappingFlag == "true" || useMappingFlag == "1"
+
+		// Parse column mappings if mapping flag is true
+		var mappings *ColumnMappings
+		if useMapping {
+			mappingsJSON := r.FormValue("column_mappings")
+			if mappingsJSON != "" {
+				mappings = &ColumnMappings{}
+				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
+					log.Printf("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"message": "Invalid column_mappings JSON: " + err.Error(),
+					})
+					return
+				}
+				log.Printf("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
+			} else {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": "mapping flag is true but column_mappings not provided",
+				})
+				return
+			}
+
+			// Validate that account_number mapping exists when mapping mode is requested
+			if mappings != nil && strings.TrimSpace(mappings.AccountNumber) == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": "Column-Mappings must include 'Account Number' when mapping is enabled",
+				})
+				return
+			}
+		}
+
 		// Log available form fields for debugging
 		var fileFieldsAvailable []string
 		if r.MultipartForm != nil && r.MultipartForm.File != nil {
@@ -3957,7 +4141,7 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 		fileReader := bytes.NewReader(fileBytes)
 		mf := &bytesFile{Reader: fileReader}
 
-		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash)
+		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -4723,14 +4907,15 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 			}
 			categoryTxns[catID] = append(categoryTxns[catID], txMap)
 		} else {
+			// Keep shape consistent with upload flow: nested `amount` and time.Time dates
 			uncategorized = append(uncategorized, map[string]interface{}{
 				"index":            i,
-				"transaction_date": txnDate.Format(constants.DateFormat),
-				"value_date":       valDate.Format(constants.DateFormat),
-				"description":      txn.Description,
-				"withdrawal":       txn.Withdrawal,
-				"deposit":          txn.Deposit,
-				"balance":          txn.Balance,
+				"tran_id":          t.TranID.String,
+				"description":      t.Description,
+				"transaction_date": t.TransactionDate,
+				"value_date":       t.ValueDate,
+				"amount":           map[string]interface{}{"withdrawal": t.WithdrawalAmount.Float64, "deposit": t.DepositAmount.Float64},
+				"balance":          t.Balance.Float64,
 			})
 		}
 	}

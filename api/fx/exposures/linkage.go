@@ -167,7 +167,19 @@ func ExpFwdLinkingBookings(db *sql.DB) http.HandlerFunc {
 			}
 		}
 		buCompliance := map[string]bool{}
-		buRows, err := db.Query(`SELECT entity_name FROM masterEntity WHERE (approval_status = 'Approved' OR approval_status = 'approved')`)
+		buRows, err := db.QueryContext(r.Context(), `
+		SELECT me.entity_name
+		FROM masterentitycash me
+		JOIN LATERAL (
+		  SELECT processing_status
+		  FROM auditactionentity
+		  WHERE entity_id = me.entity_id
+		  ORDER BY requested_at DESC
+		  LIMIT 1
+		) a ON TRUE
+		WHERE COALESCE(me.is_deleted, false) = false
+		  AND (a.processing_status = 'APPROVED' OR a.processing_status = 'Approved')
+		`)
 		if err == nil {
 			for buRows.Next() {
 				var name string
@@ -265,6 +277,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrPleaseLogin)
 			return
 		}
+		// request decoded
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		if !ok || len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
@@ -300,6 +313,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				headers = append(headers, row)
 			}
 		}
+		// headers fetched from DB and filtered by BU
 		// normalize header ids to strings for safe map keys
 		headerIds := []string{}
 		for _, h := range headers {
@@ -342,8 +356,22 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 				hedgeRows.Close()
 			}
 		}
+		// hedge map prepared
 		buCompliance := map[string]bool{}
-		buRows, err := db.Query(`SELECT entity_name FROM masterentity WHERE (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)`)
+		buRows, err := db.QueryContext(r.Context(), `
+		SELECT me.entity_name
+		FROM masterentitycash me
+		JOIN LATERAL (
+		  SELECT processing_status
+		  FROM auditactionentity
+		  WHERE entity_id = me.entity_id
+		  ORDER BY requested_at DESC
+		  LIMIT 1
+		) a ON TRUE
+		WHERE COALESCE(me.is_deleted, false) = false
+		  AND (a.processing_status = 'APPROVED' OR a.processing_status = 'Approved')
+		AND (me.is_deleted = false OR me.is_deleted IS NULL)
+		`)
 		if err == nil {
 			for buRows.Next() {
 				var name string
@@ -352,6 +380,7 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			}
 			buRows.Close()
 		}
+		// buCompliance loaded
 		response := []map[string]interface{}{}
 		for _, h := range headers {
 			// lookup by normalized string key
@@ -375,21 +404,26 @@ func ExpFwdLinking(db *sql.DB) http.HandlerFunc {
 			case []uint8:
 				totalOpen, _ = strconv.ParseFloat(string(v), 64)
 			}
+			// Use absolute value for comparison and reporting; DB may store negative for one-sided exposures
+			totalOpenAbs := math.Abs(totalOpen)
 			entityStr, _ := h["entity"].(string)
-			if hedgeAmount < totalOpen {
+			if hedgeAmount < totalOpenAbs {
 				response = append(response, map[string]interface{}{
 					"bu":                 entityStr,
 					"exposure_header_id": h["exposure_header_id"],
 					"type":               h["exposure_type"],
 					"currency":           h["currency"],
 					"maturity_date":      h["value_date"],
-					"amount":             totalOpen,
+					"amount":             totalOpenAbs,
+					"open_amount":        totalOpen,
+					"amount_abs":         totalOpenAbs,
 					"hedge_amount":       hedgeAmount,
 					"bu_unit_compliance": buCompliance[entityStr],
 					"Bank":               h["counterparty_name"],
 				})
 			}
 		}
+		// finished processing headers
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,

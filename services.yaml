@@ -19,7 +19,7 @@ services:
     start_order: 4
     config:
       max_users: 100
-      session_timeout: 60
+      session_timeout: 45
       max_login_attempts : 2
       account_lock_duration: 1
       session_cleaner_period : 1
@@ -55,3 +55,4 @@ services:
       batch_size: 1000
       sweep_schedule: "*/1 * * * *"
       sweep_batch_size: 100
+
