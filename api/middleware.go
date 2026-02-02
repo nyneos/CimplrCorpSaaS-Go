@@ -247,7 +247,7 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 
 			// Get user's business unit name
 			var userBu string
-			err := db.QueryRow("SELECT business_unit_name FROM users WHERE id = $1", userID).Scan(&userBu)
+			err := db.QueryRow(constants.QuerryBusinessUnitName, userID).Scan(&userBu)
 			if err != nil || userBu == "" {
 				log.Println("[ERROR] User not found or has no business unit assigned for user_id:", userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
