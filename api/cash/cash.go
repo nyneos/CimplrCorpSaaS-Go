@@ -33,6 +33,7 @@ func StartCashService(db *sql.DB) {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db)))
+	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db)))
 
 	// New streaming preview and management endpoints
 	mux.Handle("/cash/preview", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV3Handler(db)))

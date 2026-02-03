@@ -11,6 +11,7 @@ import (
 	"log"
 	"path/filepath"
 
+	"archive/zip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
@@ -5201,4 +5202,163 @@ func joinStrings(strs []string, sep string) string {
 		out += sep + s
 	}
 	return out
+}
+
+// UploadZippedBankStatementsHandler accepts a zip file containing multiple bank statement files,
+// unzips them, processes each file one by one, and returns aggregated results.
+func UploadZippedBankStatementsHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// Parse multipart form (max 100MB for zip files)
+		if err := r.ParseMultipartForm(100 << 20); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Get user_id from form
+		userID := r.FormValue("user_id")
+		if userID == "" {
+			http.Error(w, "Missing user_id", http.StatusBadRequest)
+			return
+		}
+
+		// Get the zip file from form
+		zipFile, zipHeader, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get zip file: %v", err), http.StatusBadRequest)
+			return
+		}
+		defer zipFile.Close()
+
+		// Check if custom mappings provided
+		useMapping := r.FormValue("useMapping") == "true"
+		var mappings *ColumnMappings
+		if useMapping {
+			mappingsJSON := r.FormValue("mappings")
+			if mappingsJSON != "" {
+				mappings = &ColumnMappings{}
+				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
+					http.Error(w, fmt.Sprintf("Invalid mappings JSON: %v", err), http.StatusBadRequest)
+					return
+				}
+			}
+		}
+
+		// Read zip file into memory
+		zipData, err := io.ReadAll(zipFile)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to read zip file: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Create a zip reader
+		zipReader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to open zip file: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Prepare response structure
+		type FileResult struct {
+			FileName string                 `json:"file_name"`
+			Success  bool                   `json:"success"`
+			Result   map[string]interface{} `json:"result,omitempty"`
+			Error    string                 `json:"error,omitempty"`
+		}
+
+		results := []FileResult{}
+		successCount := 0
+		failureCount := 0
+
+		// Process each file in the zip
+		for _, zipFileEntry := range zipReader.File {
+			// Skip directories and hidden files
+			if zipFileEntry.FileInfo().IsDir() || strings.HasPrefix(filepath.Base(zipFileEntry.Name), ".") {
+				continue
+			}
+
+			// Only process supported file types
+			ext := strings.ToLower(filepath.Ext(zipFileEntry.Name))
+			if ext != ".xlsx" && ext != ".xls" && ext != ".csv" {
+				results = append(results, FileResult{
+					FileName: zipFileEntry.Name,
+					Success:  false,
+					Error:    fmt.Sprintf("Unsupported file type: %s (only .xlsx, .xls, .csv allowed)", ext),
+				})
+				failureCount++
+				continue
+			}
+
+			// Open the file from zip
+			fileReader, err := zipFileEntry.Open()
+			if err != nil {
+				results = append(results, FileResult{
+					FileName: zipFileEntry.Name,
+					Success:  false,
+					Error:    fmt.Sprintf("Failed to open file from zip: %v", err),
+				})
+				failureCount++
+				continue
+			}
+
+			// Read file contents
+			fileData, err := io.ReadAll(fileReader)
+			fileReader.Close()
+			if err != nil {
+				results = append(results, FileResult{
+					FileName: zipFileEntry.Name,
+					Success:  false,
+					Error:    fmt.Sprintf("Failed to read file contents: %v", err),
+				})
+				failureCount++
+				continue
+			}
+
+			// Calculate file hash for idempotency
+			hash := sha256.New()
+			hash.Write(fileData)
+			fileHash := fmt.Sprintf("%x", hash.Sum(nil))
+
+			// Create a multipart.File interface from bytes
+			bytesReader := bytes.NewReader(fileData)
+			file := &bytesFile{Reader: bytesReader}
+
+			// Process the file using existing upload logic
+			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, fileHash, useMapping, mappings)
+			if err != nil {
+				results = append(results, FileResult{
+					FileName: zipFileEntry.Name,
+					Success:  false,
+					Error:    userFriendlyUploadError(err),
+				})
+				failureCount++
+				continue
+			}
+
+			// Success
+			results = append(results, FileResult{
+				FileName: zipFileEntry.Name,
+				Success:  true,
+				Result:   result,
+			})
+			successCount++
+		}
+
+		// Build aggregated response
+		response := map[string]interface{}{
+			"message":       fmt.Sprintf("Processed %d files from zip", len(results)),
+			"zip_file_name": zipHeader.Filename,
+			"total_files":   len(results),
+			"success_count": successCount,
+			"failure_count": failureCount,
+			"results":       results,
+			"uploaded_by":   userID,
+			"upload_time":   time.Now().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	})
 }
