@@ -306,7 +306,7 @@ func uploadBankStatementToS3(ctx context.Context, key string, body []byte, conte
 type categoryRuleComponent struct {
 	RuleID         int64
 	Priority       int
-	CategoryID     int64
+	CategoryID     string
 	CategoryName   string
 	CategoryType   string
 	ComponentType  string
@@ -324,9 +324,9 @@ type categoryRuleComponent struct {
 // the same rules.
 func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
 	q := `
-	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	       FROM cimplrcorpsaas.category_rules r
-	       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
+	SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
+	FROM cimplrcorpsaas.category_rules r
+	JOIN public.mastercashflowcategory c ON r.category_id = c.category_id
 	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
 	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
 	       WHERE r.is_active = true
@@ -364,8 +364,8 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 // transaction and returns the matched category_id, if any. The logic here is
 // exactly the same as what is used during upload so that recompute produces
 // consistent results when new rules are added.
-func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64) sql.NullInt64 {
-	matchedCategoryID := sql.NullInt64{Valid: false}
+func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64) sql.NullString {
+	matchedCategoryID := sql.NullString{Valid: false}
 	descLower := strings.ToLower(description)
 	for _, rule := range rules {
 		// NARRATION LOGIC
@@ -374,19 +374,19 @@ func matchCategoryForTransaction(rules []categoryRuleComponent, description stri
 			switch rule.MatchType.String {
 			case "CONTAINS", "ILIKE":
 				if strings.Contains(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 				}
 			case "EQUALS":
 				if descLower == val {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 				}
 			case "STARTS_WITH":
 				if strings.HasPrefix(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 				}
 			case "ENDS_WITH":
 				if strings.HasSuffix(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 				}
 
 			case "REGEX":
@@ -406,23 +406,23 @@ func matchCategoryForTransaction(rules []categoryRuleComponent, description stri
 				switch rule.AmountOperator.String {
 				case ">":
 					if amt > rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 					}
 				case ">=":
 					if amt >= rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 					}
 				case "=":
 					if amt == rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 					}
 				case "<=":
 					if amt <= rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 					}
 				case "<":
 					if amt < rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 					}
 				}
 			}
@@ -430,10 +430,10 @@ func matchCategoryForTransaction(rules []categoryRuleComponent, description stri
 		// TRANSACTION LOGIC (DEBIT/CREDIT)
 		if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
 			if rule.TxnFlow.String == "DEBIT" && withdrawal.Valid && withdrawal.Float64 > 0 {
-				matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 			}
 			if rule.TxnFlow.String == "CREDIT" && deposit.Valid && deposit.Float64 > 0 {
-				matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
+				matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 			}
 		}
 		// CURRENCY_CONDITION and other component types are ignored here because
@@ -1735,9 +1735,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 
 	// KPI maps
-	categoryCount := map[int64]int{}
-	debitSum := map[int64]float64{}
-	creditSum := map[int64]float64{}
+	categoryCount := map[string]int{}
+	debitSum := map[string]float64{}
+	creditSum := map[string]float64{}
 	uncategorized := []map[string]interface{}{}
 	transactions := []BankStatementTransaction{}
 	// Will be filled later after DB insert to indicate which
@@ -2366,12 +2366,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// --- CATEGORY MATCHING ---
 		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
 		if matchedCategoryID.Valid {
-			categoryCount[matchedCategoryID.Int64]++
+			categoryCount[matchedCategoryID.String]++
 			if withdrawal.Valid {
-				debitSum[matchedCategoryID.Int64] += withdrawal.Float64
+				debitSum[matchedCategoryID.String] += withdrawal.Float64
 			}
 			if deposit.Valid {
-				creditSum[matchedCategoryID.Int64] += deposit.Float64
+				creditSum[matchedCategoryID.String] += deposit.Float64
 			}
 		} else {
 			uncategorized = append(uncategorized, map[string]interface{}{
@@ -2597,7 +2597,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					"withdrawal_amount": t.WithdrawalAmount.Float64,
 					"deposit_amount":    t.DepositAmount.Float64,
 					"balance":           t.Balance.Float64,
-					"category_id":       t.CategoryID.Int64,
+					"category_id":       t.CategoryID.String,
 				})
 				continue
 			}
@@ -2677,17 +2677,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// KPIs and category details
 	kpiCats := []map[string]interface{}{}
 	foundCategories := []map[string]interface{}{}
-	foundCategoryIDs := map[int64]bool{}
+	foundCategoryIDs := map[string]bool{}
 	totalTxns := len(transactions)
 	groupedTxns := 0
 	ungroupedTxns := 0
 
-	categoryTxns := map[int64][]map[string]interface{}{}
+	categoryTxns := map[string][]map[string]interface{}{}
 
 	for i, t := range transactions {
 		if t.CategoryID.Valid {
 			groupedTxns++
-			catID := t.CategoryID.Int64
+			catID := t.CategoryID.String
 			categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
 				"index":             i,
 				"tran_id":           t.TranID.String,
@@ -3223,7 +3223,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 				ON t.bank_statement_id = s.bank_statement_id
 			JOIN public.masterentitycash e
 				ON s.entity_id = e.entity_id
-			LEFT JOIN cimplrcorpsaas.transaction_categories c
+			LEFT JOIN public.mastercashflowcategory c
 				ON t.category_id = c.category_id
 			WHERE t.bank_statement_id = $1
 			  AND s.entity_id = ANY($2)
@@ -3410,15 +3410,15 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		}
 		defer rows.Close()
 
-		categoryCount := map[int64]int{}
-		debitSum := map[int64]float64{}
-		creditSum := map[int64]float64{}
+		categoryCount := map[string]int{}
+		debitSum := map[string]float64{}
+		creditSum := map[string]float64{}
 		uncategorized := []map[string]interface{}{}
 		transactionsCount := 0
 		totalTxns := 0
 		groupedTxns := 0
 		ungroupedTxns := 0
-		categoryTxns := map[int64][]map[string]interface{}{}
+		categoryTxns := map[string][]map[string]interface{}{}
 		for rows.Next() {
 			var transactionID int64
 			var tranID sql.NullString
@@ -3426,7 +3426,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			var description string
 			var withdrawal, deposit, balance sql.NullFloat64
 			var rawJSON json.RawMessage
-			var existingCategoryID sql.NullInt64
+			var existingCategoryID sql.NullString
 			if err := rows.Scan(&transactionID, &tranID, &valueDate, &transactionDate, &description,
 				&withdrawal, &deposit, &balance, &rawJSON, &existingCategoryID); err != nil {
 				continue
@@ -3440,12 +3440,18 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 
 			// If the category has changed (including from/to NULL), persist the
 			// new category_id back to the database.
-			if (newCategoryID.Valid != existingCategoryID.Valid) || (newCategoryID.Valid && existingCategoryID.Valid && newCategoryID.Int64 != existingCategoryID.Int64) {
+			if (newCategoryID.Valid != existingCategoryID.Valid) || (newCategoryID.Valid && existingCategoryID.Valid && newCategoryID.String != existingCategoryID.String) {
+				var catParam interface{}
+				if newCategoryID.Valid {
+					catParam = newCategoryID.String
+				} else {
+					catParam = nil
+				}
 				if _, err := db.ExecContext(ctx, `
 					UPDATE cimplrcorpsaas.bank_statement_transactions
 					SET category_id = $1
 					WHERE transaction_id = $2
-				`, newCategoryID, transactionID); err != nil {
+				`, catParam, transactionID); err != nil {
 					log.Printf("failed to update category_id for transaction_id %d: %v", transactionID, err)
 				}
 			}
@@ -3453,15 +3459,15 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 			// Use the (potentially updated) category for KPI aggregation and
 			// uncategorized list.
 			if newCategoryID.Valid {
-				categoryCount[newCategoryID.Int64]++
+				categoryCount[newCategoryID.String]++
 				if withdrawal.Valid {
-					debitSum[newCategoryID.Int64] += withdrawal.Float64
+					debitSum[newCategoryID.String] += withdrawal.Float64
 				}
 				if deposit.Valid {
-					creditSum[newCategoryID.Int64] += deposit.Float64
+					creditSum[newCategoryID.String] += deposit.Float64
 				}
 				groupedTxns++
-				catID := newCategoryID.Int64
+				catID := newCategoryID.String
 				categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
 					"transaction_id":    transactionID,
 					"tran_id":           tranID.String,
@@ -3491,7 +3497,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 		// Build KPI and category metadata, mirroring the upload response
 		kpiCats := []map[string]interface{}{}
 		foundCategories := []map[string]interface{}{}
-		foundCategoryIDs := map[int64]bool{}
+		foundCategoryIDs := map[string]bool{}
 		for catID, count := range categoryCount {
 			var catName string
 			for _, rule := range rules {
@@ -4224,7 +4230,7 @@ type BankStatementTransaction struct {
 	DepositAmount    sql.NullFloat64 `db:"deposit_amount"`
 	Balance          sql.NullFloat64 `db:"balance"`
 	RawJSON          json.RawMessage `db:"raw_json"`
-	CategoryID       sql.NullInt64   `db:"category_id"`
+	CategoryID       sql.NullString  `db:"category_id"`
 	CreatedAt        time.Time       `db:"created_at"`
 }
 
@@ -4839,11 +4845,11 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	// Convert structured transactions to BankStatementTransaction and build
 	// per-category transaction lists for KPI output (matching V2 format).
 	transactions := []BankStatementTransaction{}
-	categoryCount := map[int64]int{}
-	debitSum := map[int64]float64{}
-	creditSum := map[int64]float64{}
+	categoryCount := map[string]int{}
+	debitSum := map[string]float64{}
+	creditSum := map[string]float64{}
 	uncategorized := []map[string]interface{}{}
-	categoryTxns := map[int64][]map[string]interface{}{}
+	categoryTxns := map[string][]map[string]interface{}{}
 
 	for i, txn := range input.Transactions {
 		txnDate, err := time.Parse(constants.DateFormat, txn.TransactionDate)
@@ -4887,7 +4893,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 
 		// Update KPIs and category transaction lists
 		if categoryID.Valid {
-			catID := categoryID.Int64
+			catID := categoryID.String
 			categoryCount[catID]++
 			if withdrawal.Valid {
 				debitSum[catID] += withdrawal.Float64
@@ -5040,7 +5046,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	// Build KPI response
 	kpiCats := []map[string]interface{}{}
 	foundCategories := []map[string]interface{}{}
-	foundCategoryIDs := map[int64]bool{}
+	foundCategoryIDs := map[string]bool{}
 	totalTxns := len(transactions)
 	groupedTxns := 0
 	for catID, count := range categoryCount {

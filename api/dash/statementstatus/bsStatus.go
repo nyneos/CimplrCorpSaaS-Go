@@ -223,8 +223,8 @@ LEFT JOIN LATERAL (
 			ORDER BY COALESCE(tx.transaction_date, tx.value_date), tx.transaction_id
 		) AS tx_json
 		FROM cimplrcorpsaas.bank_statement_transactions tx
-		LEFT JOIN cimplrcorpsaas.transaction_categories tc
-			ON tx.category_id = tc.category_id
+			LEFT JOIN public.mastercashflowcategory tc
+				ON tx.category_id = tc.category_id
 		WHERE tx.bank_statement_id = bs3.bank_statement_id
 	) txn ON true
 	WHERE bs3.account_number = mba.account_number

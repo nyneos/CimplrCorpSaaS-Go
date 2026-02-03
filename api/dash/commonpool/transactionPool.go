@@ -109,7 +109,7 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 		LEFT JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
 		JOIN public.masterbankaccount mba ON t.account_number = mba.account_number AND mba.is_deleted = false
 		JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-		LEFT JOIN cimplrcorpsaas.transaction_categories c ON t.category_id = c.category_id
+		LEFT JOIN public.mastercashflowcategory c ON t.category_id = c.category_id
 		LEFT JOIN public.masterentitycash me ON s.entity_id = me.entity_id
 		WHERE s.entity_id = ANY($1)
 		  AND s.account_number = ANY($2)

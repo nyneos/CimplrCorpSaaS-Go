@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -279,6 +281,194 @@ func attachStreamKey(u string) string {
 	return u + "?stream_key=" + url.QueryEscape(first)
 }
 
+func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+
+	for key, values := range formValues {
+		for _, value := range values {
+			if err := mw.WriteField(key, value); err != nil {
+				return nil, fmt.Errorf("failed to set form field %s: %w", key, err)
+			}
+		}
+	}
+
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		return nil, fmt.Errorf("failed to write form file: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	u := &url.URL{Path: "/cash/upload-bank-statement"}
+	if len(query) > 0 {
+		u.RawQuery = query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), &body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upload request: %w", err)
+	}
+	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
+
+	rr := httptest.NewRecorder()
+	UploadBankStatementV2Handler(db).ServeHTTP(rr, req)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse V2 response: %w", err)
+	}
+	return payload, nil
+}
+
+func handleZipBankStatementUpload(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respondWithError(w, err, "File is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	zipBytes, err := io.ReadAll(file)
+	if err != nil {
+		respondWithError(w, err, "Failed to read uploaded file", http.StatusInternalServerError)
+		return
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		respondWithError(w, err, "Invalid zip file", http.StatusBadRequest)
+		return
+	}
+
+	allowedExt := map[string]bool{
+		".xls":  true,
+		".xlsx": true,
+		".csv":  true,
+	}
+
+	formValues := map[string][]string{}
+	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
+		for k, v := range r.MultipartForm.Value {
+			formValues[k] = append([]string{}, v...)
+		}
+	}
+
+	results := make([]map[string]interface{}, 0)
+	successCount := 0
+	failedCount := 0
+	skippedCount := 0
+
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		filename := filepath.Base(zf.Name)
+		ext := strings.ToLower(filepath.Ext(filename))
+
+		if !allowedExt[ext] {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "skipped",
+				"reason": "unsupported file type",
+			})
+			skippedCount++
+			continue
+		}
+
+		rc, err := zf.Open()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			failedCount++
+			continue
+		}
+		fileBytes, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			failedCount++
+			continue
+		}
+
+		resp, err := uploadBankStatementV2FromBytes(ctx, db, filename, fileBytes, formValues, r.URL.Query())
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			failedCount++
+			continue
+		}
+
+		successVal, _ := resp["success"].(bool)
+		status := "success"
+		if !successVal {
+			status = "failed"
+		}
+		if status == "success" {
+			successCount++
+		} else {
+			failedCount++
+		}
+
+		results = append(results, map[string]interface{}{
+			"file":     filename,
+			"status":   status,
+			"response": resp,
+		})
+	}
+
+	if successCount == 0 && failedCount == 0 && skippedCount == 0 {
+		respondWithError(w, nil, "Zip contains no files to process", http.StatusBadRequest)
+		return
+	}
+	if successCount == 0 && failedCount == 0 && skippedCount > 0 {
+		respondWithError(w, nil, "Zip contains no supported files (only .xls, .xlsx, .csv are allowed)", http.StatusBadRequest)
+		return
+	}
+
+	overallStatus := "success"
+	if failedCount > 0 && successCount > 0 {
+		overallStatus = "partial"
+	} else if failedCount > 0 && successCount == 0 {
+		overallStatus = "failed"
+	} else if failedCount == 0 && successCount > 0 && skippedCount > 0 {
+		overallStatus = "partial"
+	}
+
+	message := fmt.Sprintf("Processed zip '%s': %d succeeded, %d failed, %d skipped", header.Filename, successCount, failedCount, skippedCount)
+	if header.Filename == "" {
+		message = fmt.Sprintf("Processed zip: %d succeeded, %d failed, %d skipped", successCount, failedCount, skippedCount)
+	}
+
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   failedCount == 0 && successCount > 0,
+		"status":    overallStatus,
+		"message":   message,
+		"processed": successCount + failedCount,
+		"succeeded": successCount,
+		"failed":    failedCount,
+		"skipped":   skippedCount,
+		"files":     results,
+	})
+}
+
 // UploadBankStatementV3Handler returns http.Handler that accepts file upload and streams preview
 func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +495,12 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
 			log.Printf("[BANK-PREVIEW] user_id=%s", vals[0])
 		}
+		if ext == ".zip" {
+			log.Printf("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
+			handleZipBankStatementUpload(db, w, r)
+			return
+		}
+
 		// Accept PDF and DOCX for streaming to external AI parser; others go to V2
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
@@ -922,11 +1118,11 @@ func CommitHandler(db *sql.DB) http.Handler {
 		// Compute KPIs
 		kpiCats := []map[string]interface{}{}
 		foundCategories := []map[string]interface{}{}
-		foundCategoryIDs := map[int64]bool{}
-		categoryCount := map[int64]int{}
-		debitSum := map[int64]float64{}
-		creditSum := map[int64]float64{}
-		categoryTxns := map[int64][]map[string]interface{}{}
+		foundCategoryIDs := map[string]bool{}
+		categoryCount := map[string]int{}
+		debitSum := map[string]float64{}
+		creditSum := map[string]float64{}
+		categoryTxns := map[string][]map[string]interface{}{}
 		uncategorized := []map[string]interface{}{}
 
 		totalTxns := len(txs)
@@ -973,7 +1169,7 @@ func CommitHandler(db *sql.DB) http.Handler {
 
 			if matched.Valid {
 				groupedTxns++
-				catID := matched.Int64
+				catID := matched.String
 				categoryCount[catID]++
 				debitSum[catID] += wd
 				creditSum[catID] += dep

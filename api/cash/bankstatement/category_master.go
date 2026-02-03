@@ -17,7 +17,7 @@ import (
 
 // TransactionCategory represents a category master
 type TransactionCategory struct {
-	CategoryID   int64  `json:"category_id"`
+	CategoryID   string `json:"category_id"`
 	CategoryName string `json:"category_name"`
 	CategoryType string `json:"category_type"`
 	Description  string `json:"description"`
@@ -37,7 +37,7 @@ type RuleScope struct {
 type CategoryRule struct {
 	RuleID     int64     `json:"rule_id"`
 	RuleName   string    `json:"rule_name"`
-	CategoryID int64     `json:"category_id"`
+	CategoryID string    `json:"category_id"`
 	ScopeID    int64     `json:"scope_id"`
 	Priority   int       `json:"priority"`
 	IsActive   bool      `json:"is_active"`
@@ -169,8 +169,8 @@ func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCo
 func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string, accountCurrency *string) ([]categoryRuleComponent, error) {
 	const q = `
 	   SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	   FROM cimplrcorpsaas.category_rules r
-	   JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
+	FROM cimplrcorpsaas.category_rules r
+	JOIN public.mastercashflowcategory c ON r.category_id = c.category_id
 	   JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
 	   JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
 	   WHERE r.is_active = true
@@ -225,7 +225,7 @@ func ListCategoriesForUserHandler(db *sql.DB) http.Handler {
 		// best-effort parse; no filter yet
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
-		rows, err := db.Query(`SELECT category_id, category_name FROM cimplrcorpsaas.transaction_categories ORDER BY category_name`)
+		rows, err := db.Query(`SELECT category_id, category_name FROM public.mastercashflowcategory ORDER BY category_name`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -257,10 +257,10 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		}
 		var body struct {
 			TransactionIDs []int64 `json:"transaction_ids"`
-			CategoryID     int64   `json:"category_id"`
+			CategoryID     string  `json:"category_id"`
 			UserID         string  `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 || body.CategoryID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 || strings.TrimSpace(body.CategoryID) == "" {
 			http.Error(w, "Missing transaction_ids or category_id", http.StatusBadRequest)
 			return
 		}
@@ -402,10 +402,10 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			CategoryID int64  `json:"category_id"`
+			CategoryID string `json:"category_id"`
 			UserID     string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CategoryID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.CategoryID) == "" {
 			http.Error(w, "Missing category_id", http.StatusBadRequest)
 			return
 		}
@@ -484,7 +484,7 @@ WHERE t.category_id IS NULL
 
 		ruleCache := make(map[string][]categoryRuleComponent)
 		bsSet := make(map[string]struct{})
-		matchedByCategory := make(map[int64][]int64)
+		matchedByCategory := make(map[string][]int64)
 
 		for _, tr := range txns {
 			if !ctxHasApprovedBankAccount(ctx, tr.acct) {
@@ -512,8 +512,8 @@ WHERE t.category_id IS NULL
 			}
 
 			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep)
-			if matched.Valid && matched.Int64 == body.CategoryID {
-				matchedByCategory[matched.Int64] = append(matchedByCategory[matched.Int64], tr.id)
+			if matched.Valid && matched.String == body.CategoryID {
+				matchedByCategory[matched.String] = append(matchedByCategory[matched.String], tr.id)
 				bsSet[tr.bsID] = struct{}{}
 			}
 		}
@@ -662,7 +662,7 @@ WHERE t.category_id IS NULL
 
 			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep)
 			if matched.Valid {
-				if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.Int64, tr.id); err == nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.String, tr.id); err == nil {
 					updated++
 					bsSet[tr.bsID] = struct{}{}
 				}
@@ -700,7 +700,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			CategoryIDs []int64 `json:"category_ids"`
+			CategoryIDs []string `json:"category_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.CategoryIDs) == 0 {
 			http.Error(w, "Missing or invalid category_ids", http.StatusBadRequest)
@@ -775,7 +775,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 
 		// 5. Delete the categories themselves
-		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
+		_, err = tx.Exec(`DELETE FROM public.mastercashflowcategory WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()
@@ -819,8 +819,8 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 		if body.CategoryType == "" {
 			body.CategoryType = "BOTH"
 		}
-		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.transaction_categories (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
+		var id string
+		err := db.QueryRow(`INSERT INTO public.mastercashflowcategory (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -839,7 +839,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
+		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM public.mastercashflowcategory`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -858,8 +858,8 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 
 		var categories []CategoryWithRules
-		var catIDs []int64
-		catIndex := make(map[int64]int)
+		var catIDs []string
+		catIndex := make(map[string]int)
 
 		for catRows.Next() {
 			var c TransactionCategory
@@ -889,7 +889,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 		defer ruleRows.Close()
 
-		rulesByCat := make(map[int64][]CategoryRule)
+		rulesByCat := make(map[string][]CategoryRule)
 		var scopeIDs []int64
 		scopeSeen := make(map[int64]struct{})
 		var ruleIDs []int64
@@ -1002,12 +1002,12 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 		}
 		var body struct {
 			RuleName   string `json:"rule_name"`
-			CategoryID int64  `json:"category_id"`
+			CategoryID string `json:"category_id"`
 			ScopeID    int64  `json:"scope_id"`
 			Priority   int    `json:"priority"`
 			IsActive   *bool  `json:"is_active"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleName == "" || body.CategoryID == 0 || body.ScopeID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleName == "" || strings.TrimSpace(body.CategoryID) == "" || body.ScopeID == 0 {
 			http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
 			return
 		}
@@ -1186,9 +1186,9 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			CategoryID int64 `json:"category_id"`
+			CategoryID string `json:"category_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CategoryID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.CategoryID) == "" {
 			http.Error(w, "Missing or invalid category_id", http.StatusBadRequest)
 			return
 		}
@@ -1261,7 +1261,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		}
 
 		// 5. Delete the category itself
-		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = $1`, body.CategoryID)
+		_, err = tx.Exec(`DELETE FROM public.mastercashflowcategory WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()

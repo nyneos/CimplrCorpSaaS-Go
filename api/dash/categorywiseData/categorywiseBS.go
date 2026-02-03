@@ -207,7 +207,7 @@ SELECT
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs
 	ON t.bank_statement_id = bs.bank_statement_id
-LEFT JOIN cimplrcorpsaas.transaction_categories tc
+LEFT JOIN public.mastercashflowcategory tc
 	ON t.category_id = tc.category_id
 LEFT JOIN public.masterbankaccount mba
 	ON mba.account_number = bs.account_number
@@ -300,8 +300,8 @@ LEFT JOIN LATERAL (
   FROM cimplrcorpsaas.bank_statements bs2
   JOIN cimplrcorpsaas.bank_statement_transactions tx
     ON tx.bank_statement_id = bs2.bank_statement_id
-  LEFT JOIN cimplrcorpsaas.transaction_categories tc
-    ON tx.category_id = tc.category_id
+	LEFT JOIN public.mastercashflowcategory tc
+		ON tx.category_id = tc.category_id
   JOIN (
     SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
     FROM cimplrcorpsaas.auditactionbankstatement
@@ -370,7 +370,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	FROM cimplrcorpsaas.bank_statement_transactions t
 	JOIN cimplrcorpsaas.bank_statements bs
 		ON t.bank_statement_id = bs.bank_statement_id
-	LEFT JOIN cimplrcorpsaas.transaction_categories tc
+	LEFT JOIN public.mastercashflowcategory tc
 		ON t.category_id = tc.category_id
 	LEFT JOIN public.masterbankaccount mba
 		ON mba.account_number = bs.account_number
@@ -551,7 +551,7 @@ SELECT
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs
 	ON t.bank_statement_id = bs.bank_statement_id
-LEFT JOIN cimplrcorpsaas.transaction_categories tc
+LEFT JOIN public.mastercashflowcategory tc
 	ON t.category_id = tc.category_id
 LEFT JOIN public.masterbankaccount mba
 	ON mba.account_number = bs.account_number

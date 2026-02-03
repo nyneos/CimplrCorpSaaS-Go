@@ -392,7 +392,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 				) a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
 				JOIN cimplrcorpsaas.bank_statement_transactions tx
 					ON tx.bank_statement_id = bs.bank_statement_id
-				LEFT JOIN cimplrcorpsaas.transaction_categories tc
+				LEFT JOIN public.mastercashflowcategory tc
 					ON tx.category_id = tc.category_id
 			)
 			SELECT
@@ -556,7 +556,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 				ON COALESCE(NULLIF(ltrim(trim(bs.account_number), '0'), ''), '0') = COALESCE(NULLIF(ltrim(trim(ab.account_no), '0'), ''), '0')
 			JOIN cimplrcorpsaas.bank_statement_transactions tx
 				ON tx.bank_statement_id = bs.bank_statement_id
-			LEFT JOIN cimplrcorpsaas.transaction_categories tc
+			LEFT JOIN public.mastercashflowcategory tc
 				ON tx.category_id = tc.category_id
 			JOIN (
 				SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
