@@ -41,7 +41,8 @@ type CategoryRule struct {
 	ScopeID    int64     `json:"scope_id"`
 	Priority   int       `json:"priority"`
 	IsActive   bool      `json:"is_active"`
-	CreatedAt  time.Time `json:"created_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	EffectiveDate *time.Time `json:"effective_date,omitempty"`
 }
 
 // CategoryRuleComponent represents a rule component
@@ -881,8 +882,8 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// Fetch all rules for these categories in one query
-		ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(catIDs))
+		// Fetch all rules for these categories in one query (include effective_date)
+		ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at, effective_date FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(catIDs))
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -896,7 +897,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 
 		for ruleRows.Next() {
 			var rule CategoryRule
-			if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt); err != nil {
+			if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt, &rule.EffectiveDate); err != nil {
 				continue
 			}
 			rulesByCat[rule.CategoryID] = append(rulesByCat[rule.CategoryID], rule)
@@ -1001,11 +1002,12 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			RuleName   string `json:"rule_name"`
-			CategoryID string `json:"category_id"`
-			ScopeID    int64  `json:"scope_id"`
-			Priority   int    `json:"priority"`
-			IsActive   *bool  `json:"is_active"`
+			RuleName      string     `json:"rule_name"`
+			CategoryID    string     `json:"category_id"`
+			ScopeID       int64      `json:"scope_id"`
+			Priority      int        `json:"priority"`
+			IsActive      *bool      `json:"is_active"`
+			EffectiveDate *time.Time `json:"effective_date,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleName == "" || strings.TrimSpace(body.CategoryID) == "" || body.ScopeID == 0 {
 			http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
@@ -1049,7 +1051,7 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 		}
 
 		var id int64
-		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive).Scan(&id)
+		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive, body.EffectiveDate).Scan(&id)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return

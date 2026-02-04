@@ -51,6 +51,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/category/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteMultipleTransactionCategoriesHandler(db)))
 	mux.Handle("/cash/transactions/map-category", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MapTransactionsToCategoryHandler(db)))
 	mux.Handle("/cash/transactions/categorize-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CategorizeUncategorizedTransactionsHandler(db)))
+	mux.Handle("/cash/transactions/recompute-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecomputeUncategorizedTransactionsHandler(db)))
+	mux.Handle("/cash/transactions/auto-categorize-trigger", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ManualCategorizationTriggerHandler(pgxPool)))
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetAllBankStatementsHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionsHandler(db)))
@@ -100,7 +102,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config/statistics", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepStatistics(pgxPool)))
 	mux.Handle("/cash/sweep-config/manual-trigger", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweep(pgxPool)))
 
-	// Cash flow projection routes
+	// Cash flow projection routes (V1)
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-approve", api.BusinessUnitMiddleware(db)(projection.BulkApproveCashFlowProposalActions(pgxPool)))
@@ -111,6 +113,16 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/cashflow-projection/update", api.BusinessUnitMiddleware(db)(projection.UpdateCashFlowProposal(pgxPool)))
 
 	mux.Handle("/cash/cashflow-projection/upload", api.BusinessUnitMiddleware(db)(projection.UploadCashflowProposalSimple(pgxPool)))
+
+	// Cash flow projection routes (V2 - Auto-calculated monthly projections)
+	mux.Handle("/cash/projection/v2/create", middlewares.PreValidationMiddleware(pgxPool)(projection.CreateCashFlowProposalV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/update", middlewares.PreValidationMiddleware(pgxPool)(projection.UpdateCashFlowProposalV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/detail", middlewares.PreValidationMiddleware(pgxPool)(projection.GetProposalDetailV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/list", middlewares.PreValidationMiddleware(pgxPool)(projection.ListProposalsV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/delete", middlewares.PreValidationMiddleware(pgxPool)(projection.DeleteCashFlowProposalV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(projection.BulkApproveCashFlowProposalActionsV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(projection.BulkRejectCashFlowProposalActionsV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/upload", middlewares.PreValidationMiddleware(pgxPool)(projection.UploadCashflowProposalV2(pgxPool)))
 
 	//bank balance
 	mux.Handle("/cash/bank-balances/create", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.CreateBankBalance(pgxPool)))

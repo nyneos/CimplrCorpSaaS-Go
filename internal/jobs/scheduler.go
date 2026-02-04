@@ -69,6 +69,27 @@ func (s *CronService) Start() error {
 	logger.GlobalLogger.LogAudit("Sweep scheduler started")
 	log.Println("Cron service started — Sweep Scheduler scheduled")
 
+	// Start the Auto-Categorization Scheduler
+	categorizationConfig := NewDefaultCategorizationConfig()
+
+	// Override categorization config from services.yaml if provided
+	if s.config != nil {
+		if catSchedule, ok := s.config["categorization_schedule"].(string); ok && catSchedule != "" {
+			categorizationConfig.Schedule = catSchedule
+		}
+		if catBatchSize, ok := s.config["categorization_batch_size"].(int); ok && catBatchSize > 0 {
+			categorizationConfig.BatchSize = catBatchSize
+		}
+	}
+
+	err = RunCategorizationScheduler(categorizationConfig, s.db)
+	if err != nil {
+		return fmt.Errorf("failed to start categorization scheduler: %v", err)
+	}
+
+	logger.GlobalLogger.LogAudit("Auto-categorization scheduler started")
+	log.Println("Cron service started — Auto-Categorization Scheduler scheduled")
+
 	return nil
 }
 

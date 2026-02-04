@@ -427,18 +427,28 @@ func matchCategoryForTransaction(rules []categoryRuleComponent, description stri
 				}
 			}
 		}
-		// TRANSACTION LOGIC (DEBIT/CREDIT)
+		// TRANSACTION LOGIC (Outflow/Inflow)
 		if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
-			if rule.TxnFlow.String == "DEBIT" && withdrawal.Valid && withdrawal.Float64 > 0 {
+			if rule.TxnFlow.String == "Outflow" && withdrawal.Valid && withdrawal.Float64 > 0 {
 				matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 			}
-			if rule.TxnFlow.String == "CREDIT" && deposit.Valid && deposit.Float64 > 0 {
+			if rule.TxnFlow.String == "Inflow" && deposit.Valid && deposit.Float64 > 0 {
 				matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
 			}
 		}
 		// CURRENCY_CONDITION and other component types are ignored here because
 		// the original upload logic didn't implement them either.
 		if matchedCategoryID.Valid {
+			// Validate category_type matches transaction type
+			if rule.CategoryType == "Outflow" && (!withdrawal.Valid || withdrawal.Float64 <= 0) {
+				matchedCategoryID = sql.NullString{Valid: false} // Reset - Outflow category can't match deposit
+				continue
+			}
+			if rule.CategoryType == "Inflow" && (!deposit.Valid || deposit.Float64 <= 0) {
+				matchedCategoryID = sql.NullString{Valid: false} // Reset - Inflow category can't match withdrawal
+				continue
+			}
+			// Both type is allowed for both withdrawals and deposits
 			break
 		}
 	}
