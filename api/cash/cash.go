@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/cash/bankbalances"
 	"CimplrCorpSaas/api/cash/bankstatement"
+	fundavailibilty "CimplrCorpSaas/api/cash/fundavailibilty"
 	"CimplrCorpSaas/api/cash/fundplanning"
 	"CimplrCorpSaas/api/cash/payablerecievable"
 	"CimplrCorpSaas/api/cash/projection"
@@ -102,6 +103,33 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config/statistics", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepStatistics(pgxPool)))
 	mux.Handle("/cash/sweep-config/manual-trigger", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweep(pgxPool)))
 
+	// Sweep V2 configuration routes (new table structure with source/target accounts, sweep types)
+	mux.Handle("/cash/sweep-config-v2/create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CreateSweepConfigurationV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkCreateSweepConfigurationV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/update", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepConfigurationV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/all", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepConfigurationsV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/approved-active", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepConfigurationsV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepConfigurationsV2(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRequestDeleteSweepConfigurationsV2(pgxPool)))
+
+	// Sweep V2 initiation routes (manual/scheduled initiation with overrides)
+	mux.Handle("/cash/sweep-initiation/create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CreateSweepInitiation(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/all", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepInitiations(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/approved-active", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepInitiations(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/update-status", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepInitiationStatus(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/cancel", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CancelSweepInitiation(pgxPool)))
+
+	// Sweep V2 execution routes (logs, statistics, manual trigger)
+	mux.Handle("/cash/sweep-execution-v2/logs", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepExecutionLogsV2(pgxPool)))
+	mux.Handle("/cash/sweep-execution-v2/all-logs", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetAllSweepExecutionLogsV2(pgxPool)))
+	mux.Handle("/cash/sweep-execution-v2/statistics", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepStatisticsV2(pgxPool)))
+	mux.Handle("/cash/sweep-execution-v2/manual-trigger-direct", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2Direct(pgxPool)))
+	mux.Handle("/cash/sweep-execution-v2/manual-trigger", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2(pgxPool)))
+
+	// Treasury KPI Dashboard
+	mux.Handle("/cash/sweep/kpi", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetTreasuryKPI(pgxPool)))
+
 	// Cash flow projection routes (V1)
 	mux.Handle("/cash/cashflow-projection/bulk-delete", api.BusinessUnitMiddleware(db)(projection.DeleteCashFlowProposal(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/bulk-reject", api.BusinessUnitMiddleware(db)(projection.BulkRejectCashFlowProposalActions(pgxPool)))
@@ -132,6 +160,9 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-balances/all", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/upload", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/update", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UpdateBankBalance(pgxPool)))
+
+	// Fund Availability - Combined Actuals & Projections
+	mux.Handle("/cash/fund-availability/combined", middlewares.PreValidationMiddleware(pgxPool)(fundavailibilty.GetFundAvailability(pgxPool)))
 
 	// Travel package endpoints
 	mux.Handle("/cash/package/create", (travel.CreatePackageHandler(db)))

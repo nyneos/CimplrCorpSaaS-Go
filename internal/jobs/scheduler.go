@@ -69,6 +69,27 @@ func (s *CronService) Start() error {
 	logger.GlobalLogger.LogAudit("Sweep scheduler started")
 	log.Println("Cron service started — Sweep Scheduler scheduled")
 
+	// Start the Sweep V2 Scheduler
+	sweepConfigV2 := NewDefaultSweepConfigV2()
+
+	// Override sweep V2 config from services.yaml if provided
+	if s.config != nil {
+		if sweepSchedule, ok := s.config["sweep_schedule_v2"].(string); ok && sweepSchedule != "" {
+			sweepConfigV2.Schedule = sweepSchedule
+		}
+		if sweepBatchSize, ok := s.config["sweep_batch_size_v2"].(int); ok && sweepBatchSize > 0 {
+			sweepConfigV2.BatchSize = sweepBatchSize
+		}
+	}
+
+	err = RunSweepSchedulerV2(sweepConfigV2, s.db)
+	if err != nil {
+		return fmt.Errorf("failed to start sweep V2 scheduler: %v", err)
+	}
+
+	logger.GlobalLogger.LogAudit("Sweep V2 scheduler started")
+	log.Println("Cron service started — Sweep V2 Scheduler scheduled")
+
 	// Start the Auto-Categorization Scheduler
 	categorizationConfig := NewDefaultCategorizationConfig()
 

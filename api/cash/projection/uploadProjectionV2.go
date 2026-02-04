@@ -385,11 +385,3 @@ func nullStringV2(s string) interface{} {
 	}
 	return s
 }
-
-// UpdateCashflowProposalV2 updates an existing proposal (V2 schema)
-// TODO: Implement full update logic when needed
-func UpdateCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		api.RespondWithError(w, http.StatusNotImplemented, "Update endpoint not implemented yet - use DELETE + CREATE for now")
-	}
-}

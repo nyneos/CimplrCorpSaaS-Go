@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"context"
+	"log"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -826,6 +827,10 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		return true
 	}
 
+	// Debug: log what we're checking and how many approved accounts are loaded
+	log.Printf("[CTX-ACC-CHECK] checking account=%s expectedBank=%s expectedEntity=%s approved_count=%d",
+		accountNumber, expectedBankName, expectedEntityName, len(accounts))
+
 	for _, a := range accounts {
 		if !strings.EqualFold(strings.TrimSpace(a["account_number"]), accountNumber) {
 			continue
@@ -837,6 +842,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// Account must belong to an entity the user is allowed for.
 		if strings.TrimSpace(accEntity) != "" {
 			if !api.IsEntityAllowed(ctx, accEntity) {
+				log.Printf("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
 				return false
 			}
 		}
@@ -844,6 +850,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected entity, enforce match.
 		if expectedEntityName != "" && accEntity != "" {
 			if !strings.EqualFold(accEntity, expectedEntityName) {
+				log.Printf("[CTX-ACC-CHECK] account=%s entity mismatch: account_entity='%s' expected='%s'", accountNumber, accEntity, expectedEntityName)
 				return false
 			}
 		}
@@ -851,12 +858,15 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected bank, enforce match.
 		if expectedBankName != "" && accBank != "" {
 			if !strings.EqualFold(accBank, expectedBankName) {
+				log.Printf("[CTX-ACC-CHECK] account=%s bank mismatch: account_bank='%s' expected='%s'", accountNumber, accBank, expectedBankName)
 				return false
 			}
 		}
 
+		log.Printf("[CTX-ACC-CHECK] account=%s OK matched bank='%s' entity='%s'", accountNumber, accBank, accEntity)
 		return true
 	}
 
+	log.Printf("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
 	return false
 }
