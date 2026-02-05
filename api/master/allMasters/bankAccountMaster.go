@@ -1533,9 +1533,23 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				a.iban,
 				a.currency,
 				a.account_nickname,
-				a.account_id
+				a.account_id,
+				COALESCE(ec.entity_name, me.entity_name, '') AS entity_name,
+				COALESCE(a.entity_id, '') AS entity_id,
+				COALESCE(a.usage, '') AS usage,
+				COALESCE(latest_bal.balance_amount, 0) AS approved_balance
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+			LEFT JOIN public.masterentitycash ec ON a.entity_id::text = ec.entity_id
+			LEFT JOIN public.masterentity me ON me.entity_id::text = a.entity_id
+			LEFT JOIN LATERAL (
+				SELECT bb.balance_amount
+				FROM bank_balances_manual bb
+				JOIN auditactionbankbalances ab ON ab.balance_id = bb.balance_id
+				WHERE bb.account_no = a.account_number AND ab.processing_status = 'APPROVED'
+				ORDER BY bb.as_of_date DESC, bb.as_of_time DESC
+				LIMIT 1
+			) latest_bal ON TRUE
 			LEFT JOIN LATERAL (
 				SELECT processing_status
 				FROM auditactionbankaccount aa
@@ -1578,7 +1592,11 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var currency *string
 			var nickname *string
 			var accountID string
-			if err := rows.Scan(&bankName, &accountNumber, &iban, &currency, &nickname, &accountID); err != nil {
+			var entityName *string
+			var entityID *string
+			var usageVal *string
+			var approvedBalance float64
+			if err := rows.Scan(&bankName, &accountNumber, &iban, &currency, &nickname, &accountID, &entityName, &entityID, &usageVal, &approvedBalance); err != nil {
 				continue
 			}
 			out = append(out, map[string]interface{}{
@@ -1607,7 +1625,26 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return ""
 				}(),
-				"account_id": accountID,
+					"account_id": accountID,
+					"entity_name": func() string {
+						if entityName != nil {
+							return *entityName
+						}
+						return ""
+					}(),
+					"entity_id": func() string {
+						if entityID != nil {
+							return *entityID
+						}
+						return ""
+					}(),
+					"usage": func() string {
+						if usageVal != nil {
+							return *usageVal
+						}
+						return ""
+					}(),
+					"approved_balance": approvedBalance,
 			})
 		}
 
