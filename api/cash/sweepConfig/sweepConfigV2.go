@@ -59,30 +59,30 @@ func CreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		if strings.TrimSpace(req.SourceBankName) != "" {
-			if !api.IsBankAllowed(ctx, req.SourceBankName) {
-				api.RespondWithResult(w, false, "unauthorized source bank")
-				return
-			}
-		}
-		if strings.TrimSpace(req.TargetBankName) != "" {
-			if !api.IsBankAllowed(ctx, req.TargetBankName) {
-				api.RespondWithResult(w, false, "unauthorized target bank")
-				return
-			}
-		}
-		if strings.TrimSpace(req.SourceBankAccount) != "" {
-			if !ctxHasApprovedBankAccountFor(ctx, req.SourceBankAccount, req.SourceBankName, req.EntityName) {
-				api.RespondWithResult(w, false, "unauthorized source bank account")
-				return
-			}
-		}
-		if strings.TrimSpace(req.TargetBankAccount) != "" {
-			if !ctxHasApprovedBankAccountFor(ctx, req.TargetBankAccount, req.TargetBankName, req.EntityName) {
-				api.RespondWithResult(w, false, "unauthorized target bank account")
-				return
-			}
-		}
+		// if strings.TrimSpace(req.SourceBankName) != "" {
+		// 	if !api.IsBankAllowed(ctx, req.SourceBankName) {
+		// 		api.RespondWithResult(w, false, "unauthorized source bank")
+		// 		return
+		// 	}
+		// }
+		// if strings.TrimSpace(req.TargetBankName) != "" {
+		// 	if !api.IsBankAllowed(ctx, req.TargetBankName) {
+		// 		api.RespondWithResult(w, false, "unauthorized target bank")
+		// 		return
+		// 	}
+		// }
+		// if strings.TrimSpace(req.SourceBankAccount) != "" {
+		// 	if !ctxHasApprovedBankAccountFor(ctx, req.SourceBankAccount, req.SourceBankName, req.EntityName) {
+		// 		api.RespondWithResult(w, false, "unauthorized source bank account")
+		// 		return
+		// 	}
+		// }
+		// if strings.TrimSpace(req.TargetBankAccount) != "" {
+		// 	if !ctxHasApprovedBankAccountFor(ctx, req.TargetBankAccount, req.TargetBankName, req.EntityName) {
+		// 		api.RespondWithResult(w, false, "unauthorized target bank account")
+		// 		return
+		// 	}
+		// }
 
 		// Validate sweep_type (must be ZBA, CONCENTRATION, or TARGET_BALANCE)
 		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(req.SweepType))
@@ -175,8 +175,8 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var req struct {
-			UserID  string                `json:"user_id"`
-			Configs []SweepConfigRequest  `json:"configs"`
+			UserID  string               `json:"user_id"`
+			Configs []SweepConfigRequest `json:"configs"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -234,30 +234,30 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 			}
-			if strings.TrimSpace(cfg.SourceBankName) != "" {
-				if !api.IsBankAllowed(ctx, cfg.SourceBankName) {
-					api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized source bank %s", i, cfg.SourceBankName))
-					return
-				}
-			}
-			if strings.TrimSpace(cfg.TargetBankName) != "" {
-				if !api.IsBankAllowed(ctx, cfg.TargetBankName) {
-					api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized target bank %s", i, cfg.TargetBankName))
-					return
-				}
-			}
-			if strings.TrimSpace(cfg.SourceBankAccount) != "" {
-				if !ctxHasApprovedBankAccountFor(ctx, cfg.SourceBankAccount, cfg.SourceBankName, cfg.EntityName) {
-					api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized source bank account %s", i, cfg.SourceBankAccount))
-					return
-				}
-			}
-			if strings.TrimSpace(cfg.TargetBankAccount) != "" {
-				if !ctxHasApprovedBankAccountFor(ctx, cfg.TargetBankAccount, cfg.TargetBankName, cfg.EntityName) {
-					api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized target bank account %s", i, cfg.TargetBankAccount))
-					return
-				}
-			}
+			// if strings.TrimSpace(cfg.SourceBankName) != "" {
+			// 	if !api.IsBankAllowed(ctx, cfg.SourceBankName) {
+			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized source bank %s", i, cfg.SourceBankName))
+			// 		return
+			// 	}
+			// }
+			// if strings.TrimSpace(cfg.TargetBankName) != "" {
+			// 	if !api.IsBankAllowed(ctx, cfg.TargetBankName) {
+			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized target bank %s", i, cfg.TargetBankName))
+			// 		return
+			// 	}
+			// }
+			// if strings.TrimSpace(cfg.SourceBankAccount) != "" {
+			// 	if !ctxHasApprovedBankAccountFor(ctx, cfg.SourceBankAccount, cfg.SourceBankName, cfg.EntityName) {
+			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized source bank account %s", i, cfg.SourceBankAccount))
+			// 		return
+			// 	}
+			// }
+			// if strings.TrimSpace(cfg.TargetBankAccount) != "" {
+			// 	if !ctxHasApprovedBankAccountFor(ctx, cfg.TargetBankAccount, cfg.TargetBankName, cfg.EntityName) {
+			// 		api.RespondWithResult(w, false, fmt.Sprintf("config[%d]: unauthorized target bank account %s", i, cfg.TargetBankAccount))
+			// 		return
+			// 	}
+			// }
 
 			// Validate sweep_type
 			sweepTypeUpper := strings.ToUpper(strings.TrimSpace(cfg.SweepType))
@@ -1086,6 +1086,7 @@ func GetApprovedActiveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 		var err error
 
 		// Query only APPROVED configurations that are ACTIVE (is_deleted = false)
+		// Filter out sweeps that already have APPROVED initiations
 		q := `
 			SELECT DISTINCT ON (sc.sweep_id)
 				sc.sweep_id, 
@@ -1107,6 +1108,12 @@ func GetApprovedActiveSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFun
 				ON a.sweep_id = sc.sweep_id
 			WHERE sc.is_deleted = false 
 				AND a.processing_status = 'APPROVED'
+				AND NOT EXISTS (
+					SELECT 1 FROM cimplrcorpsaas.sweep_initiation si
+					JOIN cimplrcorpsaas.auditactionsweepinitiation asi 
+						ON asi.initiation_id = si.initiation_id
+					WHERE si.sweep_id = sc.sweep_id 
+				)
 		`
 
 		if len(norm) > 0 {

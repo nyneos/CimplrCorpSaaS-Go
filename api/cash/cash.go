@@ -109,23 +109,38 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config-v2/update", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepConfigurationV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/all", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/approved-active", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepConfigurations(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/approved-with-potentials", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepConfigurationsEnhanced(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRequestDeleteSweepConfigurationsV2(pgxPool)))
 
 	// Sweep V2 initiation routes (manual/scheduled initiation with overrides)
 	mux.Handle("/cash/sweep-initiation/create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CreateSweepInitiation(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkCreateSweepInitiation(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/update", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepInitiation(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/all", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepInitiations(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/with-details", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepInitiationsWithJoinedData(pgxPool)))
 	mux.Handle("/cash/sweep-initiation/approved-active", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepInitiations(pgxPool)))
-	mux.Handle("/cash/sweep-initiation/update-status", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepInitiationStatus(pgxPool)))
-	mux.Handle("/cash/sweep-initiation/cancel", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.CancelSweepInitiation(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepInitiations(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepInitiations(pgxPool)))
+	mux.Handle("/cash/sweep-initiation/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkDeleteSweepInitiations(pgxPool)))
 
 	// Sweep V2 execution routes (logs, statistics, manual trigger)
 	mux.Handle("/cash/sweep-execution-v2/logs", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepExecutionLogsV2(pgxPool)))
 	mux.Handle("/cash/sweep-execution-v2/all-logs", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetAllSweepExecutionLogsV2(pgxPool)))
 	mux.Handle("/cash/sweep-execution-v2/statistics", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepStatisticsV2(pgxPool)))
-	mux.Handle("/cash/sweep-execution-v2/manual-trigger-direct", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2Direct(pgxPool)))
+	// DEPRECATED: /cash/sweep-execution-v2/manual-trigger-direct - ALL sweeps now use initiation workflow
+	// Use /cash/sweep-execution-v2/manual-trigger instead
+	// mux.Handle("/cash/sweep-execution-v2/manual-trigger-direct", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2Direct(pgxPool)))
 	mux.Handle("/cash/sweep-execution-v2/manual-trigger", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2(pgxPool)))
+
+	// Sweep V2 Simulation & Analytics (comprehensive pre-execution analysis, CFO decision support)
+	mux.Handle("/cash/sweep/simulate", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.SimulateSweepExecution(pgxPool)))
+	mux.Handle("/cash/sweep/balance-snapshot", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetBalanceSnapshot(pgxPool)))
+	mux.Handle("/cash/sweep/validate", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ValidateSweepConfiguration(pgxPool)))
+	mux.Handle("/cash/sweep/analytics", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepAnalytics(pgxPool)))
+	mux.Handle("/cash/sweep/suggestions", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepSuggestions(pgxPool)))
+	mux.Handle("/cash/sweep/execution-graph", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepExecutionGraph(pgxPool)))
 
 	// Treasury KPI Dashboard
 	mux.Handle("/cash/sweep/kpi", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetTreasuryKPI(pgxPool)))

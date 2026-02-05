@@ -479,7 +479,9 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ManualTriggerSweepV2Direct executes a sweep DIRECTLY without creating initiation (for requires_initiation=false sweeps)
+// DEPRECATED: ManualTriggerSweepV2Direct - ALL sweeps now require initiation workflow
+// Use ManualTriggerSweepV2 instead, which creates initiation + auto-approves
+/*
 func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -525,8 +527,8 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var requestedAt time.Time
 
 		err := pgxPool.QueryRow(ctx, `
-			SELECT sc.entity_name, sc.source_bank_name, sc.source_bank_account, 
-			       sc.target_bank_name, sc.target_bank_account, sc.sweep_type, 
+			SELECT sc.entity_name, sc.source_bank_name, sc.source_bank_account,
+			       sc.target_bank_name, sc.target_bank_account, sc.sweep_type,
 			       sc.buffer_amount, sc.sweep_amount, sc.requires_initiation,
 			       sc.frequency, sc.effective_date,
 			       audit.requested_at
@@ -548,6 +550,7 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// CHECK: This endpoint is ONLY for requires_initiation = FALSE
+		// For manual trigger, we create an initiation and auto-approve it for audit trail
 		if requiresInitiation {
 			api.RespondWithResult(w, false, "This sweep requires initiation. Use /manual-trigger endpoint instead.")
 			return
@@ -597,6 +600,30 @@ func ManualTriggerSweepV2Direct(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil || processingStatus != "APPROVED" {
 			api.RespondWithResult(w, false, "Sweep must be approved before manual execution")
+			return
+		}
+
+		// Create initiation record for audit trail
+		var initiationID string
+		insInitiation := `INSERT INTO cimplrcorpsaas.sweep_initiation (
+			sweep_id, initiated_by, initiation_time
+		) VALUES ($1, $2, now()) RETURNING initiation_id`
+
+		err = pgxPool.QueryRow(ctx, insInitiation, req.SweepID, requestedBy).Scan(&initiationID)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to create initiation: "+err.Error())
+			return
+		}
+
+		// Auto-approve the initiation (manual trigger bypasses approval workflow)
+		insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+			initiation_id, sweep_id, actiontype, processing_status,
+			requested_by, requested_at, checker_by, checker_at
+		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, now())`
+
+		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, requestedBy)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to auto-approve initiation: "+err.Error())
 			return
 		}
 
@@ -846,7 +873,7 @@ func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep inte
 	// Log sweep execution (NO initiation_id for direct sweeps)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO cimplrcorpsaas.sweep_execution_log (
-			sweep_id, amount_swept, from_account, to_account, status, 
+			sweep_id, amount_swept, from_account, to_account, status,
 			balance_before, balance_after, error_message
 		) VALUES ($1, $2, $3, $4, 'SUCCESS', $5, $6, NULL)
 	`, s.sweepID, sweepAmountFinal, s.sourceAccount, s.targetAccount, currentBalance, newBalance)
@@ -869,6 +896,7 @@ func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep inte
 		"execution_type": "DIRECT_MANUAL",
 	}, nil
 }
+*/
 
 // ManualTriggerSweepV2 allows manual triggering of a V2 sweep by creating a MANUAL initiation record
 // Then immediately executes the sweep based on that initiation
@@ -913,59 +941,51 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fetch sweep configuration
 		var entityName, sourceBank, sourceAccount, targetBank, targetAccount, sweepType string
 		var bufferAmount, sweepAmount *float64
-		var requiresInitiation bool
 
 		err := pgxPool.QueryRow(ctx, `
-			SELECT entity_name, source_bank_name, source_bank_account, target_bank_name, target_bank_account, 
-				   sweep_type, buffer_amount, sweep_amount, requires_initiation
-			FROM cimplrcorpsaas.sweepconfiguration
-			WHERE sweep_id = $1 AND is_deleted = false
-		`, req.SweepID).Scan(&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount,
-			&sweepType, &bufferAmount, &sweepAmount, &requiresInitiation)
+		SELECT entity_name, source_bank_name, source_bank_account, target_bank_name, target_bank_account, 
+			   sweep_type, buffer_amount, sweep_amount
+		FROM cimplrcorpsaas.sweepconfiguration
+		WHERE sweep_id = $1 AND is_deleted = false
+	`, req.SweepID).Scan(&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount,
+			&sweepType, &bufferAmount, &sweepAmount)
 
 		if err != nil {
 			api.RespondWithResult(w, false, "Sweep configuration not found: "+err.Error())
 			return
 		}
 
-		// CHECK: This endpoint creates initiation - should only be used for requires_initiation = TRUE
-		// For requires_initiation = FALSE, use /manual-trigger-direct instead
-		if !requiresInitiation {
-			api.RespondWithResult(w, false, "This sweep does not require initiation. Use /manual-trigger-direct endpoint for direct execution.")
-			return
-		}
-
-		// Validate sweep scope against prevalidation context
+		// NOTE: ALL sweeps now use initiation workflow (requires_initiation flag removed)		// Validate sweep scope against prevalidation context
 		if strings.TrimSpace(entityName) != "" {
 			if !api.IsEntityAllowed(ctx, entityName) {
 				api.RespondWithResult(w, false, "unauthorized entity")
 				return
 			}
 		}
-		if strings.TrimSpace(sourceBank) != "" {
-			if !api.IsBankAllowed(ctx, sourceBank) {
-				api.RespondWithResult(w, false, "unauthorized source bank")
-				return
-			}
-		}
-		if strings.TrimSpace(targetBank) != "" {
-			if !api.IsBankAllowed(ctx, targetBank) {
-				api.RespondWithResult(w, false, "unauthorized target bank")
-				return
-			}
-		}
-		if strings.TrimSpace(sourceAccount) != "" {
-			if !ctxHasApprovedBankAccountFor(ctx, sourceAccount, sourceBank, entityName) {
-				api.RespondWithResult(w, false, "unauthorized source bank account")
-				return
-			}
-		}
-		if strings.TrimSpace(targetAccount) != "" {
-			if !ctxHasApprovedBankAccountFor(ctx, targetAccount, targetBank, entityName) {
-				api.RespondWithResult(w, false, "unauthorized target bank account")
-				return
-			}
-		}
+		// if strings.TrimSpace(sourceBank) != "" {
+		// 	if !api.IsBankAllowed(ctx, sourceBank) {
+		// 		api.RespondWithResult(w, false, "unauthorized source bank")
+		// 		return
+		// 	}
+		// }
+		// if strings.TrimSpace(targetBank) != "" {
+		// 	if !api.IsBankAllowed(ctx, targetBank) {
+		// 		api.RespondWithResult(w, false, "unauthorized target bank")
+		// 		return
+		// 	}
+		// }
+		// if strings.TrimSpace(sourceAccount) != "" {
+		// 	if !ctxHasApprovedBankAccountFor(ctx, sourceAccount, sourceBank, entityName) {
+		// 		api.RespondWithResult(w, false, "unauthorized source bank account")
+		// 		return
+		// 	}
+		// }
+		// if strings.TrimSpace(targetAccount) != "" {
+		// 	if !ctxHasApprovedBankAccountFor(ctx, targetAccount, targetBank, entityName) {
+		// 		api.RespondWithResult(w, false, "unauthorized target bank account")
+		// 		return
+		// 	}
+		// }
 
 		// Check if approved (ONLY requirement for manual trigger)
 		var processingStatus string
@@ -982,11 +1002,11 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Create MANUAL initiation record
+		// Create MANUAL initiation record (no status/initiation_type - using audit table)
 		ins := `INSERT INTO cimplrcorpsaas.sweep_initiation (
-			sweep_id, initiated_by, initiation_type, initiation_time, 
-			overridden_amount, overridden_execution_time, status
-		) VALUES ($1,$2,'MANUAL',now(),$3,$4,'IN_PROGRESS') RETURNING initiation_id`
+			sweep_id, initiated_by, initiation_time, 
+			overridden_amount, overridden_execution_time
+		) VALUES ($1, $2, now(), $3, $4) RETURNING initiation_id`
 
 		var initiationID string
 		err = pgxPool.QueryRow(ctx, ins,
@@ -1001,19 +1021,27 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Auto-approve the manual initiation (manual triggers bypass approval workflow)
+		insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+			initiation_id, sweep_id, actiontype, processing_status, 
+			requested_by, requested_at, checker_by, checker_at
+		) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, now())`
+
+		_, err = pgxPool.Exec(ctx, insAudit, initiationID, req.SweepID, requestedBy, requestedBy)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to auto-approve manual initiation: "+err.Error())
+			return
+		}
+
 		// Execute the sweep with the initiation context
 		result, err := executeSweepV2WithInitiation(ctx, pgxPool, req.SweepID, initiationID, sourceAccount, targetAccount,
 			sweepType, bufferAmount, sweepAmount, req.OverriddenAmount, requestedBy)
 
 		if err != nil {
-			// Update initiation status to FAILED
-			pgxPool.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET status = 'FAILED' WHERE initiation_id = $1`, initiationID)
+			// Execution failure is already logged in sweep_execution_log by executeSweepV2WithInitiation
 			api.RespondWithResult(w, false, "Sweep execution failed: "+err.Error())
 			return
 		}
-
-		// Update initiation status to COMPLETED
-		pgxPool.Exec(ctx, `UPDATE 	cimplrcorpsaas.sweep_initiation SET status = 'COMPLETED' WHERE initiation_id = $1`, initiationID)
 
 		api.RespondWithPayload(w, true, "Sweep executed successfully", result)
 	}

@@ -35,13 +35,13 @@ type RuleScope struct {
 
 // CategoryRule represents a category rule
 type CategoryRule struct {
-	RuleID     int64     `json:"rule_id"`
-	RuleName   string    `json:"rule_name"`
-	CategoryID string    `json:"category_id"`
-	ScopeID    int64     `json:"scope_id"`
-	Priority   int       `json:"priority"`
-	IsActive   bool      `json:"is_active"`
-	CreatedAt  time.Time  `json:"created_at"`
+	RuleID        int64      `json:"rule_id"`
+	RuleName      string     `json:"rule_name"`
+	CategoryID    string     `json:"category_id"`
+	ScopeID       int64      `json:"scope_id"`
+	Priority      int        `json:"priority"`
+	IsActive      bool       `json:"is_active"`
+	CreatedAt     time.Time  `json:"created_at"`
 	EffectiveDate *time.Time `json:"effective_date,omitempty"`
 }
 
@@ -1002,12 +1002,12 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			RuleName      string     `json:"rule_name"`
-			CategoryID    string     `json:"category_id"`
-			ScopeID       int64      `json:"scope_id"`
-			Priority      int        `json:"priority"`
-			IsActive      *bool      `json:"is_active"`
-			EffectiveDate *time.Time `json:"effective_date,omitempty"`
+			RuleName      string  `json:"rule_name"`
+			CategoryID    string  `json:"category_id"`
+			ScopeID       int64   `json:"scope_id"`
+			Priority      int     `json:"priority"`
+			IsActive      *bool   `json:"is_active"`
+			EffectiveDate *string `json:"effective_date,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleName == "" || strings.TrimSpace(body.CategoryID) == "" || body.ScopeID == 0 {
 			http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
@@ -1050,8 +1050,19 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 			return
 		}
 
+		// Parse effective date if provided (accepts multiple formats)
+		var eff *time.Time
+		if body.EffectiveDate != nil && strings.TrimSpace(*body.EffectiveDate) != "" {
+			t, err := parseDate(*body.EffectiveDate)
+			if err != nil {
+				http.Error(w, "invalid effective_date format", http.StatusBadRequest)
+				return
+			}
+			eff = &t
+		}
+
 		var id int64
-		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive, body.EffectiveDate).Scan(&id)
+		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive, eff).Scan(&id)
 		if err != nil {
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return

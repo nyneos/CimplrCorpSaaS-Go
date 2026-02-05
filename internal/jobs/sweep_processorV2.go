@@ -141,7 +141,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 		AND EXTRACT(MINUTE FROM sc.execution_time) BETWEEN $3 AND $4
 	`
 
-	log.Printf("[SWEEP V2] 🔍 Querying for sweeps at %02d:%02d (today=%s)", currentHour, currentMinute, today)
+	log.Printf("[SWEEP V2]  Querying for sweeps at %02d:%02d (today=%s)", currentHour, currentMinute, today)
 	rows, err := db.Query(ctx, query, today, currentHour, currentMinute, currentMinute+1)
 	if err != nil {
 		return fmt.Errorf("unable to fetch approved V2 sweeps: %v", err)
@@ -179,7 +179,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 		return nil
 	}
 
-	log.Printf("[SWEEP V2] ✓ Found %d sweeps ready for processing", len(sweeps))
+	log.Printf("[SWEEP V2]  Found %d sweeps ready for processing", len(sweeps))
 	for i, s := range sweeps {
 		log.Printf("[SWEEP V2]   [%d] ID=%s Type=%s Freq=%s Source=%s Target=%s RequiresInitiation=%v",
 			i+1, s.sweepID, s.sweepType, s.frequency, s.sourceAccount, s.targetAccount, s.requiresInitiation)
@@ -216,26 +216,8 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 				return
 			}
 
-			// Check if sweep requires initiation
-			if !sweep.requiresInitiation {
-				// Execute sweep directly (FALSE = auto-execute immediately after approval)
-				log.Printf("[SWEEP V2] %s - Executing sweep directly (requires_initiation=false)...", sweep.sweepID)
-				err = ExecuteSweepV2Direct(ctx, db, sweep)
-				if err != nil {
-					log.Printf("[SWEEP V2] %s - Execution failed: %v", sweep.sweepID, err)
-					mu.Lock()
-					failCount++
-					mu.Unlock()
-				} else {
-					mu.Lock()
-					successCount++
-					mu.Unlock()
-					log.Printf("[SWEEP V2] %s - Executed successfully", sweep.sweepID)
-				}
-				return
-			}
-
-			// requires_initiation=true: Create SCHEDULED initiation and wait for processing
+			// ALL sweeps now require initiation -> approval -> execution workflow
+			// Create initiation with auto-approval for scheduled sweeps
 			err = createScheduledInitiation(ctx, db, sweep.sweepID)
 			if err != nil {
 				log.Printf("[SWEEP V2] %s - Failed to create scheduled initiation: %v", sweep.sweepID, err)
@@ -247,7 +229,7 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 			mu.Lock()
 			initiationCreatedCount++
 			mu.Unlock()
-			log.Printf("[SWEEP V2] %s - Scheduled initiation created (requires_initiation=true), waiting for initiation processing", sweep.sweepID)
+			log.Printf("[SWEEP V2] %s - Scheduled initiation created and auto-approved", sweep.sweepID)
 			// Sweep will be executed by ProcessPendingInitiations when initiation status becomes INITIATED
 		}(s)
 	}
@@ -259,11 +241,11 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 
 	log.Printf("[SWEEP V2] ═══════════════════════════════════════════════════════")
 	log.Printf("[SWEEP V2]  PROCESSING SUMMARY:")
-	log.Printf("[SWEEP V2]   ✓ Direct Executions: %d", successCount)
-	log.Printf("[SWEEP V2]   ✗ Failed: %d", failCount)
+	log.Printf("[SWEEP V2]    Direct Executions: %d", successCount)
+	log.Printf("[SWEEP V2]    Failed: %d", failCount)
 	log.Printf("[SWEEP V2]    Initiations Created: %d", initiationCreatedCount)
-	log.Printf("[SWEEP V2]   ✓ Initiations Processed: %d", initiationsProcessed)
-	log.Printf("[SWEEP V2]   ✗ Initiations Failed: %d", initiationsFailed)
+	log.Printf("[SWEEP V2]    Initiations Processed: %d", initiationsProcessed)
+	log.Printf("[SWEEP V2]    Initiations Failed: %d", initiationsFailed)
 	log.Printf("[SWEEP V2] ═══════════════════════════════════════════════════════")
 
 	return nil
@@ -277,6 +259,25 @@ func shouldExecuteSweepV2ByFrequency(frequency string, effectiveDate sql.NullStr
 	case "DAILY":
 		// Execute every day at the specified execution_time
 		return true, nil
+
+	case "WEEKLY":
+		// Execute every 7th day from effective_date
+		referenceDate := requestedAt
+		if effectiveDate.Valid && effectiveDate.String != "" {
+			parsed, err := time.Parse(constants.DateFormat, effectiveDate.String)
+			if err == nil {
+				referenceDate = parsed
+			}
+		}
+
+		// Calculate days since reference date
+		daysSince := int(now.Sub(referenceDate).Hours() / 24)
+		
+		// Execute if today is exactly a multiple of 7 days from reference
+		if daysSince >= 0 && daysSince%7 == 0 {
+			return true, nil
+		}
+		return false, nil
 
 	case "MONTHLY":
 		// Execute on the same day of month as effective_date (or requested_at if no effective_date)
@@ -327,31 +328,45 @@ func getTargetDayForMonthV2(targetDay, year, month int) int {
 	return targetDay
 }
 
-// createScheduledInitiation creates a SCHEDULED initiation record for a sweep
+// createScheduledInitiation creates a SCHEDULED initiation record for a sweep with auto-approval
 func createScheduledInitiation(ctx context.Context, db *pgxpool.Pool, sweepID string) error {
-	// Check if there's already a pending initiation for today
+	// Check if there's already a pending or approved initiation for today
 	var existingCount int
 	err := db.QueryRow(ctx, `
 		SELECT COUNT(*) 
-		FROM cimplrcorpsaas.sweep_initiation 
-		WHERE sweep_id = $1 
-		AND DATE(initiation_time) = CURRENT_DATE
-		AND status IN ('INITIATED', 'IN_PROGRESS')
+		FROM cimplrcorpsaas.sweep_initiation si
+		JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = si.initiation_id
+		WHERE si.sweep_id = $1 
+		AND DATE(si.initiation_time) = CURRENT_DATE
+		AND asi.processing_status IN ('PENDING_APPROVAL', 'APPROVED')
 	`, sweepID).Scan(&existingCount)
 
 	if err == nil && existingCount > 0 {
-		return nil // Already has a pending initiation for today, skip
+		return nil // Already has a pending/approved initiation for today, skip
 	}
 
+	// Create initiation
 	ins := `INSERT INTO cimplrcorpsaas.sweep_initiation (
-		sweep_id, initiated_by, initiation_type, initiation_time, status
-	) VALUES ($1, 'sweep_system', 'SCHEDULED', now(), 'INITIATED')`
+		sweep_id, initiated_by, initiation_time
+	) VALUES ($1, 'sweep_system', now()) RETURNING initiation_id`
 
-	_, err = db.Exec(ctx, ins, sweepID)
+	var initiationID string
+	err = db.QueryRow(ctx, ins, sweepID).Scan(&initiationID)
+	if err != nil {
+		return err
+	}
+
+	// Auto-approve the scheduled initiation
+	insAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+		initiation_id, sweep_id, actiontype, processing_status, 
+		requested_by, requested_at, checker_by, checker_at
+	) VALUES ($1, $2, 'CREATE', 'APPROVED', 'sweep_system', now(), 'sweep_system', now())`
+
+	_, err = db.Exec(ctx, insAudit, initiationID, sweepID)
 	return err
 }
 
-// ProcessPendingInitiations processes all initiations with status='INITIATED'
+// ProcessPendingInitiations processes all APPROVED initiations
 func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize int) (int, int) {
 	query := `
 		SELECT 
@@ -359,6 +374,8 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 			i.sweep_id,
 			i.overridden_amount,
 			i.overridden_execution_time,
+			i.overridden_source_bank_account,
+			i.overridden_target_bank_account,
 			sc.source_bank_account,
 			sc.target_bank_account,
 			sc.sweep_type,
@@ -366,15 +383,16 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 			sc.sweep_amount
 		FROM cimplrcorpsaas.sweep_initiation i
 		JOIN cimplrcorpsaas.sweepconfiguration sc ON sc.sweep_id = i.sweep_id
-		WHERE i.status = 'INITIATED'
+		JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = i.initiation_id
+		WHERE asi.processing_status = 'APPROVED'
 		AND sc.is_deleted = false
 		ORDER BY i.initiation_time ASC
 	`
 
-	log.Printf("[SWEEP V2] 🔍 Checking for pending initiations (status=INITIATED)...")
+	log.Printf("[SWEEP V2]  Checking for approved initiations (processing_status=APPROVED)...")
 	rows, err := db.Query(ctx, query)
 	if err != nil {
-		log.Printf("[SWEEP V2] Failed to fetch pending initiations: %v", err)
+		log.Printf("[SWEEP V2] Failed to fetch approved initiations: %v", err)
 		return 0, 0
 	}
 	defer rows.Close()
@@ -385,12 +403,13 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 
 	for rows.Next() {
 		initiationCount++
-		var initiationID, sweepID, sourceAccount, targetAccount, sweepType string
+		var initiationID, sweepID, configSourceAccount, configTargetAccount, sweepType string
 		var overriddenAmount, bufferAmount, sweepAmount *float64
-		var overriddenExecutionTime sql.NullString
+		var overriddenExecutionTime, overriddenSourceAccount, overriddenTargetAccount *string
 
 		err := rows.Scan(&initiationID, &sweepID, &overriddenAmount, &overriddenExecutionTime,
-			&sourceAccount, &targetAccount, &sweepType, &bufferAmount, &sweepAmount)
+			&overriddenSourceAccount, &overriddenTargetAccount,
+			&configSourceAccount, &configTargetAccount, &sweepType, &bufferAmount, &sweepAmount)
 		if err != nil {
 			log.Printf("[SWEEP V2] Failed to scan initiation row: %v", err)
 			continue
@@ -398,24 +417,32 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 
 		log.Printf("[SWEEP V2] 📝 Processing initiation [%d]: %s (sweep: %s)", initiationCount, initiationID, sweepID)
 
-		// Update status to IN_PROGRESS
-		db.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET status = 'IN_PROGRESS' WHERE initiation_id = $1`, initiationID)
+		// Determine final source and target accounts
+		finalSourceAccount := configSourceAccount
+		if overriddenSourceAccount != nil && *overriddenSourceAccount != "" {
+			finalSourceAccount = *overriddenSourceAccount
+		}
+
+		finalTargetAccount := configTargetAccount
+		if overriddenTargetAccount != nil && *overriddenTargetAccount != "" {
+			finalTargetAccount = *overriddenTargetAccount
+		}
 
 		// Execute the sweep
-		err = executeSweepWithInitiation(ctx, db, sweepID, initiationID, sourceAccount, targetAccount,
+		err = executeSweepWithInitiation(ctx, db, sweepID, initiationID, finalSourceAccount, finalTargetAccount,
 			sweepType, bufferAmount, sweepAmount, overriddenAmount)
 
 		if err != nil {
 			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution failed: %v", sweepID, initiationID, err)
-			db.Exec(ctx, `UPDATE cimplrcorpsaas.sweep_initiation SET status = 'FAILED' WHERE initiation_id = $1`, initiationID)
 			failCount++
 		} else {
 			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution successful", sweepID, initiationID)
+			successCount++
 		}
 	}
 
 	if initiationCount > 0 {
-		log.Printf("[SWEEP V2] ✅ Processed %d initiations: %d succeeded, %d failed", initiationCount, successCount, failCount)
+		log.Printf("[SWEEP V2] Processed %d initiations: %d succeeded, %d failed", initiationCount, successCount, failCount)
 	}
 
 	return successCount, failCount
@@ -461,16 +488,16 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
 			return fmt.Errorf(errMsg)
 		}
-		
+
 		// Only sweep if current balance exceeds buffer
 		if currentBalance <= buffer {
 			errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
 			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
 			return fmt.Errorf(errMsg)
 		}
-		
+
 		sweepAmountFinal = *sweep.sweepAmount
-		
+
 		// Maintain buffer - ensure sweep doesn't violate buffer requirement
 		if (currentBalance - sweepAmountFinal) < buffer {
 			errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Sweeping %.2f would leave balance below buffer (%.2f)", sweepAmountFinal, buffer)
@@ -603,7 +630,7 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 		return fmt.Errorf(errMsg)
 	}
 
-	log.Printf("[SWEEP V2] %s ✓ SUCCESS | Type: %s | Amount: %.2f | From: %s (%.2f → %.2f) | To: %s (%.2f → %.2f) | Buffer: %.2f",
+	log.Printf("[SWEEP V2] %s  SUCCESS | Type: %s | Amount: %.2f | From: %s (%.2f → %.2f) | To: %s (%.2f → %.2f) | Buffer: %.2f",
 		sweep.sweepID, sweep.sweepType, sweepAmountFinal, sweep.sourceAccount, currentBalance, newBalance,
 		sweep.targetAccount, sweep.targetBalance, targetNewBalance, buffer)
 
@@ -622,7 +649,7 @@ func logSweepFailure(ctx context.Context, db *pgxpool.Pool, sweepID, initiationI
 	if err != nil {
 		log.Printf("[SWEEP V2] Failed to log sweep failure: %v", err)
 	}
-	log.Printf("[SWEEP V2] %s ✗ FAILED | Reason: %s", sweepID, reason)
+	log.Printf("[SWEEP V2] %s  FAILED | Reason: %s", sweepID, reason)
 }
 
 // executeSweepWithInitiation executes a sweep with initiation context (similar to executeSweepV2WithInitiation in sweepExecutorV2.go)
@@ -664,7 +691,7 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 	// If overridden_amount is provided, validate and use it
 	if overriddenAmount != nil && *overriddenAmount > 0 {
 		finalSweepAmount = *overriddenAmount
-		
+
 		// For ZBA with override, allow sweeping to zero
 		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweepType))
 		if sweepTypeUpper != "ZBA" {
@@ -698,16 +725,16 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
 				return fmt.Errorf(errMsg)
 			}
-			
+
 			// Only sweep if current balance exceeds buffer
 			if currentBalance <= buffer {
 				errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
 				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
 				return fmt.Errorf(errMsg)
 			}
-			
+
 			finalSweepAmount = *sweepAmount
-			
+
 			// Maintain buffer - ensure sweep doesn't violate buffer requirement
 			if (currentBalance - finalSweepAmount) < buffer {
 				errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
@@ -846,7 +873,7 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 		return fmt.Errorf(errMsg)
 	}
 
-	log.Printf("[SWEEP V2] %s ✓ SUCCESS (Initiation: %s) | Type: %s | Amount: %.2f | Buffer: %.2f",
+	log.Printf("[SWEEP V2] %s SUCCESS (Initiation: %s) | Type: %s | Amount: %.2f | Buffer: %.2f",
 		sweepID, initiationID, sweepType, finalSweepAmount, buffer)
 
 	return nil
