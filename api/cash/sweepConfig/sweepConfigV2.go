@@ -631,42 +631,84 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithPayload(w, true, "", []map[string]interface{}{})
 				return
 			}
-			q := `SELECT 
-				sweep_id, entity_name, 
-				source_bank_name, source_bank_account, 
-				target_bank_name, target_bank_account, 
-				sweep_type, frequency, 
-				effective_date, execution_time, 
-				buffer_amount, sweep_amount, 
-				requires_initiation,
-				old_entity_name, 
-				old_source_bank_name, old_source_bank_account, 
-				old_target_bank_name, old_target_bank_account, 
-				old_sweep_type, old_frequency, 
-				old_effective_date, old_execution_time, 
-				old_buffer_amount, old_sweep_amount
-			FROM cimplrcorpsaas.sweepconfiguration 
-			WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) 
-			ORDER BY created_at DESC, sweep_id`
+						q := `SELECT 
+								sweep_id, entity_name, 
+								source_bank_name, source_bank_account, 
+								target_bank_name, target_bank_account, 
+								sweep_type, frequency,
+								-- include latest approved balances (0 if none)
+								COALESCE(bbal1.current_balance,0) AS source_current_balance,
+								COALESCE(bbal2.current_balance,0) AS target_current_balance,
+								effective_date, execution_time, 
+								buffer_amount, sweep_amount, 
+								requires_initiation,
+								old_entity_name, 
+								old_source_bank_name, old_source_bank_account, 
+								old_target_bank_name, old_target_bank_account, 
+								old_sweep_type, old_frequency, 
+								old_effective_date, old_execution_time, 
+								old_buffer_amount, old_sweep_amount
+						FROM cimplrcorpsaas.sweepconfiguration 
+						LEFT JOIN LATERAL (
+								SELECT COALESCE(bbm.closing_balance,0) AS current_balance
+								FROM public.bank_balances_manual bbm
+								JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+								WHERE a.processing_status = 'APPROVED'
+									AND bbm.account_no = COALESCE(sweepconfiguration.source_bank_account, sweepconfiguration.source_bank_account)
+								ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+								LIMIT 1
+						) bbal1 ON true
+						LEFT JOIN LATERAL (
+								SELECT COALESCE(bbm.closing_balance,0) AS current_balance
+								FROM public.bank_balances_manual bbm
+								JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+								WHERE a.processing_status = 'APPROVED'
+									AND bbm.account_no = COALESCE(sweepconfiguration.target_bank_account, sweepconfiguration.target_bank_account)
+								ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+								LIMIT 1
+						) bbal2 ON true
+						WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) 
+						ORDER BY created_at DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q, norm)
 		} else {
-			q := `SELECT 
-				sweep_id, entity_name, 
-				source_bank_name, source_bank_account, 
-				target_bank_name, target_bank_account, 
-				sweep_type, frequency, 
-				effective_date, execution_time, 
-				buffer_amount, sweep_amount, 
-				requires_initiation,
-				old_entity_name, 
-				old_source_bank_name, old_source_bank_account, 
-				old_target_bank_name, old_target_bank_account, 
-				old_sweep_type, old_frequency, 
-				old_effective_date, old_execution_time, 
-				old_buffer_amount, old_sweep_amount
-			FROM cimplrcorpsaas.sweepconfiguration 
-			WHERE is_deleted != TRUE 
-			ORDER BY created_at DESC, sweep_id`
+						q := `SELECT 
+								sweep_id, entity_name, 
+								source_bank_name, source_bank_account, 
+								target_bank_name, target_bank_account, 
+								sweep_type, frequency,
+								-- include latest approved balances (0 if none)
+								COALESCE(bbal1.current_balance,0) AS source_current_balance,
+								COALESCE(bbal2.current_balance,0) AS target_current_balance,
+								effective_date, execution_time, 
+								buffer_amount, sweep_amount, 
+								requires_initiation,
+								old_entity_name, 
+								old_source_bank_name, old_source_bank_account, 
+								old_target_bank_name, old_target_bank_account, 
+								old_sweep_type, old_frequency, 
+								old_effective_date, old_execution_time, 
+								old_buffer_amount, old_sweep_amount
+						FROM cimplrcorpsaas.sweepconfiguration 
+						LEFT JOIN LATERAL (
+								SELECT COALESCE(bbm.closing_balance,0) AS current_balance
+								FROM public.bank_balances_manual bbm
+								JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+								WHERE a.processing_status = 'APPROVED'
+									AND bbm.account_no = COALESCE(sweepconfiguration.source_bank_account, sweepconfiguration.source_bank_account)
+								ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+								LIMIT 1
+						) bbal1 ON true
+						LEFT JOIN LATERAL (
+								SELECT COALESCE(bbm.closing_balance,0) AS current_balance
+								FROM public.bank_balances_manual bbm
+								JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+								WHERE a.processing_status = 'APPROVED'
+									AND bbm.account_no = COALESCE(sweepconfiguration.target_bank_account, sweepconfiguration.target_bank_account)
+								ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+								LIMIT 1
+						) bbal2 ON true
+						WHERE is_deleted != TRUE 
+						ORDER BY created_at DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
@@ -679,6 +721,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var sweepID string
 			var entity, sourceBank, sourceAccount, targetBank, targetAccount, sweepType, freq sqlNullString
+			var sourceCurrBal, targetCurrBal sqlNullFloat
 			var effectiveDate, execTime sqlNullString
 			var bufferAmt, sweepAmt sqlNullFloat
 			var requiresInitiation *bool
@@ -691,6 +734,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&sourceBank, &sourceAccount,
 				&targetBank, &targetAccount,
 				&sweepType, &freq,
+				&sourceCurrBal, &targetCurrBal,
 				&effectiveDate, &execTime,
 				&bufferAmt, &sweepAmt,
 				&requiresInitiation,
@@ -773,6 +817,8 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"frequency":               freq.ValueOrZero(),
 				"effective_date":          effectiveDate.ValueOrZero(),
 				"execution_time":          execTime.ValueOrZero(),
+				"source_current_balance":  sourceCurrBal.ValueOrZero(),
+				"target_current_balance":  targetCurrBal.ValueOrZero(),
 				"buffer_amount":           bufferAmt.ValueOrZero(),
 				"sweep_amount":            sweepAmt.ValueOrZero(),
 				"requires_initiation":     requiresInitiation,

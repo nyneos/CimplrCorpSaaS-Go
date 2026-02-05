@@ -5,10 +5,12 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,57 +24,72 @@ import (
 
 // SimulationRequest holds input parameters for sweep simulation
 type SimulationRequest struct {
-	UserID         string   `json:"user_id"`
-	EntityIDs      []string `json:"entity_ids,omitempty"`      // Filter by entities
-	BankNames      []string `json:"bank_names,omitempty"`      // Filter by banks
-	Frequency      string   `json:"frequency"`                  // DAILY, MONTHLY, SPECIFIC_DATE
-	EffectiveDate  string   `json:"effective_date"`             // Date to simulate
-	ExecutionTime  string   `json:"execution_time"`             // Time of day (HH:MM format)
-	SweepIDs       []string `json:"sweep_ids,omitempty"`       // Specific sweeps (optional, empty = all approved)
-	IncludeChains  bool     `json:"include_chains"`             // Detect multi-hop sweep chains
-	IncludeSuggestions bool  `json:"include_suggestions"`       // AI-powered optimization suggestions
+	UserID             string   `json:"user_id"`                       // Required: User ID for session validation
+	EntityIDs          []string `json:"entity_ids,omitempty"`          // Optional filter: Specific entities
+	BankNames          []string `json:"bank_names,omitempty"`          // Optional filter: Specific banks
+	Frequency          string   `json:"frequency,omitempty"`           // Optional filter: DAILY, MONTHLY, SPECIFIC_DATE
+	EffectiveDate      string   `json:"effective_date,omitempty"`      // Optional: Date to simulate (defaults to today)
+	ExecutionTime      string   `json:"execution_time,omitempty"`      // Optional: Time of day (HH:MM format)
+	SweepIDs           []string `json:"sweep_ids,omitempty"`           // Optional: Specific sweep IDs to simulate
+	IncludeChains      bool     `json:"include_chains,omitempty"`      // Optional: Detect multi-hop sweep chains
+	IncludeSuggestions bool     `json:"include_suggestions,omitempty"` // Optional: AI-powered optimization suggestions
 }
 
 // SweepExecutionStep represents a single sweep in the execution sequence
 type SweepExecutionStep struct {
-	Step              int                    `json:"step"`
-	Time              string                 `json:"time"`
-	SweepID           string                 `json:"sweep_id"`
-	InitiationID      string                 `json:"initiation_id,omitempty"`
-	FromAccount       string                 `json:"from_account"`
-	FromBank          string                 `json:"from_bank"`
-	FromEntity        string                 `json:"from_entity"`
-	ToAccount         string                 `json:"to_account"`
-	ToBank            string                 `json:"to_bank"`
-	ToEntity          string                 `json:"to_entity"`
-	SweepType         string                 `json:"sweep_type"`
-	BufferAmount      float64                `json:"buffer_amount"`
-	AvailableBalance  float64                `json:"available_balance"`
-	RequestedAmount   float64                `json:"requested_amount"`
-	ValidatedAmount   float64                `json:"validated_amount"`
-	Violations        []string               `json:"violations"`
-	Penalties         []string               `json:"penalties"`
-	ExecutionStatus   string                 `json:"execution_status"` // APPROVED, BLOCKED, PARTIAL
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	Step             int                    `json:"step"`
+	Time             string                 `json:"time"`
+	SweepID          string                 `json:"sweep_id"`
+	InitiationID     string                 `json:"initiation_id,omitempty"`
+	FromAccount      string                 `json:"from_account"`
+	FromBank         string                 `json:"from_bank"`
+	FromEntity       string                 `json:"from_entity"`
+	ToAccount        string                 `json:"to_account"`
+	ToBank           string                 `json:"to_bank"`
+	ToEntity         string                 `json:"to_entity"`
+	SweepType        string                 `json:"sweep_type"`
+	BufferAmount     float64                `json:"buffer_amount"`
+	AvailableBalance float64                `json:"available_balance"`
+	RequestedAmount  float64                `json:"requested_amount"`
+	ValidatedAmount  float64                `json:"validated_amount"`
+	Violations       []string               `json:"violations"`
+	Penalties        []string               `json:"penalties"`
+	ExecutionStatus  string                 `json:"execution_status"` // APPROVED, BLOCKED, PARTIAL
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// KPIAccountBreakdown provides drill-down data per account
+type KPIAccountBreakdown struct {
+	AccountNumber  string  `json:"account_number"`
+	AccountName    string  `json:"account_name,omitempty"`
+	BankName       string  `json:"bank_name"`
+	EntityName     string  `json:"entity_name"`
+	Role           string  `json:"role"`            // SOURCE, DESTINATION, BOTH
+	OpeningBalance float64 `json:"opening_balance"` // Initial balance
+	ClosingBalance float64 `json:"closing_balance"` // Balance after simulation
+	NetChange      float64 `json:"net_change"`      // Closing - Opening
 }
 
 // KPIMetrics holds key performance indicators
 type KPIMetrics struct {
-	GrossOpeningBalance       float64 `json:"gross_opening_balance"`
-	TotalPlannedOutflow       float64 `json:"total_planned_outflow"`
-	MasterConcentrationFinal  float64 `json:"master_concentration_final"`
-	ProjectedPosition         float64 `json:"projected_position"`
-	ConcentrationEfficiency   float64 `json:"concentration_efficiency"`    // % of funds concentrated
-	IdleCashReduction         float64 `json:"idle_cash_reduction"`         // % reduction in idle cash
-	BufferUtilizationRate     float64 `json:"buffer_utilization_rate"`     // Average buffer usage
-	SuccessRate               float64 `json:"success_rate"`                // % of sweeps executed
+	GrossOpeningBalance        float64               `json:"gross_opening_balance"`        // Sum of balances ONLY for accounts in sweeps
+	TotalPlannedOutflow        float64               `json:"total_planned_outflow"`        // Total amount that would sweep if no violations
+	MasterConcentrationInitial float64               `json:"master_concentration_initial"` // Initial balance of end-node accounts
+	MasterConcentrationFinal   float64               `json:"master_concentration_final"`   // Final balance of end-node accounts after simulation
+	ActualPosition             float64               `json:"actual_position"`              // Same as master_concentration_final
+	ProjectedPosition          float64               `json:"projected_position"`           // master_concentration_initial + total_planned_outflow
+	ConcentrationEfficiency    float64               `json:"concentration_efficiency"`     // (actual_transferred / total_planned_outflow) * 100
+	IdleCashReduction          float64               `json:"idle_cash_reduction"`          // % reduction in idle cash in source accounts
+	BufferUtilizationRate      float64               `json:"buffer_utilization_rate"`      // Average buffer usage
+	SuccessRate                float64               `json:"success_rate"`                 // % of sweeps executed
+	AccountBreakdown           []KPIAccountBreakdown `json:"account_breakdown"`            // Drillable account-level data
 }
 
 // BalanceImpact shows before/after balance positions
 type BalanceImpact struct {
-	Before             []AccountBalance `json:"before"`
-	After              []AccountBalance `json:"after"`
-	MasterAccountGrowth float64         `json:"master_account_growth"`
+	Before              []AccountBalance `json:"before"`
+	After               []AccountBalance `json:"after"`
+	MasterAccountGrowth float64          `json:"master_account_growth"`
 }
 
 type AccountBalance struct {
@@ -85,12 +102,12 @@ type AccountBalance struct {
 
 // Violation represents a rule violation
 type Violation struct {
-	SweepID      string `json:"sweep_id"`
-	Account      string `json:"account"`
-	Type         string `json:"type"`     // BUFFER_BREACH, INSUFFICIENT_FUNDS, TIMING_CONFLICT, CIRCULAR_DEPENDENCY
-	Severity     string `json:"severity"` // HIGH, MEDIUM, LOW
-	Message      string `json:"message"`
-	PenaltyRisk  string `json:"penalty_risk,omitempty"`
+	SweepID     string `json:"sweep_id"`
+	Account     string `json:"account"`
+	Type        string `json:"type"`     // BUFFER_BREACH, INSUFFICIENT_FUNDS, TIMING_CONFLICT, CIRCULAR_DEPENDENCY
+	Severity    string `json:"severity"` // HIGH, MEDIUM, LOW
+	Message     string `json:"message"`
+	PenaltyRisk string `json:"penalty_risk,omitempty"`
 }
 
 // Suggestion represents an optimization recommendation
@@ -104,23 +121,26 @@ type Suggestion struct {
 
 // TimingAnalysis provides execution timing insights
 type TimingAnalysis struct {
-	TotalExecutionTime      string   `json:"total_execution_time"`
-	CriticalPath            []string `json:"critical_path"`           // Sweep IDs on critical path
-	ParallelOpportunities   int      `json:"parallel_opportunities"`  // Number of parallel execution opportunities
-	EstimatedCompletionTime string   `json:"estimated_completion_time"`
+	TotalExecutionWindow    string   `json:"total_execution_window"`    // Time from earliest to latest sweep (now - last_datetime)
+	EarliestExecution       string   `json:"earliest_execution"`        // First sweep datetime
+	LatestExecution         string   `json:"latest_execution"`          // Last sweep datetime
+	TotalExecutionTime      string   `json:"total_execution_time"`      // Deprecated: use total_execution_window
+	CriticalPath            []string `json:"critical_path"`             // Sweep IDs on critical path
+	ParallelOpportunities   int      `json:"parallel_opportunities"`    // Number of parallel execution opportunities
+	EstimatedCompletionTime string   `json:"estimated_completion_time"` // Deprecated: use latest_execution
 }
 
 // SimulationResponse is the complete simulation output
 type SimulationResponse struct {
-	SimulationID      string               `json:"simulation_id"`
-	ExecutionPlan     []SweepExecutionStep `json:"execution_plan"`
-	KPIs              KPIMetrics           `json:"kpis"`
-	BalanceImpact     BalanceImpact        `json:"balance_impact"`
-	Violations        []Violation          `json:"violations"`
-	Suggestions       []Suggestion         `json:"suggestions,omitempty"`
-	TimingAnalysis    TimingAnalysis       `json:"timing_analysis"`
-	SweepChains       []SweepChain         `json:"sweep_chains,omitempty"`
-	GeneratedAt       string               `json:"generated_at"`
+	SimulationID   string               `json:"simulation_id"`
+	ExecutionPlan  []SweepExecutionStep `json:"execution_plan"`
+	KPIs           KPIMetrics           `json:"kpis"`
+	BalanceImpact  BalanceImpact        `json:"balance_impact"`
+	Violations     []Violation          `json:"violations"`
+	Suggestions    []Suggestion         `json:"suggestions,omitempty"`
+	TimingAnalysis TimingAnalysis       `json:"timing_analysis"`
+	SweepChains    []SweepChain         `json:"sweep_chains,omitempty"`
+	GeneratedAt    string               `json:"generated_at"`
 }
 
 // SweepChain represents a multi-hop sweep flow (A→B→C→D)
@@ -164,21 +184,16 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Validate required fields
-		if req.Frequency == "" {
-			api.RespondWithResult(w, false, "frequency is required (DAILY, MONTHLY, SPECIFIC_DATE)")
-			return
-		}
+		// Set defaults for optional fields
 		if req.EffectiveDate == "" {
-			api.RespondWithResult(w, false, "effective_date is required")
-			return
+			req.EffectiveDate = time.Now().Format("2006-01-02") // Default to today
 		}
 		if req.ExecutionTime == "" {
 			req.ExecutionTime = "18:00" // Default to 6 PM
 		}
 
-		log.Printf("[SWEEP SIMULATION] User: %s, Date: %s, Time: %s, Frequency: %s",
-			req.UserID, req.EffectiveDate, req.ExecutionTime, req.Frequency)
+		log.Printf("[SWEEP SIMULATION] User: %s, Date: %s, Time: %s, Frequency: %s, SweepIDs: %v",
+			req.UserID, req.EffectiveDate, req.ExecutionTime, req.Frequency, req.SweepIDs)
 
 		// Get middleware-filtered entities and banks
 		entityNames := api.GetEntityNamesFromCtx(ctx)
@@ -200,7 +215,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(sweeps) == 0 {
-			api.RespondWithResult(w, false, "No approved sweeps found for simulation")
+			api.RespondWithResult(w, false, "No sweeps found for simulation (check is_deleted status or filters)")
 			return
 		}
 
@@ -438,9 +453,9 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID     string `json:"user_id"`
-			DateFrom   string `json:"date_from,omitempty"`
-			DateTo     string `json:"date_to,omitempty"`
+			UserID   string `json:"user_id"`
+			DateFrom string `json:"date_from,omitempty"`
+			DateTo   string `json:"date_to,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -522,15 +537,15 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		analytics := map[string]interface{}{
 			"concentration_metrics": map[string]interface{}{
-				"total_swept":             totalSwept,
-				"avg_sweep_amount":        avgSwept,
-				"total_executions":        totalExec,
-				"successful_executions":   successful,
-				"failed_executions":       failed,
+				"total_swept":           totalSwept,
+				"avg_sweep_amount":      avgSwept,
+				"total_executions":      totalExec,
+				"successful_executions": successful,
+				"failed_executions":     failed,
 			},
 			"efficiency_scores": map[string]interface{}{
-				"sweep_success_rate":      successRate,
-				"execution_reliability":   successRate,
+				"sweep_success_rate":    successRate,
+				"execution_reliability": successRate,
 			},
 			"period": map[string]interface{}{
 				"from": req.DateFrom,
@@ -586,7 +601,7 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Fetch current sweeps and balances
 		balances, _ := fetchCurrentBalances(ctx, pgxPool, entityNames, bankNames)
-		
+
 		// Generate basic suggestions
 		suggestions := []Suggestion{}
 
@@ -812,6 +827,14 @@ func fetchApprovedSweepsForSimulation(ctx context.Context, pgxPool *pgxpool.Pool
 		}
 	}
 
+	// Frequency filter: only if provided
+	frequencyFilter := ""
+	if req.Frequency != "" {
+		frequencyFilter = fmt.Sprintf(" AND UPPER(TRIM(sc.frequency)) = $%d", argPos)
+		args = append(args, strings.ToUpper(strings.TrimSpace(req.Frequency)))
+		argPos++
+	}
+
 	query := fmt.Sprintf(`
 		SELECT DISTINCT ON (sc.sweep_id)
 			sc.sweep_id,
@@ -828,16 +851,12 @@ func fetchApprovedSweepsForSimulation(ctx context.Context, pgxPool *pgxpool.Pool
 			sc.sweep_amount,
 			sc.requires_initiation
 		FROM cimplrcorpsaas.sweepconfiguration sc
-		JOIN cimplrcorpsaas.auditactionsweepconfiguration a 
-			ON a.sweep_id = sc.sweep_id
-		WHERE a.processing_status = 'APPROVED'
-			AND COALESCE(sc.is_deleted, false) = false
-			AND UPPER(TRIM(sc.frequency)) = $%d
+		LEFT JOIN cimplrcorpsaas.auditactionsweepconfiguration a ON a.sweep_id = sc.sweep_id
+		WHERE COALESCE(sc.is_deleted, false) = false
 			%s
-		ORDER BY sc.sweep_id, a.requested_at DESC
-	`, argPos, sweepFilter)
-
-	args = append(args, strings.ToUpper(strings.TrimSpace(req.Frequency)))
+			%s
+		ORDER BY sc.sweep_id, COALESCE(a.requested_at, now()) DESC
+	`, frequencyFilter, sweepFilter)
 
 	rows, err := pgxPool.Query(ctx, query, args...)
 	if err != nil {
@@ -848,12 +867,20 @@ func fetchApprovedSweepsForSimulation(ctx context.Context, pgxPool *pgxpool.Pool
 	sweeps := []map[string]interface{}{}
 	for rows.Next() {
 		var sweepID, entityName, sourceAcc, sourceBank, targetAcc, targetBank, sweepType, frequency, executionTime string
-		var effectiveDate *string
+		var effectiveDate sql.NullTime
 		var bufferAmt, sweepAmt *float64
 		var requiresInitiation bool
 
 		if err := rows.Scan(&sweepID, &entityName, &sourceAcc, &sourceBank, &targetAcc, &targetBank, &sweepType, &frequency, &effectiveDate, &executionTime, &bufferAmt, &sweepAmt, &requiresInitiation); err != nil {
+			log.Printf("[ERROR] Sweep scan error: %v", err)
 			continue
+		}
+
+		// Format effective_date as string
+		var effectiveDateStr *string
+		if effectiveDate.Valid {
+			formatted := effectiveDate.Time.Format("2006-01-02")
+			effectiveDateStr = &formatted
 		}
 
 		sweeps = append(sweeps, map[string]interface{}{
@@ -865,7 +892,7 @@ func fetchApprovedSweepsForSimulation(ctx context.Context, pgxPool *pgxpool.Pool
 			"target_bank":         targetBank,
 			"sweep_type":          sweepType,
 			"frequency":           frequency,
-			"effective_date":      effectiveDate,
+			"effective_date":      effectiveDateStr,
 			"execution_time":      executionTime,
 			"buffer_amount":       bufferAmt,
 			"sweep_amount":        sweepAmt,
@@ -890,11 +917,11 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 				normEntities = append(normEntities, strings.ToLower(s))
 			}
 		}
-		if len(normEntities) > 0 {
-			filters += fmt.Sprintf(" AND LOWER(TRIM(mba.entity_id)) = ANY($%d)", argPos)
-			args = append(args, normEntities)
-			argPos++
-		}
+		// if len(normEntities) > 0 {
+		// 	filters += fmt.Sprintf(" AND LOWER(TRIM(mba.entity_id)) = ANY($%d)", argPos)
+		// 	args = append(args, normEntities)
+		// 	argPos++
+		// }
 	}
 
 	if len(bankNames) > 0 {
@@ -916,28 +943,41 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 			mba.bank_name,
 			mba.entity_id,
 			COALESCE(bb.closing_balance, 0) as balance,
-			mba.currency
-		FROM cimplrcorpsaas.bank_balances_manual bb
+			COALESCE(mba.currency, 'INR') as currency
+		FROM public.bank_balances_manual bb
 		JOIN public.masterbankaccount mba ON mba.account_number = bb.account_no
+		LEFT JOIN public.auditactionbankbalances audit ON audit.balance_id = bb.balance_id
 		WHERE COALESCE(mba.is_deleted, false) = false
+			AND (audit.processing_status = 'APPROVED' OR audit.processing_status IS NULL)
 			%s
 		ORDER BY bb.account_no, bb.as_of_date DESC, bb.as_of_time DESC
 	`, filters)
 
+	log.Printf("[BALANCE FETCH] Query: %s", query)
+	log.Printf("[BALANCE FETCH] Args: %v", args)
+	log.Printf("[BALANCE FETCH] EntityNames: %v", entityNames)
+	log.Printf("[BALANCE FETCH] BankNames: %v", bankNames)
+
 	rows, err := pgxPool.Query(ctx, query, args...)
 	if err != nil {
+		log.Printf("[BALANCE FETCH ERROR] %v", err)
 		return nil, err
 	}
 	defer rows.Close()
 
 	balances := []AccountBalance{}
+	rowCount := 0
 	for rows.Next() {
+		rowCount++
 		var accountNo, bankName, entityID, currency string
 		var balance float64
 
 		if err := rows.Scan(&accountNo, &bankName, &entityID, &balance, &currency); err != nil {
+			log.Printf("[BALANCE FETCH] Scan error on row %d: %v", rowCount, err)
 			continue
 		}
+
+		log.Printf("[BALANCE FETCH] Found balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityID, balance)
 
 		balances = append(balances, AccountBalance{
 			AccountNumber: accountNo,
@@ -948,26 +988,113 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 		})
 	}
 
+	log.Printf("[BALANCE FETCH] Total rows: %d, Balances collected: %d", rowCount, len(balances))
+
 	return balances, nil
 }
 
 // runSweepSimulation executes the core simulation logic
 func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalance, req SimulationRequest) SimulationResponse {
-	// Create balance lookup map
+	// Create balance lookup map and track initial balances
 	balanceMap := make(map[string]float64)
+	initialBalanceMap := make(map[string]float64)
+	accountInfoMap := make(map[string]AccountBalance)
 	for _, bal := range balances {
 		balanceMap[bal.AccountNumber] = bal.Balance
+		initialBalanceMap[bal.AccountNumber] = bal.Balance
+		accountInfoMap[bal.AccountNumber] = bal
 	}
+
+	// Track accounts involved in sweeps and their roles
+	accountsInvolved := make(map[string]string) // account -> role (SOURCE, DESTINATION, BOTH)
+
+	// Sort sweeps by effective_date + execution_time (FIFO queue - earliest first)
+	sort.Slice(sweeps, func(i, j int) bool {
+		dateI := ""
+		timeI := "18:00" // default
+		if sweeps[i]["effective_date"] != nil {
+			if datePtr, ok := sweeps[i]["effective_date"].(*string); ok && datePtr != nil {
+				dateI = *datePtr
+			}
+		}
+		if sweeps[i]["execution_time"] != nil {
+			if timeStr, ok := sweeps[i]["execution_time"].(string); ok {
+				timeI = timeStr
+			}
+		}
+		datetimeI := dateI + " " + timeI
+
+		dateJ := ""
+		timeJ := "18:00"
+		if sweeps[j]["effective_date"] != nil {
+			if datePtr, ok := sweeps[j]["effective_date"].(*string); ok && datePtr != nil {
+				dateJ = *datePtr
+			}
+		}
+		if sweeps[j]["execution_time"] != nil {
+			if timeStr, ok := sweeps[j]["execution_time"].(string); ok {
+				timeJ = timeStr
+			}
+		}
+		datetimeJ := dateJ + " " + timeJ
+
+		return datetimeI < datetimeJ // FIFO: earliest datetime first
+	})
 
 	executionPlan := []SweepExecutionStep{}
 	violations := []Violation{}
-	
-	grossOpening := 0.0
-	totalPlannedOutflow := 0.0
+
+	totalPlannedOutflow := 0.0 // Amount that would transfer if no violations
+	actualTransferred := 0.0   // Amount actually transferred in simulation
 	masterConcentration := 0.0
 	successCount := 0
 
-	// Simulate each sweep
+	// Track destination accounts (end nodes)
+	destinationAccounts := make(map[string]bool)
+	sourceAccounts := make(map[string]bool)
+
+	// First pass: identify all source and destination accounts
+	for _, sweep := range sweeps {
+		sourceAcc := fmt.Sprint(sweep["source_account"])
+		targetAcc := fmt.Sprint(sweep["target_account"])
+		sourceAccounts[sourceAcc] = true
+		destinationAccounts[targetAcc] = true
+
+		// Mark roles
+		if _, exists := accountsInvolved[sourceAcc]; exists {
+			if accountsInvolved[sourceAcc] == "DESTINATION" {
+				accountsInvolved[sourceAcc] = "BOTH"
+			}
+		} else {
+			accountsInvolved[sourceAcc] = "SOURCE"
+		}
+
+		if _, exists := accountsInvolved[targetAcc]; exists {
+			if accountsInvolved[targetAcc] == "SOURCE" {
+				accountsInvolved[targetAcc] = "BOTH"
+			}
+		} else {
+			accountsInvolved[targetAcc] = "DESTINATION"
+		}
+	}
+
+	// Calculate gross opening balance (ONLY accounts involved in sweeps)
+	grossOpening := 0.0
+	for acc := range accountsInvolved {
+		if bal, exists := initialBalanceMap[acc]; exists {
+			grossOpening += bal
+		}
+	}
+
+	// Calculate master concentration initial (ALL destination accounts)
+	masterConcentrationInitial := 0.0
+	for acc := range destinationAccounts {
+		if bal, exists := initialBalanceMap[acc]; exists {
+			masterConcentrationInitial += bal
+		}
+	}
+
+	// Simulate each sweep in chronological order
 	for i, sweep := range sweeps {
 		sweepID := fmt.Sprint(sweep["sweep_id"])
 		sourceAcc := fmt.Sprint(sweep["source_account"])
@@ -989,12 +1116,28 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 		}
 
 		availableBalance := balanceMap[sourceAcc]
-		grossOpening += availableBalance
 
+		// If sweep_amount is not defined (NULL or 0), calculate based on sweep type
 		requestedAmount := sweepAmt
-		validatedAmount := sweepAmt
+		if sweepAmt == 0 {
+			sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweepType))
+			if sweepTypeUpper == "ZBA" || sweepTypeUpper == "CONCENTRATION" {
+				// ZBA/CONCENTRATION: Sweep everything above buffer
+				if availableBalance > bufferAmt {
+					requestedAmount = availableBalance - bufferAmt
+				} else {
+					requestedAmount = 0
+				}
+			}
+			// For TARGET_BALANCE, we'd need target amount (not implemented yet)
+		}
+
+		validatedAmount := requestedAmount
 		status := "APPROVED"
 		stepViolations := []string{}
+
+		// This is the planned amount (what SHOULD transfer if no violations)
+		totalPlannedOutflow += requestedAmount
 
 		// Validation: Buffer check
 		if availableBalance <= bufferAmt {
@@ -1009,34 +1152,43 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 			stepViolations = append(stepViolations, "BUFFER_BREACH")
 			status = "BLOCKED"
 			validatedAmount = 0
-		} else if sweepAmt > (availableBalance - bufferAmt) {
+		} else if requestedAmount > (availableBalance - bufferAmt) {
 			// Partial sweep
 			validatedAmount = availableBalance - bufferAmt
 			stepViolations = append(stepViolations, "PARTIAL_SWEEP")
 			status = "PARTIAL"
 		}
 
-		if status == "APPROVED" {
-			successCount++
-			totalPlannedOutflow += validatedAmount
-			masterConcentration += validatedAmount
-			
+		if status == "APPROVED" || status == "PARTIAL" {
+			if status == "APPROVED" {
+				successCount++
+			}
+			actualTransferred += validatedAmount
+
 			// Update simulated balances
 			balanceMap[sourceAcc] -= validatedAmount
 			balanceMap[targetAcc] += validatedAmount
 		}
 
-		execTime := req.ExecutionTime
-		if i > 0 {
-			// Stagger execution times by 5 minutes
-			parsedTime, _ := time.Parse("15:04", req.ExecutionTime)
-			parsedTime = parsedTime.Add(time.Duration(i*5) * time.Minute)
-			execTime = parsedTime.Format("15:04")
+		// Use actual sweep execution time from database
+		execTime := "18:00" // default
+		if sweep["execution_time"] != nil {
+			if timeStr, ok := sweep["execution_time"].(string); ok && timeStr != "" {
+				execTime = timeStr
+			}
+		}
+
+		// Use actual effective date from sweep
+		execDate := req.EffectiveDate // fallback
+		if sweep["effective_date"] != nil {
+			if datePtr, ok := sweep["effective_date"].(*string); ok && datePtr != nil && *datePtr != "" {
+				execDate = *datePtr
+			}
 		}
 
 		executionPlan = append(executionPlan, SweepExecutionStep{
 			Step:             i + 1,
-			Time:             fmt.Sprintf("%s %s", req.EffectiveDate, execTime),
+			Time:             fmt.Sprintf("%s %s", execDate, execTime),
 			SweepID:          sweepID,
 			FromAccount:      sourceAcc,
 			FromBank:         fmt.Sprint(sweep["source_bank"]),
@@ -1054,30 +1206,114 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 		})
 	}
 
+	// Calculate master concentration final (ALL destination accounts after simulation)
+	masterConcentrationFinal := 0.0
+	for acc := range destinationAccounts {
+		if bal, exists := balanceMap[acc]; exists {
+			masterConcentrationFinal += bal
+		}
+	}
+
 	// Calculate KPIs
 	successRate := 0.0
 	if len(sweeps) > 0 {
 		successRate = (float64(successCount) / float64(len(sweeps))) * 100
 	}
 
+	// Concentration efficiency: actual transferred / planned outflow
 	concentrationEfficiency := 0.0
-	if grossOpening > 0 {
-		concentrationEfficiency = (totalPlannedOutflow / grossOpening) * 100
+	if totalPlannedOutflow > 0 {
+		concentrationEfficiency = (actualTransferred / totalPlannedOutflow) * 100
+	}
+
+	// Projected position: what master concentration WOULD BE if all sweeps succeeded
+	projectedPosition := masterConcentrationInitial + totalPlannedOutflow
+
+	// Actual position = master concentration final
+	actualPosition := masterConcentrationFinal
+
+	// Idle cash reduction: % reduction in pure source account balances (not destinations)
+	idleCashReduction := 0.0
+	initialSourceBalance := 0.0
+	finalSourceBalance := 0.0
+	for acc := range accountsInvolved {
+		// Only count accounts that are sources (includes BOTH)
+		if sourceAccounts[acc] {
+			if initial, exists := initialBalanceMap[acc]; exists {
+				initialSourceBalance += initial
+			}
+			if final, exists := balanceMap[acc]; exists {
+				finalSourceBalance += final
+			}
+		}
+	}
+	if initialSourceBalance > 0 {
+		idleCashReduction = ((initialSourceBalance - finalSourceBalance) / initialSourceBalance) * 100
+	}
+
+	// Buffer utilization rate: average % of buffer used across all sweeps
+	bufferUtilizationRate := 0.0
+	bufferCount := 0
+	totalBufferUsage := 0.0
+	for _, sweep := range sweeps {
+		sourceAcc := fmt.Sprint(sweep["source_account"])
+		var bufferAmt float64 = 0
+		if sweep["buffer_amount"] != nil {
+			if val, ok := sweep["buffer_amount"].(*float64); ok && val != nil {
+				bufferAmt = *val
+			}
+		}
+		if bufferAmt > 0 {
+			openingBal := initialBalanceMap[sourceAcc]
+			if openingBal > 0 {
+				usage := (bufferAmt / openingBal) * 100
+				totalBufferUsage += usage
+				bufferCount++
+			}
+		}
+	}
+	if bufferCount > 0 {
+		bufferUtilizationRate = totalBufferUsage / float64(bufferCount)
+	}
+
+	// Build account breakdown for drillability
+	accountBreakdown := []KPIAccountBreakdown{}
+	for acc, role := range accountsInvolved {
+		info, exists := accountInfoMap[acc]
+		if !exists {
+			continue
+		}
+		openingBal := initialBalanceMap[acc]
+		closingBal := balanceMap[acc]
+		accountBreakdown = append(accountBreakdown, KPIAccountBreakdown{
+			AccountNumber:  acc,
+			BankName:       info.BankName,
+			EntityName:     info.EntityName,
+			Role:           role,
+			OpeningBalance: openingBal,
+			ClosingBalance: closingBal,
+			NetChange:      closingBal - openingBal,
+		})
 	}
 
 	kpis := KPIMetrics{
-		GrossOpeningBalance:      grossOpening,
-		TotalPlannedOutflow:      totalPlannedOutflow,
-		MasterConcentrationFinal: masterConcentration,
-		ProjectedPosition:        masterConcentration,
-		ConcentrationEfficiency:  concentrationEfficiency,
-		SuccessRate:              successRate,
+		GrossOpeningBalance:        grossOpening,
+		TotalPlannedOutflow:        totalPlannedOutflow,
+		MasterConcentrationInitial: masterConcentrationInitial,
+		MasterConcentrationFinal:   masterConcentrationFinal,
+		ActualPosition:             actualPosition,
+		ProjectedPosition:          projectedPosition,
+		ConcentrationEfficiency:    concentrationEfficiency,
+		IdleCashReduction:          idleCashReduction,
+		BufferUtilizationRate:      bufferUtilizationRate,
+		SuccessRate:                successRate,
+		AccountBreakdown:           accountBreakdown,
 	}
 
 	// Build balance impact
 	beforeBalances := []AccountBalance{}
 	afterBalances := []AccountBalance{}
-	
+
 	for _, bal := range balances {
 		beforeBalances = append(beforeBalances, bal)
 		afterBalances = append(afterBalances, AccountBalance{
@@ -1095,13 +1331,32 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 		MasterAccountGrowth: masterConcentration,
 	}
 
-	// Timing analysis
-	estimatedTime := len(sweeps) * 5 // 5 minutes per sweep
+	// Timing analysis: calculate execution window from earliest to latest sweep
+	var earliestTime, latestTime time.Time
+	if len(executionPlan) > 0 {
+		// Parse first and last execution times
+		earliestTime, _ = time.Parse("2006-01-02 15:04", executionPlan[0].Time)
+		latestTime, _ = time.Parse("2006-01-02 15:04", executionPlan[len(executionPlan)-1].Time)
+	}
+
+	executionWindow := ""
+	if !earliestTime.IsZero() && !latestTime.IsZero() {
+		duration := latestTime.Sub(earliestTime)
+		if duration < 24*time.Hour {
+			executionWindow = fmt.Sprintf("%.0f hours %.0f minutes", duration.Hours(), duration.Minutes()-duration.Hours()*60)
+		} else {
+			executionWindow = fmt.Sprintf("%.0f days %.0f hours", duration.Hours()/24, duration.Hours()-float64(int(duration.Hours()/24))*24)
+		}
+	}
+
 	timingAnalysis := TimingAnalysis{
-		TotalExecutionTime:      fmt.Sprintf("%d minutes", estimatedTime),
+		TotalExecutionWindow:    executionWindow,
+		EarliestExecution:       executionPlan[0].Time,
+		LatestExecution:         executionPlan[len(executionPlan)-1].Time,
+		TotalExecutionTime:      executionWindow, // deprecated field
 		CriticalPath:            extractCriticalPath(executionPlan),
-		ParallelOpportunities:   0, // Could be enhanced with dependency analysis
-		EstimatedCompletionTime: fmt.Sprintf("%s %s", req.EffectiveDate, req.ExecutionTime),
+		ParallelOpportunities:   0,
+		EstimatedCompletionTime: executionPlan[len(executionPlan)-1].Time, // deprecated field
 	}
 
 	return SimulationResponse{

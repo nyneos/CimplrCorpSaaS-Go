@@ -67,7 +67,9 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID    string   `json:"user_id"`
+			EntityIDs []string `json:"entity_ids,omitempty"`
+			BankNames []string `json:"bank_names,omitempty"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -93,9 +95,16 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-	// Get middleware context filters
-	entityIDs := api.GetEntityIDsFromCtx(ctx)  // ✅ Use entity IDs, not names
+	// Get middleware context filters (default) but allow request overrides
+	entityIDs := api.GetEntityIDsFromCtx(ctx)  // Use entity IDs by default
 	bankNames := api.GetBankNamesFromCtx(ctx)
+	// If request provided explicit filters, prefer them
+	if len(req.EntityIDs) > 0 {
+		entityIDs = req.EntityIDs
+	}
+	if len(req.BankNames) > 0 {
+		bankNames = req.BankNames
+	}
 
 	fmt.Printf("\n[KPI DEBUG] ========================================\n")
 	fmt.Printf("[KPI DEBUG] User ID: %s\n", req.UserID)
