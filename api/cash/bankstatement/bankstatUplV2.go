@@ -5289,8 +5289,16 @@ func UploadZippedBankStatementsHandler(db *sql.DB) http.Handler {
 
 		// Process each file in the zip
 		for _, zipFileEntry := range zipReader.File {
-			// Skip directories and hidden files
-			if zipFileEntry.FileInfo().IsDir() || strings.HasPrefix(filepath.Base(zipFileEntry.Name), ".") {
+			// Skip directories
+			if zipFileEntry.FileInfo().IsDir() {
+				continue
+			}
+
+			// Skip macOS metadata files (__MACOSX, ._ prefix, .DS_Store, hidden files)
+			base := filepath.Base(zipFileEntry.Name)
+			dir := filepath.Dir(zipFileEntry.Name)
+			if strings.HasPrefix(base, ".") || strings.HasPrefix(base, "._") || 
+			   strings.Contains(dir, "__MACOSX") || base == ".DS_Store" {
 				continue
 			}
 

@@ -36,6 +36,12 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db)))
 	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db)))
 
+	// Preview and categorization endpoints (NO DB insertion, fast preview with categorization)
+	mux.Handle("/cash/preview-categorize", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.PreviewBankStatementHandler(db)))
+
+	// Load uncategorized transactions with pagination
+	mux.Handle("/cash/uncategorized-transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetUncategorizedTransactionsHandler(db)))
+
 	// New streaming preview and management endpoints
 	mux.Handle("/cash/preview", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV3Handler(db)))
 	mux.Handle("/cash/recalculate", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecalculateHandler(db)))
