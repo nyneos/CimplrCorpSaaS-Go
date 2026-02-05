@@ -109,7 +109,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/sweep-config-v2/update", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.UpdateSweepConfigurationV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/all", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/approved-active", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepConfigurations(pgxPool)))
-	mux.Handle("/cash/sweep-config-v2/approved-with-potentials", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepConfigurationsEnhanced(pgxPool)))
+	mux.Handle("/cash/sweep-config-v2/approved", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.GetApprovedActiveSweepConfigurationsEnhanced(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkApproveSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRejectSweepConfigurationsV2(pgxPool)))
 	mux.Handle("/cash/sweep-config-v2/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkRequestDeleteSweepConfigurationsV2(pgxPool)))

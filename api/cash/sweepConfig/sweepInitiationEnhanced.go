@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -595,6 +596,12 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				effectiveDateStr = &formatted
 			}
 
+			var executionTimeStr *string
+			if executionTime.Valid {
+				s := executionTime.String
+				executionTimeStr = &s
+			}
+
 			approvedSweeps = append(approvedSweeps, map[string]interface{}{
 				"sweep_id":            sweepID,
 				"entity_name":         entityName,
@@ -605,7 +612,7 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				"sweep_type":          sweepType,
 				"frequency":           frequency,
 				"effective_date":      effectiveDateStr,
-				"execution_time":      executionTime,
+				"execution_time":      executionTimeStr,
 				"buffer_amount":       bufferAmount,
 				"sweep_amount":        sweepAmount,
 				"created_at":          createdAt,
@@ -615,41 +622,66 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 		// ====== PART 2: Get potential sweeps (account pairs with no sweep) ======
 		potentialQuery := `
 			SELECT DISTINCT
-				ba1.entity_name,
-				ba1.bank_name AS source_bank_name,
-				ba1.account_no AS source_account,
-				ba2.bank_name AS target_bank_name,
-				ba2.account_no AS target_account,
-				ba1.currency_code,
-				ba1.current_balance AS source_balance,
-				ba2.current_balance AS target_balance
-			FROM cimplrcorpsaas.bankaccounts ba1
-			CROSS JOIN cimplrcorpsaas.bankaccounts ba2
+				COALESCE(me1.entity_name, mec1.entity_name) AS entity_name,
+				COALESCE(mb1.bank_name, '') AS source_bank_name,
+				COALESCE(ba1.account_no, ba1.account_number) AS source_account,
+				COALESCE(mb2.bank_name, '') AS target_bank_name,
+				COALESCE(ba2.account_no, ba2.account_number) AS target_account,
+				COALESCE(ba1.currency, '') AS currency_code,
+				COALESCE(bbal1.current_balance, 0)::numeric AS source_balance,
+				COALESCE(bbal2.current_balance, 0)::numeric AS target_balance
+			FROM masterbankaccount ba1
+			CROSS JOIN masterbankaccount ba2
+			LEFT JOIN masterbank mb1 ON mb1.bank_id = ba1.bank_id
+			LEFT JOIN masterbank mb2 ON mb2.bank_id = ba2.bank_id
+			LEFT JOIN masterentity me1 ON me1.entity_id::text = ba1.entity_id
+			LEFT JOIN masterentitycash mec1 ON mec1.entity_id::text = ba1.entity_id
+			LEFT JOIN masterentity me2 ON me2.entity_id::text = ba2.entity_id
+			LEFT JOIN masterentitycash mec2 ON mec2.entity_id::text = ba2.entity_id
 			LEFT JOIN LATERAL (
 				SELECT processing_status
-				FROM cimplrcorpsaas.auditactionbankaccounts
+				FROM auditactionbankaccount
 				WHERE account_id = ba1.account_id
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) audit1 ON true
 			LEFT JOIN LATERAL (
 				SELECT processing_status
-				FROM cimplrcorpsaas.auditactionbankaccounts
+				FROM auditactionbankaccount
 				WHERE account_id = ba2.account_id
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) audit2 ON true
-			WHERE ba1.entity_name = ba2.entity_name
-				AND ba1.account_no != ba2.account_no
-				AND ba1.is_deleted = false
-				AND ba2.is_deleted = false
-				AND audit1.processing_status = 'APPROVED'
-				AND audit2.processing_status = 'APPROVED'
+			-- latest approved balance for source account
+			LEFT JOIN LATERAL (
+				SELECT COALESCE(bbm.closing_balance, 0) AS current_balance
+				FROM public.bank_balances_manual bbm
+				JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+				WHERE a.processing_status = 'APPROVED'
+				  AND bbm.account_no = COALESCE(ba1.account_no, ba1.account_number)
+				ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+				LIMIT 1
+			) bbal1 ON true
+			-- latest approved balance for target account
+			LEFT JOIN LATERAL (
+				SELECT COALESCE(bbm.closing_balance, 0) AS current_balance
+				FROM public.bank_balances_manual bbm
+				JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+				WHERE a.processing_status = 'APPROVED'
+				  AND bbm.account_no = COALESCE(ba2.account_no, ba2.account_number)
+				ORDER BY bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+				LIMIT 1
+			) bbal2 ON true
+			WHERE COALESCE(me1.entity_name, mec1.entity_name) = COALESCE(me2.entity_name, mec2.entity_name)
+				AND COALESCE(ba1.is_deleted, false) = false
+				AND COALESCE(ba2.is_deleted, false) = false
+				AND COALESCE(audit1.processing_status, 'APPROVED') = 'APPROVED'
+				AND COALESCE(audit2.processing_status, 'APPROVED') = 'APPROVED'
 				AND NOT EXISTS (
 					SELECT 1 FROM cimplrcorpsaas.sweepconfiguration sc
-					WHERE sc.source_bank_account = ba1.account_no
-						AND sc.target_bank_account = ba2.account_no
-						AND sc.entity_name = ba1.entity_name
+					WHERE sc.source_bank_account = COALESCE(ba1.account_no, ba1.account_number)
+						AND sc.target_bank_account = COALESCE(ba2.account_no, ba2.account_number)
+						AND sc.entity_name = COALESCE(me1.entity_name, mec1.entity_name)
 						AND sc.is_deleted = false
 				)
 		`
@@ -657,15 +689,15 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 		var potentialRows pgx.Rows
 
 		if len(normEntities) > 0 {
-			potentialQuery += ` AND lower(trim(ba1.entity_name)) = ANY($1)`
-			potentialQuery += ` ORDER BY ba1.entity_name, ba1.bank_name, ba1.account_no`
+			potentialQuery += ` AND lower(trim(COALESCE(me1.entity_name, mec1.entity_name))) = ANY($1)`
+			potentialQuery += ` ORDER BY entity_name, source_bank_name, source_account`
 			potentialRows, err = pgxPool.Query(ctx, potentialQuery, normEntities)
 			if err != nil {
 				api.RespondWithResult(w, false, "potential sweeps query error: "+err.Error())
 				return
 			}
 		} else {
-			potentialQuery += ` ORDER BY ba1.entity_name, ba1.bank_name, ba1.account_no`
+			potentialQuery += ` ORDER BY entity_name, source_bank_name, source_account`
 			potentialRows, err = pgxPool.Query(ctx, potentialQuery)
 			if err != nil {
 				api.RespondWithResult(w, false, "potential sweeps query error: "+err.Error())
@@ -674,7 +706,8 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 		}
 		defer potentialRows.Close()
 
-		potentialSweeps := make([]map[string]interface{}, 0)
+		// collect into a dedupe map keyed by source_account so we don't repeat the same source
+		dedupe := make(map[string]map[string]interface{})
 		for potentialRows.Next() {
 			var entityName, sourceBank, sourceAccount, targetBank, targetAccount, currency string
 			var sourceBalance, targetBalance *float64
@@ -687,19 +720,53 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 				api.RespondWithResult(w, false, "potential sweep scan error: "+err.Error())
 				return
 			}
+			// filter: require source balance > 0 and not same account
+			if sourceBalance == nil || *sourceBalance <= 0 {
+				continue
+			}
+			if sourceAccount == targetAccount {
+				continue
+			}
 
-			potentialSweeps = append(potentialSweeps, map[string]interface{}{
-				"entity_name":          entityName,
-				"source_bank_name":     sourceBank,
-				"source_bank_account":  sourceAccount,
-				"target_bank_name":     targetBank,
-				"target_bank_account":  targetAccount,
-				"currency_code":        currency,
-				"source_balance":       sourceBalance,
-				"target_balance":       targetBalance,
-				"recommended_type":     "ZBA", // Default recommendation
-			})
+			// normalize numeric balance
+			var srcBal float64
+			if sourceBalance != nil {
+				srcBal = *sourceBalance
+			}
+
+			entry := map[string]interface{}{
+				"entity_name":      entityName,
+				"currency_code":    currency,
+				"source_bank_name": sourceBank,
+				"source_bank_account": sourceAccount,
+				"source_balance":   srcBal,
+				"recommended_type": "ZBA",
+				"sweep_type":       "ZBA",
+				"frequency":        "DAILY",
+			}
+
+			// dedupe: keep the entry with the highest source_balance for the same source account
+			if existing, ok := dedupe[sourceAccount]; ok {
+				if existingBal, ok2 := existing["source_balance"].(float64); ok2 {
+					if srcBal > existingBal {
+						dedupe[sourceAccount] = entry
+					}
+				}
+			} else {
+				dedupe[sourceAccount] = entry
+			}
 		}
+
+		// convert dedupe map to slice and sort by source_balance desc
+		potentialSweeps := make([]map[string]interface{}, 0, len(dedupe))
+		for _, v := range dedupe {
+			potentialSweeps = append(potentialSweeps, v)
+		}
+		sort.Slice(potentialSweeps, func(i, j int) bool {
+			bi, _ := potentialSweeps[i]["source_balance"].(float64)
+			bj, _ := potentialSweeps[j]["source_balance"].(float64)
+			return bi > bj
+		})
 
 		api.RespondWithPayload(w, true, "Approved and potential sweeps retrieved successfully", map[string]interface{}{
 			"approved_sweeps":   approvedSweeps,
