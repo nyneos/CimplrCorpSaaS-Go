@@ -964,11 +964,23 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				a.account_nickname,
 				b.bank_id,
 				b.bank_name,
+				COALESCE(a.iban, '') AS iban,
+				COALESCE(a.currency, '') AS currency_code,
+				COALESCE(a.usage, '') AS usage,
 				COALESCE(e.entity_id::text, ec.entity_id::text) AS entity_id,
 				COALESCE(e.entity_name, ec.entity_name) AS entity_name,
+				COALESCE(latest_bal.balance_amount, 0) AS approved_balance,
 				cl.clearing_codes
 			FROM masterbankaccount a
 			LEFT JOIN masterbank b ON a.bank_id = b.bank_id
+			LEFT JOIN LATERAL (
+				SELECT bb.balance_amount
+				FROM bank_balances_manual bb
+				JOIN auditactionbankbalances ab ON ab.balance_id = bb.balance_id
+				WHERE bb.account_no = a.account_number AND ab.processing_status = 'APPROVED'
+				ORDER BY bb.as_of_date DESC, bb.as_of_time DESC
+				LIMIT 1
+			) latest_bal ON TRUE
 			LEFT JOIN masterentity e ON e.entity_id::text = a.entity_id
 			LEFT JOIN masterentitycash ec ON ec.entity_id::text = a.entity_id
 			LEFT JOIN latest_audit l ON l.account_id = a.account_id
@@ -1012,7 +1024,8 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 		var results []map[string]interface{}
 		for rows.Next() {
 			var accountID, accountNumber string
-			var accountNickname, bankID, bankName, entityID, entityName, clearingCodes *string
+			var accountNickname, bankID, bankName, iban, currencyCode, usageVal, entityID, entityName, clearingCodes *string
+			var approvedBalance float64
 
 			if err := rows.Scan(
 				&accountID,
@@ -1020,8 +1033,12 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 				&accountNickname,
 				&bankID,
 				&bankName,
+				&iban,
+				&currencyCode,
+				&usageVal,
 				&entityID,
 				&entityName,
+				&approvedBalance,
 				&clearingCodes,
 			); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "row scan failed: "+err.Error())
@@ -1049,6 +1066,24 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					}
 					return ""
 				}(),
+				"iban": func() string {
+						if iban != nil {
+							return *iban
+						}
+						return ""
+					}(),
+				"currency_code": func() string {
+						if currencyCode != nil {
+							return *currencyCode
+						}
+						return ""
+					}(),
+				"usage": func() string {
+						if usageVal != nil {
+							return *usageVal
+						}
+						return ""
+					}(),
 				"entity_id": func() string {
 					if entityID != nil {
 						return *entityID
@@ -1061,6 +1096,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					}
 					return ""
 				}(),
+				"approved_balance": approvedBalance,
 				"clearing_codes": func() string {
 					if clearingCodes != nil {
 						return *clearingCodes
