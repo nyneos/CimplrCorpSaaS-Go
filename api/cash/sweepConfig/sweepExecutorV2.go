@@ -1350,6 +1350,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 
 				// Validate required fields for new sweep
 				if strings.TrimSpace(sweep.EntityName) == "" {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: entity_name required when sweep_id is empty", i)
 					results = append(results, result)
@@ -1358,6 +1359,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 
 				// Validate entity authorization
 				if !api.IsEntityAllowed(ctx, sweep.EntityName) {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity %s", i, sweep.EntityName)
 					results = append(results, result)
@@ -1367,6 +1369,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				// Validate sweep_type
 				sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweep.SweepType))
 				if sweepTypeUpper != "ZBA" && sweepTypeUpper != "CONCENTRATION" && sweepTypeUpper != "TARGET_BALANCE" {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: invalid sweep_type (must be ZBA, CONCENTRATION, or TARGET_BALANCE)", i)
 					results = append(results, result)
@@ -1376,6 +1379,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				// Validate frequency
 				frequencyUpper := strings.ToUpper(strings.TrimSpace(sweep.Frequency))
 				if frequencyUpper != "DAILY" && frequencyUpper != "MONTHLY" && frequencyUpper != "SPECIFIC_DATE" {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: invalid frequency (must be DAILY, MONTHLY, or SPECIFIC_DATE)", i)
 					results = append(results, result)
@@ -1394,22 +1398,21 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 					created_at, updated_at
 				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),now()) RETURNING sweep_id`
 
-				err := tx.QueryRow(ctx, insConfig,
-					nullifyEmpty(sweep.EntityName),
-					nullifyEmpty(sweep.SourceBankName),
-					nullifyEmpty(sweep.SourceBankAccount),
-					nullifyEmpty(sweep.TargetBankName),
-					nullifyEmpty(sweep.TargetBankAccount),
-					sweepTypeUpper,
-					frequencyUpper,
-					nullifyEmpty(sweep.EffectiveDate),
-					nullifyEmpty(sweep.ExecutionTime),
-					nullifyFloat(sweep.BufferAmount),
-					nullifyFloat(sweep.SweepAmount),
-					nullifyBool(sweep.RequiresInitiation),
-				).Scan(&sweepID)
-
-				if err != nil {
+			err := tx.QueryRow(ctx, insConfig,
+				nullifyEmpty(sweep.EntityName),
+				nullifyEmpty(sweep.SourceBankName),
+				nullifyEmpty(sweep.SourceBankAccount),
+				nullifyEmpty(sweep.TargetBankName),
+				nullifyEmpty(sweep.TargetBankAccount),
+				sweepTypeUpper,
+				frequencyUpper,
+				nullifyEmpty(sweep.EffectiveDate),
+				nullifyEmpty(sweep.ExecutionTime),
+				nullifyFloat(sweep.BufferAmount),
+				nullifyFloat(sweep.SweepAmount),
+				true, // Default to true (all sweeps use initiation workflow)
+			).Scan(&sweepID)				if err != nil {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: failed to create config: %s", i, err.Error())
 					results = append(results, result)
@@ -1430,6 +1433,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				)
 
 				if err != nil {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: failed to auto-approve config: %s", i, err.Error())
 					results = append(results, result)
@@ -1450,6 +1454,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				`, sweepID).Scan(&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount)
 
 				if err != nil {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: sweep configuration not found", i)
 					results = append(results, result)
@@ -1459,6 +1464,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				// Validate entity authorization
 				if strings.TrimSpace(entityName) != "" {
 					if !api.IsEntityAllowed(ctx, entityName) {
+						tx.Rollback(ctx)
 						result.Status = "failed"
 						result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity", i)
 						results = append(results, result)
@@ -1477,6 +1483,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				`, sweepID).Scan(&processingStatus)
 
 				if err != nil || processingStatus != "APPROVED" {
+					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: sweep must be approved before triggering", i)
 					results = append(results, result)
@@ -1503,6 +1510,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			).Scan(&initiationID)
 
 			if err != nil {
+				tx.Rollback(ctx)
 				result.Status = "failed"
 				result.Error = fmt.Sprintf("sweep[%d]: failed to create initiation: %s", i, err.Error())
 				results = append(results, result)
@@ -1523,8 +1531,17 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			)
 
 			if err != nil {
+				tx.Rollback(ctx)
 				result.Status = "failed"
 				result.Error = fmt.Sprintf("sweep[%d]: failed to auto-approve initiation: %s", i, err.Error())
+				results = append(results, result)
+				continue
+			}
+
+			// Commit this sweep's transaction
+			if err := tx.Commit(ctx); err != nil {
+				result.Status = "failed"
+				result.Error = fmt.Sprintf("sweep[%d]: failed to commit: %s", i, err.Error())
 				results = append(results, result)
 				continue
 			}
@@ -1532,13 +1549,6 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			result.InitiationID = initiationID
 			results = append(results, result)
 		}
-
-		// Commit transaction
-		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithResult(w, false, "failed to commit transaction: "+err.Error())
-			return
-		}
-		committed = true
 
 		// Count successes and failures
 		successCount := 0
