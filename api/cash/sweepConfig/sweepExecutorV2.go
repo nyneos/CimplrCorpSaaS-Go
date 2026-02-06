@@ -1245,3 +1245,319 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, sw
 		"balance_after":  newBalance,
 	}, nil
 }
+
+// BulkManualTriggerSweepV2WithAutoApproval - Super admin endpoint for bulk sweep trigger with auto-create and auto-approve
+// If sweep_id is provided, uses existing sweep (must be approved)
+// If sweep_id is empty, creates new sweep config and auto-approves it
+// Always creates initiation and auto-approves it for immediate worker execution
+func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		type SweepTriggerRequest struct {
+			// If SweepID is provided, use existing approved sweep
+			SweepID string `json:"sweep_id,omitempty"`
+
+			// If SweepID is empty, these fields are required to create new sweep
+			EntityName        string   `json:"entity_name,omitempty"`
+			SourceBankName    string   `json:"source_bank_name,omitempty"`
+			SourceBankAccount string   `json:"source_bank_account,omitempty"`
+			TargetBankName    string   `json:"target_bank_name,omitempty"`
+			TargetBankAccount string   `json:"target_bank_account,omitempty"`
+			SweepType         string   `json:"sweep_type,omitempty"`         // ZBA, CONCENTRATION, TARGET_BALANCE
+			Frequency         string   `json:"frequency,omitempty"`          // DAILY, MONTHLY, SPECIFIC_DATE
+			EffectiveDate     string   `json:"effective_date,omitempty"`
+			ExecutionTime     string   `json:"execution_time,omitempty"`
+			BufferAmount      *float64 `json:"buffer_amount,omitempty"`
+			SweepAmount       *float64 `json:"sweep_amount,omitempty"`
+			RequiresInitiation *bool   `json:"requires_initiation,omitempty"`
+
+			// Optional overrides for initiation
+			OverriddenAmount        *float64 `json:"overridden_amount,omitempty"`
+			OverriddenExecutionTime string   `json:"overridden_execution_time,omitempty"`
+			Reason                  string   `json:"reason,omitempty"`
+		}
+
+		var req struct {
+			UserID  string                 `json:"user_id"`
+			Sweeps  []SweepTriggerRequest  `json:"sweeps"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+
+		if req.UserID == "" {
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
+			return
+		}
+
+		if len(req.Sweeps) == 0 {
+			api.RespondWithResult(w, false, "sweeps array cannot be empty")
+			return
+		}
+
+		// Validate session
+		if ctxUID := api.GetUserIDFromCtx(ctx); ctxUID != "" && ctxUID != req.UserID {
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+
+		requestedBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				requestedBy = s.Name
+				break
+			}
+		}
+		if requestedBy == "" {
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
+		}
+
+		// Start transaction
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		type ResultItem struct {
+			SweepID       string `json:"sweep_id"`
+			InitiationID  string `json:"initiation_id"`
+			Status        string `json:"status"`
+			Error         string `json:"error,omitempty"`
+			IsNewSweep    bool   `json:"is_new_sweep"`
+		}
+
+		var results []ResultItem
+
+		for i, sweep := range req.Sweeps {
+			result := ResultItem{Status: "success"}
+
+			// Determine if we need to create new sweep or use existing
+			sweepID := strings.TrimSpace(sweep.SweepID)
+
+			if sweepID == "" {
+				// CREATE NEW SWEEP CONFIG + AUTO-APPROVE
+
+				// Validate required fields for new sweep
+				if strings.TrimSpace(sweep.EntityName) == "" {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: entity_name required when sweep_id is empty", i)
+					results = append(results, result)
+					continue
+				}
+
+				// Validate entity authorization
+				if !api.IsEntityAllowed(ctx, sweep.EntityName) {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity %s", i, sweep.EntityName)
+					results = append(results, result)
+					continue
+				}
+
+				// Validate sweep_type
+				sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweep.SweepType))
+				if sweepTypeUpper != "ZBA" && sweepTypeUpper != "CONCENTRATION" && sweepTypeUpper != "TARGET_BALANCE" {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: invalid sweep_type (must be ZBA, CONCENTRATION, or TARGET_BALANCE)", i)
+					results = append(results, result)
+					continue
+				}
+
+				// Validate frequency
+				frequencyUpper := strings.ToUpper(strings.TrimSpace(sweep.Frequency))
+				if frequencyUpper != "DAILY" && frequencyUpper != "MONTHLY" && frequencyUpper != "SPECIFIC_DATE" {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: invalid frequency (must be DAILY, MONTHLY, or SPECIFIC_DATE)", i)
+					results = append(results, result)
+					continue
+				}
+
+				// Insert sweep configuration
+				insConfig := `INSERT INTO cimplrcorpsaas.sweepconfiguration (
+					entity_name, 
+					source_bank_name, source_bank_account, 
+					target_bank_name, target_bank_account, 
+					sweep_type, frequency, 
+					effective_date, execution_time, 
+					buffer_amount, sweep_amount, 
+					requires_initiation, 
+					created_at, updated_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),now()) RETURNING sweep_id`
+
+				err := tx.QueryRow(ctx, insConfig,
+					nullifyEmpty(sweep.EntityName),
+					nullifyEmpty(sweep.SourceBankName),
+					nullifyEmpty(sweep.SourceBankAccount),
+					nullifyEmpty(sweep.TargetBankName),
+					nullifyEmpty(sweep.TargetBankAccount),
+					sweepTypeUpper,
+					frequencyUpper,
+					nullifyEmpty(sweep.EffectiveDate),
+					nullifyEmpty(sweep.ExecutionTime),
+					nullifyFloat(sweep.BufferAmount),
+					nullifyFloat(sweep.SweepAmount),
+					nullifyBool(sweep.RequiresInitiation),
+				).Scan(&sweepID)
+
+				if err != nil {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: failed to create config: %s", i, err.Error())
+					results = append(results, result)
+					continue
+				}
+
+				// AUTO-APPROVE sweep config (bypass approval workflow)
+				insConfigAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
+					sweep_id, actiontype, processing_status, reason, 
+					requested_by, requested_at, checker_by, checker_at
+				) VALUES ($1, 'CREATE', 'APPROVED', $2, $3, now(), $4, now())`
+
+				_, err = tx.Exec(ctx, insConfigAudit,
+					sweepID,
+					nullifyEmpty(fmt.Sprintf("Super admin bulk trigger: %s", sweep.Reason)),
+					requestedBy,
+					requestedBy, // Auto-approved by same user
+				)
+
+				if err != nil {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: failed to auto-approve config: %s", i, err.Error())
+					results = append(results, result)
+					continue
+				}
+
+				result.IsNewSweep = true
+
+			} else {
+				// USE EXISTING SWEEP - Validate it exists and is approved
+
+				var entityName, sourceBank, sourceAccount, targetBank, targetAccount string
+				err := tx.QueryRow(ctx, `
+					SELECT entity_name, source_bank_name, source_bank_account, 
+						   target_bank_name, target_bank_account
+					FROM cimplrcorpsaas.sweepconfiguration
+					WHERE sweep_id = $1 AND is_deleted = false
+				`, sweepID).Scan(&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount)
+
+				if err != nil {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: sweep configuration not found", i)
+					results = append(results, result)
+					continue
+				}
+
+				// Validate entity authorization
+				if strings.TrimSpace(entityName) != "" {
+					if !api.IsEntityAllowed(ctx, entityName) {
+						result.Status = "failed"
+						result.Error = fmt.Sprintf("sweep[%d]: unauthorized entity", i)
+						results = append(results, result)
+						continue
+					}
+				}
+
+				// Check if sweep is approved
+				var processingStatus string
+				err = tx.QueryRow(ctx, `
+					SELECT processing_status
+					FROM cimplrcorpsaas.auditactionsweepconfiguration
+					WHERE sweep_id = $1
+					ORDER BY requested_at DESC
+					LIMIT 1
+				`, sweepID).Scan(&processingStatus)
+
+				if err != nil || processingStatus != "APPROVED" {
+					result.Status = "failed"
+					result.Error = fmt.Sprintf("sweep[%d]: sweep must be approved before triggering", i)
+					results = append(results, result)
+					continue
+				}
+
+				result.IsNewSweep = false
+			}
+
+			result.SweepID = sweepID
+
+			// CREATE INITIATION + AUTO-APPROVE
+			insInitiation := `INSERT INTO cimplrcorpsaas.sweep_initiation (
+				sweep_id, initiated_by, initiation_time, 
+				overridden_amount, overridden_execution_time
+			) VALUES ($1, $2, now(), $3, $4) RETURNING initiation_id`
+
+			var initiationID string
+			err = tx.QueryRow(ctx, insInitiation,
+				sweepID,
+				requestedBy,
+				nullifyFloat(sweep.OverriddenAmount),
+				nullifyEmpty(sweep.OverriddenExecutionTime),
+			).Scan(&initiationID)
+
+			if err != nil {
+				result.Status = "failed"
+				result.Error = fmt.Sprintf("sweep[%d]: failed to create initiation: %s", i, err.Error())
+				results = append(results, result)
+				continue
+			}
+
+			// AUTO-APPROVE initiation (bypass approval workflow)
+			insInitiationAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+				initiation_id, sweep_id, actiontype, processing_status, 
+				requested_by, requested_at, checker_by, checker_at
+			) VALUES ($1, $2, 'CREATE', 'APPROVED', $3, now(), $4, now())`
+
+			_, err = tx.Exec(ctx, insInitiationAudit,
+				initiationID,
+				sweepID,
+				requestedBy,
+				requestedBy, // Auto-approved by same user
+			)
+
+			if err != nil {
+				result.Status = "failed"
+				result.Error = fmt.Sprintf("sweep[%d]: failed to auto-approve initiation: %s", i, err.Error())
+				results = append(results, result)
+				continue
+			}
+
+			result.InitiationID = initiationID
+			results = append(results, result)
+		}
+
+		// Commit transaction
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithResult(w, false, "failed to commit transaction: "+err.Error())
+			return
+		}
+		committed = true
+
+		// Count successes and failures
+		successCount := 0
+		failureCount := 0
+		for _, r := range results {
+			if r.Status == "success" {
+				successCount++
+			} else {
+				failureCount++
+			}
+		}
+
+		api.RespondWithPayload(w, true,
+			fmt.Sprintf("Processed %d sweeps: %d successful, %d failed", len(results), successCount, failureCount),
+			map[string]interface{}{
+				"results":       results,
+				"total":         len(results),
+				"successful":    successCount,
+				"failed":        failureCount,
+			})
+	}
+}

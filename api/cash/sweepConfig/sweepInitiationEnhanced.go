@@ -524,33 +524,36 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 			}
 		}
 
-		// ====== PART 1: Get approved sweeps ======
-		approvedQuery := `
-			SELECT DISTINCT ON (sc.sweep_id)
-				sc.sweep_id, 
-				sc.entity_name, 
-				sc.source_bank_name, 
-				sc.source_bank_account, 
-				sc.target_bank_name, 
-				sc.target_bank_account, 
-				sc.sweep_type, 
-				sc.frequency, 
-				sc.effective_date, 
-				sc.execution_time, 
-				sc.buffer_amount, 
-				sc.sweep_amount,
-				sc.created_at
-			FROM cimplrcorpsaas.sweepconfiguration sc
-			JOIN cimplrcorpsaas.auditactionsweepconfiguration a 
-				ON a.sweep_id = sc.sweep_id
-			WHERE sc.is_deleted = false 
-				AND a.processing_status = 'APPROVED'
-		`
+	// ====== PART 1: Get approved sweeps (excluding those with existing initiations) ======
+	approvedQuery := `
+		SELECT DISTINCT ON (sc.sweep_id)
+			sc.sweep_id, 
+			sc.entity_name, 
+			sc.source_bank_name, 
+			sc.source_bank_account, 
+			sc.target_bank_name, 
+			sc.target_bank_account, 
+			sc.sweep_type, 
+			sc.frequency, 
+			sc.effective_date, 
+			sc.execution_time, 
+		sc.buffer_amount, 
+		sc.sweep_amount,
+		sc.created_at
+	FROM cimplrcorpsaas.sweepconfiguration sc
+	JOIN cimplrcorpsaas.auditactionsweepconfiguration a 
+		ON a.sweep_id = sc.sweep_id
+	LEFT JOIN cimplrcorpsaas.sweep_initiation si
+		ON si.sweep_id = sc.sweep_id AND si.is_deleted = false
+	WHERE sc.is_deleted = false 
+		AND a.processing_status = 'APPROVED'
+		AND si.initiation_id IS NULL
+`
 
-		var approvedRows pgx.Rows
-		var err error
+	var approvedRows pgx.Rows
+	var err error
 
-		if len(normEntities) > 0 {
+	if len(normEntities) > 0 {
 			approvedQuery += ` AND lower(trim(sc.entity_name)) = ANY($1)`
 			approvedQuery += ` ORDER BY sc.sweep_id, a.requested_at DESC`
 			approvedRows, err = pgxPool.Query(ctx, approvedQuery, normEntities)
