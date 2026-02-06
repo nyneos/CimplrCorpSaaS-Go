@@ -1259,18 +1259,18 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 			SweepID string `json:"sweep_id,omitempty"`
 
 			// If SweepID is empty, these fields are required to create new sweep
-			EntityName        string   `json:"entity_name,omitempty"`
-			SourceBankName    string   `json:"source_bank_name,omitempty"`
-			SourceBankAccount string   `json:"source_bank_account,omitempty"`
-			TargetBankName    string   `json:"target_bank_name,omitempty"`
-			TargetBankAccount string   `json:"target_bank_account,omitempty"`
-			SweepType         string   `json:"sweep_type,omitempty"`         // ZBA, CONCENTRATION, TARGET_BALANCE
-			Frequency         string   `json:"frequency,omitempty"`          // DAILY, MONTHLY, SPECIFIC_DATE
-			EffectiveDate     string   `json:"effective_date,omitempty"`
-			ExecutionTime     string   `json:"execution_time,omitempty"`
-			BufferAmount      *float64 `json:"buffer_amount,omitempty"`
-			SweepAmount       *float64 `json:"sweep_amount,omitempty"`
-			RequiresInitiation *bool   `json:"requires_initiation,omitempty"`
+			EntityName         string   `json:"entity_name,omitempty"`
+			SourceBankName     string   `json:"source_bank_name,omitempty"`
+			SourceBankAccount  string   `json:"source_bank_account,omitempty"`
+			TargetBankName     string   `json:"target_bank_name,omitempty"`
+			TargetBankAccount  string   `json:"target_bank_account,omitempty"`
+			SweepType          string   `json:"sweep_type,omitempty"` // ZBA, CONCENTRATION, TARGET_BALANCE
+			Frequency          string   `json:"frequency,omitempty"`  // DAILY, MONTHLY, SPECIFIC_DATE
+			EffectiveDate      string   `json:"effective_date,omitempty"`
+			ExecutionTime      string   `json:"execution_time,omitempty"`
+			BufferAmount       *float64 `json:"buffer_amount,omitempty"`
+			SweepAmount        *float64 `json:"sweep_amount,omitempty"`
+			RequiresInitiation *bool    `json:"requires_initiation,omitempty"`
 
 			// Optional overrides for initiation
 			OverriddenAmount        *float64 `json:"overridden_amount,omitempty"`
@@ -1279,8 +1279,8 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		}
 
 		var req struct {
-			UserID  string                 `json:"user_id"`
-			Sweeps  []SweepTriggerRequest  `json:"sweeps"`
+			UserID string                `json:"user_id"`
+			Sweeps []SweepTriggerRequest `json:"sweeps"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1330,11 +1330,11 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		}()
 
 		type ResultItem struct {
-			SweepID       string `json:"sweep_id"`
-			InitiationID  string `json:"initiation_id"`
-			Status        string `json:"status"`
-			Error         string `json:"error,omitempty"`
-			IsNewSweep    bool   `json:"is_new_sweep"`
+			SweepID      string `json:"sweep_id"`
+			InitiationID string `json:"initiation_id"`
+			Status       string `json:"status"`
+			Error        string `json:"error,omitempty"`
+			IsNewSweep   bool   `json:"is_new_sweep"`
 		}
 
 		var results []ResultItem
@@ -1398,20 +1398,21 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 					created_at, updated_at
 				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),now()) RETURNING sweep_id`
 
-			err := tx.QueryRow(ctx, insConfig,
-				nullifyEmpty(sweep.EntityName),
-				nullifyEmpty(sweep.SourceBankName),
-				nullifyEmpty(sweep.SourceBankAccount),
-				nullifyEmpty(sweep.TargetBankName),
-				nullifyEmpty(sweep.TargetBankAccount),
-				sweepTypeUpper,
-				frequencyUpper,
-				nullifyEmpty(sweep.EffectiveDate),
-				nullifyEmpty(sweep.ExecutionTime),
-				nullifyFloat(sweep.BufferAmount),
-				nullifyFloat(sweep.SweepAmount),
-				true, // Default to true (all sweeps use initiation workflow)
-			).Scan(&sweepID)				if err != nil {
+				err := tx.QueryRow(ctx, insConfig,
+					nullifyEmpty(sweep.EntityName),
+					nullifyEmpty(sweep.SourceBankName),
+					nullifyEmpty(sweep.SourceBankAccount),
+					nullifyEmpty(sweep.TargetBankName),
+					nullifyEmpty(sweep.TargetBankAccount),
+					sweepTypeUpper,
+					frequencyUpper,
+					nullifyEmpty(sweep.EffectiveDate),
+					nullifyEmpty(sweep.ExecutionTime),
+					nullifyFloat(sweep.BufferAmount),
+					nullifyFloat(sweep.SweepAmount),
+					true, // Default to true (all sweeps use initiation workflow)
+				).Scan(&sweepID)
+				if err != nil {
 					tx.Rollback(ctx)
 					result.Status = "failed"
 					result.Error = fmt.Sprintf("sweep[%d]: failed to create config: %s", i, err.Error())
@@ -1564,10 +1565,10 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		api.RespondWithPayload(w, true,
 			fmt.Sprintf("Processed %d sweeps: %d successful, %d failed", len(results), successCount, failureCount),
 			map[string]interface{}{
-				"results":       results,
-				"total":         len(results),
-				"successful":    successCount,
-				"failed":        failureCount,
+				"results":    results,
+				"total":      len(results),
+				"successful": successCount,
+				"failed":     failureCount,
 			})
 	}
 }
