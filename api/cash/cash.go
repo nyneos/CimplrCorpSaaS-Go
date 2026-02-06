@@ -140,8 +140,7 @@ func StartCashService(db *sql.DB) {
 	// mux.Handle("/cash/sweep-execution-v2/manual-trigger-direct", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2Direct(pgxPool)))
 	mux.Handle("/cash/sweep-execution-v2/manual-trigger", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.ManualTriggerSweepV2(pgxPool)))
 	// Super admin bulk trigger: Creates sweep config (if needed) + initiation with auto-approval, bypasses approval workflow for urgent CFO actions
-	mux.Handle("/cash/sweep-execution-v2/bulk-manual-trigger-admin", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkManualTriggerSweepV2WithAutoApproval(pgxPool)))
-
+	mux.Handle("/cash/sweep-execution-v2/bulk-manual", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.BulkManualTriggerSweepV2WithAutoApproval(pgxPool)))
 
 	// Sweep V2 Simulation & Analytics (comprehensive pre-execution analysis, CFO decision support)
 	mux.Handle("/cash/sweep/simulate", middlewares.PreValidationMiddleware(pgxPool)(sweepconfig.SimulateSweepExecution(pgxPool)))
