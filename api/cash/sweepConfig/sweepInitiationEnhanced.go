@@ -537,18 +537,18 @@ func GetApprovedActiveSweepConfigurationsEnhanced(pgxPool *pgxpool.Pool) http.Ha
 			sc.frequency, 
 			sc.effective_date, 
 			sc.execution_time, 
-		sc.buffer_amount, 
-		sc.sweep_amount,
-		sc.created_at
-	FROM cimplrcorpsaas.sweepconfiguration sc
-	JOIN cimplrcorpsaas.auditactionsweepconfiguration a 
-		ON a.sweep_id = sc.sweep_id
-	LEFT JOIN cimplrcorpsaas.sweep_initiation si
-		ON si.sweep_id = sc.sweep_id AND si.is_deleted = false
-	WHERE sc.is_deleted = false 
-		AND a.processing_status = 'APPROVED'
-		AND si.initiation_id IS NULL
-`
+			sc.buffer_amount, 
+			sc.sweep_amount,
+			sc.created_at
+		FROM cimplrcorpsaas.sweepconfiguration sc
+		JOIN cimplrcorpsaas.auditactionsweepconfiguration a 
+			ON a.sweep_id = sc.sweep_id
+		LEFT JOIN cimplrcorpsaas.sweep_initiation si
+			ON si.sweep_id = sc.sweep_id
+		WHERE sc.is_deleted = false 
+			AND a.processing_status = 'APPROVED'
+			AND si.initiation_id IS NULL
+	`
 
 	var approvedRows pgx.Rows
 	var err error
