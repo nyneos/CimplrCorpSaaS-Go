@@ -21,16 +21,16 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		var req struct {
 			UserID                      string   `json:"user_id"`
-			SweepID                     *string  `json:"sweep_id,omitempty"`                   // If null, auto-create
-			EntityName                  string   `json:"entity_name"`                          // Required for auto-create
-			SourceBankName              string   `json:"source_bank_name"`                     // Required for auto-create
-			SourceBankAccount           string   `json:"source_bank_account"`                  // Required for auto-create
-			TargetBankName              string   `json:"target_bank_name"`                     // Required for auto-create
-			TargetBankAccount           string   `json:"target_bank_account"`                  // Required for auto-create
-			SweepType                   string   `json:"sweep_type,omitempty"`                 // Default: ZBA
-			Frequency                   string   `json:"frequency,omitempty"`                  // Default: SPECIFIC_DATE
-			EffectiveDate               string   `json:"effective_date,omitempty"`             // Default: today
-			ExecutionTime               string   `json:"execution_time,omitempty"`             // Default: 10:00
+			SweepID                     *string  `json:"sweep_id,omitempty"`       // If null, auto-create
+			EntityName                  string   `json:"entity_name"`              // Required for auto-create
+			SourceBankName              string   `json:"source_bank_name"`         // Required for auto-create
+			SourceBankAccount           string   `json:"source_bank_account"`      // Required for auto-create
+			TargetBankName              string   `json:"target_bank_name"`         // Required for auto-create
+			TargetBankAccount           string   `json:"target_bank_account"`      // Required for auto-create
+			SweepType                   string   `json:"sweep_type,omitempty"`     // Default: ZBA
+			Frequency                   string   `json:"frequency,omitempty"`      // Default: SPECIFIC_DATE
+			EffectiveDate               string   `json:"effective_date,omitempty"` // Default: today
+			ExecutionTime               string   `json:"execution_time,omitempty"` // Default: 10:00
 			BufferAmount                *float64 `json:"buffer_amount,omitempty"`
 			SweepAmount                 *float64 `json:"sweep_amount,omitempty"`
 			OverriddenAmount            *float64 `json:"overridden_amount,omitempty"`
@@ -188,11 +188,11 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// autoCreated = true (sweep was auto-created)
 
 			api.RespondWithPayload(w, true, "Sweep auto-created and initiation created successfully, pending approval", map[string]interface{}{
-				"initiation_id":       initiationID,
-				"sweep_id":            sweepID,
-				"processing_status":   "PENDING_APPROVAL",
-				"actiontype":          "CREATE",
-				"auto_created_sweep":  true,
+				"initiation_id":      initiationID,
+				"sweep_id":           sweepID,
+				"processing_status":  "PENDING_APPROVAL",
+				"actiontype":         "CREATE",
+				"auto_created_sweep": true,
 			})
 			return
 		}
@@ -439,7 +439,7 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			err := rows.Scan(
 				&initiationID, &sweepID, &initiatedBy, &initiationTime,
-				&overriddenAmount, &overriddenExecutionTime, 
+				&overriddenAmount, &overriddenExecutionTime,
 				&overriddenSourceAccount, &overriddenTargetAccount,
 				&actiontype, &processingStatus, &requestedBy, &checkerBy, &checkerComment,
 				&entityName, &sourceBank, &sourceAccount, &targetBank, &targetAccount, &sweepType,
@@ -463,25 +463,25 @@ func GetSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			initiation := map[string]interface{}{
-				"initiation_id":                    initiationID,
-				"sweep_id":                         sweepID,
-				"initiated_by":                     initiatedBy,
-				"initiation_time":                  initiationTime.Format("2006-01-02 15:04:05"),
-				"overridden_amount":                overriddenAmount,
-				"overridden_execution_time":        overriddenExecutionTime,
-				"overridden_source_bank_account":   overriddenSourceAccount,
-				"overridden_target_bank_account":   overriddenTargetAccount,
-				"actiontype":                       actiontype,
-				"processing_status":                processingStatus,
-				"requested_by":                     requestedBy,
-				"checker_by":                       checkerBy,
-				"checker_comment":                  checkerComment,
-				"entity_name":         entityName,
-				"source_bank_name":    sourceBank,
-				"source_bank_account": sourceAccount,
-				"target_bank_name":    targetBank,
-				"target_bank_account": targetAccount,
-				"sweep_type":          sweepType,
+				"initiation_id":                  initiationID,
+				"sweep_id":                       sweepID,
+				"initiated_by":                   initiatedBy,
+				"initiation_time":                initiationTime.Format("2006-01-02 15:04:05"),
+				"overridden_amount":              overriddenAmount,
+				"overridden_execution_time":      overriddenExecutionTime,
+				"overridden_source_bank_account": overriddenSourceAccount,
+				"overridden_target_bank_account": overriddenTargetAccount,
+				"actiontype":                     actiontype,
+				"processing_status":              processingStatus,
+				"requested_by":                   requestedBy,
+				"checker_by":                     checkerBy,
+				"checker_comment":                checkerComment,
+				"entity_name":                    entityName,
+				"source_bank_name":               sourceBank,
+				"source_bank_account":            sourceAccount,
+				"target_bank_name":               targetBank,
+				"target_bank_account":            targetAccount,
+				"sweep_type":                     sweepType,
 			}
 
 			initiations = append(initiations, initiation)
@@ -608,10 +608,10 @@ func CancelSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Only cancel if status is INITIATED or IN_PROGRESS
-		upd := `UPDATE cimplrcorpsaas.sweep_initiation 
-				SET status = 'CANCELLED' 
-				WHERE initiation_id = $1 
-				AND status IN ('INITIATED', 'IN_PROGRESS') 
+		upd := `UPDATE cimplrcorpsaas.sweep_initiation
+				SET status = 'CANCELLED'
+				WHERE initiation_id = $1
+				AND status IN ('INITIATED', 'IN_PROGRESS')
 				RETURNING sweep_id, status`
 
 		var sweepID, oldStatus string
@@ -765,22 +765,22 @@ func GetApprovedActiveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			initiation := map[string]interface{}{
-				"initiation_id":                    initiationID,
-				"sweep_id":                         sweepID,
-				"initiated_by":                     initiatedBy,
-				"initiation_time":                  initiationTime,
-				"overridden_amount":                overriddenAmount,
-				"overridden_execution_time":        overriddenExecutionTime,
-				"overridden_source_bank_account":   overriddenSourceAccount,
-				"overridden_target_bank_account":   overriddenTargetAccount,
-				"actiontype":                       actiontype,
-				"processing_status":                processingStatus,
-				"entity_name":                      entityName,
-				"source_bank_name":                 sourceBank,
-				"source_bank_account":              sourceAccount,
-				"target_bank_name":                 targetBank,
-				"target_bank_account":              targetAccount,
-				"sweep_type":                       sweepType,
+				"initiation_id":                  initiationID,
+				"sweep_id":                       sweepID,
+				"initiated_by":                   initiatedBy,
+				"initiation_time":                initiationTime,
+				"overridden_amount":              overriddenAmount,
+				"overridden_execution_time":      overriddenExecutionTime,
+				"overridden_source_bank_account": overriddenSourceAccount,
+				"overridden_target_bank_account": overriddenTargetAccount,
+				"actiontype":                     actiontype,
+				"processing_status":              processingStatus,
+				"entity_name":                    entityName,
+				"source_bank_name":               sourceBank,
+				"source_bank_account":            sourceAccount,
+				"target_bank_name":               targetBank,
+				"target_bank_account":            targetAccount,
+				"sweep_type":                     sweepType,
 			}
 			initiations = append(initiations, initiation)
 		}

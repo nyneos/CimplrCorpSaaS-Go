@@ -15,10 +15,10 @@ import (
 
 // KPIResponse is the main response structure for treasury dashboard KPIs
 type KPIResponse struct {
-	Overall    OverallKPI               `json:"overall"`
-	EntityWise []EntityKPI              `json:"entitywise"`
-	BankWise   []BankKPI                `json:"bankwise"`
-	MoM        MoMComparison            `json:"mom_comparison"`
+	Overall    OverallKPI    `json:"overall"`
+	EntityWise []EntityKPI   `json:"entitywise"`
+	BankWise   []BankKPI     `json:"bankwise"`
+	MoM        MoMComparison `json:"mom_comparison"`
 }
 
 // OverallKPI contains consolidated balance and yield metrics
@@ -95,100 +95,100 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-	// Get middleware context filters (default) but allow request overrides
-	entityIDs := api.GetEntityIDsFromCtx(ctx)  // Use entity IDs by default
-	bankNames := api.GetBankNamesFromCtx(ctx)
-	// If request provided explicit filters, prefer them
-	if len(req.EntityIDs) > 0 {
-		entityIDs = req.EntityIDs
-	}
-	if len(req.BankNames) > 0 {
-		bankNames = req.BankNames
-	}
+		// Get middleware context filters (default) but allow request overrides
+		entityIDs := api.GetEntityIDsFromCtx(ctx) // Use entity IDs by default
+		bankNames := api.GetBankNamesFromCtx(ctx)
+		// If request provided explicit filters, prefer them
+		if len(req.EntityIDs) > 0 {
+			entityIDs = req.EntityIDs
+		}
+		if len(req.BankNames) > 0 {
+			bankNames = req.BankNames
+		}
 
-	fmt.Printf("\n[KPI DEBUG] ========================================\n")
-	fmt.Printf("[KPI DEBUG] User ID: %s\n", req.UserID)
-	fmt.Printf("[KPI DEBUG] Entity IDs from context: %v (count: %d)\n", entityIDs, len(entityIDs))
-	fmt.Printf("[KPI DEBUG] Bank Names from context: %v (count: %d)\n", bankNames, len(bankNames))
+		fmt.Printf("\n[KPI DEBUG] ========================================\n")
+		fmt.Printf("[KPI DEBUG] User ID: %s\n", req.UserID)
+		fmt.Printf("[KPI DEBUG] Entity IDs from context: %v (count: %d)\n", entityIDs, len(entityIDs))
+		fmt.Printf("[KPI DEBUG] Bank Names from context: %v (count: %d)\n", bankNames, len(bankNames))
 
-	// Build entity filter for SQL (using entity_id from masterbankaccount)
-	entityFilter := ""
-	bankFilter := ""
-	if len(entityIDs) > 0 {
-		normEntities := make([]string, 0, len(entityIDs))
-		for _, n := range entityIDs {
-			if s := strings.TrimSpace(n); s != "" {
-				normEntities = append(normEntities, "'"+s+"'")
+		// Build entity filter for SQL (using entity_id from masterbankaccount)
+		entityFilter := ""
+		bankFilter := ""
+		if len(entityIDs) > 0 {
+			normEntities := make([]string, 0, len(entityIDs))
+			for _, n := range entityIDs {
+				if s := strings.TrimSpace(n); s != "" {
+					normEntities = append(normEntities, "'"+s+"'")
+				}
+			}
+			if len(normEntities) > 0 {
+				entityFilter = " AND mba.entity_id IN (" + strings.Join(normEntities, ",") + ")"
 			}
 		}
-		if len(normEntities) > 0 {
-			entityFilter = " AND mba.entity_id IN (" + strings.Join(normEntities, ",") + ")"
-		}
-	}
 
-	if len(bankNames) > 0 {
-		normBanks := make([]string, 0, len(bankNames))
-		for _, n := range bankNames {
-			if s := strings.TrimSpace(n); s != "" {
-				normBanks = append(normBanks, "'"+strings.ToLower(s)+"'")
+		if len(bankNames) > 0 {
+			normBanks := make([]string, 0, len(bankNames))
+			for _, n := range bankNames {
+				if s := strings.TrimSpace(n); s != "" {
+					normBanks = append(normBanks, "'"+strings.ToLower(s)+"'")
+				}
+			}
+			if len(normBanks) > 0 {
+				bankFilter = " AND LOWER(TRIM(mba.bank_name)) IN (" + strings.Join(normBanks, ",") + ")"
 			}
 		}
-		if len(normBanks) > 0 {
-			bankFilter = " AND LOWER(TRIM(mba.bank_name)) IN (" + strings.Join(normBanks, ",") + ")"
+
+		fmt.Printf("[KPI DEBUG] Entity Filter SQL: %s\n", entityFilter)
+		fmt.Printf("[KPI DEBUG] Bank Filter SQL: %s\n", bankFilter)
+		fmt.Printf("[KPI DEBUG] ========================================\n\n")
+
+		// Execute KPI queries
+		fmt.Printf("[KPI DEBUG] Executing getOverallKPI...\n")
+		overall, err := getOverallKPI(ctx, pgxPool, entityFilter, bankFilter)
+		if err != nil {
+			fmt.Printf("[KPI ERROR] getOverallKPI failed: %v\n", err)
+			api.RespondWithResult(w, false, "Failed to fetch overall KPI: "+err.Error())
+			return
 		}
-	}
+		fmt.Printf("[KPI DEBUG] Overall KPI: TotalBalance=%.2f, ActiveAccounts=%d\n", overall.TotalBalance, overall.ActiveAccounts)
 
-	fmt.Printf("[KPI DEBUG] Entity Filter SQL: %s\n", entityFilter)
-	fmt.Printf("[KPI DEBUG] Bank Filter SQL: %s\n", bankFilter)
-	fmt.Printf("[KPI DEBUG] ========================================\n\n")
+		fmt.Printf("[KPI DEBUG] Executing getEntityWiseKPI...\n")
+		entityWise, err := getEntityWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
+		if err != nil {
+			fmt.Printf("[KPI ERROR] getEntityWiseKPI failed: %v\n", err)
+			api.RespondWithResult(w, false, "Failed to fetch entity-wise KPI: "+err.Error())
+			return
+		}
+		fmt.Printf("[KPI DEBUG] Entity-wise KPI: %d entities found\n", len(entityWise))
 
-	// Execute KPI queries
-	fmt.Printf("[KPI DEBUG] Executing getOverallKPI...\n")
-	overall, err := getOverallKPI(ctx, pgxPool, entityFilter, bankFilter)
-	if err != nil {
-		fmt.Printf("[KPI ERROR] getOverallKPI failed: %v\n", err)
-		api.RespondWithResult(w, false, "Failed to fetch overall KPI: "+err.Error())
-		return
-	}
-	fmt.Printf("[KPI DEBUG] Overall KPI: TotalBalance=%.2f, ActiveAccounts=%d\n", overall.TotalBalance, overall.ActiveAccounts)
+		fmt.Printf("[KPI DEBUG] Executing getBankWiseKPI...\n")
+		bankWise, err := getBankWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
+		if err != nil {
+			fmt.Printf("[KPI ERROR] getBankWiseKPI failed: %v\n", err)
+			api.RespondWithResult(w, false, "Failed to fetch bank-wise KPI: "+err.Error())
+			return
+		}
+		fmt.Printf("[KPI DEBUG] Bank-wise KPI: %d banks found\n", len(bankWise))
 
-	fmt.Printf("[KPI DEBUG] Executing getEntityWiseKPI...\n")
-	entityWise, err := getEntityWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
-	if err != nil {
-		fmt.Printf("[KPI ERROR] getEntityWiseKPI failed: %v\n", err)
-		api.RespondWithResult(w, false, "Failed to fetch entity-wise KPI: "+err.Error())
-		return
-	}
-	fmt.Printf("[KPI DEBUG] Entity-wise KPI: %d entities found\n", len(entityWise))
+		fmt.Printf("[KPI DEBUG] Executing getMoMComparison...\n")
+		mom, err := getMoMComparison(ctx, pgxPool, entityFilter, bankFilter)
+		if err != nil {
+			fmt.Printf("[KPI ERROR] getMoMComparison failed: %v\n", err)
+			api.RespondWithResult(w, false, "Failed to fetch MoM comparison: "+err.Error())
+			return
+		}
+		fmt.Printf("[KPI DEBUG] MoM: Current=%.2f, Previous=%.2f, Change=%.2f%%\n",
+			mom.CurrentMonth.TotalBalance, mom.PreviousMonth.TotalBalance, mom.ChangePercent)
 
-	fmt.Printf("[KPI DEBUG] Executing getBankWiseKPI...\n")
-	bankWise, err := getBankWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
-	if err != nil {
-		fmt.Printf("[KPI ERROR] getBankWiseKPI failed: %v\n", err)
-		api.RespondWithResult(w, false, "Failed to fetch bank-wise KPI: "+err.Error())
-		return
-	}
-	fmt.Printf("[KPI DEBUG] Bank-wise KPI: %d banks found\n", len(bankWise))
+		response := KPIResponse{
+			Overall:    overall,
+			EntityWise: entityWise,
+			BankWise:   bankWise,
+			MoM:        mom,
+		}
 
-	fmt.Printf("[KPI DEBUG] Executing getMoMComparison...\n")
-	mom, err := getMoMComparison(ctx, pgxPool, entityFilter, bankFilter)
-	if err != nil {
-		fmt.Printf("[KPI ERROR] getMoMComparison failed: %v\n", err)
-		api.RespondWithResult(w, false, "Failed to fetch MoM comparison: "+err.Error())
-		return
-	}
-	fmt.Printf("[KPI DEBUG] MoM: Current=%.2f, Previous=%.2f, Change=%.2f%%\n", 
-		mom.CurrentMonth.TotalBalance, mom.PreviousMonth.TotalBalance, mom.ChangePercent)
-
-	response := KPIResponse{
-		Overall:    overall,
-		EntityWise: entityWise,
-		BankWise:   bankWise,
-		MoM:        mom,
-	}
-
-	fmt.Printf("[KPI DEBUG] ✅ SUCCESS - Sending response\n\n")
-	api.RespondWithPayload(w, true, "", response)
+		fmt.Printf("[KPI DEBUG] ✅ SUCCESS - Sending response\n\n")
+		api.RespondWithPayload(w, true, "", response)
 	}
 }
 
@@ -230,7 +230,7 @@ func getOverallKPI(ctx context.Context, db *pgxpool.Pool, entityFilter, bankFilt
 		&kpi.TotalBalance,
 		&kpi.ActiveAccounts,
 	)
-	
+
 	if err != nil {
 		fmt.Printf("[SQL ERROR - Overall KPI] Query execution failed: %v\n", err)
 	} else {

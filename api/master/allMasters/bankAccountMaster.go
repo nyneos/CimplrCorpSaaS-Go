@@ -1067,23 +1067,23 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 					return ""
 				}(),
 				"iban": func() string {
-						if iban != nil {
-							return *iban
-						}
-						return ""
-					}(),
+					if iban != nil {
+						return *iban
+					}
+					return ""
+				}(),
 				"currency_code": func() string {
-						if currencyCode != nil {
-							return *currencyCode
-						}
-						return ""
-					}(),
+					if currencyCode != nil {
+						return *currencyCode
+					}
+					return ""
+				}(),
 				"usage": func() string {
-						if usageVal != nil {
-							return *usageVal
-						}
-						return ""
-					}(),
+					if usageVal != nil {
+						return *usageVal
+					}
+					return ""
+				}(),
 				"entity_id": func() string {
 					if entityID != nil {
 						return *entityID
@@ -1661,26 +1661,26 @@ func GetApprovedBankAccountsSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 					return ""
 				}(),
-					"account_id": accountID,
-					"entity_name": func() string {
-						if entityName != nil {
-							return *entityName
-						}
-						return ""
-					}(),
-					"entity_id": func() string {
-						if entityID != nil {
-							return *entityID
-						}
-						return ""
-					}(),
-					"usage": func() string {
-						if usageVal != nil {
-							return *usageVal
-						}
-						return ""
-					}(),
-					"approved_balance": approvedBalance,
+				"account_id": accountID,
+				"entity_name": func() string {
+					if entityName != nil {
+						return *entityName
+					}
+					return ""
+				}(),
+				"entity_id": func() string {
+					if entityID != nil {
+						return *entityID
+					}
+					return ""
+				}(),
+				"usage": func() string {
+					if usageVal != nil {
+						return *usageVal
+					}
+					return ""
+				}(),
+				"approved_balance": approvedBalance,
 			})
 		}
 

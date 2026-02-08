@@ -85,20 +85,20 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		transactions := []map[string]interface{}{}
 		for rows.Next() {
 			var (
-				transactionID                                      int64
-				bankStatementID, accountNumber                     string
-				tranID, chequeNo                                   sql.NullString
-				valueDate, transactionDate                         sql.NullTime
-				postedDate                                         sql.NullTime
-				description                                        string
-				withdrawalAmount, depositAmount, balance           sql.NullFloat64
-				categoryID                                         sql.NullString
-				createdAt                                          sql.NullTime
-				entityID                                           sql.NullString
-				periodStart, periodEnd                             sql.NullTime
-				bankName, entityName                               sql.NullString
-				currency                                           sql.NullString
-				categoryName                                       string
+				transactionID                            int64
+				bankStatementID, accountNumber           string
+				tranID, chequeNo                         sql.NullString
+				valueDate, transactionDate               sql.NullTime
+				postedDate                               sql.NullTime
+				description                              string
+				withdrawalAmount, depositAmount, balance sql.NullFloat64
+				categoryID                               sql.NullString
+				createdAt                                sql.NullTime
+				entityID                                 sql.NullString
+				periodStart, periodEnd                   sql.NullTime
+				bankName, entityName                     sql.NullString
+				currency                                 sql.NullString
+				categoryName                             string
 			)
 
 			err := rows.Scan(
@@ -113,27 +113,27 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			}
 
 			txn := map[string]interface{}{
-				"transaction_id":     transactionID,
-				"bank_statement_id":  bankStatementID,
-				"account_number":     accountNumber,
-				"description":        description,
-				"withdrawal_amount":  nil,
-				"deposit_amount":     nil,
-				"balance":            nil,
-				"category_id":        nil,
-				"category_name":      categoryName,
-				"tran_id":            nil,
-				"cheque_no":          nil,
-				"value_date":         nil,
-				"transaction_date":   nil,
-				"posted_date":        nil,
-				"created_at":         nil,
-				"entity_id":          nil,
-				"period_start":       nil,
-				"period_end":         nil,
-				"bank_name":          nil,
-				"entity_name":        nil,
-				"currency":           nil,
+				"transaction_id":    transactionID,
+				"bank_statement_id": bankStatementID,
+				"account_number":    accountNumber,
+				"description":       description,
+				"withdrawal_amount": nil,
+				"deposit_amount":    nil,
+				"balance":           nil,
+				"category_id":       nil,
+				"category_name":     categoryName,
+				"tran_id":           nil,
+				"cheque_no":         nil,
+				"value_date":        nil,
+				"transaction_date":  nil,
+				"posted_date":       nil,
+				"created_at":        nil,
+				"entity_id":         nil,
+				"period_start":      nil,
+				"period_end":        nil,
+				"bank_name":         nil,
+				"entity_name":       nil,
+				"currency":          nil,
 			}
 
 			if tranID.Valid {

@@ -21,9 +21,9 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID    string `json:"user_id"`
-			AsOfDate  string `json:"as_of_date"`  // YYYY-MM-DD format
-			ViewType  string `json:"view_type"`   // daily, weekly, monthly, quarterly, yearly
+			UserID   string `json:"user_id"`
+			AsOfDate string `json:"as_of_date"` // YYYY-MM-DD format
+			ViewType string `json:"view_type"`  // daily, weekly, monthly, quarterly, yearly
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -114,9 +114,9 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		projectionsSummary := calculateSummary(projections)
 
 		response := map[string]interface{}{
-			"success":     true,
-			"as_of_date":  asOfDate.Format(constants.DateFormat),
-			"view_type":   viewType,
+			"success":    true,
+			"as_of_date": asOfDate.Format(constants.DateFormat),
+			"view_type":  viewType,
 			"date_range": map[string]string{
 				"start": asOfDate.Format(constants.DateFormat),
 				"end":   endDate.Format(constants.DateFormat),
@@ -272,7 +272,7 @@ func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate 
 	result := make([]map[string]interface{}, 0, len(groups))
 	for key, transactions := range groups {
 		periods := aggregateByPeriod(transactions, asOfDate, viewType)
-		
+
 		// Zero-fill all periods in range
 		allPeriods := generateAllPeriods(asOfDate, endDate, viewType)
 		for periodKey := range allPeriods {
@@ -280,7 +280,7 @@ func fetchActuals(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endDate 
 				periods[periodKey] = 0.0
 			}
 		}
-		
+
 		totalAmount := 0.0
 		for _, amount := range periods {
 			totalAmount += amount
@@ -312,7 +312,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	// Users create projections with their own entity/bank names, so we show all approved projections
 	// filtered only by date range
 
-	log.Printf("[fetchProjections] Date range: %s to %s (showing ALL approved projections)", 
+	log.Printf("[fetchProjections] Date range: %s to %s (showing ALL approved projections)",
 		asOfDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
 
 	// First, check if there are ANY approved proposals
@@ -427,19 +427,19 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 
 	// Group data
 	type groupKey struct {
-		EntityID          string
-		EntityName        string
-		BankName          string
-		BankAccount       string
-		CurrencyCode      string
-		Usage             string
-		Flow              string
-		CategoryID        string
-		CategoryName      string
-		Description       string
-		MaturityDate      time.Time
-		IsRecurring       bool
-		RecurrenceFreq    string
+		EntityID       string
+		EntityName     string
+		BankName       string
+		BankAccount    string
+		CurrencyCode   string
+		Usage          string
+		Flow           string
+		CategoryID     string
+		CategoryName   string
+		Description    string
+		MaturityDate   time.Time
+		IsRecurring    bool
+		RecurrenceFreq string
 	}
 
 	groups := make(map[groupKey][]struct {
@@ -463,7 +463,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 
 		rowCount++
 		if rowCount <= 3 {
-			log.Printf("[fetchProjections] Sample row %d: entity=%s/%s bank=%s account=%s year=%d month=%d amount=%.2f", 
+			log.Printf("[fetchProjections] Sample row %d: entity=%s/%s bank=%s account=%s year=%d month=%d amount=%.2f",
 				rowCount, entityID, entityName, bankName, bankAccount, year, month, amount)
 		}
 
@@ -504,7 +504,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	result := make([]map[string]interface{}, 0, len(groups))
 	for key, monthlyData := range groups {
 		periods := aggregateProjectionsByPeriod(monthlyData, asOfDate, viewType)
-		
+
 		// Zero-fill all periods in range
 		allPeriods := generateAllPeriods(asOfDate, endDate, viewType)
 		for periodKey := range allPeriods {
@@ -512,7 +512,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 				periods[periodKey] = 0.0
 			}
 		}
-		
+
 		totalAmount := 0.0
 		for _, amount := range periods {
 			totalAmount += amount
@@ -550,7 +550,7 @@ func aggregateByPeriod(transactions []struct {
 
 	for _, txn := range transactions {
 		var periodKey string
-		
+
 		switch viewType {
 		case "daily":
 			periodKey = txn.Date.Format("2006-01-02")
@@ -603,13 +603,13 @@ func aggregateProjectionsByPeriod(monthlyData []struct {
 			// Distribute monthly amount across weeks in month
 			firstDay := time.Date(data.Year, time.Month(data.Month), 1, 0, 0, 0, 0, time.UTC)
 			lastDay := time.Date(data.Year, time.Month(data.Month+1), 0, 0, 0, 0, 0, time.UTC)
-			
+
 			weeksInMonth := make(map[string]bool)
 			for d := firstDay; !d.After(lastDay); d = d.AddDate(0, 0, 1) {
 				year, week := d.ISOWeek()
 				weeksInMonth[fmt.Sprintf("%d-W%02d", year, week)] = true
 			}
-			
+
 			weeklyAmount := data.Amount / float64(len(weeksInMonth))
 			for week := range weeksInMonth {
 				periods[week] += weeklyAmount
@@ -633,7 +633,7 @@ func aggregateProjectionsByPeriod(monthlyData []struct {
 // generateAllPeriods creates a map with all period keys in the range filled with 0
 func generateAllPeriods(startDate, endDate time.Time, viewType string) map[string]float64 {
 	allPeriods := make(map[string]float64)
-	
+
 	switch viewType {
 	case "daily":
 		for d := startDate; !d.After(endDate); d = d.AddDate(0, 0, 1) {
@@ -658,7 +658,7 @@ func generateAllPeriods(startDate, endDate time.Time, viewType string) map[strin
 			allPeriods[fmt.Sprintf("%d", y)] = 0.0
 		}
 	}
-	
+
 	return allPeriods
 }
 

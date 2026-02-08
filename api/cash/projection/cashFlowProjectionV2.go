@@ -24,7 +24,7 @@ import (
 // Returns map[year-month]amount for 12 months from effectiveDate
 func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time, expectedAmount float64, isRecurring bool, frequency string) map[string]float64 {
 	projections := make(map[string]float64)
-	
+
 	if !isRecurring {
 		// Non-recurring: Full amount in maturity month
 		projections[fmt.Sprintf("%d-%02d", maturityDate.Year(), maturityDate.Month())] = expectedAmount
@@ -34,7 +34,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 	// Recurring: Distribute across months based on frequency
 	freq := strings.ToLower(strings.TrimSpace(frequency))
 	endDate := effectiveDate.AddDate(0, 12, 0) // 12 months window
-	
+
 	switch freq {
 	case "weekly":
 		// Weekly: Divide by ~4.33 weeks/month
@@ -43,7 +43,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 			key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 			projections[key] = monthlyAmount
 		}
-		
+
 	case "monthly":
 		// Monthly: Divide by 12 months
 		monthlyAmount := expectedAmount / 12.0
@@ -51,7 +51,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 			key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 			projections[key] = monthlyAmount
 		}
-		
+
 	case "quarterly":
 		// Quarterly: Divide by 4, distribute in months matching effective month
 		quarterlyAmount := expectedAmount / 4.0
@@ -64,7 +64,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 				projections[key] = quarterlyAmount
 			}
 		}
-		
+
 	case "halfyearly", "half yearly", "semi-annual":
 		// HalfYearly: Divide by 2, distribute in 6-month intervals
 		halfYearlyAmount := expectedAmount / 2.0
@@ -72,17 +72,17 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 			key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 			projections[key] = halfYearlyAmount
 		}
-		
+
 	case "yearly", "annual":
 		// Yearly: Full amount in effective month
 		key := fmt.Sprintf("%d-%02d", effectiveDate.Year(), effectiveDate.Month())
 		projections[key] = expectedAmount
-		
+
 	default:
 		// Unknown frequency: treat as non-recurring
 		projections[fmt.Sprintf("%d-%02d", maturityDate.Year(), maturityDate.Month())] = expectedAmount
 	}
-	
+
 	return projections
 }
 
@@ -542,9 +542,9 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Default: 12 months from effective
 				maturityParsed = effectiveDate.AddDate(0, 12, 0)
 			}
-			
+
 			monthlyProj := calculateMonthlyProjections(effectiveDate, maturityParsed, item.ExpectedAmount, item.IsRecurring, item.RecurrenceFrequency)
-			
+
 			// Insert calculated projections
 			for yearMonth, amount := range monthlyProj {
 				parts := strings.Split(yearMonth, "-")
@@ -1044,9 +1044,9 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				maturityParsed = effectiveDate.AddDate(0, 12, 0)
 			}
-			
+
 			monthlyProj := calculateMonthlyProjections(effectiveDate, maturityParsed, item.ExpectedAmount, item.IsRecurring, item.RecurrenceFrequency)
-			
+
 			// Insert calculated projections
 			for yearMonth, amount := range monthlyProj {
 				parts := strings.Split(yearMonth, "-")

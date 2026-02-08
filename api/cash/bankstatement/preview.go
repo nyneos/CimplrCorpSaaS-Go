@@ -169,11 +169,11 @@ func processZipPreviewFlat(ctx context.Context, db *sql.DB, zipBytes []byte, use
 // processSingleFilePreviewFlat parses file and categorizes WITHOUT any DB writes
 // Uses EXACT same parsing logic as UploadBankStatementV2WithCategorization but ONLY reads DB for account lookup and rules
 func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, filename string, useMapping bool, mappings *ColumnMappings) ([]map[string]interface{}, error) {
-	
+
 	ext := strings.ToLower(filepath.Ext(filename))
 	var rows [][]string
 	var isCSV bool
-	
+
 	// Parse file with EXACT same logic as upload
 	switch ext {
 	case ".xlsx":
@@ -188,15 +188,15 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", ext)
 	}
-	
+
 	if len(rows) < 2 {
 		return nil, fmt.Errorf("file must have at least one data row")
 	}
-	
+
 	// Extract account number using EXACT upload logic with all fallbacks
 	var accountNumber string
 	acNoHeader := "A/C No:"
-	
+
 	// Custom mapping first
 	if mappings != nil && mappings.AccountNumber != "" {
 		for i := 0; i < len(rows) && i < 20; i++ {
@@ -219,7 +219,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			}
 		}
 	}
-	
+
 	// Default extraction if custom mapping failed
 	if accountNumber == "" {
 		if isCSV {
@@ -240,12 +240,12 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			}
 		}
 	}
-	
+
 	// Fallback: regex-based extraction with label detection
 	if accountNumber == "" {
 		acctLabelRe := regexp.MustCompile(`(?i)\b(?:a[/\\]?c|acct|account)[\s\.:#-]*(?:no|number)?\b`)
 		acctNumberRe := regexp.MustCompile(`\d{6,}`)
-		
+
 		// First: look for title line with "transactions list"
 		titleDigitRe := regexp.MustCompile(`\d{7,}`)
 		for i := 0; i < 40 && i < len(rows); i++ {
@@ -262,7 +262,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 				break
 			}
 		}
-		
+
 		// Second: label-based extraction (same cell, adjacent, below)
 		if accountNumber == "" {
 			for i := 0; i < 20 && i < len(rows); i++ {
@@ -297,7 +297,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 				}
 			}
 		}
-		
+
 		// Third: scan all header cells for 7+ digit sequences
 		if accountNumber == "" {
 			for i := 0; i < 20 && i < len(rows); i++ {
@@ -314,11 +314,11 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			}
 		}
 	}
-	
+
 	if accountNumber == "" {
 		return nil, fmt.Errorf("account number not found in file header")
 	}
-	
+
 	// DB READ ONLY: Lookup account metadata
 	var entityID, bankName, currency string
 	err := db.QueryRowContext(ctx, `
@@ -327,7 +327,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
 		WHERE mba.account_number = $1 AND COALESCE(mba.is_deleted, false) = false
 	`, accountNumber).Scan(&entityID, &bankName, &currency)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Try candidate verification like upload does
@@ -346,7 +346,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 					}
 				}
 			}
-			
+
 			matched := false
 			for _, cand := range candidates {
 				qErr := db.QueryRowContext(ctx, `
@@ -368,13 +368,13 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			return nil, fmt.Errorf("database lookup failed: %w", err)
 		}
 	}
-	
+
 	// DB READ ONLY: Load category rules
 	rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currency)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load category rules: %w", err)
 	}
-	
+
 	// Find transaction header row (EXACT upload logic)
 	var txnHeaderIdx int = -1
 	if isCSV {
@@ -434,19 +434,19 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			}
 		}
 	}
-	
+
 	if txnHeaderIdx == -1 {
 		return nil, fmt.Errorf("transaction header row not found")
 	}
-	
+
 	headerRow := rows[txnHeaderIdx]
-	
+
 	// Build column mapping (simplified from upload)
 	colIdx := make(map[string]int)
 	for idx, col := range headerRow {
 		colIdx[strings.TrimSpace(col)] = idx
 	}
-	
+
 	// Apply custom mappings if provided
 	if mappings != nil {
 		if mappings.TranID != "" {
@@ -499,7 +499,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			}
 		}
 	}
-	
+
 	// Auto-detect common columns
 	findColContaining := func(keywords ...string) int {
 		for colName, idx := range colIdx {
@@ -512,7 +512,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 		return -1
 	}
-	
+
 	if _, ok := colIdx["Transaction Date"]; !ok {
 		if idx := findColContaining("transaction date", "txn date", "posted date"); idx >= 0 {
 			colIdx["Transaction Date"] = idx
@@ -553,17 +553,17 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			colIdx["Tran. Id"] = idx
 		}
 	}
-	
+
 	// Parse transactions
 	transactions := []map[string]interface{}{}
-	
+
 	for i := txnHeaderIdx + 1; i < len(rows); i++ {
 		row := rows[i]
-		
+
 		if isEmptyRow(row) {
 			continue
 		}
-		
+
 		// Skip non-transaction rows
 		if len(row) > 0 {
 			firstCell := strings.ToLower(strings.TrimSpace(row[0]))
@@ -576,12 +576,12 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 				continue
 			}
 		}
-		
+
 		// Pad row
 		for len(row) < len(headerRow) {
 			row = append(row, "")
 		}
-		
+
 		txn := map[string]interface{}{
 			"account_number":     accountNumber,
 			"entity_id":          entityID,
@@ -590,12 +590,12 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			"currency":           currency,
 			"misclassified_flag": false,
 		}
-		
+
 		// Extract fields
 		if idx, ok := colIdx["Tran. Id"]; ok && idx < len(row) {
 			txn["tran_id"] = strings.TrimSpace(row[idx])
 		}
-		
+
 		// Parse dates
 		var transactionDate, valueDate time.Time
 		if idx, ok := colIdx["Transaction Date"]; ok && idx < len(row) {
@@ -614,7 +614,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 				valueDate = dt
 			}
 		}
-		
+
 		// Mirror dates if one is missing
 		if transactionDate.IsZero() && !valueDate.IsZero() {
 			transactionDate = valueDate
@@ -622,15 +622,15 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if valueDate.IsZero() && !transactionDate.IsZero() {
 			valueDate = transactionDate
 		}
-		
+
 		// Skip if no dates
 		if transactionDate.IsZero() {
 			continue
 		}
-		
+
 		txn["transaction_date"] = transactionDate.Format(time.RFC3339)
 		txn["value_date"] = valueDate.Format(time.RFC3339)
-		
+
 		// Description
 		description := ""
 		if idx, ok := colIdx["Transaction Remarks"]; ok && idx < len(row) {
@@ -639,10 +639,10 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			description = sanitizeForPostgres(normalizeCell(row[idx]))
 		}
 		txn["description"] = description
-		
+
 		// Amounts
 		var withdrawal, deposit sql.NullFloat64
-		
+
 		if idx, ok := colIdx["Withdrawal Amt (INR)"]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil && val > 0 {
 				withdrawal = sql.NullFloat64{Float64: val, Valid: true}
@@ -653,7 +653,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		} else {
 			txn["withdrawal_amount"] = 0
 		}
-		
+
 		if idx, ok := colIdx["Deposit Amt (INR)"]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil && val > 0 {
 				deposit = sql.NullFloat64{Float64: val, Valid: true}
@@ -664,13 +664,13 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		} else {
 			txn["deposit_amount"] = 0
 		}
-		
+
 		if idx, ok := colIdx["Balance (INR)"]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil {
 				txn["balance"] = val
 			}
 		}
-		
+
 		// Apply categorization
 		categoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
 		if categoryID.Valid && categoryID.String != "" {
@@ -684,10 +684,10 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		} else {
 			txn["category_name"] = "Uncategorized"
 		}
-		
+
 		transactions = append(transactions, txn)
 	}
-	
+
 	return transactions, nil
 }
 
@@ -695,27 +695,27 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 func isJunkFile(filename string) bool {
 	base := filepath.Base(filename)
 	dir := filepath.Dir(filename)
-	
+
 	// Skip hidden files (starting with .)
 	if strings.HasPrefix(base, ".") {
 		return true
 	}
-	
+
 	// Skip macOS resource fork files (starting with ._)
 	if strings.HasPrefix(base, "._") {
 		return true
 	}
-	
+
 	// Skip __MACOSX directory and its contents
 	if strings.Contains(dir, "__MACOSX") || strings.HasPrefix(dir, "__MACOSX") {
 		return true
 	}
-	
+
 	// Skip .DS_Store files
 	if base == ".DS_Store" {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -879,7 +879,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 	balanceIdx := findIdx("balance", "available balance", "closing balance", "current / closing")
 	tranIDIdx := findIdx("transaction id", "tran id", "txn id", "reference", "ref no", "bank reference")
 
-	fmt.Printf("[PREVIEW-MULTI] Column indices - acc:%d date:%d desc:%d debit:%d credit:%d balance:%d\n", 
+	fmt.Printf("[PREVIEW-MULTI] Column indices - acc:%d date:%d desc:%d debit:%d credit:%d balance:%d\n",
 		accIdx, dateIdx, descIdx, debitIdx, creditIdx, balanceIdx)
 
 	if accIdx == -1 {
@@ -887,16 +887,16 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 	}
 
 	allTransactions := []map[string]interface{}{}
-	
+
 	// OPTIMIZATION: Load ALL accounts in ONE query to avoid per-row DB calls with context timeout
 	fmt.Printf("[PREVIEW-MULTI] Loading all accounts from database...\n")
-	accountCache := make(map[string]struct{
+	accountCache := make(map[string]struct {
 		entityID string
 		bankName string
 		currency string
 		rules    []categoryRuleComponent
 	})
-	
+
 	// Use background context for initial load (not tied to HTTP request timeout)
 	loadCtx := context.Background()
 	accountRows, err := db.QueryContext(loadCtx, `
@@ -909,19 +909,19 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		return nil, fmt.Errorf("failed to load accounts: %w", err)
 	}
 	defer accountRows.Close()
-	
+
 	for accountRows.Next() {
 		var accNum, entityID, bankName, currency string
 		if err := accountRows.Scan(&accNum, &entityID, &bankName, &currency); err != nil {
 			continue
 		}
-		
+
 		// Also pre-load rules for this account
 		rules, err := loadCategoryRuleComponents(loadCtx, db, accNum, entityID, currency)
 		if err != nil {
 			rules = []categoryRuleComponent{}
 		}
-		
+
 		accountCache[accNum] = struct {
 			entityID string
 			bankName string
@@ -939,7 +939,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 	// Process each data row (NO MORE DB QUERIES - just map lookups)
 	for ri := 1; ri < len(rows); ri++ {
 		row := rows[ri]
-		
+
 		// Get account number from this row
 		if accIdx >= len(row) {
 			skippedNoAccount++
@@ -987,7 +987,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 				valueDate = dt
 			}
 		}
-		
+
 		// Mirror dates if one is missing
 		if transactionDate.IsZero() && !valueDate.IsZero() {
 			transactionDate = valueDate
@@ -995,13 +995,13 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		if valueDate.IsZero() && !transactionDate.IsZero() {
 			valueDate = transactionDate
 		}
-		
+
 		// Skip if no valid date
 		if transactionDate.IsZero() {
 			skippedNoDate++
 			continue
 		}
-		
+
 		txn["transaction_date"] = transactionDate.Format(time.RFC3339)
 		txn["value_date"] = valueDate.Format(time.RFC3339)
 
@@ -1014,7 +1014,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 
 		// Amounts
 		var withdrawal, deposit sql.NullFloat64
-		
+
 		if debitIdx >= 0 && debitIdx < len(row) {
 			if val, err := parseAmount(row[debitIdx]); err == nil && val > 0 {
 				withdrawal = sql.NullFloat64{Float64: val, Valid: true}
@@ -1025,7 +1025,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		} else {
 			txn["withdrawal_amount"] = 0
 		}
-		
+
 		if creditIdx >= 0 && creditIdx < len(row) {
 			if val, err := parseAmount(row[creditIdx]); err == nil && val > 0 {
 				deposit = sql.NullFloat64{Float64: val, Valid: true}
@@ -1036,7 +1036,7 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 		} else {
 			txn["deposit_amount"] = 0
 		}
-		
+
 		if balanceIdx >= 0 && balanceIdx < len(row) {
 			if val, err := parseAmount(row[balanceIdx]); err == nil {
 				txn["balance"] = val
@@ -1251,7 +1251,7 @@ func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, fi
 					continue
 				}
 				txnMap["category_name"] = "Uncategorized"
-				
+
 				// Ensure amount fields exist
 				if _, ok := txnMap["withdrawal_amount"]; !ok {
 					if w, ok := txnMap["withdrawal"]; ok {
@@ -1267,7 +1267,7 @@ func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, fi
 						txnMap["deposit_amount"] = 0
 					}
 				}
-				
+
 				transactions = append(transactions, txnMap)
 			}
 		}

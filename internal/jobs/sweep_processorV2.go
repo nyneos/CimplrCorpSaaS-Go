@@ -272,7 +272,7 @@ func shouldExecuteSweepV2ByFrequency(frequency string, effectiveDate sql.NullStr
 
 		// Calculate days since reference date
 		daysSince := int(now.Sub(referenceDate).Hours() / 24)
-		
+
 		// Execute if today is exactly a multiple of 7 days from reference
 		if daysSince >= 0 && daysSince%7 == 0 {
 			return true, nil

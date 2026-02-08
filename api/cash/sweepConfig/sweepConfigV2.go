@@ -631,7 +631,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithPayload(w, true, "", []map[string]interface{}{})
 				return
 			}
-						q := `SELECT 
+			q := `SELECT 
 								sweep_id, entity_name, 
 								source_bank_name, source_bank_account, 
 								target_bank_name, target_bank_account, 
@@ -671,7 +671,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						ORDER BY created_at DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q, norm)
 		} else {
-						q := `SELECT 
+			q := `SELECT 
 								sweep_id, entity_name, 
 								source_bank_name, source_bank_account, 
 								target_bank_name, target_bank_account, 
