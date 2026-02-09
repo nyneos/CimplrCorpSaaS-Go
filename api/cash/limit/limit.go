@@ -61,8 +61,8 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate fungibility_type
 		fungibilityType := strings.ToUpper(strings.TrimSpace(req.FungibilityType))
-		if fungibilityType != "FUNGIBLE" && fungibilityType != "NON-FUNGIBLE" {
-			api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Fungible, Non-Fungible")
+		if fungibilityType != "INTER-CORE" && fungibilityType != "INTRA-CORE" && fungibilityType != "NONE" {
+			api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
 			return
 		}
 
@@ -163,53 +163,50 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-	if req.UserID == "" || len(req.Limits) == 0 {
-		api.RespondWithResult(w, false, "user_id and limits array required")
-		return
-	}
-
-	requestedBy := ""
-	for _, s := range auth.GetActiveSessions() {
-		if s.UserID == req.UserID {
-			requestedBy = s.Name
-			break
-		}
-	}
-	if requestedBy == "" {
-		api.RespondWithResult(w, false, constants.ErrInvalidSession)
-		return
-	}
-
-	results := make([]map[string]interface{}, 0, len(req.Limits))
-
-	for i, lim := range req.Limits {
-		result := map[string]interface{}{"index": i}
-
-		// Validate entity
-		if !api.IsEntityAllowed(ctx, lim.EntityName) {
-			result["success"] = false
-			result["error"] = "unauthorized entity: " + lim.EntityName
-			results = append(results, result)
-			continue
+		if req.UserID == "" || len(req.Limits) == 0 {
+			api.RespondWithResult(w, false, "user_id and limits array required")
+			return
 		}
 
-		// Validate enums
-		coreLimitType := strings.ToUpper(strings.TrimSpace(lim.CoreLimitType))
-		if coreLimitType != "FUND BASED" && coreLimitType != "NON FUND BASED" && coreLimitType != "TERM LOANS" {
-			result["success"] = false
-			result["error"] = "invalid core_limit_type"
-			results = append(results, result)
-			continue
+		requestedBy := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				requestedBy = s.Name
+				break
+			}
+		}
+		if requestedBy == "" {
+			api.RespondWithResult(w, false, constants.ErrInvalidSession)
+			return
 		}
 
-		fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
-			if fungibilityType != "FUNGIBLE" && fungibilityType != "NON-FUNGIBLE" {
+		results := make([]map[string]interface{}, 0, len(req.Limits))
+
+		for i, lim := range req.Limits {
+			result := map[string]interface{}{"index": i}
+
+			// Validate entity
+			if !api.IsEntityAllowed(ctx, lim.EntityName) {
 				result["success"] = false
-				result["error"] = "invalid fungibility_type"
+				result["error"] = "unauthorized entity: " + lim.EntityName
 				results = append(results, result)
 				continue
 			}
 
+			// Validate enums
+			coreLimitType := strings.ToUpper(strings.TrimSpace(lim.CoreLimitType))
+			if coreLimitType != "FUND BASED" && coreLimitType != "NON FUND BASED" && coreLimitType != "TERM LOANS" {
+				result["success"] = false
+				result["error"] = "invalid core_limit_type"
+				results = append(results, result)
+				continue
+			}
+
+			fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
+			if fungibilityType != "INTER-CORE" && fungibilityType != "INTRA-CORE" && fungibilityType != "NONE" {
+				api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
+				return
+			}
 			securityType := strings.ToUpper(strings.TrimSpace(lim.SecurityType))
 			if securityType != "SECURED" && securityType != "UNSECURED" {
 				result["success"] = false
@@ -514,13 +511,13 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var sanctionDate, effectiveDate *time.Time
 			var sanctionedAmount float64
 			var fungibilityPct, initialUtilization *float64
-			
+
 			// Old values
 			var oldEntityName, oldBankName, oldCoreLimitType, oldCurrencyCode, oldFungibilityType, oldSecurityType *string
 			var oldLimitType, oldLimitSubType, oldRemarks *string
 			var oldSanctionDate, oldEffectiveDate *time.Time
 			var oldSanctionedAmount, oldFungibilityPct, oldInitialUtilization *float64
-			
+
 			var actionType, procStatus, requestedBy, checkerBy, checkerComment, reason *string
 			var requestedAt, checkerAt *time.Time
 
@@ -553,7 +550,7 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"security_type":       securityType,
 				"remarks":             stringOrEmpty(remarks),
 				"initial_utilization": floatOrZero(initialUtilization),
-				
+
 				"old_entity_name":         stringOrEmpty(oldEntityName),
 				"old_bank_name":           stringOrEmpty(oldBankName),
 				"old_core_limit_type":     stringOrEmpty(oldCoreLimitType),
@@ -568,15 +565,15 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"old_security_type":       stringOrEmpty(oldSecurityType),
 				"old_remarks":             stringOrEmpty(oldRemarks),
 				"old_initial_utilization": floatOrZero(oldInitialUtilization),
-				
-				"action_type":         stringOrEmpty(actionType),
-				"processing_status":   stringOrEmpty(procStatus),
-				"requested_by":        stringOrEmpty(requestedBy),
-				"requested_at":        timeOrEmpty(requestedAt),
-				"checker_by":          stringOrEmpty(checkerBy),
-				"checker_at":          timeOrEmpty(checkerAt),
-				"checker_comment":     stringOrEmpty(checkerComment),
-				"reason":              stringOrEmpty(reason),
+
+				"action_type":       stringOrEmpty(actionType),
+				"processing_status": stringOrEmpty(procStatus),
+				"requested_by":      stringOrEmpty(requestedBy),
+				"requested_at":      timeOrEmpty(requestedAt),
+				"checker_by":        stringOrEmpty(checkerBy),
+				"checker_at":        timeOrEmpty(checkerAt),
+				"checker_comment":   stringOrEmpty(checkerComment),
+				"reason":            stringOrEmpty(reason),
 			}
 
 			results = append(results, item)
