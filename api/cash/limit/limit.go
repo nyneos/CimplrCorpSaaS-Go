@@ -281,23 +281,10 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID             string   `json:"user_id"`
-			LimitID            string   `json:"limit_id"`
-			EntityName         string   `json:"entity_name"`
-			BankName           string   `json:"bank_name"`
-			CoreLimitType      string   `json:"core_limit_type"`
-			LimitType          string   `json:"limit_type"`
-			LimitSubType       string   `json:"limit_sub_type"`
-			SanctionDate       string   `json:"sanction_date"`
-			EffectiveDate      string   `json:"effective_date"`
-			CurrencyCode       string   `json:"currency_code"`
-			SanctionedAmount   float64  `json:"sanctioned_amount"`
-			FungibilityType    string   `json:"fungibility_type"`
-			FungibilityPct     *float64 `json:"fungibility_pct"`
-			SecurityType       string   `json:"security_type"`
-			Remarks            string   `json:"remarks"`
-			InitialUtilization *float64 `json:"initial_utilization"`
-			Reason             string   `json:"reason"`
+			UserID  string                 `json:"user_id"`
+			LimitID string                 `json:"limit_id"`
+			Fields  map[string]interface{} `json:"fields"`
+			Reason  string                 `json:"reason"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -307,6 +294,11 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.UserID == "" || req.LimitID == "" {
 			api.RespondWithResult(w, false, "user_id and limit_id required")
+			return
+		}
+
+		if len(req.Fields) == 0 {
+			api.RespondWithResult(w, false, "no fields provided to update")
 			return
 		}
 
@@ -329,52 +321,129 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Save old values before updating
-		upd := `UPDATE cimplrcorpsaas.bank_limit SET
-			old_entity_name = entity_name,
-			old_bank_name = bank_name,
-			old_core_limit_type = core_limit_type,
-			old_limit_type = limit_type,
-			old_limit_sub_type = limit_sub_type,
-			old_sanction_date = sanction_date,
-			old_effective_date = effective_date,
-			old_currency_code = currency_code,
-			old_sanctioned_amount = sanctioned_amount,
-			old_fungibility_type = fungibility_type,
-			old_fungibility_pct = fungibility_pct,
-			old_security_type = security_type,
-			old_remarks = remarks,
-			old_initial_utilization = initial_utilization,
-			entity_name = $2,
-			bank_name = $3,
-			core_limit_type = $4,
-			limit_type = $5,
-			limit_sub_type = $6,
-			sanction_date = $7,
-			effective_date = $8,
-			currency_code = $9,
-			sanctioned_amount = $10,
-			fungibility_type = $11,
-			fungibility_pct = $12,
-			security_type = $13,
-			remarks = $14,
-			initial_utilization = $15
-		WHERE limit_id = $1`
+		// Fetch current row to lock
+		sel := `SELECT entity_name, bank_name, core_limit_type, limit_type, limit_sub_type, sanction_date, effective_date, currency_code, sanctioned_amount, fungibility_type, fungibility_pct, security_type, remarks, initial_utilization FROM cimplrcorpsaas.bank_limit WHERE limit_id = $1 FOR UPDATE`
+		var curEntity, curBank, curCoreLimit, curLimitType, curLimitSub *string
+		var curSanctionDate, curEffectiveDate *time.Time
+		var curCurrency *string
+		var curSanctionedAmount float64
+		var curFungibilityType *string
+		var curFungibilityPct *float64
+		var curSecurity *string
+		var curRemarks *string
+		var curInitialUtilization *float64
 
-		_, err = tx.Exec(ctx, upd,
-			req.LimitID,
-			req.EntityName, req.BankName,
-			strings.ToUpper(strings.TrimSpace(req.CoreLimitType)),
-			nullifyEmpty(req.LimitType), nullifyEmpty(req.LimitSubType),
-			nullifyEmpty(req.SanctionDate), nullifyEmpty(req.EffectiveDate),
-			strings.ToUpper(req.CurrencyCode), req.SanctionedAmount,
-			strings.ToUpper(strings.TrimSpace(req.FungibilityType)),
-			nullifyFloat(req.FungibilityPct),
-			strings.ToUpper(strings.TrimSpace(req.SecurityType)),
-			nullifyEmpty(req.Remarks), nullifyFloat(req.InitialUtilization),
-		)
+		if err := tx.QueryRow(ctx, sel, req.LimitID).Scan(&curEntity, &curBank, &curCoreLimit, &curLimitType, &curLimitSub, &curSanctionDate, &curEffectiveDate, &curCurrency, &curSanctionedAmount, &curFungibilityType, &curFungibilityPct, &curSecurity, &curRemarks, &curInitialUtilization); err != nil {
+			api.RespondWithResult(w, false, "failed to fetch current limit: "+err.Error())
+			return
+		}
 
-		if err != nil {
+		// Build dynamic SET clause. For each provided field we first set old_<col> = <col>, then <col> = $N
+		oldSets := []string{}
+		newSets := []string{}
+		args := []interface{}{}
+		pos := 1
+
+		// helper to add string field
+		addStr := func(col string, value interface{}) {
+			oldSets = append(oldSets, "old_"+col+" = "+col)
+			newSets = append(newSets, col+" = $"+fmt.Sprint(pos))
+			args = append(args, value)
+			pos++
+		}
+		addFloat := func(col string, value interface{}) {
+			oldSets = append(oldSets, "old_"+col+" = "+col)
+			newSets = append(newSets, col+" = $"+fmt.Sprint(pos))
+			args = append(args, value)
+			pos++
+		}
+
+		for k, v := range req.Fields {
+			switch strings.ToLower(k) {
+			case "entity_name":
+				if s, ok := v.(string); ok { addStr("entity_name", s) }
+			case "bank_name":
+				if s, ok := v.(string); ok { addStr("bank_name", s) }
+			case "core_limit_type":
+				if s, ok := v.(string); ok {
+					val := strings.ToUpper(strings.TrimSpace(s))
+					if val != "FUND BASED" && val != "NON FUND BASED" && val != "TERM LOANS" {
+						api.RespondWithResult(w, false, "invalid core_limit_type")
+						return
+					}
+					addStr("core_limit_type", val)
+				}
+			case "limit_type":
+				if s, ok := v.(string); ok { addStr("limit_type", s) }
+			case "limit_sub_type":
+				if s, ok := v.(string); ok { addStr("limit_sub_type", s) }
+			case "sanction_date":
+				if s, ok := v.(string); ok { addStr("sanction_date", s) }
+			case "effective_date":
+				if s, ok := v.(string); ok { addStr("effective_date", s) }
+			case "currency_code":
+				if s, ok := v.(string); ok { addStr("currency_code", strings.ToUpper(s)) }
+			case "sanctioned_amount":
+				switch t := v.(type) {
+				case float64:
+					addFloat("sanctioned_amount", t)
+				case int:
+					addFloat("sanctioned_amount", float64(t))
+				}
+			case "fungibility_type":
+				if s, ok := v.(string); ok {
+					val := strings.ToUpper(strings.TrimSpace(s))
+					if val != "INTER-CORE" && val != "INTRA-CORE" && val != "NONE" {
+						api.RespondWithResult(w, false, "invalid fungibility_type")
+						return
+					}
+					addStr("fungibility_type", val)
+				}
+			case "fungibility_pct":
+				switch t := v.(type) {
+				case float64:
+					addFloat("fungibility_pct", t)
+				case int:
+					addFloat("fungibility_pct", float64(t))
+				}
+			case "security_type":
+				if s, ok := v.(string); ok {
+					val := strings.ToUpper(strings.TrimSpace(s))
+					if val != "SECURED" && val != "UNSECURED" {
+						api.RespondWithResult(w, false, "invalid security_type")
+						return
+					}
+					addStr("security_type", val)
+				}
+			case "remarks":
+				if s, ok := v.(string); ok { addStr("remarks", s) }
+			case "initial_utilization":
+				switch t := v.(type) {
+				case float64:
+					addFloat("initial_utilization", t)
+				case int:
+					addFloat("initial_utilization", float64(t))
+				}
+			default:
+				// ignore unknown fields
+			}
+		}
+
+		if len(newSets) == 0 {
+			api.RespondWithResult(w, false, "no valid fields provided to update")
+			return
+		}
+
+		setClause := strings.Join(oldSets, ", ")
+		if setClause != "" {
+			setClause += ", "
+		}
+		setClause += strings.Join(newSets, ", ")
+
+		q := "UPDATE cimplrcorpsaas.bank_limit SET " + setClause + " WHERE limit_id = $" + fmt.Sprint(pos)
+		args = append(args, req.LimitID)
+
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			api.RespondWithResult(w, false, "failed to update limit: "+err.Error())
 			return
 		}

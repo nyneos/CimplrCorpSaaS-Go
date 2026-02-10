@@ -247,6 +247,13 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// Forward Flush to the underlying ResponseWriter if it supports http.Flusher
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // encResponseWriter captures handler output so we can encrypt it if requested.
 type encResponseWriter struct {
 	http.ResponseWriter
@@ -264,6 +271,13 @@ func (erw *encResponseWriter) WriteHeader(code int) {
 
 func (erw *encResponseWriter) Write(b []byte) (int, error) {
 	return erw.buf.Write(b)
+}
+
+// Forward Flush to the underlying ResponseWriter if it supports http.Flusher
+func (erw *encResponseWriter) Flush() {
+	if f, ok := erw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // decryptPayload unwraps AES-GCM encrypted request bodies when X-Payload-Enc=aes-gcm is present.

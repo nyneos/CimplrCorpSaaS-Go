@@ -218,15 +218,10 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var req struct {
-			UserID          string  `json:"user_id"`
-			UtilizationID   string  `json:"utilization_id"`
-			LimitID         string  `json:"limit_id"`
-			UtilizationDate string  `json:"utilization_date"`
-			CurrencyCode    string  `json:"currency_code"`
-			UtilizedAmount  float64 `json:"utilized_amount"`
-			Remarks         string  `json:"remarks"`
-			ReferenceDoc    string  `json:"reference_doc"`
-			Reason          string  `json:"reason"`
+			UserID        string                 `json:"user_id"`
+			UtilizationID string                 `json:"utilization_id"`
+			Fields        map[string]interface{} `json:"fields"`
+			Reason        string                 `json:"reason"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -236,6 +231,11 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.UserID == "" || req.UtilizationID == "" {
 			api.RespondWithResult(w, false, "user_id and utilization_id required")
+			return
+		}
+
+		if len(req.Fields) == 0 {
+			api.RespondWithResult(w, false, "no fields provided to update")
 			return
 		}
 
@@ -258,25 +258,76 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		upd := `UPDATE cimplrcorpsaas.bank_limit_utilization SET
-			old_utilization_date = utilization_date,
-			old_currency_code = currency_code,
-			old_utilized_amount = utilized_amount,
-			old_remarks = remarks,
-			old_reference_doc = reference_doc,
-			utilization_date = $2,
-			currency_code = $3,
-			utilized_amount = $4,
-			remarks = $5,
-			reference_doc = $6
-		WHERE utilization_id = $1`
+		sel := `SELECT limit_id, utilization_date, currency_code, utilized_amount, remarks, reference_doc FROM cimplrcorpsaas.bank_limit_utilization WHERE utilization_id = $1 FOR UPDATE`
+		var curLimitID *string
+		var curUtilDate *time.Time
+		var curCurrency *string
+		var curUtilizedAmount float64
+		var curRemarks *string
+		var curReferenceDoc *string
 
-		_, err = tx.Exec(ctx, upd,
-			req.UtilizationID, req.UtilizationDate, strings.ToUpper(req.CurrencyCode),
-			req.UtilizedAmount, nullifyEmpty(req.Remarks), nullifyEmpty(req.ReferenceDoc),
-		)
+		if err := tx.QueryRow(ctx, sel, req.UtilizationID).Scan(&curLimitID, &curUtilDate, &curCurrency, &curUtilizedAmount, &curRemarks, &curReferenceDoc); err != nil {
+			api.RespondWithResult(w, false, "failed to fetch current utilization: "+err.Error())
+			return
+		}
 
-		if err != nil {
+		oldSets := []string{}
+		newSets := []string{}
+		args := []interface{}{}
+		pos := 1
+
+		addStr := func(col string, value interface{}) {
+			oldSets = append(oldSets, "old_"+col+" = "+col)
+			newSets = append(newSets, col+" = $"+fmt.Sprint(pos))
+			args = append(args, value)
+			pos++
+		}
+		addFloat := func(col string, value interface{}) {
+			oldSets = append(oldSets, "old_"+col+" = "+col)
+			newSets = append(newSets, col+" = $"+fmt.Sprint(pos))
+			args = append(args, value)
+			pos++
+		}
+
+		for k, v := range req.Fields {
+			switch strings.ToLower(k) {
+			case "limit_id":
+				if s, ok := v.(string); ok { addStr("limit_id", s) }
+			case "utilization_date":
+				if s, ok := v.(string); ok { addStr("utilization_date", s) }
+			case "currency_code":
+				if s, ok := v.(string); ok { addStr("currency_code", strings.ToUpper(s)) }
+			case "utilized_amount":
+				switch t := v.(type) {
+				case float64:
+					addFloat("utilized_amount", t)
+				case int:
+					addFloat("utilized_amount", float64(t))
+				}
+			case "remarks":
+				if s, ok := v.(string); ok { addStr("remarks", s) }
+			case "reference_doc":
+				if s, ok := v.(string); ok { addStr("reference_doc", s) }
+			default:
+				// ignore unknown fields
+			}
+		}
+
+		if len(newSets) == 0 {
+			api.RespondWithResult(w, false, "no valid fields provided to update")
+			return
+		}
+
+		setClause := strings.Join(oldSets, ", ")
+		if setClause != "" {
+			setClause += ", "
+		}
+		setClause += strings.Join(newSets, ", ")
+
+		q := "UPDATE cimplrcorpsaas.bank_limit_utilization SET " + setClause + " WHERE utilization_id = $" + fmt.Sprint(pos)
+		args = append(args, req.UtilizationID)
+
+		if _, err := tx.Exec(ctx, q, args...); err != nil {
 			api.RespondWithResult(w, false, "failed to update: "+err.Error())
 			return
 		}
@@ -285,7 +336,16 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at
 		) VALUES ($1,$2,'EDIT','PENDING_EDIT_APPROVAL',$3,$4,now())`
 
-		if _, err := tx.Exec(ctx, auditQ, req.UtilizationID, req.LimitID, nullifyEmpty(req.Reason), requestedBy); err != nil {
+		// pick limit id argument: prefer fields if supplied, else current
+		limitForAudit := ""
+		if v, ok := req.Fields["limit_id"]; ok {
+			if s, sok := v.(string); sok { limitForAudit = s }
+		}
+		if limitForAudit == "" && curLimitID != nil {
+			limitForAudit = *curLimitID
+		}
+
+		if _, err := tx.Exec(ctx, auditQ, req.UtilizationID, limitForAudit, nullifyEmpty(req.Reason), requestedBy); err != nil {
 			api.RespondWithResult(w, false, "failed to create audit: "+err.Error())
 			return
 		}
@@ -392,7 +452,17 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				u.utilization_id, u.limit_id, u.utilization_date, u.currency_code, u.utilized_amount,
 				u.remarks, u.reference_doc, u.entry_mode, u.status,
 				u.old_utilization_date, u.old_currency_code, u.old_utilized_amount, u.old_remarks, u.old_reference_doc,
-				a.action_type, a.processing_status, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
+				a.action_type, a.processing_status, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason,
+
+				-- limit fields
+				l.limit_id, l.entity_name, l.bank_name, l.core_limit_type, l.limit_type, l.limit_sub_type,
+				l.sanction_date, l.effective_date, l.currency_code as limit_currency_code, l.sanctioned_amount,
+				l.fungibility_type, l.fungibility_pct, l.security_type, l.remarks as limit_remarks, l.initial_utilization,
+				l.old_entity_name, l.old_bank_name, l.old_core_limit_type, l.old_limit_type, l.old_limit_sub_type,
+				l.old_sanction_date, l.old_effective_date, l.old_currency_code, l.old_sanctioned_amount,
+				l.old_fungibility_type, l.old_fungibility_pct, l.old_security_type, l.old_remarks, l.old_initial_utilization,
+				la.action_type as limit_action_type, la.processing_status as limit_processing_status, la.requested_by as limit_requested_by, la.requested_at as limit_requested_at, la.checker_by as limit_checker_by, la.checker_at as limit_checker_at, la.checker_comment as limit_checker_comment, la.reason as limit_reason
+
 			FROM cimplrcorpsaas.bank_limit_utilization u
 			LEFT JOIN LATERAL (
 				SELECT action_type, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment, reason
@@ -401,6 +471,14 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
+			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
+			LEFT JOIN LATERAL (
+				SELECT action_type, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment, reason
+				FROM cimplrcorpsaas.auditactionbanklimit
+				WHERE limit_id = l.limit_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) la ON TRUE
 			WHERE COALESCE(u.is_deleted, false) = false
 			ORDER BY u.utilization_date DESC`
 
@@ -417,21 +495,50 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var utilizationDate *time.Time
 			var utilizedAmount float64
 			var remarks, referenceDoc *string
-			
-			// Old values
+
+			// Old values (utilization)
 			var oldUtilizationDate *time.Time
 			var oldCurrencyCode *string
 			var oldUtilizedAmount *float64
 			var oldRemarks, oldReferenceDoc *string
-			
+
 			var actionType, procStatus, requestedBy, checkerBy, checkerComment, reason *string
 			var requestedAt, checkerAt *time.Time
+
+			// limit fields
+			var l_limitID, l_entityName, l_bankName, l_coreLimitType string
+			var l_limitType, l_limitSubType, l_limitRemarks *string
+			var l_sanctionDate, l_effectiveDate *time.Time
+			var l_limitCurrencyCode *string
+			var l_sanctionedAmount float64
+			var l_fungibilityType *string
+			var l_fungibilityPct *float64
+			var l_securityType *string
+			var l_initialUtilization *float64
+
+			// old limit values
+			var l_oldEntityName, l_oldBankName, l_oldCoreLimitType, l_oldLimitType, l_oldLimitSubType *string
+			var l_oldSanctionDate, l_oldEffectiveDate *time.Time
+			var l_oldCurrencyCode *string
+			var l_oldSanctionedAmount, l_oldFungibilityPct, l_oldInitialUtilization *float64
+			var l_oldFungibilityType, l_oldSecurityType, l_oldRemarks *string
+
+			var limitActionType, limitProcStatus, limitRequestedBy, limitCheckerBy, limitCheckerComment, limitReason *string
+			var limitRequestedAt, limitCheckerAt *time.Time
 
 			err := rows.Scan(
 				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
 				&remarks, &referenceDoc, &entryMode, &status,
 				&oldUtilizationDate, &oldCurrencyCode, &oldUtilizedAmount, &oldRemarks, &oldReferenceDoc,
 				&actionType, &procStatus, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason,
+
+				&l_limitID, &l_entityName, &l_bankName, &l_coreLimitType, &l_limitType, &l_limitSubType,
+				&l_sanctionDate, &l_effectiveDate, &l_limitCurrencyCode, &l_sanctionedAmount,
+				&l_fungibilityType, &l_fungibilityPct, &l_securityType, &l_limitRemarks, &l_initialUtilization,
+				&l_oldEntityName, &l_oldBankName, &l_oldCoreLimitType, &l_oldLimitType, &l_oldLimitSubType,
+				&l_oldSanctionDate, &l_oldEffectiveDate, &l_oldCurrencyCode, &l_oldSanctionedAmount,
+				&l_oldFungibilityType, &l_oldFungibilityPct, &l_oldSecurityType, &l_oldRemarks, &l_oldInitialUtilization,
+				&limitActionType, &limitProcStatus, &limitRequestedBy, &limitRequestedAt, &limitCheckerBy, &limitCheckerAt, &limitCheckerComment, &limitReason,
 			)
 			if err != nil {
 				continue
@@ -447,13 +554,13 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"reference_doc":     stringOrEmpty(referenceDoc),
 				"entry_mode":        entryMode,
 				"status":            status,
-				
+
 				"old_utilization_date": timeOrEmpty(oldUtilizationDate),
 				"old_currency_code":    stringOrEmpty(oldCurrencyCode),
 				"old_utilized_amount":  floatOrZero(oldUtilizedAmount),
 				"old_remarks":          stringOrEmpty(oldRemarks),
 				"old_reference_doc":    stringOrEmpty(oldReferenceDoc),
-				
+
 				"action_type":       stringOrEmpty(actionType),
 				"processing_status": stringOrEmpty(procStatus),
 				"requested_by":      stringOrEmpty(requestedBy),
@@ -462,6 +569,47 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_at":        timeOrEmpty(checkerAt),
 				"checker_comment":   stringOrEmpty(checkerComment),
 				"reason":            stringOrEmpty(reason),
+
+				// flattened limit fields (prefixed with limit_)
+				"limit_limit_id":            l_limitID,
+				"limit_entity_name":         l_entityName,
+				"limit_bank_name":           l_bankName,
+				"limit_core_limit_type":     l_coreLimitType,
+				"limit_limit_type":          stringOrEmpty(l_limitType),
+				"limit_limit_sub_type":      stringOrEmpty(l_limitSubType),
+				"limit_sanction_date":       timeOrEmpty(l_sanctionDate),
+				"limit_effective_date":      timeOrEmpty(l_effectiveDate),
+				"limit_currency_code":       stringOrEmpty(l_limitCurrencyCode),
+				"limit_sanctioned_amount":   l_sanctionedAmount,
+				"limit_fungibility_type":    stringOrEmpty(l_fungibilityType),
+				"limit_fungibility_pct":     floatOrZero(l_fungibilityPct),
+				"limit_security_type":       stringOrEmpty(l_securityType),
+				"limit_remarks":             stringOrEmpty(l_limitRemarks),
+				"limit_initial_utilization": floatOrZero(l_initialUtilization),
+
+				"limit_old_entity_name":         stringOrEmpty(l_oldEntityName),
+				"limit_old_bank_name":           stringOrEmpty(l_oldBankName),
+				"limit_old_core_limit_type":     stringOrEmpty(l_oldCoreLimitType),
+				"limit_old_limit_type":          stringOrEmpty(l_oldLimitType),
+				"limit_old_limit_sub_type":      stringOrEmpty(l_oldLimitSubType),
+				"limit_old_sanction_date":       timeOrEmpty(l_oldSanctionDate),
+				"limit_old_effective_date":      timeOrEmpty(l_oldEffectiveDate),
+				"limit_old_currency_code":       stringOrEmpty(l_oldCurrencyCode),
+				"limit_old_sanctioned_amount":   floatOrZero(l_oldSanctionedAmount),
+				"limit_old_fungibility_type":    stringOrEmpty(l_oldFungibilityType),
+				"limit_old_fungibility_pct":     floatOrZero(l_oldFungibilityPct),
+				"limit_old_security_type":       stringOrEmpty(l_oldSecurityType),
+				"limit_old_remarks":             stringOrEmpty(l_oldRemarks),
+				"limit_old_initial_utilization": floatOrZero(l_oldInitialUtilization),
+
+				"limit_action_type":       stringOrEmpty(limitActionType),
+				"limit_processing_status": stringOrEmpty(limitProcStatus),
+				"limit_requested_by":      stringOrEmpty(limitRequestedBy),
+				"limit_requested_at":      timeOrEmpty(limitRequestedAt),
+				"limit_checker_by":        stringOrEmpty(limitCheckerBy),
+				"limit_checker_at":        timeOrEmpty(limitCheckerAt),
+				"limit_checker_comment":   stringOrEmpty(limitCheckerComment),
+				"limit_reason":            stringOrEmpty(limitReason),
 			}
 
 			results = append(results, item)
@@ -479,7 +627,12 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		query := `
 			SELECT 
 				u.utilization_id, u.limit_id, u.utilization_date, u.currency_code, u.utilized_amount,
-				u.remarks, u.reference_doc, u.entry_mode, u.status
+				u.remarks, u.reference_doc, u.entry_mode, u.status,
+
+				l.limit_id, l.entity_name, l.bank_name, l.core_limit_type, l.limit_type, l.limit_sub_type,
+				l.sanction_date, l.effective_date, l.currency_code as limit_currency_code, l.sanctioned_amount,
+				l.fungibility_type, l.fungibility_pct, l.security_type, l.remarks as limit_remarks, l.initial_utilization,
+				la.processing_status as limit_processing_status
 			FROM cimplrcorpsaas.bank_limit_utilization u
 			INNER JOIN LATERAL (
 				SELECT processing_status
@@ -488,6 +641,14 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON a.processing_status = 'APPROVED'
+			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM cimplrcorpsaas.auditactionbanklimit
+				WHERE limit_id = l.limit_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) la ON TRUE
 			WHERE COALESCE(u.is_deleted, false) = false
 			ORDER BY u.utilization_date DESC`
 
@@ -505,9 +666,25 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var utilizedAmount float64
 			var remarks, referenceDoc *string
 
+			// limit fields
+			var l_limitID, l_entityName, l_bankName, l_coreLimitType string
+			var l_limitType, l_limitSubType, l_limitRemarks *string
+			var l_sanctionDate, l_effectiveDate *time.Time
+			var l_limitCurrencyCode *string
+			var l_sanctionedAmount float64
+			var l_fungibilityType *string
+			var l_fungibilityPct *float64
+			var l_securityType *string
+			var l_initialUtilization *float64
+			var l_limitProcessingStatus *string
+
 			err := rows.Scan(
 				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
 				&remarks, &referenceDoc, &entryMode, &status,
+				&l_limitID, &l_entityName, &l_bankName, &l_coreLimitType, &l_limitType, &l_limitSubType,
+				&l_sanctionDate, &l_effectiveDate, &l_limitCurrencyCode, &l_sanctionedAmount,
+				&l_fungibilityType, &l_fungibilityPct, &l_securityType, &l_limitRemarks, &l_initialUtilization,
+				&l_limitProcessingStatus,
 			)
 			if err != nil {
 				continue
@@ -523,6 +700,23 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"reference_doc":    stringOrEmpty(referenceDoc),
 				"entry_mode":       entryMode,
 				"status":           status,
+
+				"limit_limit_id":            l_limitID,
+				"limit_entity_name":         l_entityName,
+				"limit_bank_name":           l_bankName,
+				"limit_core_limit_type":     l_coreLimitType,
+				"limit_limit_type":          stringOrEmpty(l_limitType),
+				"limit_limit_sub_type":      stringOrEmpty(l_limitSubType),
+				"limit_sanction_date":       timeOrEmpty(l_sanctionDate),
+				"limit_effective_date":      timeOrEmpty(l_effectiveDate),
+				"limit_currency_code":       stringOrEmpty(l_limitCurrencyCode),
+				"limit_sanctioned_amount":   l_sanctionedAmount,
+				"limit_fungibility_type":    stringOrEmpty(l_fungibilityType),
+				"limit_fungibility_pct":     floatOrZero(l_fungibilityPct),
+				"limit_security_type":       stringOrEmpty(l_securityType),
+				"limit_remarks":             stringOrEmpty(l_limitRemarks),
+				"limit_initial_utilization": floatOrZero(l_initialUtilization),
+				"limit_processing_status":   stringOrEmpty(l_limitProcessingStatus),
 			}
 
 			results = append(results, item)
