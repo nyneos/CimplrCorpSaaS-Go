@@ -13,6 +13,7 @@ import (
 	"CimplrCorpSaas/api/fx"
 	"CimplrCorpSaas/api/investment"
 	"CimplrCorpSaas/api/master"
+	"CimplrCorpSaas/api/notification"
 	"CimplrCorpSaas/api/uam"
 	"CimplrCorpSaas/internal/jobs"
 	"CimplrCorpSaas/internal/logger"
@@ -73,6 +74,9 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 	"investment": func(cfg map[string]interface{}) serviceiface.Service {
 		// return investment.NewInvestmentService(cfg, pgxPool)
 		return investment.NewInvestmentService(cfg, pgxPool, db)
+	},
+	"notification": func(cfg map[string]interface{}) serviceiface.Service {
+		return notification.NewNotificationService(cfg, pgxPool, db)
 	},
 	"gateway": func(cfg map[string]interface{}) serviceiface.Service {
 		return api.NewGatewayService(cfg)

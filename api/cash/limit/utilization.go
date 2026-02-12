@@ -544,6 +544,22 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// KPI computations: available headroom and utilization percentage
+			var l_initial float64
+			if l_initialUtilization != nil {
+				l_initial = *l_initialUtilization
+			}
+			limitAvailable := l_sanctionedAmount - (l_initial + utilizedAmount)
+			if limitAvailable < 0 {
+				limitAvailable = 0
+			}
+			var limitUtilPct float64
+			if l_sanctionedAmount > 0 {
+				limitUtilPct = (l_initial + utilizedAmount) / l_sanctionedAmount
+			}
+
+
+
 			item := map[string]interface{}{
 				"utilization_id":    utilizationID,
 				"limit_id":          limitID,
@@ -610,6 +626,9 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"limit_checker_at":        timeOrEmpty(limitCheckerAt),
 				"limit_checker_comment":   stringOrEmpty(limitCheckerComment),
 				"limit_reason":            stringOrEmpty(limitReason),
+				// KPIs
+				"limit_available":         limitAvailable,
+				"limit_utilization_pct":   limitUtilPct,
 			}
 
 			results = append(results, item)
@@ -690,6 +709,20 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
+			// KPI computations for approved utilizations
+			var l_initial float64
+			if l_initialUtilization != nil {
+				l_initial = *l_initialUtilization
+			}
+			limitAvailable := l_sanctionedAmount - (l_initial + utilizedAmount)
+			if limitAvailable < 0 {
+				limitAvailable = 0
+			}
+			var limitUtilPct float64
+			if l_sanctionedAmount > 0 {
+				limitUtilPct = (l_initial + utilizedAmount) / l_sanctionedAmount
+			}
+
 			item := map[string]interface{}{
 				"utilization_id":   utilizationID,
 				"limit_id":         limitID,
@@ -717,12 +750,179 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"limit_remarks":             stringOrEmpty(l_limitRemarks),
 				"limit_initial_utilization": floatOrZero(l_initialUtilization),
 				"limit_processing_status":   stringOrEmpty(l_limitProcessingStatus),
+				// KPIs
+				"limit_available":         limitAvailable,
+				"limit_utilization_pct":   limitUtilPct,
 			}
 
 			results = append(results, item)
 		}
 
 		api.RespondWithPayload(w, true, "", results)
+	}
+}
+
+// GetApprovedUtilizationsGrouped returns approved utilizations plus grouped KPIs by limit
+func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		query := `
+			SELECT 
+				u.utilization_id, u.limit_id, u.utilization_date, u.currency_code, u.utilized_amount,
+				u.remarks, u.reference_doc, u.entry_mode, u.status,
+
+				l.limit_id, l.entity_name, l.bank_name, l.core_limit_type, l.limit_type, l.limit_sub_type,
+				l.sanction_date, l.effective_date, l.currency_code as limit_currency_code, l.sanctioned_amount,
+				l.fungibility_type, l.fungibility_pct, l.security_type, l.remarks as limit_remarks, l.initial_utilization
+			FROM cimplrcorpsaas.bank_limit_utilization u
+			INNER JOIN LATERAL (
+				SELECT processing_status
+				FROM cimplrcorpsaas.auditactionbanklimitutilization
+				WHERE utilization_id = u.utilization_id
+				ORDER BY requested_at DESC
+				LIMIT 1
+			) a ON a.processing_status = 'APPROVED'
+			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
+			WHERE COALESCE(u.is_deleted, false) = false
+			ORDER BY u.utilization_date DESC`
+
+		rows, err := pgxPool.Query(ctx, query)
+		if err != nil {
+			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		results := make([]map[string]interface{}, 0)
+
+		// grouping by limit_id
+		type grp struct {
+			LimitID           string
+			BankName          string
+			SanctionedAmount  float64
+			TotalInitial      float64
+			TotalUtilized     float64
+		}
+		groups := map[string]*grp{}
+
+		for rows.Next() {
+			var utilizationID, limitID, currencyCode, entryMode, status string
+			var utilizationDate *time.Time
+			var utilizedAmount float64
+			var remarks, referenceDoc *string
+
+			// limit fields
+			var l_limitID, l_entityName, l_bankName, l_coreLimitType string
+			var l_limitType, l_limitSubType, l_limitRemarks *string
+			var l_sanctionDate, l_effectiveDate *time.Time
+			var l_limitCurrencyCode *string
+			var l_sanctionedAmount float64
+			var l_fungibilityType *string
+			var l_fungibilityPct *float64
+			var l_securityType *string
+			var l_initialUtilization *float64
+
+			if err := rows.Scan(
+				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
+				&remarks, &referenceDoc, &entryMode, &status,
+
+				&l_limitID, &l_entityName, &l_bankName, &l_coreLimitType, &l_limitType, &l_limitSubType,
+				&l_sanctionDate, &l_effectiveDate, &l_limitCurrencyCode, &l_sanctionedAmount,
+				&l_fungibilityType, &l_fungibilityPct, &l_securityType, &l_limitRemarks, &l_initialUtilization,
+			); err != nil {
+				continue
+			}
+
+			// per-row KPI
+			var l_initial float64
+			if l_initialUtilization != nil {
+				l_initial = *l_initialUtilization
+			}
+			limitAvailable := l_sanctionedAmount - (l_initial + utilizedAmount)
+			if limitAvailable < 0 {
+				limitAvailable = 0
+			}
+			var limitUtilPct float64
+			if l_sanctionedAmount > 0 {
+				limitUtilPct = (l_initial + utilizedAmount) / l_sanctionedAmount
+			}
+
+			item := map[string]interface{}{
+				"utilization_id":   utilizationID,
+				"limit_id":         limitID,
+				"utilization_date": timeOrEmpty(utilizationDate),
+				"currency_code":    currencyCode,
+				"utilized_amount":  utilizedAmount,
+				"remarks":          stringOrEmpty(remarks),
+				"reference_doc":    stringOrEmpty(referenceDoc),
+				"entry_mode":       entryMode,
+				"status":           status,
+
+				"limit_limit_id":            l_limitID,
+				"limit_entity_name":         l_entityName,
+				"limit_bank_name":           l_bankName,
+				"limit_core_limit_type":     l_coreLimitType,
+				"limit_limit_type":          stringOrEmpty(l_limitType),
+				"limit_limit_sub_type":      stringOrEmpty(l_limitSubType),
+				"limit_sanction_date":       timeOrEmpty(l_sanctionDate),
+				"limit_effective_date":      timeOrEmpty(l_effectiveDate),
+				"limit_currency_code":       stringOrEmpty(l_limitCurrencyCode),
+				"limit_sanctioned_amount":   l_sanctionedAmount,
+				"limit_fungibility_type":    stringOrEmpty(l_fungibilityType),
+				"limit_fungibility_pct":     floatOrZero(l_fungibilityPct),
+				"limit_security_type":       stringOrEmpty(l_securityType),
+				"limit_remarks":             stringOrEmpty(l_limitRemarks),
+				"limit_initial_utilization": floatOrZero(l_initialUtilization),
+
+				// KPIs
+				"limit_available":       limitAvailable,
+				"limit_utilization_pct": limitUtilPct,
+			}
+
+			// append row
+			results = append(results, item)
+
+			// accumulate group
+			g, ok := groups[l_limitID]
+			if !ok {
+				g = &grp{LimitID: l_limitID, BankName: l_bankName, SanctionedAmount: l_sanctionedAmount}
+				if l_initialUtilization != nil {
+					g.TotalInitial = *l_initialUtilization
+				}
+				groups[l_limitID] = g
+			}
+			g.TotalUtilized += utilizedAmount
+		}
+
+		// build grouped slice with computed KPIs
+		grouped := make([]map[string]interface{}, 0, len(groups))
+		for _, g := range groups {
+			avail := g.SanctionedAmount - (g.TotalInitial + g.TotalUtilized)
+			if avail < 0 {
+				avail = 0
+			}
+			var utilPct float64
+			if g.SanctionedAmount > 0 {
+				utilPct = (g.TotalInitial + g.TotalUtilized) / g.SanctionedAmount
+			}
+			grouped = append(grouped, map[string]interface{}{
+				"limit_id":            g.LimitID,
+				"bank_name":           g.BankName,
+				"sanctioned_amount":   g.SanctionedAmount,
+				"total_initial":       g.TotalInitial,
+				"total_utilized":      g.TotalUtilized,
+				"available":           avail,
+				"utilization_pct":     utilPct,
+			})
+		}
+
+		payload := map[string]interface{}{
+			"rows":   results,
+			"groups": grouped,
+		}
+
+		api.RespondWithPayload(w, true, "", payload)
 	}
 }
 

@@ -49,8 +49,12 @@ services:
     start_order: 12
     config:
       port: 7143
-  - name: cron
+  - name: notification
     start_order: 13
+    config:
+      port: 9111
+  - name: cron
+    start_order: 14
     config:
       batch_size: 1000
       sweep_schedule: "*/1 * * * *"

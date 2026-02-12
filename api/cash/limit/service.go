@@ -27,6 +27,7 @@ func RegisterLimitRoutes(mux *http.ServeMux, pgxPool *pgxpool.Pool) {
 	mux.Handle("/cash/utilization/delete", middlewares.PreValidationMiddleware(pgxPool)(DeleteUtilization(pgxPool)))
 	mux.Handle("/cash/utilization/all", middlewares.PreValidationMiddleware(pgxPool)(GetAllUtilizations(pgxPool)))
 	mux.Handle("/cash/utilization/approved", middlewares.PreValidationMiddleware(pgxPool)(GetApprovedUtilizations(pgxPool)))
+	mux.Handle("/cash/utilization/approved-grouped", middlewares.PreValidationMiddleware(pgxPool)(GetApprovedUtilizationsGrouped(pgxPool)))
 	mux.Handle("/cash/utilization/approve", middlewares.PreValidationMiddleware(pgxPool)(BulkApproveUtilizations(pgxPool)))
 	mux.Handle("/cash/utilization/reject", middlewares.PreValidationMiddleware(pgxPool)(BulkRejectUtilizations(pgxPool)))
 	mux.Handle("/cash/utilization/upload", middlewares.PreValidationMiddleware(pgxPool)(UploadUtilization(pgxPool)))
