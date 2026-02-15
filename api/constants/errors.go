@@ -7,7 +7,7 @@ import "fmt"
 // ============================================================================
 
 const (
-	ErrMissingUserID  = "user_id is required in the request"
+	ErrMissingUserID  = "User ID is required in the request"
 	ErrInvalidSession = "Your session has expired or is invalid. Please login again"
 	ErrUnauthorized   = "You are not authorized to perform this action"
 	ErrSessionExpired = "Your session has expired. Please login again"
@@ -187,7 +187,7 @@ const (
 
 const (
 	ErrDatabaseConnection      = "Database connection failed. Please try again later"
-	ErrQueryFailed             = "Database query failed. Please contact support if this persists"
+	ErrQueryFailed             = "Database query failed. Please contact support if this persists :"
 	ErrTransactionFailed       = "Transaction failed. Please try again"
 	ErrDuplicateEntry          = "This entry already exists in the system"
 	ErrConstraintViolation     = "Operation violates data constraints"

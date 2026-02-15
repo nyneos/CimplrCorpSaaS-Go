@@ -32,7 +32,7 @@ func GetFundAvailability(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
@@ -313,7 +313,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 	// filtered only by date range
 
 	log.Printf("[fetchProjections] Date range: %s to %s (showing ALL approved projections)",
-		asOfDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+		asOfDate.Format(constants.DateFormat), endDate.Format(constants.DateFormat))
 
 	// First, check if there are ANY approved proposals
 	var approvedCount int
@@ -529,7 +529,7 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 			"category_id":          key.CategoryID,
 			"category_name":        key.CategoryName,
 			"description":          key.Description,
-			"maturity_date":        key.MaturityDate.Format("2006-01-02"),
+			"maturity_date":        key.MaturityDate.Format(constants.DateFormat),
 			"periods":              periods,
 			"total_amount":         totalAmount,
 			"is_recurring":         key.IsRecurring,
@@ -553,15 +553,15 @@ func aggregateByPeriod(transactions []struct {
 
 		switch viewType {
 		case "daily":
-			periodKey = txn.Date.Format("2006-01-02")
+			periodKey = txn.Date.Format(constants.DateFormat)
 		case "weekly":
 			year, week := txn.Date.ISOWeek()
-			periodKey = fmt.Sprintf("%d-W%02d", year, week)
+			periodKey = fmt.Sprintf(constants.FormatYearWeek, year, week)
 		case "monthly":
-			periodKey = txn.Date.Format("2006-01")
+			periodKey = txn.Date.Format(constants.DateFormatYearMonth)
 		case "quarterly":
 			quarter := (int(txn.Date.Month())-1)/3 + 1
-			periodKey = fmt.Sprintf("%d-Q%d", txn.Date.Year(), quarter)
+			periodKey = fmt.Sprintf(constants.FormatYearQuarter, txn.Date.Year(), quarter)
 		case "yearly":
 			periodKey = fmt.Sprintf("%d", txn.Date.Year())
 		}
@@ -594,7 +594,7 @@ func aggregateProjectionsByPeriod(monthlyData []struct {
 			for day := 1; day <= daysInMonth; day++ {
 				dayDate := time.Date(data.Year, time.Month(data.Month), day, 0, 0, 0, 0, time.UTC)
 				if dayDate.After(asOfDate) || dayDate.Equal(asOfDate) {
-					periodKey = dayDate.Format("2006-01-02")
+					periodKey = dayDate.Format(constants.DateFormat)
 					periods[periodKey] += dailyAmount
 				}
 			}
@@ -607,7 +607,7 @@ func aggregateProjectionsByPeriod(monthlyData []struct {
 			weeksInMonth := make(map[string]bool)
 			for d := firstDay; !d.After(lastDay); d = d.AddDate(0, 0, 1) {
 				year, week := d.ISOWeek()
-				weeksInMonth[fmt.Sprintf("%d-W%02d", year, week)] = true
+				weeksInMonth[fmt.Sprintf(constants.FormatYearWeek, year, week)] = true
 			}
 
 			weeklyAmount := data.Amount / float64(len(weeksInMonth))
@@ -616,10 +616,10 @@ func aggregateProjectionsByPeriod(monthlyData []struct {
 			}
 			continue
 		case "monthly":
-			periodKey = date.Format("2006-01")
+			periodKey = date.Format(constants.DateFormatYearMonth)
 		case "quarterly":
 			quarter := (data.Month-1)/3 + 1
-			periodKey = fmt.Sprintf("%d-Q%d", data.Year, quarter)
+			periodKey = fmt.Sprintf(constants.FormatYearQuarter, data.Year, quarter)
 		case "yearly":
 			periodKey = fmt.Sprintf("%d", data.Year)
 		}
@@ -637,21 +637,21 @@ func generateAllPeriods(startDate, endDate time.Time, viewType string) map[strin
 	switch viewType {
 	case "daily":
 		for d := startDate; !d.After(endDate); d = d.AddDate(0, 0, 1) {
-			allPeriods[d.Format("2006-01-02")] = 0.0
+			allPeriods[d.Format(constants.DateFormat)] = 0.0
 		}
 	case "weekly":
 		for d := startDate; !d.After(endDate); d = d.AddDate(0, 0, 7) {
 			year, week := d.ISOWeek()
-			allPeriods[fmt.Sprintf("%d-W%02d", year, week)] = 0.0
+			allPeriods[fmt.Sprintf(constants.FormatYearWeek, year, week)] = 0.0
 		}
 	case "monthly":
 		for d := startDate; !d.After(endDate); d = d.AddDate(0, 1, 0) {
-			allPeriods[d.Format("2006-01")] = 0.0
+			allPeriods[d.Format(constants.DateFormatYearMonth)] = 0.0
 		}
 	case "quarterly":
 		for d := startDate; !d.After(endDate); d = d.AddDate(0, 3, 0) {
 			quarter := (int(d.Month())-1)/3 + 1
-			allPeriods[fmt.Sprintf("%d-Q%d", d.Year(), quarter)] = 0.0
+			allPeriods[fmt.Sprintf(constants.FormatYearQuarter, d.Year(), quarter)] = 0.0
 		}
 	case "yearly":
 		for y := startDate.Year(); y <= endDate.Year(); y++ {

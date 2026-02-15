@@ -329,7 +329,7 @@ func handleZipBankStatementUpload(db *sql.DB, w http.ResponseWriter, r *http.Req
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		respondWithError(w, err, "File is required", http.StatusBadRequest)
+		respondWithError(w, err, constants.ErrFileUploadFailed, http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
@@ -483,7 +483,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		}
 
 		if r.MultipartForm == nil || r.MultipartForm.File == nil || len(r.MultipartForm.File["file"]) == 0 {
-			respondWithError(w, nil, "File is required", http.StatusBadRequest)
+			respondWithError(w, nil, constants.ErrFileUploadFailed, http.StatusBadRequest)
 			return
 		}
 
@@ -512,7 +512,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			respondWithError(w, err, "File is required", http.StatusBadRequest)
+			respondWithError(w, err, constants.ErrFileUploadFailed, http.StatusBadRequest)
 			return
 		}
 		defer file.Close()

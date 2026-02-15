@@ -73,7 +73,7 @@ func CashContextMiddleware(pgxPool *pgxpool.Pool) func(http.Handler) http.Handle
 
 			if userID == "" {
 				LogError("Missing user_id in request (cash middleware)")
-				RespondWithPayload(w, false, "Missing user_id", nil)
+				RespondWithPayload(w, false, constants.ErrMissingUserID, nil)
 				return
 			}
 

@@ -184,7 +184,7 @@ func UpsertRolePermissions(db *sql.DB) http.HandlerFunc {
 		// Step 3: Bulk insert or fetch permission IDs using CTE (no duplicates created)
 		tx, err := db.Begin()
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, "failed to begin transaction")
+			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToBeginTransaction)
 			return
 		}
 		defer tx.Rollback()

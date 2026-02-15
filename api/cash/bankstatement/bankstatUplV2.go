@@ -187,13 +187,13 @@ var (
 var (
 	acNoHeader                      = "A/C No:"
 	slNoHeader                      = "Sl. No."
-	tranIDHeader                    = "Tran. Id"
-	valueDateHeader                 = "Value Date"
-	transactionDateHeader           = "Transaction Date"
-	transactionRemarksHeader        = "Transaction Remarks"
-	withdrawalAmtHeader             = "Withdrawal Amt (INR)"
-	depositAmtHeader                = "Deposit Amt (INR)"
-	balanceHeader                   = "Balance (INR)"
+	tranIDHeader                    = constants.TranID
+	valueDateHeader                 = constants.ValueDateAlt
+	transactionDateHeader           = constants.TransactionDateAlt
+	transactionRemarksHeader        = constants.TransactionRemarks
+	withdrawalAmtHeader             = constants.WithdrawalAmountINR
+	depositAmtHeader                = constants.DepositAmountINR
+	balanceHeader                   = constants.BalanceINR
 	missingUserIDOrBankStatementIDs = "Missing user_id or bank_statement_ids"
 )
 
@@ -507,7 +507,7 @@ func parseDate(s string) (time.Time, error) {
 		"01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
 		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
 		// ISO-ish layouts to catch Excel exports that already render as 2026-01-15 or RFC3339 strings
-		constants.DateFormat, "2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
+		constants.DateFormat, constants.DateTimeFormat, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
 	}
 	// Try all layouts
 	for _, layout := range layouts {
@@ -1065,7 +1065,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				for _, cell := range row {
 					c := strings.TrimSpace(cell)
 					lc := strings.ToLower(c)
-					// Accept "Date", "Value Date", "Transaction Date", etc.
+					// Accept "Date", constants.ValueDateAlt, constants.TransactionDateAlt, etc.
 					if strings.EqualFold(c, "Date") || strings.Contains(lc, "date") {
 						hasDate = true
 					}
@@ -1415,7 +1415,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			return nil, errors.New("transaction header row not found in CSV file")
 		}
 	} else {
-		// For Excel/XLS, some statements don't include a "Tran. Id" column.
+		// For Excel/XLS, some statements don't include a constants.TranID column.
 		// Try the original Tran Id detection first, then fall back to a
 		// flexible detection similar to CSV: find a row that has Date and
 		// (Description-like column OR amount columns).
@@ -1438,7 +1438,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				for _, cell := range row {
 					c := strings.TrimSpace(cell)
 					lc := strings.ToLower(c)
-					// Accept "Date", "Value Date", "Transaction Date", "Txn Posted Date", etc.
+					// Accept "Date", constants.ValueDateAlt, constants.TransactionDateAlt, "Txn Posted Date", etc.
 					if strings.EqualFold(c, "Date") || strings.Contains(lc, "date") {
 						hasDate = true
 					}
@@ -1598,7 +1598,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if _, exists := colIdx[valueDateHeader]; !exists {
-			// Try "Value Date", "Txn Posted Date", or any date column
+			// Try constants.ValueDateAlt, "Txn Posted Date", or any date column
 			if idx := findColContaining(constants.ValueDate, constants.TransactionPostedDate); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
@@ -1606,7 +1606,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if _, exists := colIdx[transactionDateHeader]; !exists {
-			// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
+			// Try constants.TransactionDateAlt, "Txn Posted Date", or fallback to "Date"
 			if idx := findColContaining(constants.TransactionDate, constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
@@ -3299,7 +3299,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 			})
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    resp,
@@ -5195,7 +5195,7 @@ func userFriendlyUploadError(err error) string {
 		strings.Contains(msg, "failed to upsert bank_balances_manual") ||
 		strings.Contains(msg, "failed to bulk insert transactions") ||
 		strings.Contains(msg, "failed to insert audit action") ||
-		strings.Contains(msg, "failed to commit") {
+		strings.Contains(msg, constants.ErrTxCommitFailed) {
 		return "Something went wrong while saving the uploaded statement. Please try again !!"
 	}
 
@@ -5235,7 +5235,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB) http.Handler {
 		// Get user_id from form
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			http.Error(w, "Missing user_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
 			return
 		}
 
@@ -5381,7 +5381,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB) http.Handler {
 			"upload_time":   time.Now().Format(time.RFC3339),
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	})

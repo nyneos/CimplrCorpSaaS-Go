@@ -168,7 +168,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate session
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id is required")
+			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -186,7 +186,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Set defaults for optional fields
 		if req.EffectiveDate == "" {
-			req.EffectiveDate = time.Now().Format("2006-01-02") // Default to today
+			req.EffectiveDate = time.Now().Format(constants.DateFormat) // Default to today
 		}
 		if req.ExecutionTime == "" {
 			req.ExecutionTime = "18:00" // Default to 6 PM
@@ -244,7 +244,7 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		simulation.SimulationID = fmt.Sprintf("SIM-%s-%d", time.Now().Format("20060102"), time.Now().Unix())
 		simulation.GeneratedAt = time.Now().Format(time.RFC3339)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    simulation,
@@ -270,7 +270,7 @@ func GetBalanceSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id is required")
+			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -296,7 +296,7 @@ func GetBalanceSnapshot(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":  true,
 			"balances": balances,
@@ -324,7 +324,7 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id is required")
+			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -434,7 +434,7 @@ func ValidateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"sweeps_checked": sweepCount,
@@ -464,7 +464,7 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id is required")
+			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -483,10 +483,10 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Default to last 30 days if not provided
 		if req.DateFrom == "" {
-			req.DateFrom = time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+			req.DateFrom = time.Now().AddDate(0, 0, -30).Format(constants.DateFormat)
 		}
 		if req.DateTo == "" {
-			req.DateTo = time.Now().Format("2006-01-02")
+			req.DateTo = time.Now().Format(constants.DateFormat)
 		}
 
 		entityNames := api.GetEntityNamesFromCtx(ctx)
@@ -553,7 +553,7 @@ func GetSweepAnalytics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			},
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    analytics,
@@ -579,7 +579,7 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id is required")
+			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -631,7 +631,7 @@ func GetSweepSuggestions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EstimatedBenefit: "Unlock up to 15% more working capital",
 		})
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":     true,
 			"suggestions": suggestions,
@@ -658,7 +658,7 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id is required")
+			api.RespondWithResult(w, false, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -771,7 +771,7 @@ func GetSweepExecutionGraph(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nodeArray = append(nodeArray, node)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"graph": map[string]interface{}{
@@ -879,7 +879,7 @@ func fetchApprovedSweepsForSimulation(ctx context.Context, pgxPool *pgxpool.Pool
 		// Format effective_date as string
 		var effectiveDateStr *string
 		if effectiveDate.Valid {
-			formatted := effectiveDate.Time.Format("2006-01-02")
+			formatted := effectiveDate.Time.Format(constants.DateFormat)
 			effectiveDateStr = &formatted
 		}
 

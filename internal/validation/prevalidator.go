@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 
@@ -19,7 +20,7 @@ type ValidationResult struct {
 // This replaces multiple middleware queries with ONE database call
 func PreValidateRequest(ctx context.Context, db *pgxpool.Pool, userID string) (*ValidationResult, error) {
 	if userID == "" {
-		return nil, fmt.Errorf("user_id is required")
+		return nil, fmt.Errorf(constants.ErrUserIIsRequired)
 	}
 
 	// Single mega-query combining:

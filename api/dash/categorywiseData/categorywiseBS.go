@@ -664,18 +664,18 @@ LIMIT 2000;
 			}
 
 			resp["debug"] = map[string]interface{}{
-				"horizon_days":             days,
-				"from_date":                fromDate,
-				"entity_filter":            entityF,
-				"bank_filter":              bankF,
-				"currency_filter":          currencyF,
-				"allowed_entity_ids":       len(allowedEntityIDs),
-				"allowed_accounts":         len(allowedAccountNumbers),
-				"allowed_banks":            len(allowedBanksNorm),
-				"allowed_currencies":       len(allowedCurrenciesNorm),
+				"horizon_days":          days,
+				"from_date":             fromDate,
+				"entity_filter":         entityF,
+				"bank_filter":           bankF,
+				"currency_filter":        currencyF,
+				"allowed_entity_ids":     len(allowedEntityIDs),
+				"allowed_accounts":       len(allowedAccountNumbers),
+				"allowed_banks":          len(allowedBanksNorm),
+				"allowed_currencies":     len(allowedCurrenciesNorm),
 				"approved_statement_count": stmtCount,
-				"approved_txn_count":       txnCount,
-				"note":                     "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
+				"approved_txn_count":     txnCount,
+				"note": "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
 			}
 		}
 

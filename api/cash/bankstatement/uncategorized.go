@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -27,7 +28,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		if req.UserID == "" {
-			http.Error(w, "user_id is required", http.StatusBadRequest)
+			http.Error(w, constants.ErrUserIIsRequired, http.StatusBadRequest)
 			return
 		}
 
@@ -143,13 +144,13 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 				txn["cheque_no"] = chequeNo.String
 			}
 			if valueDate.Valid {
-				txn["value_date"] = valueDate.Time.Format("2006-01-02")
+				txn["value_date"] = valueDate.Time.Format(constants.DateFormat)
 			}
 			if transactionDate.Valid {
-				txn["transaction_date"] = transactionDate.Time.Format("2006-01-02")
+				txn["transaction_date"] = transactionDate.Time.Format(constants.DateFormat)
 			}
 			if postedDate.Valid {
-				txn["posted_date"] = postedDate.Time.Format("2006-01-02")
+				txn["posted_date"] = postedDate.Time.Format(constants.DateFormat)
 			}
 			if withdrawalAmount.Valid {
 				txn["withdrawal_amount"] = withdrawalAmount.Float64
@@ -164,16 +165,16 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 				txn["category_id"] = categoryID.String
 			}
 			if createdAt.Valid {
-				txn["created_at"] = createdAt.Time.Format("2006-01-02 15:04:05")
+				txn["created_at"] = createdAt.Time.Format(constants.DateTimeFormat)
 			}
 			if entityID.Valid {
 				txn["entity_id"] = entityID.String
 			}
 			if periodStart.Valid {
-				txn["period_start"] = periodStart.Time.Format("2006-01-02")
+				txn["period_start"] = periodStart.Time.Format(constants.DateFormat)
 			}
 			if periodEnd.Valid {
-				txn["period_end"] = periodEnd.Time.Format("2006-01-02")
+				txn["period_end"] = periodEnd.Time.Format(constants.DateFormat)
 			}
 			if bankName.Valid {
 				txn["bank_name"] = bankName.String
@@ -209,7 +210,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			response["offset"] = offset
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(response)
 	})
 }

@@ -31,7 +31,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
@@ -143,7 +143,7 @@ func GetSweepExecutionLogs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			log := map[string]interface{}{
 				"execution_id":   executionID,
 				"sweep_id":       sweepID,
-				"execution_date": executionDate.Format("2006-01-02 15:04:05"),
+				"execution_date": executionDate.Format(constants.DateTimeFormat),
 				"amount_swept":   amountSwept,
 				"from_account":   fromAccount,
 				"to_account":     toAccount,
@@ -224,7 +224,7 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
@@ -337,7 +337,7 @@ func GetSweepStatistics(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if lastExecution != nil {
-			stats["last_execution"] = lastExecution.Format("2006-01-02 15:04:05")
+			stats["last_execution"] = lastExecution.Format(constants.DateTimeFormat)
 		} else {
 			stats["last_execution"] = nil
 		}

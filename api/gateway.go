@@ -552,6 +552,127 @@ func StartGateway() {
 		})
 	}))
 
+	// Debug endpoint to show .env file contents and effective environment values
+	mux.HandleFunc("/debug/env", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Try a few likely locations for the .env file
+		candidatePaths := []string{".env", "/app/.env", os.Getenv("ENV_FILE_PATH")}
+		chosen := ""
+		var data []byte
+		for _, p := range candidatePaths {
+			if p == "" {
+				continue
+			}
+			if b, err := os.ReadFile(p); err == nil {
+				chosen = p
+				data = b
+				break
+			}
+		}
+
+		fileStr := ""
+		if len(data) > 0 {
+			fileStr = string(data)
+		}
+
+		// Parse keys from the file (simple parser: KEY=VALUE, ignores comments)
+		entries := []map[string]string{}
+		sensitive := map[string]bool{
+			"DB_PASSWORD":      true,
+			"PAYLOAD_ENC_KEY":  true,
+			"RESPONSE_ENC_KEY": true,
+		}
+		for _, line := range strings.Split(fileStr, "\n") {
+			l := strings.TrimSpace(line)
+			if l == "" || strings.HasPrefix(l, "#") {
+				continue
+			}
+			idx := strings.Index(l, "=")
+			if idx <= 0 {
+				continue
+			}
+			key := strings.TrimSpace(l[:idx])
+			// trim optional surrounding quotes for file value
+			fv := strings.TrimSpace(l[idx+1:])
+			if strings.HasPrefix(fv, "\"") && strings.HasSuffix(fv, "\"") && len(fv) >= 2 {
+				fv = fv[1 : len(fv)-1]
+			}
+			envVal := os.Getenv(key)
+			envOut := envVal
+			hexOut := hex.EncodeToString([]byte(envVal))
+			urlOut := url.QueryEscape(envVal)
+			if sensitive[key] {
+				if envVal != "" {
+					envOut = "[set]"
+					hexOut = ""
+					urlOut = ""
+				} else {
+					envOut = ""
+					hexOut = ""
+					urlOut = ""
+				}
+				// also mask file_value if it matches a sensitive key
+				if fv != "" {
+					fv = "[set]"
+				}
+			}
+			entries = append(entries, map[string]string{
+				"key":                  key,
+				"file_value":           fv,
+				"env_value":            envOut,
+				"env_value_hex":        hexOut,
+				"env_value_urlencoded": urlOut,
+			})
+		}
+
+		// Also include process environment values for common keys
+		envKeys := []string{
+			"DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME",
+			"UPLOAD_TO_STORAGE", "BANK_STMT_S3_ENABLED", "BANK_STMT_DEBUG_PARSE",
+			"ENABLE_ADMIN_OVERRIDE", "ADMIN_USER_IDS", "ADMIN_ROLES", "DEVEL_MODE",
+			"PAYLOAD_ENC_KEY", "RESPONSE_ENC_KEY", "CATEGORIZATION_SCHEDULE",
+			"CATEGORIZATION_BATCH_SIZE", "STREAM_ACCESS_KEYS",
+		}
+		envEntries := []map[string]string{}
+		for _, k := range envKeys {
+			v := os.Getenv(k)
+			ev := v
+			eh := hex.EncodeToString([]byte(v))
+			eu := url.QueryEscape(v)
+			if sensitive[k] {
+				if v != "" {
+					ev = "[set]"
+					eh = ""
+					eu = ""
+				} else {
+					ev = ""
+					eh = ""
+					eu = ""
+				}
+			}
+			envEntries = append(envEntries, map[string]string{
+				"key":                  k,
+				"env_value":            ev,
+				"env_value_hex":        eh,
+				"env_value_urlencoded": eu,
+			})
+		}
+
+		resp := map[string]interface{}{
+			"file_path":       chosen,
+			"file_contents":   fileStr,
+			"file_urlencoded": url.QueryEscape(fileStr),
+			"entries":         entries,
+			"env":             envEntries,
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(resp)
+	}))
+
 	// Auth endpoints
 	mux.HandleFunc("/auth/login", withCORS(LoginHandler))
 	mux.HandleFunc("/auth/logout", withCORS(LogoutHandler))

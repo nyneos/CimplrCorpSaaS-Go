@@ -2,6 +2,7 @@ package validation
 
 import (
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -35,7 +36,7 @@ func ExtractUserID(r *http.Request) (string, error) {
 
 	// Restore body so form parsing can read it
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
-	ct := r.Header.Get("Content-Type")
+	ct := r.Header.Get(constants.ContentTypeText)
 	// If multipart, explicitly call ParseMultipartForm with a reasonable maxMemory
 	if strings.Contains(strings.ToLower(ct), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err == nil {

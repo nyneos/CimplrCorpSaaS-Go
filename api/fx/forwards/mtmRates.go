@@ -49,7 +49,7 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			// 	}
 		}
 		if userID == "" {
-			respondWithError(w, http.StatusBadRequest, "Missing user_id")
+			respondWithError(w, http.StatusBadRequest, constants.ErrMissingUserID)
 			return
 		}
 

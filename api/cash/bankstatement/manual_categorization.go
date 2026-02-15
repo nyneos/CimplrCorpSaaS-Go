@@ -29,7 +29,7 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		}
 
 		if body.UserID == "" {
-			http.Error(w, "Missing user_id", http.StatusBadRequest)
+			http.Error(w, constants.ErrMissingUserID, http.StatusBadRequest)
 			return
 		}
 

@@ -78,7 +78,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
@@ -237,7 +237,6 @@ func getOverallKPI(ctx context.Context, db *pgxpool.Pool, entityFilter, bankFilt
 		fmt.Printf("[SQL DEBUG - Overall KPI] Result: Balance=%.2f, Accounts=%d\n", kpi.TotalBalance, kpi.ActiveAccounts)
 	}
 
-	// TODO: Calculate weighted yield when yield data is available
 	// For now, set to 0 as placeholder
 	kpi.WeightedYieldPercent = 0.0
 
@@ -367,8 +366,6 @@ func getBankWiseKPI(ctx context.Context, db *pgxpool.Pool, totalBalance float64,
 		if totalBalance > 0 {
 			bank.WeightPercent = (bank.Balance / totalBalance) * 100
 		}
-
-		// TODO: Calculate yield when data is available
 		// For now, set to 0 as placeholder
 		bank.YieldPercent = 0.0
 

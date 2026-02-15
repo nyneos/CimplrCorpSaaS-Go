@@ -27,7 +27,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 
 	if !isRecurring {
 		// Non-recurring: Full amount in maturity month
-		projections[fmt.Sprintf("%d-%02d", maturityDate.Year(), maturityDate.Month())] = expectedAmount
+		projections[fmt.Sprintf(constants.FormatYearMonth, maturityDate.Year(), maturityDate.Month())] = expectedAmount
 		return projections
 	}
 
@@ -40,7 +40,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 		// Weekly: Divide by ~4.33 weeks/month
 		monthlyAmount := expectedAmount / 4.33
 		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 1, 0) {
-			key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
+			key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
 			projections[key] = monthlyAmount
 		}
 
@@ -48,7 +48,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 		// Monthly: Divide by 12 months
 		monthlyAmount := expectedAmount / 12.0
 		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 1, 0) {
-			key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
+			key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
 			projections[key] = monthlyAmount
 		}
 
@@ -60,7 +60,7 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 			month := int(d.Month())
 			// Match quarter months: if effective is Jan, then Jan/Apr/Jul/Oct
 			if (month-effMonth)%3 == 0 {
-				key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
+				key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
 				projections[key] = quarterlyAmount
 			}
 		}
@@ -69,18 +69,18 @@ func calculateMonthlyProjections(effectiveDate time.Time, maturityDate time.Time
 		// HalfYearly: Divide by 2, distribute in 6-month intervals
 		halfYearlyAmount := expectedAmount / 2.0
 		for d := effectiveDate; d.Before(endDate); d = d.AddDate(0, 6, 0) {
-			key := fmt.Sprintf("%d-%02d", d.Year(), d.Month())
+			key := fmt.Sprintf(constants.FormatYearMonth, d.Year(), d.Month())
 			projections[key] = halfYearlyAmount
 		}
 
 	case "yearly", "annual":
 		// Yearly: Full amount in effective month
-		key := fmt.Sprintf("%d-%02d", effectiveDate.Year(), effectiveDate.Month())
+		key := fmt.Sprintf(constants.FormatYearMonth, effectiveDate.Year(), effectiveDate.Month())
 		projections[key] = expectedAmount
 
 	default:
 		// Unknown frequency: treat as non-recurring
-		projections[fmt.Sprintf("%d-%02d", maturityDate.Year(), maturityDate.Month())] = expectedAmount
+		projections[fmt.Sprintf(constants.FormatYearMonth, maturityDate.Year(), maturityDate.Month())] = expectedAmount
 	}
 
 	return projections
@@ -756,7 +756,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						if projMap[itemID] == nil {
 							projMap[itemID] = make(map[string]float64)
 						}
-						key := fmt.Sprintf("%d-%02d", year, month)
+						key := fmt.Sprintf(constants.FormatYearMonth, year, month)
 						projMap[itemID][key] = amount
 					}
 				}
@@ -798,7 +798,7 @@ func GetProposalDetailV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"processing_status": processingStatus,
 						"reason":            reason,
 						"requested_by":      requestedBy,
-						"requested_at":      requestedAt.Format("2006-01-02 15:04:05"),
+						"requested_at":      requestedAt.Format(constants.DateTimeFormat),
 						"checker_by":        ifaceToString(checkerBy),
 						"checker_at":        ifaceToTimeString(checkerAt),
 						"checker_comment":   ifaceToString(checkerComment),

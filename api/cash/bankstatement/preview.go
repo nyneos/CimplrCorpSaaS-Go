@@ -1,6 +1,7 @@
 package bankstatement
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -114,7 +115,7 @@ func PreviewBankStatementHandler(db *sql.DB) http.Handler {
 			"count":   len(allTransactions),
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(response)
 	})
 }
@@ -452,7 +453,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if mappings.TranID != "" {
 			for idx, col := range headerRow {
 				if strings.EqualFold(strings.TrimSpace(col), mappings.TranID) {
-					colIdx["Tran. Id"] = idx
+					colIdx[constants.TranID] = idx
 					break
 				}
 			}
@@ -460,7 +461,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if mappings.ValueDate != "" {
 			for idx, col := range headerRow {
 				if strings.EqualFold(strings.TrimSpace(col), mappings.ValueDate) {
-					colIdx["Value Date"] = idx
+					colIdx[constants.ValueDateAlt] = idx
 					break
 				}
 			}
@@ -468,7 +469,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if mappings.Description != "" {
 			for idx, col := range headerRow {
 				if strings.EqualFold(strings.TrimSpace(col), mappings.Description) {
-					colIdx["Transaction Remarks"] = idx
+					colIdx[constants.TransactionRemarks] = idx
 					colIdx["Description"] = idx
 					break
 				}
@@ -477,7 +478,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if mappings.WithdrawalAmount != "" {
 			for idx, col := range headerRow {
 				if strings.EqualFold(strings.TrimSpace(col), mappings.WithdrawalAmount) {
-					colIdx["Withdrawal Amt (INR)"] = idx
+					colIdx[constants.WithdrawalAmountINR] = idx
 					break
 				}
 			}
@@ -485,7 +486,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if mappings.DepositAmount != "" {
 			for idx, col := range headerRow {
 				if strings.EqualFold(strings.TrimSpace(col), mappings.DepositAmount) {
-					colIdx["Deposit Amt (INR)"] = idx
+					colIdx[constants.DepositAmountINR] = idx
 					break
 				}
 			}
@@ -493,7 +494,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		if mappings.Balance != "" {
 			for idx, col := range headerRow {
 				if strings.EqualFold(strings.TrimSpace(col), mappings.Balance) {
-					colIdx["Balance (INR)"] = idx
+					colIdx[constants.BalanceINR] = idx
 					break
 				}
 			}
@@ -513,14 +514,14 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		return -1
 	}
 
-	if _, ok := colIdx["Transaction Date"]; !ok {
+	if _, ok := colIdx[constants.TransactionDateAlt]; !ok {
 		if idx := findColContaining("transaction date", "txn date", "posted date"); idx >= 0 {
-			colIdx["Transaction Date"] = idx
+			colIdx[constants.TransactionDateAlt] = idx
 		}
 	}
-	if _, ok := colIdx["Value Date"]; !ok {
+	if _, ok := colIdx[constants.ValueDateAlt]; !ok {
 		if idx := findColContaining("value date", "val date"); idx >= 0 {
-			colIdx["Value Date"] = idx
+			colIdx[constants.ValueDateAlt] = idx
 		}
 	}
 	if _, ok := colIdx["Description"]; !ok {
@@ -528,29 +529,29 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			colIdx["Description"] = idx
 		}
 	}
-	if _, ok := colIdx["Transaction Remarks"]; !ok {
+	if _, ok := colIdx[constants.TransactionRemarks]; !ok {
 		if idx := findColContaining("transaction remarks", "description", "remarks"); idx >= 0 {
-			colIdx["Transaction Remarks"] = idx
+			colIdx[constants.TransactionRemarks] = idx
 		}
 	}
-	if _, ok := colIdx["Withdrawal Amt (INR)"]; !ok {
+	if _, ok := colIdx[constants.WithdrawalAmountINR]; !ok {
 		if idx := findColContaining("withdrawal", "debit"); idx >= 0 {
-			colIdx["Withdrawal Amt (INR)"] = idx
+			colIdx[constants.WithdrawalAmountINR] = idx
 		}
 	}
-	if _, ok := colIdx["Deposit Amt (INR)"]; !ok {
+	if _, ok := colIdx[constants.DepositAmountINR]; !ok {
 		if idx := findColContaining("deposit", "credit"); idx >= 0 {
-			colIdx["Deposit Amt (INR)"] = idx
+			colIdx[constants.DepositAmountINR] = idx
 		}
 	}
-	if _, ok := colIdx["Balance (INR)"]; !ok {
+	if _, ok := colIdx[constants.BalanceINR]; !ok {
 		if idx := findColContaining("balance"); idx >= 0 {
-			colIdx["Balance (INR)"] = idx
+			colIdx[constants.BalanceINR] = idx
 		}
 	}
-	if _, ok := colIdx["Tran. Id"]; !ok {
+	if _, ok := colIdx[constants.TranID]; !ok {
 		if idx := findColContaining("tran id", "transaction id", "txn id"); idx >= 0 {
-			colIdx["Tran. Id"] = idx
+			colIdx[constants.TranID] = idx
 		}
 	}
 
@@ -592,18 +593,18 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 
 		// Extract fields
-		if idx, ok := colIdx["Tran. Id"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.TranID]; ok && idx < len(row) {
 			txn["tran_id"] = strings.TrimSpace(row[idx])
 		}
 
 		// Parse dates
 		var transactionDate, valueDate time.Time
-		if idx, ok := colIdx["Transaction Date"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.TransactionDateAlt]; ok && idx < len(row) {
 			if dt, err := parseDate(row[idx]); err == nil {
 				transactionDate = dt
 			}
 		}
-		if idx, ok := colIdx["Value Date"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.ValueDateAlt]; ok && idx < len(row) {
 			if dt, err := parseDate(row[idx]); err == nil {
 				valueDate = dt
 			}
@@ -633,7 +634,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 
 		// Description
 		description := ""
-		if idx, ok := colIdx["Transaction Remarks"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.TransactionRemarks]; ok && idx < len(row) {
 			description = sanitizeForPostgres(normalizeCell(row[idx]))
 		} else if idx, ok := colIdx["Description"]; ok && idx < len(row) {
 			description = sanitizeForPostgres(normalizeCell(row[idx]))
@@ -643,7 +644,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		// Amounts
 		var withdrawal, deposit sql.NullFloat64
 
-		if idx, ok := colIdx["Withdrawal Amt (INR)"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.WithdrawalAmountINR]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil && val > 0 {
 				withdrawal = sql.NullFloat64{Float64: val, Valid: true}
 				txn["withdrawal_amount"] = val
@@ -654,7 +655,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			txn["withdrawal_amount"] = 0
 		}
 
-		if idx, ok := colIdx["Deposit Amt (INR)"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.DepositAmountINR]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil && val > 0 {
 				deposit = sql.NullFloat64{Float64: val, Valid: true}
 				txn["deposit_amount"] = val
@@ -665,7 +666,7 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			txn["deposit_amount"] = 0
 		}
 
-		if idx, ok := colIdx["Balance (INR)"]; ok && idx < len(row) {
+		if idx, ok := colIdx[constants.BalanceINR]; ok && idx < len(row) {
 			if val, err := parseAmount(row[idx]); err == nil {
 				txn["balance"] = val
 			}
@@ -1099,7 +1100,7 @@ func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, fi
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 	client := &http.Client{Timeout: 0} // NO timeout, same as upload
 	resp, err := client.Do(req)

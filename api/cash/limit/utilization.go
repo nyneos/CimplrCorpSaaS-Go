@@ -160,7 +160,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				result["success"] = false
-				result["error"] = "failed to begin transaction"
+				result["error"] = constants.ErrFailedToBeginTransaction
 				results = append(results, result)
 				continue
 			}
@@ -199,7 +199,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := tx.Commit(ctx); err != nil {
 				result["success"] = false
-				result["error"] = "failed to commit"
+				result["error"] = constants.ErrTxCommitFailed
 				results = append(results, result)
 				continue
 			}
@@ -292,11 +292,17 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			switch strings.ToLower(k) {
 			case "limit_id":
-				if s, ok := v.(string); ok { addStr("limit_id", s) }
+				if s, ok := v.(string); ok {
+					addStr("limit_id", s)
+				}
 			case "utilization_date":
-				if s, ok := v.(string); ok { addStr("utilization_date", s) }
+				if s, ok := v.(string); ok {
+					addStr("utilization_date", s)
+				}
 			case "currency_code":
-				if s, ok := v.(string); ok { addStr("currency_code", strings.ToUpper(s)) }
+				if s, ok := v.(string); ok {
+					addStr("currency_code", strings.ToUpper(s))
+				}
 			case "utilized_amount":
 				switch t := v.(type) {
 				case float64:
@@ -305,9 +311,13 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					addFloat("utilized_amount", float64(t))
 				}
 			case "remarks":
-				if s, ok := v.(string); ok { addStr("remarks", s) }
+				if s, ok := v.(string); ok {
+					addStr("remarks", s)
+				}
 			case "reference_doc":
-				if s, ok := v.(string); ok { addStr("reference_doc", s) }
+				if s, ok := v.(string); ok {
+					addStr("reference_doc", s)
+				}
 			default:
 				// ignore unknown fields
 			}
@@ -339,7 +349,9 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// pick limit id argument: prefer fields if supplied, else current
 		limitForAudit := ""
 		if v, ok := req.Fields["limit_id"]; ok {
-			if s, sok := v.(string); sok { limitForAudit = s }
+			if s, sok := v.(string); sok {
+				limitForAudit = s
+			}
 		}
 		if limitForAudit == "" && curLimitID != nil {
 			limitForAudit = *curLimitID
@@ -399,7 +411,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				result["success"] = false
-				result["error"] = "failed to begin transaction"
+				result["error"] = constants.ErrFailedToBeginTransaction
 				results = append(results, result)
 				continue
 			}
@@ -429,7 +441,7 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := tx.Commit(ctx); err != nil {
 				result["success"] = false
-				result["error"] = "failed to commit"
+				result["error"] = constants.ErrTxCommitFailed
 				results = append(results, result)
 				continue
 			}
@@ -484,7 +496,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -506,22 +518,22 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var requestedAt, checkerAt *time.Time
 
 			// limit fields
-			var l_limitID, l_entityName, l_bankName, l_coreLimitType string
-			var l_limitType, l_limitSubType, l_limitRemarks *string
-			var l_sanctionDate, l_effectiveDate *time.Time
-			var l_limitCurrencyCode *string
-			var l_sanctionedAmount float64
-			var l_fungibilityType *string
-			var l_fungibilityPct *float64
-			var l_securityType *string
-			var l_initialUtilization *float64
+			var lLimitID, lEntityName, lBankName, lCoreLimitType string
+			var lLimitType, lLimitSubType, lLimitRemarks *string
+			var lSanctionDate, lEffectiveDate *time.Time
+			var lLimitCurrencyCode *string
+			var lSanctionedAmount float64
+			var lFungibilityType *string
+			var lFungibilityPct *float64
+			var lSecurityType *string
+			var lInitialUtilization *float64
 
 			// old limit values
-			var l_oldEntityName, l_oldBankName, l_oldCoreLimitType, l_oldLimitType, l_oldLimitSubType *string
-			var l_oldSanctionDate, l_oldEffectiveDate *time.Time
-			var l_oldCurrencyCode *string
-			var l_oldSanctionedAmount, l_oldFungibilityPct, l_oldInitialUtilization *float64
-			var l_oldFungibilityType, l_oldSecurityType, l_oldRemarks *string
+			var lOldEntityName, lOldBankName, lOldCoreLimitType, lOldLimitType, lOldLimitSubType *string
+			var lOldSanctionDate, lOldEffectiveDate *time.Time
+			var lOldCurrencyCode *string
+			var lOldSanctionedAmount, lOldFungibilityPct, lOldInitialUtilization *float64
+			var lOldFungibilityType, lOldSecurityType, lOldRemarks *string
 
 			var limitActionType, limitProcStatus, limitRequestedBy, limitCheckerBy, limitCheckerComment, limitReason *string
 			var limitRequestedAt, limitCheckerAt *time.Time
@@ -532,12 +544,12 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&oldUtilizationDate, &oldCurrencyCode, &oldUtilizedAmount, &oldRemarks, &oldReferenceDoc,
 				&actionType, &procStatus, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason,
 
-				&l_limitID, &l_entityName, &l_bankName, &l_coreLimitType, &l_limitType, &l_limitSubType,
-				&l_sanctionDate, &l_effectiveDate, &l_limitCurrencyCode, &l_sanctionedAmount,
-				&l_fungibilityType, &l_fungibilityPct, &l_securityType, &l_limitRemarks, &l_initialUtilization,
-				&l_oldEntityName, &l_oldBankName, &l_oldCoreLimitType, &l_oldLimitType, &l_oldLimitSubType,
-				&l_oldSanctionDate, &l_oldEffectiveDate, &l_oldCurrencyCode, &l_oldSanctionedAmount,
-				&l_oldFungibilityType, &l_oldFungibilityPct, &l_oldSecurityType, &l_oldRemarks, &l_oldInitialUtilization,
+				&lLimitID, &lEntityName, &lBankName, &lCoreLimitType, &lLimitType, &lLimitSubType,
+				&lSanctionDate, &lEffectiveDate, &lLimitCurrencyCode, &lSanctionedAmount,
+				&lFungibilityType, &lFungibilityPct, &lSecurityType, &lLimitRemarks, &lInitialUtilization,
+				&lOldEntityName, &lOldBankName, &lOldCoreLimitType, &lOldLimitType, &lOldLimitSubType,
+				&lOldSanctionDate, &lOldEffectiveDate, &lOldCurrencyCode, &lOldSanctionedAmount,
+				&lOldFungibilityType, &lOldFungibilityPct, &lOldSecurityType, &lOldRemarks, &lOldInitialUtilization,
 				&limitActionType, &limitProcStatus, &limitRequestedBy, &limitRequestedAt, &limitCheckerBy, &limitCheckerAt, &limitCheckerComment, &limitReason,
 			)
 			if err != nil {
@@ -545,31 +557,29 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// KPI computations: available headroom and utilization percentage
-			var l_initial float64
-			if l_initialUtilization != nil {
-				l_initial = *l_initialUtilization
+			var lInitial float64
+			if lInitialUtilization != nil {
+				lInitial = *lInitialUtilization
 			}
-			limitAvailable := l_sanctionedAmount - (l_initial + utilizedAmount)
+			limitAvailable := lSanctionedAmount - (lInitial + utilizedAmount)
 			if limitAvailable < 0 {
 				limitAvailable = 0
 			}
 			var limitUtilPct float64
-			if l_sanctionedAmount > 0 {
-				limitUtilPct = (l_initial + utilizedAmount) / l_sanctionedAmount
+			if lSanctionedAmount > 0 {
+				limitUtilPct = (lInitial + utilizedAmount) / lSanctionedAmount
 			}
 
-
-
 			item := map[string]interface{}{
-				"utilization_id":    utilizationID,
-				"limit_id":          limitID,
-				"utilization_date":  timeOrEmpty(utilizationDate),
-				"currency_code":     currencyCode,
-				"utilized_amount":   utilizedAmount,
-				"remarks":           stringOrEmpty(remarks),
-				"reference_doc":     stringOrEmpty(referenceDoc),
-				"entry_mode":        entryMode,
-				"status":            status,
+				"utilization_id":   utilizationID,
+				"limit_id":         limitID,
+				"utilization_date": timeOrEmpty(utilizationDate),
+				"currency_code":    currencyCode,
+				"utilized_amount":  utilizedAmount,
+				"remarks":          stringOrEmpty(remarks),
+				"reference_doc":    stringOrEmpty(referenceDoc),
+				"entry_mode":       entryMode,
+				"status":           status,
 
 				"old_utilization_date": timeOrEmpty(oldUtilizationDate),
 				"old_currency_code":    stringOrEmpty(oldCurrencyCode),
@@ -587,36 +597,36 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"reason":            stringOrEmpty(reason),
 
 				// flattened limit fields (prefixed with limit_)
-				"limit_limit_id":            l_limitID,
-				"limit_entity_name":         l_entityName,
-				"limit_bank_name":           l_bankName,
-				"limit_core_limit_type":     l_coreLimitType,
-				"limit_limit_type":          stringOrEmpty(l_limitType),
-				"limit_limit_sub_type":      stringOrEmpty(l_limitSubType),
-				"limit_sanction_date":       timeOrEmpty(l_sanctionDate),
-				"limit_effective_date":      timeOrEmpty(l_effectiveDate),
-				"limit_currency_code":       stringOrEmpty(l_limitCurrencyCode),
-				"limit_sanctioned_amount":   l_sanctionedAmount,
-				"limit_fungibility_type":    stringOrEmpty(l_fungibilityType),
-				"limit_fungibility_pct":     floatOrZero(l_fungibilityPct),
-				"limit_security_type":       stringOrEmpty(l_securityType),
-				"limit_remarks":             stringOrEmpty(l_limitRemarks),
-				"limit_initial_utilization": floatOrZero(l_initialUtilization),
+				"limit_limit_id":            lLimitID,
+				"limit_entity_name":         lEntityName,
+				"limit_bank_name":           lBankName,
+				"limit_core_limit_type":     lCoreLimitType,
+				"limit_limit_type":          stringOrEmpty(lLimitType),
+				"limit_limit_sub_type":      stringOrEmpty(lLimitSubType),
+				"limit_sanction_date":       timeOrEmpty(lSanctionDate),
+				"limit_effective_date":      timeOrEmpty(lEffectiveDate),
+				"limit_currency_code":       stringOrEmpty(lLimitCurrencyCode),
+				"limit_sanctioned_amount":   lSanctionedAmount,
+				"limit_fungibility_type":    stringOrEmpty(lFungibilityType),
+				"limit_fungibility_pct":     floatOrZero(lFungibilityPct),
+				"limit_security_type":       stringOrEmpty(lSecurityType),
+				"limit_remarks":             stringOrEmpty(lLimitRemarks),
+				"limit_initial_utilization": floatOrZero(lInitialUtilization),
 
-				"limit_old_entity_name":         stringOrEmpty(l_oldEntityName),
-				"limit_old_bank_name":           stringOrEmpty(l_oldBankName),
-				"limit_old_core_limit_type":     stringOrEmpty(l_oldCoreLimitType),
-				"limit_old_limit_type":          stringOrEmpty(l_oldLimitType),
-				"limit_old_limit_sub_type":      stringOrEmpty(l_oldLimitSubType),
-				"limit_old_sanction_date":       timeOrEmpty(l_oldSanctionDate),
-				"limit_old_effective_date":      timeOrEmpty(l_oldEffectiveDate),
-				"limit_old_currency_code":       stringOrEmpty(l_oldCurrencyCode),
-				"limit_old_sanctioned_amount":   floatOrZero(l_oldSanctionedAmount),
-				"limit_old_fungibility_type":    stringOrEmpty(l_oldFungibilityType),
-				"limit_old_fungibility_pct":     floatOrZero(l_oldFungibilityPct),
-				"limit_old_security_type":       stringOrEmpty(l_oldSecurityType),
-				"limit_old_remarks":             stringOrEmpty(l_oldRemarks),
-				"limit_old_initial_utilization": floatOrZero(l_oldInitialUtilization),
+				"limit_old_entity_name":         stringOrEmpty(lOldEntityName),
+				"limit_old_bank_name":           stringOrEmpty(lOldBankName),
+				"limit_old_core_limit_type":     stringOrEmpty(lOldCoreLimitType),
+				"limit_old_limit_type":          stringOrEmpty(lOldLimitType),
+				"limit_old_limit_sub_type":      stringOrEmpty(lOldLimitSubType),
+				"limit_old_sanction_date":       timeOrEmpty(lOldSanctionDate),
+				"limit_old_effective_date":      timeOrEmpty(lOldEffectiveDate),
+				"limit_old_currency_code":       stringOrEmpty(lOldCurrencyCode),
+				"limit_old_sanctioned_amount":   floatOrZero(lOldSanctionedAmount),
+				"limit_old_fungibility_type":    stringOrEmpty(lOldFungibilityType),
+				"limit_old_fungibility_pct":     floatOrZero(lOldFungibilityPct),
+				"limit_old_security_type":       stringOrEmpty(lOldSecurityType),
+				"limit_old_remarks":             stringOrEmpty(lOldRemarks),
+				"limit_old_initial_utilization": floatOrZero(lOldInitialUtilization),
 
 				"limit_action_type":       stringOrEmpty(limitActionType),
 				"limit_processing_status": stringOrEmpty(limitProcStatus),
@@ -627,8 +637,8 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"limit_checker_comment":   stringOrEmpty(limitCheckerComment),
 				"limit_reason":            stringOrEmpty(limitReason),
 				// KPIs
-				"limit_available":         limitAvailable,
-				"limit_utilization_pct":   limitUtilPct,
+				"limit_available":       limitAvailable,
+				"limit_utilization_pct": limitUtilPct,
 			}
 
 			results = append(results, item)
@@ -673,7 +683,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -686,41 +696,42 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var remarks, referenceDoc *string
 
 			// limit fields
-			var l_limitID, l_entityName, l_bankName, l_coreLimitType string
-			var l_limitType, l_limitSubType, l_limitRemarks *string
-			var l_sanctionDate, l_effectiveDate *time.Time
-			var l_limitCurrencyCode *string
-			var l_sanctionedAmount float64
-			var l_fungibilityType *string
-			var l_fungibilityPct *float64
-			var l_securityType *string
-			var l_initialUtilization *float64
-			var l_limitProcessingStatus *string
+			// limit fields
+			var lLimitID, lEntityName, lBankName, lCoreLimitType string
+			var lLimitType, lLimitSubType, lLimitRemarks *string
+			var lSanctionDate, lEffectiveDate *time.Time
+			var lLimitCurrencyCode *string
+			var lSanctionedAmount float64
+			var lFungibilityType *string
+			var lFungibilityPct *float64
+			var lSecurityType *string
+			var lInitialUtilization *float64
+			var lLimitProcessingStatus *string
 
 			err := rows.Scan(
 				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
 				&remarks, &referenceDoc, &entryMode, &status,
-				&l_limitID, &l_entityName, &l_bankName, &l_coreLimitType, &l_limitType, &l_limitSubType,
-				&l_sanctionDate, &l_effectiveDate, &l_limitCurrencyCode, &l_sanctionedAmount,
-				&l_fungibilityType, &l_fungibilityPct, &l_securityType, &l_limitRemarks, &l_initialUtilization,
-				&l_limitProcessingStatus,
+				&lLimitID, &lEntityName, &lBankName, &lCoreLimitType, &lLimitType, &lLimitSubType,
+				&lSanctionDate, &lEffectiveDate, &lLimitCurrencyCode, &lSanctionedAmount,
+				&lFungibilityType, &lFungibilityPct, &lSecurityType, &lLimitRemarks, &lInitialUtilization,
+				&lLimitProcessingStatus,
 			)
 			if err != nil {
 				continue
 			}
 
 			// KPI computations for approved utilizations
-			var l_initial float64
-			if l_initialUtilization != nil {
-				l_initial = *l_initialUtilization
+			var lInitial float64
+			if lInitialUtilization != nil {
+				lInitial = *lInitialUtilization
 			}
-			limitAvailable := l_sanctionedAmount - (l_initial + utilizedAmount)
+			limitAvailable := lSanctionedAmount - (lInitial + utilizedAmount)
 			if limitAvailable < 0 {
 				limitAvailable = 0
 			}
 			var limitUtilPct float64
-			if l_sanctionedAmount > 0 {
-				limitUtilPct = (l_initial + utilizedAmount) / l_sanctionedAmount
+			if lSanctionedAmount > 0 {
+				limitUtilPct = (lInitial + utilizedAmount) / lSanctionedAmount
 			}
 
 			item := map[string]interface{}{
@@ -734,25 +745,25 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"entry_mode":       entryMode,
 				"status":           status,
 
-				"limit_limit_id":            l_limitID,
-				"limit_entity_name":         l_entityName,
-				"limit_bank_name":           l_bankName,
-				"limit_core_limit_type":     l_coreLimitType,
-				"limit_limit_type":          stringOrEmpty(l_limitType),
-				"limit_limit_sub_type":      stringOrEmpty(l_limitSubType),
-				"limit_sanction_date":       timeOrEmpty(l_sanctionDate),
-				"limit_effective_date":      timeOrEmpty(l_effectiveDate),
-				"limit_currency_code":       stringOrEmpty(l_limitCurrencyCode),
-				"limit_sanctioned_amount":   l_sanctionedAmount,
-				"limit_fungibility_type":    stringOrEmpty(l_fungibilityType),
-				"limit_fungibility_pct":     floatOrZero(l_fungibilityPct),
-				"limit_security_type":       stringOrEmpty(l_securityType),
-				"limit_remarks":             stringOrEmpty(l_limitRemarks),
-				"limit_initial_utilization": floatOrZero(l_initialUtilization),
-				"limit_processing_status":   stringOrEmpty(l_limitProcessingStatus),
+				"limit_limit_id":            lLimitID,
+				"limit_entity_name":         lEntityName,
+				"limit_bank_name":           lBankName,
+				"limit_core_limit_type":     lCoreLimitType,
+				"limit_limit_type":          stringOrEmpty(lLimitType),
+				"limit_limit_sub_type":      stringOrEmpty(lLimitSubType),
+				"limit_sanction_date":       timeOrEmpty(lSanctionDate),
+				"limit_effective_date":      timeOrEmpty(lEffectiveDate),
+				"limit_currency_code":       stringOrEmpty(lLimitCurrencyCode),
+				"limit_sanctioned_amount":   lSanctionedAmount,
+				"limit_fungibility_type":    stringOrEmpty(lFungibilityType),
+				"limit_fungibility_pct":     floatOrZero(lFungibilityPct),
+				"limit_security_type":       stringOrEmpty(lSecurityType),
+				"limit_remarks":             stringOrEmpty(lLimitRemarks),
+				"limit_initial_utilization": floatOrZero(lInitialUtilization),
+				"limit_processing_status":   stringOrEmpty(lLimitProcessingStatus),
 				// KPIs
-				"limit_available":         limitAvailable,
-				"limit_utilization_pct":   limitUtilPct,
+				"limit_available":       limitAvailable,
+				"limit_utilization_pct": limitUtilPct,
 			}
 
 			results = append(results, item)
@@ -789,7 +800,7 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -798,11 +809,11 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// grouping by limit_id
 		type grp struct {
-			LimitID           string
-			BankName          string
-			SanctionedAmount  float64
-			TotalInitial      float64
-			TotalUtilized     float64
+			LimitID          string
+			BankName         string
+			SanctionedAmount float64
+			TotalInitial     float64
+			TotalUtilized    float64
 		}
 		groups := map[string]*grp{}
 
@@ -813,39 +824,39 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var remarks, referenceDoc *string
 
 			// limit fields
-			var l_limitID, l_entityName, l_bankName, l_coreLimitType string
-			var l_limitType, l_limitSubType, l_limitRemarks *string
-			var l_sanctionDate, l_effectiveDate *time.Time
-			var l_limitCurrencyCode *string
-			var l_sanctionedAmount float64
-			var l_fungibilityType *string
-			var l_fungibilityPct *float64
-			var l_securityType *string
-			var l_initialUtilization *float64
+			var lLimitID, lEntityName, lBankName, lCoreLimitType string
+			var lLimitType, lLimitSubType, lLimitRemarks *string
+			var lSanctionDate, lEffectiveDate *time.Time
+			var lLimitCurrencyCode *string
+			var lSanctionedAmount float64
+			var lFungibilityType *string
+			var lFungibilityPct *float64
+			var lSecurityType *string
+			var lInitialUtilization *float64
 
 			if err := rows.Scan(
 				&utilizationID, &limitID, &utilizationDate, &currencyCode, &utilizedAmount,
 				&remarks, &referenceDoc, &entryMode, &status,
 
-				&l_limitID, &l_entityName, &l_bankName, &l_coreLimitType, &l_limitType, &l_limitSubType,
-				&l_sanctionDate, &l_effectiveDate, &l_limitCurrencyCode, &l_sanctionedAmount,
-				&l_fungibilityType, &l_fungibilityPct, &l_securityType, &l_limitRemarks, &l_initialUtilization,
+				&lLimitID, &lEntityName, &lBankName, &lCoreLimitType, &lLimitType, &lLimitSubType,
+				&lSanctionDate, &lEffectiveDate, &lLimitCurrencyCode, &lSanctionedAmount,
+				&lFungibilityType, &lFungibilityPct, &lSecurityType, &lLimitRemarks, &lInitialUtilization,
 			); err != nil {
 				continue
 			}
 
 			// per-row KPI
-			var l_initial float64
-			if l_initialUtilization != nil {
-				l_initial = *l_initialUtilization
+			var lInitial float64
+			if lInitialUtilization != nil {
+				lInitial = *lInitialUtilization
 			}
-			limitAvailable := l_sanctionedAmount - (l_initial + utilizedAmount)
+			limitAvailable := lSanctionedAmount - (lInitial + utilizedAmount)
 			if limitAvailable < 0 {
 				limitAvailable = 0
 			}
 			var limitUtilPct float64
-			if l_sanctionedAmount > 0 {
-				limitUtilPct = (l_initial + utilizedAmount) / l_sanctionedAmount
+			if lSanctionedAmount > 0 {
+				limitUtilPct = (lInitial + utilizedAmount) / lSanctionedAmount
 			}
 
 			item := map[string]interface{}{
@@ -859,21 +870,21 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"entry_mode":       entryMode,
 				"status":           status,
 
-				"limit_limit_id":            l_limitID,
-				"limit_entity_name":         l_entityName,
-				"limit_bank_name":           l_bankName,
-				"limit_core_limit_type":     l_coreLimitType,
-				"limit_limit_type":          stringOrEmpty(l_limitType),
-				"limit_limit_sub_type":      stringOrEmpty(l_limitSubType),
-				"limit_sanction_date":       timeOrEmpty(l_sanctionDate),
-				"limit_effective_date":      timeOrEmpty(l_effectiveDate),
-				"limit_currency_code":       stringOrEmpty(l_limitCurrencyCode),
-				"limit_sanctioned_amount":   l_sanctionedAmount,
-				"limit_fungibility_type":    stringOrEmpty(l_fungibilityType),
-				"limit_fungibility_pct":     floatOrZero(l_fungibilityPct),
-				"limit_security_type":       stringOrEmpty(l_securityType),
-				"limit_remarks":             stringOrEmpty(l_limitRemarks),
-				"limit_initial_utilization": floatOrZero(l_initialUtilization),
+				"limit_limit_id":            lLimitID,
+				"limit_entity_name":         lEntityName,
+				"limit_bank_name":           lBankName,
+				"limit_core_limit_type":     lCoreLimitType,
+				"limit_limit_type":          stringOrEmpty(lLimitType),
+				"limit_limit_sub_type":      stringOrEmpty(lLimitSubType),
+				"limit_sanction_date":       timeOrEmpty(lSanctionDate),
+				"limit_effective_date":      timeOrEmpty(lEffectiveDate),
+				"limit_currency_code":       stringOrEmpty(lLimitCurrencyCode),
+				"limit_sanctioned_amount":   lSanctionedAmount,
+				"limit_fungibility_type":    stringOrEmpty(lFungibilityType),
+				"limit_fungibility_pct":     floatOrZero(lFungibilityPct),
+				"limit_security_type":       stringOrEmpty(lSecurityType),
+				"limit_remarks":             stringOrEmpty(lLimitRemarks),
+				"limit_initial_utilization": floatOrZero(lInitialUtilization),
 
 				// KPIs
 				"limit_available":       limitAvailable,
@@ -884,13 +895,13 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, item)
 
 			// accumulate group
-			g, ok := groups[l_limitID]
+			g, ok := groups[lLimitID]
 			if !ok {
-				g = &grp{LimitID: l_limitID, BankName: l_bankName, SanctionedAmount: l_sanctionedAmount}
-				if l_initialUtilization != nil {
-					g.TotalInitial = *l_initialUtilization
+				g = &grp{LimitID: lLimitID, BankName: lBankName, SanctionedAmount: lSanctionedAmount}
+				if lInitialUtilization != nil {
+					g.TotalInitial = *lInitialUtilization
 				}
-				groups[l_limitID] = g
+				groups[lLimitID] = g
 			}
 			g.TotalUtilized += utilizedAmount
 		}
@@ -907,13 +918,13 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				utilPct = (g.TotalInitial + g.TotalUtilized) / g.SanctionedAmount
 			}
 			grouped = append(grouped, map[string]interface{}{
-				"limit_id":            g.LimitID,
-				"bank_name":           g.BankName,
-				"sanctioned_amount":   g.SanctionedAmount,
-				"total_initial":       g.TotalInitial,
-				"total_utilized":      g.TotalUtilized,
-				"available":           avail,
-				"utilization_pct":     utilPct,
+				"limit_id":          g.LimitID,
+				"bank_name":         g.BankName,
+				"sanctioned_amount": g.SanctionedAmount,
+				"total_initial":     g.TotalInitial,
+				"total_utilized":    g.TotalUtilized,
+				"available":         avail,
+				"utilization_pct":   utilPct,
 			})
 		}
 
@@ -1237,7 +1248,7 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			result["success"] = false
-			result["error"] = "failed to begin transaction"
+			result["error"] = constants.ErrFailedToBeginTransaction
 			results = append(results, result)
 			continue
 		}
@@ -1275,7 +1286,7 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 
 		if err := tx.Commit(ctx); err != nil {
 			result["success"] = false
-			result["error"] = "failed to commit"
+			result["error"] = constants.ErrTxCommitFailed
 			results = append(results, result)
 			continue
 		}

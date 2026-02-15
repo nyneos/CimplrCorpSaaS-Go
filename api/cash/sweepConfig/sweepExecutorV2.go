@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/internal/jobs"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -31,7 +32,7 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
@@ -84,13 +85,13 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argPos := 1
 
 		if len(normEntities) > 0 {
-			query += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", argPos)
+			query += fmt.Sprintf(constants.QuerryEntityNameLower, argPos)
 			args = append(args, normEntities)
 			argPos++
 		}
 
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND l.sweep_id = $%d", argPos)
+			query += fmt.Sprintf(constants.QuerrySweepID, argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}
@@ -130,7 +131,7 @@ func GetSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			log := map[string]interface{}{
 				"execution_id":   executionID,
 				"sweep_id":       sweepID,
-				"execution_date": executionDate.Format("2006-01-02 15:04:05"),
+				"execution_date": executionDate.Format(constants.DateTimeFormat),
 				"amount_swept":   amountSwept,
 				"from_account":   fromAccount,
 				"to_account":     toAccount,
@@ -185,7 +186,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 
@@ -235,7 +236,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argPos := 1
 
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND l.sweep_id = $%d", argPos)
+			query += fmt.Sprintf(constants.QuerrySweepID, argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}
@@ -295,7 +296,7 @@ func GetAllSweepExecutionLogsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			log := map[string]interface{}{
 				"execution_id":   executionID,
 				"sweep_id":       sweepID,
-				"execution_date": executionDate.Format("2006-01-02 15:04:05"),
+				"execution_date": executionDate.Format(constants.DateTimeFormat),
 				"amount_swept":   amountSwept,
 				"from_account":   fromAccount,
 				"to_account":     toAccount,
@@ -369,7 +370,7 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "Missing user_id")
+			api.RespondWithResult(w, false, constants.ErrMissingUserID)
 			return
 		}
 		// user_id must match middleware-authenticated user
@@ -418,13 +419,13 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		argPos := 1
 
 		if len(normEntities) > 0 {
-			query += fmt.Sprintf(" AND lower(trim(c.entity_name)) = ANY($%d)", argPos)
+			query += fmt.Sprintf(constants.QuerryEntityNameLower, argPos)
 			args = append(args, normEntities)
 			argPos++
 		}
 
 		if req.SweepID != "" {
-			query += fmt.Sprintf(" AND l.sweep_id = $%d", argPos)
+			query += fmt.Sprintf(constants.QuerrySweepID, argPos)
 			args = append(args, req.SweepID)
 			argPos++
 		}
@@ -470,7 +471,7 @@ func GetSweepStatisticsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if lastExecution != nil {
-			stats["last_execution"] = lastExecution.Format("2006-01-02 15:04:05")
+			stats["last_execution"] = lastExecution.Format(constants.DateTimeFormat)
 		} else {
 			stats["last_execution"] = nil
 		}
@@ -740,7 +741,7 @@ func executeDirectSweepV2(ctx context.Context, pgxPool *pgxpool.Pool, sweep inte
 	// BR-1.1: Buffer Violation Check - CRITICAL HARD RULE
 	if currentBalance <= buffer {
 		errMsg := fmt.Sprintf("BLOCKED: Critical Buffer Violation - Current Balance (%.2f) is at or below Buffer (%.2f)", currentBalance, buffer)
-		return nil, fmt.Errorf(errMsg)
+		return nil, errors.New(errMsg)
 	}
 
 	// Calculate sweep amount based on sweep type
@@ -1034,8 +1035,18 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Execute the sweep with the initiation context
-		result, err := executeSweepV2WithInitiation(ctx, pgxPool, req.SweepID, initiationID, sourceAccount, targetAccount,
-			sweepType, bufferAmount, sweepAmount, req.OverriddenAmount, requestedBy)
+		params := jobs.SweepExecParams{
+			SweepID:          req.SweepID,
+			InitiationID:     initiationID,
+			FromAccount:      sourceAccount,
+			ToAccount:        targetAccount,
+			SweepType:        sweepType,
+			BufferAmount:     bufferAmount,
+			SweepAmount:      sweepAmount,
+			OverriddenAmount: req.OverriddenAmount,
+			RequestedBy:      requestedBy,
+		}
+		result, err := executeSweepV2WithInitiation(ctx, pgxPool, params)
 
 		if err != nil {
 			// Execution failure is already logged in sweep_execution_log by executeSweepV2WithInitiation
@@ -1048,9 +1059,17 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // executeSweepV2WithInitiation executes a V2 sweep with initiation context
-func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, sweepID, initiationID,
-	sourceAccount, targetAccount, sweepType string, bufferAmount, sweepAmount, overriddenAmount *float64,
-	requestedBy string) (map[string]interface{}, error) {
+func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, params jobs.SweepExecParams) (map[string]interface{}, error) {
+
+	sweepID := params.SweepID
+	initiationID := params.InitiationID
+	sourceAccount := params.FromAccount
+	targetAccount := params.ToAccount
+	sweepType := params.SweepType
+	bufferAmount := params.BufferAmount
+	sweepAmount := params.SweepAmount
+	overriddenAmount := params.OverriddenAmount
+	requestedBy := params.RequestedBy
 
 	// Get current balance for source account
 	var balanceID string
@@ -1319,7 +1338,7 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 		// Start transaction
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToBeginTransaction+err.Error())
 			return
 		}
 		committed := false

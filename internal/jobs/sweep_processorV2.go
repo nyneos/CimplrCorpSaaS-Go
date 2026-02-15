@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -102,10 +103,10 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 	currentMinute := now.Minute()
 	today := now.Format(constants.DateFormat)
 
-	log.Printf("[SWEEP V2] ═══════════════════════════════════════════════════════")
-	log.Printf("[SWEEP V2] Starting scheduled sweep processing at %s", now.Format("2006-01-02 15:04:05"))
+	log.Printf(constants.LogSweepWorker)
+	log.Printf("[SWEEP V2] Starting scheduled sweep processing at %s", now.Format(constants.DateTimeFormat))
 	log.Printf("[SWEEP V2] Current time: %02d:%02d | Batch size: %d", currentHour, currentMinute, batchSize)
-	log.Printf("[SWEEP V2] ═══════════════════════════════════════════════════════")
+	log.Printf(constants.LogSweepWorker)
 
 	// Step 1: Find approved sweeps that are due for execution
 	query := `
@@ -239,14 +240,14 @@ func ProcessApprovedSweepsV2(db *pgxpool.Pool, batchSize int) error {
 	// Step 3: Process pending initiations (status='INITIATED')
 	initiationsProcessed, initiationsFailed := ProcessPendingInitiations(ctx, db, batchSize)
 
-	log.Printf("[SWEEP V2] ═══════════════════════════════════════════════════════")
+	log.Printf(constants.LogSweepWorker)
 	log.Printf("[SWEEP V2]  PROCESSING SUMMARY:")
 	log.Printf("[SWEEP V2]    Direct Executions: %d", successCount)
 	log.Printf("[SWEEP V2]    Failed: %d", failCount)
 	log.Printf("[SWEEP V2]    Initiations Created: %d", initiationCreatedCount)
 	log.Printf("[SWEEP V2]    Initiations Processed: %d", initiationsProcessed)
 	log.Printf("[SWEEP V2]    Initiations Failed: %d", initiationsFailed)
-	log.Printf("[SWEEP V2] ═══════════════════════════════════════════════════════")
+	log.Printf(constants.LogSweepWorker)
 
 	return nil
 }
@@ -429,8 +430,17 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 		}
 
 		// Execute the sweep
-		err = executeSweepWithInitiation(ctx, db, sweepID, initiationID, finalSourceAccount, finalTargetAccount,
-			sweepType, bufferAmount, sweepAmount, overriddenAmount)
+		params := SweepExecParams{
+			SweepID:          sweepID,
+			InitiationID:     initiationID,
+			FromAccount:      finalSourceAccount,
+			ToAccount:        finalTargetAccount,
+			SweepType:        sweepType,
+			BufferAmount:     bufferAmount,
+			SweepAmount:      sweepAmount,
+			OverriddenAmount: overriddenAmount,
+		}
+		err = executeSweepWithInitiation(ctx, db, params)
 
 		if err != nil {
 			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution failed: %v", sweepID, initiationID, err)
@@ -461,8 +471,13 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	// BR-1.1: Buffer Violation Check - CRITICAL HARD RULE
 	if currentBalance <= buffer {
 		errMsg := fmt.Sprintf("BLOCKED: Critical Buffer Violation - Current Balance (%.2f) is at or below Buffer (%.2f)", currentBalance, buffer)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Calculate sweep amount based on sweep type
@@ -475,8 +490,13 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 		// Only execute if current balance exceeds buffer threshold
 		if currentBalance <= buffer {
 			errMsg := fmt.Sprintf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-			return fmt.Errorf(errMsg)
+			logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+				SweepID:      sweep.sweepID,
+				InitiationID: "",
+				FromAccount:  sweep.sourceAccount,
+				ToAccount:    sweep.targetAccount,
+			}, BalanceBefore: currentBalance, Reason: errMsg})
+			return errors.New(errMsg)
 		}
 		// Sweep entire balance to make source account zero
 		sweepAmountFinal = currentBalance
@@ -484,16 +504,26 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	case "CONCENTRATION":
 		// CONCENTRATION: Fixed amount sweep - only sweep if balance exceeds buffer
 		if sweep.sweepAmount == nil || *sweep.sweepAmount <= 0 {
-			errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep requires fixed sweep_amount to be configured")
-			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-			return fmt.Errorf(errMsg)
+			errMsg := "BLOCKED: CONCENTRATION sweep requires fixed sweep_amount to be configured"
+			logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+				SweepID:      sweep.sweepID,
+				InitiationID: "",
+				FromAccount:  sweep.sourceAccount,
+				ToAccount:    sweep.targetAccount,
+			}, BalanceBefore: currentBalance, Reason: errMsg})
+			return errors.New(errMsg)
 		}
 
 		// Only sweep if current balance exceeds buffer
 		if currentBalance <= buffer {
 			errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-			return fmt.Errorf(errMsg)
+			logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+				SweepID:      sweep.sweepID,
+				InitiationID: "",
+				FromAccount:  sweep.sourceAccount,
+				ToAccount:    sweep.targetAccount,
+			}, BalanceBefore: currentBalance, Reason: errMsg})
+			return errors.New(errMsg)
 		}
 
 		sweepAmountFinal = *sweep.sweepAmount
@@ -501,16 +531,26 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 		// Maintain buffer - ensure sweep doesn't violate buffer requirement
 		if (currentBalance - sweepAmountFinal) < buffer {
 			errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Sweeping %.2f would leave balance below buffer (%.2f)", sweepAmountFinal, buffer)
-			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-			return fmt.Errorf(errMsg)
+			logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+				SweepID:      sweep.sweepID,
+				InitiationID: "",
+				FromAccount:  sweep.sourceAccount,
+				ToAccount:    sweep.targetAccount,
+			}, BalanceBefore: currentBalance, Reason: errMsg})
+			return errors.New(errMsg)
 		}
 
 	case "TARGET_BALANCE":
 		// TARGET_BALANCE: Sweep excess to maintain target balance (buffer) in source
 		if currentBalance <= buffer {
 			errMsg := fmt.Sprintf("BLOCKED: TARGET_BALANCE sweep - Balance (%.2f) is at or below target (%.2f), no excess to sweep", currentBalance, buffer)
-			logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-			return fmt.Errorf(errMsg)
+			logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+				SweepID:      sweep.sweepID,
+				InitiationID: "",
+				FromAccount:  sweep.sourceAccount,
+				ToAccount:    sweep.targetAccount,
+			}, BalanceBefore: currentBalance, Reason: errMsg})
+			return errors.New(errMsg)
 		}
 		// Sweep only the excess above buffer, leaving buffer amount in source
 		sweepAmountFinal = currentBalance - buffer
@@ -522,8 +562,13 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	// Additional validation: Ensure final sweep amount is positive
 	if sweepAmountFinal <= 0 {
 		errMsg := fmt.Sprintf("BLOCKED: Calculated sweep amount (%.2f) is invalid", sweepAmountFinal)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Calculate new balance after sweep
@@ -533,8 +578,13 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Unable to start sweep transaction: %v", err)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 	defer tx.Rollback(ctx)
 
@@ -554,8 +604,13 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 
 	if err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to update source account balance: %v", err)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Create audit for source
@@ -591,8 +646,13 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 
 	if err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to update target account balance: %v", err)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Create audit for target
@@ -620,14 +680,24 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 
 	if err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to log sweep execution: %v", err)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to commit sweep transaction: %v", err)
-		logSweepFailure(ctx, db, sweep.sweepID, "", sweep.sourceAccount, sweep.targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweep.sweepID,
+			InitiationID: "",
+			FromAccount:  sweep.sourceAccount,
+			ToAccount:    sweep.targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	log.Printf("[SWEEP V2] %s  SUCCESS | Type: %s | Amount: %.2f | From: %s (%.2f → %.2f) | To: %s (%.2f → %.2f) | Buffer: %.2f",
@@ -638,23 +708,38 @@ func ExecuteSweepV2Direct(ctx context.Context, db *pgxpool.Pool, sweep SweepData
 }
 
 // logSweepFailure logs failed sweep attempts with detailed validation information
-func logSweepFailure(ctx context.Context, db *pgxpool.Pool, sweepID, initiationID, fromAccount, toAccount, reason string, balanceBefore float64) {
+func logSweepFailure(ctx context.Context, db *pgxpool.Pool, info SweepFailureInfo) {
 	query := `
 		INSERT INTO cimplrcorpsaas.sweep_execution_log (
 			sweep_id, initiation_id, from_account, to_account, status, 
 			balance_before, balance_after, amount_swept, error_message
 		) VALUES ($1, NULLIF($2, ''), $3, $4, 'FAILED', $5, $5, 0, $6)
 	`
-	_, err := db.Exec(ctx, query, sweepID, initiationID, fromAccount, toAccount, balanceBefore, reason)
+	_, err := db.Exec(ctx, query,
+		info.Params.SweepID,
+		info.Params.InitiationID,
+		info.Params.FromAccount,
+		info.Params.ToAccount,
+		info.BalanceBefore,
+		info.Reason,
+	)
 	if err != nil {
 		log.Printf("[SWEEP V2] Failed to log sweep failure: %v", err)
 	}
-	log.Printf("[SWEEP V2] %s  FAILED | Reason: %s", sweepID, reason)
+	log.Printf("[SWEEP V2] %s  FAILED | Reason: %s", info.Params.SweepID, info.Reason)
 }
 
 // executeSweepWithInitiation executes a sweep with initiation context (similar to executeSweepV2WithInitiation in sweepExecutorV2.go)
-func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, initiationID,
-	sourceAccount, targetAccount, sweepType string, bufferAmount, sweepAmount, overriddenAmount *float64) error {
+func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params SweepExecParams) error {
+
+	sweepID := params.SweepID
+	initiationID := params.InitiationID
+	sourceAccount := params.FromAccount
+	targetAccount := params.ToAccount
+	sweepType := params.SweepType
+	bufferAmount := params.BufferAmount
+	sweepAmount := params.SweepAmount
+	overriddenAmount := params.OverriddenAmount
 
 	// Get current balance for source account
 	var balanceID string
@@ -681,8 +766,13 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 	// BR-1.1: Buffer Violation Check
 	if currentBalance <= buffer {
 		errMsg := fmt.Sprintf("BLOCKED: Buffer Violation - Balance (%.2f) <= Buffer (%.2f)", currentBalance, buffer)
-		logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Calculate sweep amount
@@ -698,8 +788,13 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 			// For CONCENTRATION and TARGET_BALANCE, validate override doesn't violate buffer
 			if (currentBalance - finalSweepAmount) < buffer {
 				errMsg := fmt.Sprintf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
-				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-				return fmt.Errorf(errMsg)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  sourceAccount,
+					ToAccount:    targetAccount,
+				}, BalanceBefore: currentBalance, Reason: errMsg})
+				return errors.New(errMsg)
 			}
 		}
 	} else {
@@ -712,8 +807,13 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 			// Only execute if current balance exceeds buffer threshold
 			if currentBalance <= buffer {
 				errMsg := fmt.Sprintf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-				return fmt.Errorf(errMsg)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  sourceAccount,
+					ToAccount:    targetAccount,
+				}, BalanceBefore: currentBalance, Reason: errMsg})
+				return errors.New(errMsg)
 			}
 			// Sweep entire balance to make source account zero
 			finalSweepAmount = currentBalance
@@ -722,15 +822,25 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 			// CONCENTRATION: Fixed amount sweep - only sweep if balance exceeds buffer
 			if sweepAmount == nil || *sweepAmount <= 0 {
 				errMsg := "BLOCKED: CONCENTRATION requires fixed sweep_amount"
-				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-				return fmt.Errorf(errMsg)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  sourceAccount,
+					ToAccount:    targetAccount,
+				}, BalanceBefore: currentBalance, Reason: errMsg})
+				return errors.New(errMsg)
 			}
 
 			// Only sweep if current balance exceeds buffer
 			if currentBalance <= buffer {
 				errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-				return fmt.Errorf(errMsg)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  sourceAccount,
+					ToAccount:    targetAccount,
+				}, BalanceBefore: currentBalance, Reason: errMsg})
+				return errors.New(errMsg)
 			}
 
 			finalSweepAmount = *sweepAmount
@@ -738,16 +848,26 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 			// Maintain buffer - ensure sweep doesn't violate buffer requirement
 			if (currentBalance - finalSweepAmount) < buffer {
 				errMsg := fmt.Sprintf("BLOCKED: CONCENTRATION sweep - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
-				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-				return fmt.Errorf(errMsg)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  sourceAccount,
+					ToAccount:    targetAccount,
+				}, BalanceBefore: currentBalance, Reason: errMsg})
+				return errors.New(errMsg)
 			}
 
 		case "TARGET_BALANCE":
 			// TARGET_BALANCE: Sweep excess to maintain target balance (buffer) in source
 			if currentBalance <= buffer {
 				errMsg := fmt.Sprintf("BLOCKED: TARGET_BALANCE sweep - Balance (%.2f) is at or below target (%.2f), no excess to sweep", currentBalance, buffer)
-				logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-				return fmt.Errorf(errMsg)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  sourceAccount,
+					ToAccount:    targetAccount,
+				}, BalanceBefore: currentBalance, Reason: errMsg})
+				return errors.New(errMsg)
 			}
 			// Sweep only the excess above buffer, leaving buffer amount in source
 			finalSweepAmount = currentBalance - buffer
@@ -759,8 +879,13 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 
 	if finalSweepAmount <= 0 {
 		errMsg := fmt.Sprintf("BLOCKED: No funds available to sweep (Amount: %.2f)", finalSweepAmount)
-		logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Calculate new balance after sweep
@@ -770,8 +895,13 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to begin transaction: %v", err)
-		logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 	defer tx.Rollback(ctx)
 
@@ -862,15 +992,25 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, sweepID, 
 
 	if err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to log execution: %v", err)
-		logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Commit
 	if err := tx.Commit(ctx); err != nil {
 		errMsg := fmt.Sprintf("SYSTEM ERROR: Failed to commit: %v", err)
-		logSweepFailure(ctx, db, sweepID, initiationID, sourceAccount, targetAccount, errMsg, currentBalance)
-		return fmt.Errorf(errMsg)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	log.Printf("[SWEEP V2] %s SUCCESS (Initiation: %s) | Type: %s | Amount: %.2f | Buffer: %.2f",

@@ -54,14 +54,14 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Validate core_limit_type
 		coreLimitType := strings.ToUpper(strings.TrimSpace(req.CoreLimitType))
-		if coreLimitType != "FUND BASED" && coreLimitType != "NON FUND BASED" && coreLimitType != "TERM LOANS" {
+		if coreLimitType != constants.FundBased && coreLimitType != constants.NonFundBased && coreLimitType != constants.TermLoans {
 			api.RespondWithResult(w, false, "invalid core_limit_type. Allowed: Fund Based, Non Fund Based, Term Loans")
 			return
 		}
 
 		// Validate fungibility_type
 		fungibilityType := strings.ToUpper(strings.TrimSpace(req.FungibilityType))
-		if fungibilityType != "INTER-CORE" && fungibilityType != "INTRA-CORE" && fungibilityType != "NONE" {
+		if fungibilityType != constants.InterCore && fungibilityType != constants.IntraCore && fungibilityType != constants.None {
 			api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
 			return
 		}
@@ -195,7 +195,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Validate enums
 			coreLimitType := strings.ToUpper(strings.TrimSpace(lim.CoreLimitType))
-			if coreLimitType != "FUND BASED" && coreLimitType != "NON FUND BASED" && coreLimitType != "TERM LOANS" {
+			if coreLimitType != constants.FundBased && coreLimitType != constants.NonFundBased && coreLimitType != constants.TermLoans {
 				result["success"] = false
 				result["error"] = "invalid core_limit_type"
 				results = append(results, result)
@@ -203,7 +203,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
-			if fungibilityType != "INTER-CORE" && fungibilityType != "INTRA-CORE" && fungibilityType != "NONE" {
+			if fungibilityType != constants.InterCore && fungibilityType != constants.IntraCore && fungibilityType != constants.None {
 				api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
 				return
 			}
@@ -219,7 +219,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				result["success"] = false
-				result["error"] = "failed to begin transaction"
+				result["error"] = constants.ErrFailedToBeginTransaction
 				results = append(results, result)
 				continue
 			}
@@ -262,7 +262,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := tx.Commit(ctx); err != nil {
 				result["success"] = false
-				result["error"] = "failed to commit"
+				result["error"] = constants.ErrTxCommitFailed
 				results = append(results, result)
 				continue
 			}
@@ -361,28 +361,42 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			switch strings.ToLower(k) {
 			case "entity_name":
-				if s, ok := v.(string); ok { addStr("entity_name", s) }
+				if s, ok := v.(string); ok {
+					addStr("entity_name", s)
+				}
 			case "bank_name":
-				if s, ok := v.(string); ok { addStr("bank_name", s) }
+				if s, ok := v.(string); ok {
+					addStr("bank_name", s)
+				}
 			case "core_limit_type":
 				if s, ok := v.(string); ok {
 					val := strings.ToUpper(strings.TrimSpace(s))
-					if val != "FUND BASED" && val != "NON FUND BASED" && val != "TERM LOANS" {
+					if val != constants.FundBased && val != constants.NonFundBased && val != constants.TermLoans {
 						api.RespondWithResult(w, false, "invalid core_limit_type")
 						return
 					}
 					addStr("core_limit_type", val)
 				}
 			case "limit_type":
-				if s, ok := v.(string); ok { addStr("limit_type", s) }
+				if s, ok := v.(string); ok {
+					addStr("limit_type", s)
+				}
 			case "limit_sub_type":
-				if s, ok := v.(string); ok { addStr("limit_sub_type", s) }
+				if s, ok := v.(string); ok {
+					addStr("limit_sub_type", s)
+				}
 			case "sanction_date":
-				if s, ok := v.(string); ok { addStr("sanction_date", s) }
+				if s, ok := v.(string); ok {
+					addStr("sanction_date", s)
+				}
 			case "effective_date":
-				if s, ok := v.(string); ok { addStr("effective_date", s) }
+				if s, ok := v.(string); ok {
+					addStr("effective_date", s)
+				}
 			case "currency_code":
-				if s, ok := v.(string); ok { addStr("currency_code", strings.ToUpper(s)) }
+				if s, ok := v.(string); ok {
+					addStr("currency_code", strings.ToUpper(s))
+				}
 			case "sanctioned_amount":
 				switch t := v.(type) {
 				case float64:
@@ -393,7 +407,7 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			case "fungibility_type":
 				if s, ok := v.(string); ok {
 					val := strings.ToUpper(strings.TrimSpace(s))
-					if val != "INTER-CORE" && val != "INTRA-CORE" && val != "NONE" {
+					if val != constants.InterCore && val != constants.IntraCore && val != constants.None {
 						api.RespondWithResult(w, false, "invalid fungibility_type")
 						return
 					}
@@ -416,7 +430,9 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					addStr("security_type", val)
 				}
 			case "remarks":
-				if s, ok := v.(string); ok { addStr("remarks", s) }
+				if s, ok := v.(string); ok {
+					addStr("remarks", s)
+				}
 			case "initial_utilization":
 				switch t := v.(type) {
 				case float64:
@@ -506,7 +522,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			tx, err := pgxPool.Begin(ctx)
 			if err != nil {
 				result["success"] = false
-				result["error"] = "failed to begin transaction"
+				result["error"] = constants.ErrFailedToBeginTransaction
 				results = append(results, result)
 				continue
 			}
@@ -525,7 +541,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := tx.Commit(ctx); err != nil {
 				result["success"] = false
-				result["error"] = "failed to commit"
+				result["error"] = constants.ErrTxCommitFailed
 				results = append(results, result)
 				continue
 			}
@@ -568,7 +584,7 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -678,7 +694,7 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
-			api.RespondWithResult(w, false, "query failed: "+err.Error())
+			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()

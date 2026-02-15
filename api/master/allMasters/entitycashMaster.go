@@ -2114,7 +2114,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		f, fh, err := r.FormFile("file")
 		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "File is required")
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrFileUploadFailed)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
