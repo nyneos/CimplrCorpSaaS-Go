@@ -56,6 +56,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/category/scope/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateRuleScopeHandler(db)))
 	mux.Handle("/cash/category/rule/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateCategoryRuleHandler(db)))
 	mux.Handle("/cash/category/rule-component/create", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateCategoryRuleComponentHandler(db)))
+	mux.Handle("/cash/category/rule-master", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CreateCategoryRuleMasterHandler(db)))
 	mux.Handle("/cash/category/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteMultipleTransactionCategoriesHandler(db)))
 	mux.Handle("/cash/transactions/map-category", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MapTransactionsToCategoryHandler(db)))
 	mux.Handle("/cash/transactions/categorize-uncategorized", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CategorizeUncategorizedTransactionsHandler(db)))

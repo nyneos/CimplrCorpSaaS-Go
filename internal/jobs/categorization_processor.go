@@ -118,14 +118,19 @@ func RunCategorizationScheduler(cfg *CategorizationConfig, db *pgxpool.Pool) err
 // - If rule has effective_date AND transaction_date < effective_date: skip rule
 // - If rule has NO effective_date (NULL): apply rule regardless of transaction date
 // batchSize controls how many transactions are updated in a single bulk UPDATE (not how many are processed)
+// ProcessUncategorizedTransactions used to process only uncategorized transactions.
+// It now performs a full recategorization: scans all transactions (categorized and uncategorized),
+// applies effective_date-aware matching and updates categories where the new match differs
+// from the current value. This replaces the previous separate Recategorize job so cron
+// and manual triggers continue to call this function.
 func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	// Adopt the recategorization behavior and longer timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
 	defer cancel()
 
 	startTime := time.Now()
-	logger.GlobalLogger.LogAudit("Auto-categorization: Starting to count uncategorized transactions")
+	logger.GlobalLogger.LogAudit("Recategorization: Starting to count transactions")
 
-	// Step 1: Get database connection
 	pgDB := db.Config().ConnConfig.Database
 	pgUser := db.Config().ConnConfig.User
 	pgPass := db.Config().ConnConfig.Password
@@ -139,34 +144,24 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	}
 	defer sqlDB.Close()
 
-	// Count total uncategorized transactions
 	var totalCount int
-	countQuery := `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id IS NULL AND bank_statement_id IS NOT NULL`
-	err = sqlDB.QueryRowContext(ctx, countQuery).Scan(&totalCount)
-	if err != nil {
-		return fmt.Errorf("failed to count uncategorized transactions: %w", err)
+	countQuery := `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id IS NOT NULL`
+	if err := sqlDB.QueryRowContext(ctx, countQuery).Scan(&totalCount); err != nil {
+		return fmt.Errorf("failed to count transactions: %w", err)
 	}
-
 	if totalCount == 0 {
-		logger.GlobalLogger.LogAudit("No uncategorized transactions found")
+		logger.GlobalLogger.LogAudit("No transactions found for recategorization")
 		return nil
 	}
+	log.Printf("[AUDIT] Total transactions to consider for recategorization: %d", totalCount)
 
-	log.Printf("[AUDIT] Total uncategorized transactions: %d", totalCount)
-	logger.GlobalLogger.LogAudit(fmt.Sprintf("Found %d total uncategorized transactions to process", totalCount))
-
-	log.Printf("[AUDIT] Total uncategorized transactions: %d", totalCount)
-	logger.GlobalLogger.LogAudit(fmt.Sprintf("Found %d total uncategorized transactions to process", totalCount))
-
-	// Step 2: Load ALL active rules ONCE (avoid N+1 query problem)
-	log.Println("[AUDIT] Loading all active categorization rules...")
+	// Load all rules once
+	log.Println("[AUDIT] Loading all active categorization rules for recategorization...")
 	allRules, err := loadAllCategoryRules(ctx, sqlDB)
 	if err != nil {
 		return fmt.Errorf("failed to load category rules: %w", err)
 	}
-	log.Printf("[AUDIT] Loaded %d rule components across all scopes", len(allRules))
 
-	// Step 3: Process ALL transactions in batches
 	type txnRow struct {
 		id            int64
 		bsID          string
@@ -177,23 +172,19 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 		depositAmt    sql.NullFloat64
 		valueDate     sql.NullTime
 		currency      sql.NullString
+		currCategory  sql.NullString
 	}
 
 	offset := 0
 	totalProcessed := 0
-	totalCategorized := 0
+	totalUpdated := 0
 	bsSet := make(map[string]struct{})
-	lastLogTime := time.Now()
 
-	// Set batch size for fetching/updating (default 5000 if not specified)
 	if batchSize <= 0 {
 		batchSize = 5000
 	}
 
-	log.Printf("[AUDIT] Starting batch processing (batch size: %d)...", batchSize)
-
 	for {
-		// Fetch next batch of uncategorized transactions
 		query := `
 			SELECT 
 				t.transaction_id,
@@ -204,129 +195,99 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 				t.withdrawal_amount,
 				t.deposit_amount,
 				t.value_date,
-				m.currency
+				m.currency,
+				t.category_id
 			FROM cimplrcorpsaas.bank_statement_transactions t
 			JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
 			LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
-			WHERE t.category_id IS NULL
-				AND t.bank_statement_id IS NOT NULL
+			WHERE t.bank_statement_id IS NOT NULL
 			ORDER BY t.value_date DESC
 			LIMIT $1 OFFSET $2
 		`
 
 		rows, err := sqlDB.QueryContext(ctx, query, batchSize, offset)
 		if err != nil {
-			return fmt.Errorf("failed to query uncategorized transactions at offset %d: %w", offset, err)
+			return fmt.Errorf("failed to query transactions at offset %d: %w", offset, err)
 		}
 
 		var txns []txnRow
 		for rows.Next() {
 			var tr txnRow
-			if err := rows.Scan(&tr.id, &tr.bsID, &tr.accountNumber, &tr.entityID, &tr.description, &tr.withdrawalAmt, &tr.depositAmt, &tr.valueDate, &tr.currency); err != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("Failed to scan transaction row: %v", err))
-				continue
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.accountNumber, &tr.entityID, &tr.description, &tr.withdrawalAmt, &tr.depositAmt, &tr.valueDate, &tr.currency, &tr.currCategory); err == nil {
+				txns = append(txns, tr)
 			}
-			txns = append(txns, tr)
 		}
 		rows.Close()
-
 		if len(txns) == 0 {
-			break // No more transactions to process
-		}
-
-		log.Printf("[AUDIT] Processing batch: transactions %d-%d of %d", offset+1, offset+len(txns), totalCount)
-
-		// Match categories for this batch (in-memory processing)
-		categorized := make([]categorizationUpdate, 0, len(txns))
-		batchCategorized := 0
-
-		for idx, tr := range txns {
-			totalProcessed++
-
-			// Filter applicable rules for this transaction
-			applicableRules := filterRulesForTransaction(allRules, tr.accountNumber, tr.entityID, tr.currency)
-
-			// Match category using effective_date logic
-			matched := matchCategoryForTransactionWithEffectiveDate(applicableRules, tr.description, tr.withdrawalAmt, tr.depositAmt, tr.valueDate)
-
-			if matched.Valid && strings.TrimSpace(matched.String) != "" {
-				categorized = append(categorized, categorizationUpdate{
-					txnID:      tr.id,
-					categoryID: matched.String,
-					bsID:       tr.bsID,
-				})
-				batchCategorized++
-				totalCategorized++
-				bsSet[tr.bsID] = struct{}{}
-			}
-			// Note: Transactions that don't match any rule remain uncategorized (no counter needed)
-
-			// Progress logging every 1000 transactions or every 10 seconds
-			if (totalProcessed)%1000 == 0 || time.Since(lastLogTime) > 10*time.Second {
-				elapsed := time.Since(startTime)
-				rate := float64(totalProcessed) / elapsed.Seconds()
-				remaining := totalCount - totalProcessed
-				eta := time.Duration(float64(remaining)/rate) * time.Second
-				progress := fmt.Sprintf("⏳ Progress: %d/%d processed (%d matched, %.1f txns/sec, ETA: %v)",
-					totalProcessed, totalCount, totalCategorized, rate, eta.Round(time.Second))
-				log.Println(progress)
-				logger.GlobalLogger.LogAudit(progress)
-				lastLogTime = time.Now()
-			}
-
-			_ = idx // unused
-		}
-
-		// Bulk update this batch
-		if len(categorized) > 0 {
-			log.Printf("💾 Bulk updating %d categorized transactions in this batch...", len(categorized))
-			err = bulkUpdateCategories(ctx, sqlDB, categorized)
-			if err != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("Bulk update failed for batch at offset %d, falling back to individual updates: %v", offset, err))
-				// Fallback to individual updates if bulk fails
-				for _, cat := range categorized {
-					updateQuery := `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`
-					_, err := sqlDB.ExecContext(ctx, updateQuery, cat.categoryID, cat.txnID)
-					if err != nil {
-						logger.GlobalLogger.LogAudit(fmt.Sprintf("Failed to update transaction %d: %v", cat.txnID, err))
-					}
-				}
-			} else {
-				log.Printf("✅ Batch update successful (%d categorized)", batchCategorized)
-			}
-		}
-
-		offset += len(txns)
-
-		// Safety check: if we processed fewer than batchSize, we're done
-		if len(txns) < batchSize {
 			break
 		}
-	}
 
-	log.Printf("[AUDIT] All batches processed!")
+		// For each transaction, filter applicable rules and match
+		updates := make([]categorizationUpdate, 0)
+		nullifyIDs := make([]int64, 0)
 
-	// Step 4: Insert pending edit approval for affected bank statements
-	if len(bsSet) > 0 {
-		log.Printf("[AUDIT]Creating audit entries for %d affected bank statements...", len(bsSet))
-		for bsID := range bsSet {
-			auditQuery := `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'EDIT', 'PENDING_EDIT_APPROVAL', 'AUTO_CATEGORIZATION_JOB', $2)`
-			_, err = sqlDB.ExecContext(ctx, auditQuery, bsID, time.Now())
-			if err != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("Failed to create audit entry for bank statement %s: %v", bsID, err))
+		for _, tr := range txns {
+			applicable := filterRulesForTransaction(allRules, tr.accountNumber, tr.entityID, tr.currency)
+			matched := matchCategoryForTransactionWithEffectiveDate(applicable, tr.description, tr.withdrawalAmt, tr.depositAmt, tr.valueDate)
+
+			// If matched differs from current category (including NULL vs non-NULL), schedule update
+			if matched.Valid {
+				if !tr.currCategory.Valid || tr.currCategory.String != matched.String {
+					updates = append(updates, categorizationUpdate{txnID: tr.id, categoryID: matched.String})
+					bsSet[tr.bsID] = struct{}{}
+				}
+			} else {
+				// matched invalid (no rule) — if current category exists, nullify it
+				if tr.currCategory.Valid {
+					nullifyIDs = append(nullifyIDs, tr.id)
+					bsSet[tr.bsID] = struct{}{}
+				}
 			}
+		}
+
+		// Bulk update non-null categories
+		if len(updates) > 0 {
+			if err := bulkUpdateCategories(ctx, sqlDB, updates); err != nil {
+				return fmt.Errorf("failed to bulk update categories: %w", err)
+			}
+			totalUpdated += len(updates)
+		}
+		// Nullify categories where needed
+		if len(nullifyIDs) > 0 {
+			_, err := sqlDB.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = NULL WHERE transaction_id = ANY($1)`, pq.Array(nullifyIDs))
+			if err != nil {
+				return fmt.Errorf("failed to nullify categories: %w", err)
+			}
+			totalUpdated += len(nullifyIDs)
+		}
+
+		totalProcessed += len(txns)
+		offset += len(txns)
+
+		// small progress log
+		if time.Since(startTime) > 30*time.Second {
+			log.Printf("[AUDIT] Recategorization progress: processed %d/%d, updated %d", totalProcessed, totalCount, totalUpdated)
+			startTime = time.Now()
 		}
 	}
 
-	duration := time.Since(startTime)
-	uncategorized := totalCount - totalCategorized
-	summary := fmt.Sprintf("🎉 Auto-categorization completed: %d/%d transactions categorized (%.1f%%), %d remain uncategorized, %d bank statements affected (Duration: %v, Avg: %.1f txns/sec)",
-		totalCategorized, totalCount, float64(totalCategorized)/float64(totalCount)*100, uncategorized, len(bsSet), duration, float64(totalCount)/duration.Seconds())
-	logger.GlobalLogger.LogAudit(summary)
-	log.Println(summary)
+	// insert pending edit approval for affected bank statements similar to existing job
+	if len(bsSet) > 0 {
+		sqlDb, err := sql.Open("postgres", connStr)
+		if err == nil {
+			// use a simple insert per bsID (transactional safety left to caller)
+			for bsID := range bsSet {
+				_, _ = sqlDb.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at) VALUES ($1, 'RECAT', 'PENDING_EDIT_APPROVAL', $2, $3)`, bsID, "system", time.Now())
+			}
+			sqlDb.Close()
+		}
+	}
 
+	logger.GlobalLogger.LogAudit(fmt.Sprintf("Recategorization completed: processed=%d updated=%d", totalProcessed, totalUpdated))
 	return nil
 }
+
+
 
 // loadCategoryRuleComponentsForJob fetches all active rule components for a given account/entity/currency scope
 // INCLUDING the effective_date for each rule

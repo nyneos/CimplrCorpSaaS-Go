@@ -672,8 +672,8 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			}
 		}
 
-		// Apply categorization
-		categoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
+		// Apply categorization (use value_date when available for effective_date checks)
+		categoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
 		if categoryID.Valid && categoryID.String != "" {
 			txn["category_id"] = categoryID.String
 			for _, rule := range rules {
@@ -1044,8 +1044,8 @@ func processMultiAccountCSVPreviewFlat(ctx context.Context, db *sql.DB, fileByte
 			}
 		}
 
-		// Apply categorization
-		categoryID := matchCategoryForTransaction(accData.rules, description, withdrawal, deposit)
+		// Apply categorization (use value_date when available for effective_date checks)
+		categoryID := matchCategoryForTransaction(accData.rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
 		if categoryID.Valid && categoryID.String != "" {
 			txn["category_id"] = categoryID.String
 			for _, rule := range accData.rules {
@@ -1221,7 +1221,22 @@ func processPDFPreviewFlat(ctx context.Context, db *sql.DB, fileBytes []byte, fi
 								deposit = sql.NullFloat64{Float64: d, Valid: true}
 							}
 
-							categoryID := matchCategoryForTransaction(rules, desc, withdrawal, deposit)
+									// Parse value_date (if present) for effective_date comparisons
+									var parsedValDate sql.NullTime
+									if v, ok := txnMap["value_date"]; ok {
+										switch t := v.(type) {
+										case time.Time:
+											parsedValDate = sql.NullTime{Time: t, Valid: true}
+										case string:
+											if pd, err := time.Parse(constants.DateFormat, t); err == nil {
+												parsedValDate = sql.NullTime{Time: pd, Valid: true}
+											} else if pd2, err2 := time.Parse(time.RFC3339, t); err2 == nil {
+												parsedValDate = sql.NullTime{Time: pd2, Valid: true}
+											}
+										}
+									}
+
+									categoryID := matchCategoryForTransaction(rules, desc, withdrawal, deposit, parsedValDate)
 							if categoryID.Valid && categoryID.String != "" {
 								txn["category_id"] = categoryID.String
 								for _, rule := range rules {

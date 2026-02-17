@@ -10,37 +10,22 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/dash/ticker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NOTE: These INR conversion rates are example values. Replace with live FX rates or a rates table.
-var inrRates = map[string]float64{
-	"INR": 1.0,
-	"USD": 82.5,
-	"EUR": 90.0,
-	"GBP": 102.0,
-	"JPY": 0.61,
-	"AUD": 55.0,
-	"CAD": 60.0,
-	"CHF": 90.0,
-	"CNY": 11.5,
-	"RMB": 11.5,
-	"SEK": 7.5,
-	"AED": 22.5,
-}
-
+// toINR converts an amount in `currency` to INR using the ticker package.
 func toINR(amount float64, currency string) float64 {
 	if amount == 0 {
 		return 0
 	}
 	cur := strings.ToUpper(strings.TrimSpace(currency))
-	rate, ok := inrRates[cur]
-	if !ok || rate == 0 {
-		// fallback assume INR
+	rate, err := ticker.RateBetween(cur, "INR")
+	if err != nil || rate == 0 {
+		// fallback: treat amount as INR
 		return amount
 	}
-	// multiply by rate to get INR (rates map is INR per unit currency)
 	return amount * rate
 }
 
@@ -236,39 +221,124 @@ WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
 		outflowRows.Close()
 		actualOutflowsINR = math.Round(actualOutflowsINR*100) / 100
 
-		// Forecasts: use cashflow_proposal_item.expected_amount where start_date between
-		forecastQ := `SELECT COALESCE(SUM(i.expected_amount),0)::float8 as sum_amount, COALESCE(p.currency_code,'INR')
-FROM cashflow_proposal_item i
-JOIN cashflow_proposal p ON i.proposal_id = p.proposal_id
-WHERE i.start_date BETWEEN $1 AND $2
-AND (
-  SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY a.requested_at DESC LIMIT 1
-) = 'APPROVED' GROUP BY p.currency_code`
-		frows, err := pgxPool.Query(ctx, forecastQ, startStr, endStr)
+		// Forecasts: aggregate monthly projections from cashflow_projection_monthly
+		// Compute month-key range for the projection table (year*12 + month)
+		monthStartKey := start.Year()*12 + int(start.Month())
+		monthEndKey := end.Year()*12 + int(end.Month())
+
+		// Diagnostic: log the month key range used for the projection query
+		log.Printf("[DEBUG] projection month keys start=%d end=%d", monthStartKey, monthEndKey)
+
+		// Diagnostic counts: total projection rows in range, and rows joined to approved proposals
+		var rawCount int
+		diagQ := `SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly cpm WHERE (cpm.year*12 + cpm.month) BETWEEN $1 AND $2`
+		if err := pgxPool.QueryRow(ctx, diagQ, monthStartKey, monthEndKey).Scan(&rawCount); err != nil {
+			log.Printf("[DEBUG] projection diag raw count query error: %v", err)
+		} else {
+			log.Printf("[DEBUG] projection raw rows in range: %d", rawCount)
+		}
+
+		var approvedCount int
+		diagQ2 := `SELECT COUNT(*) FROM cimplrcorpsaas.cashflow_projection_monthly cpm
+JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+JOIN cimplrcorpsaas.cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+LEFT JOIN LATERAL (SELECT processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal a WHERE a.proposal_id = cp.proposal_id ORDER BY a.requested_at DESC LIMIT 1) aa ON TRUE
+WHERE (cpm.year*12 + cpm.month) BETWEEN $1 AND $2 AND aa.processing_status = 'APPROVED'`
+		if err := pgxPool.QueryRow(ctx, diagQ2, monthStartKey, monthEndKey).Scan(&approvedCount); err != nil {
+			log.Printf("[DEBUG] projection diag approved count query error: %v", err)
+		} else {
+			log.Printf("[DEBUG] projection rows joined to approved proposals: %d", approvedCount)
+		}
+
+		// Aggregate projected inflows/outflows per currency for KPI totals
+		projAggQ := `SELECT COALESCE(SUM(CASE WHEN cpi.cashflow_type='Inflow' THEN cpm.projected_amount ELSE 0 END),0)::float8 AS sum_in,
+COALESCE(SUM(CASE WHEN cpi.cashflow_type='Outflow' THEN cpm.projected_amount ELSE 0 END),0)::float8 AS sum_out,
+COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'INR')) as currency_code
+FROM cimplrcorpsaas.cashflow_projection_monthly cpm
+JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+JOIN cimplrcorpsaas.cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+LEFT JOIN LATERAL (SELECT processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal a WHERE a.proposal_id = cp.proposal_id ORDER BY a.requested_at DESC LIMIT 1) aa ON TRUE
+WHERE (cpm.year*12 + cpm.month) BETWEEN $1 AND $2
+AND aa.processing_status = 'APPROVED' GROUP BY COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'INR'))`
+
+		aggRows, err := pgxPool.Query(ctx, projAggQ, monthStartKey, monthEndKey)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
-			return
+			log.Printf("[DEBUG] projection agg query error: %v", err)
 		}
-		var forecastTotalINR float64
-		for frows.Next() {
-			var amt float64
-			var cur string
-			if err := frows.Scan(&amt, &cur); err != nil {
-				continue
+
+		var projectedInflowsINR float64
+		var projectedOutflowsINR float64
+		if aggRows != nil {
+			for aggRows.Next() {
+				var sumIn, sumOut float64
+				var cur string
+				if err := aggRows.Scan(&sumIn, &sumOut, &cur); err != nil {
+					log.Printf("[DEBUG] projection agg scan error: %v", err)
+					continue
+				}
+				projectedInflowsINR += toINR(sumIn, cur)
+				projectedOutflowsINR += toINR(sumOut, cur)
 			}
-			forecastTotalINR += toINR(amt, cur)
+			aggRows.Close()
 		}
-		frows.Close()
-		forecastTotalINR = math.Round(forecastTotalINR*100) / 100
+
+		// Build daily projection maps by distributing monthly projections evenly across days of that month.
+		projDetailQ := `SELECT cpm.year, cpm.month, cpm.projected_amount, cpi.cashflow_type,
+COALESCE(NULLIF(cpi.currency_code,''), COALESCE(cp.base_currency_code,'INR')) as currency_code
+FROM cimplrcorpsaas.cashflow_projection_monthly cpm
+JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cpm.item_id = cpi.item_id
+JOIN cimplrcorpsaas.cashflow_proposal cp ON cpi.proposal_id = cp.proposal_id
+LEFT JOIN LATERAL (SELECT processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal a WHERE a.proposal_id = cp.proposal_id ORDER BY a.requested_at DESC LIMIT 1) aa ON TRUE
+WHERE (cpm.year*12 + cpm.month) BETWEEN $1 AND $2
+AND aa.processing_status = 'APPROVED'`
+
+		projRows, err := pgxPool.Query(ctx, projDetailQ, monthStartKey, monthEndKey)
+		if err != nil {
+			log.Printf("[DEBUG] projection detail query error: %v", err)
+		}
+
+		projectedDailyInflow := map[string]float64{}
+		projectedDailyOutflow := map[string]float64{}
+		if projRows != nil {
+			for projRows.Next() {
+				var yr, mon int
+				var amt float64
+				var ctype, cur string
+				if err := projRows.Scan(&yr, &mon, &amt, &ctype, &cur); err != nil {
+					log.Printf("[DEBUG] projection detail scan error: %v", err)
+					continue
+				}
+				daysInMonth := time.Date(yr, time.Month(mon)+1, 0, 0, 0, 0, 0, time.UTC).Day()
+				if daysInMonth <= 0 {
+					continue
+				}
+				perDay := amt / float64(daysInMonth)
+				for d := 1; d <= daysInMonth; d++ {
+					dt := time.Date(yr, time.Month(mon), d, 0, 0, 0, 0, time.UTC)
+					if dt.Before(start) || dt.After(end) {
+						continue
+					}
+					key := dt.Format(constants.DateFormat)
+					if strings.EqualFold(strings.TrimSpace(ctype), "Inflow") {
+						projectedDailyInflow[key] += toINR(perDay, cur)
+					} else {
+						projectedDailyOutflow[key] += toINR(perDay, cur)
+					}
+				}
+			}
+			projRows.Close()
+		}
+
+		projectedInflowsINR = math.Round(projectedInflowsINR*100) / 100
+		projectedOutflowsINR = math.Round(projectedOutflowsINR*100) / 100
 
 		// Build Forecast KPI set similar to mockForecastKPIs
-		projectedClosing := math.Round((totalINR+(actualInflowsINR-actualOutflowsINR))*100) / 100
+		projectedClosing := math.Round((totalINR+(projectedInflowsINR-projectedOutflowsINR))*100) / 100
 		liquidityGap := math.Round(math.Abs(projectedClosing-totalINR)*100) / 100
 		forecastKPIs := []map[string]interface{}{
 			{"title": "Current Balance", "value": totalINR},
-			{"title": "Projected Inflows", "value": actualInflowsINR},
-			{"title": "Projected Outflows", "value": actualOutflowsINR},
+			{"title": "Projected Inflows", "value": projectedInflowsINR},
+			{"title": "Projected Outflows", "value": projectedOutflowsINR},
 			{"title": "Projected Closing", "value": projectedClosing},
 			{"title": "Liquidity Gap", "value": liquidityGap},
 		}
@@ -378,29 +448,17 @@ WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
 				arows2.Close()
 			}
 
-			// forecast inflow/outflow from cashflow_proposal_item.start_date
+			// forecast inflow/outflow: sum daily-prorated monthly projections for the week
 			var fIn, fOut float64
-			fq := `SELECT COALESCE(SUM(CASE WHEN i.cashflow_type='Inflow' THEN i.expected_amount ELSE 0 END),0)::float8,
-COALESCE(SUM(CASE WHEN i.cashflow_type='Outflow' THEN i.expected_amount ELSE 0 END),0)::float8, COALESCE(p.currency_code,'INR')
-FROM cashflow_proposal_item i JOIN cashflow_proposal p ON i.proposal_id = p.proposal_id
-WHERE i.start_date BETWEEN $1 AND $2
-AND (
-  SELECT a.processing_status FROM audit_action_cashflow_proposal a WHERE a.proposal_id = p.proposal_id ORDER BY a.requested_at DESC LIMIT 1
-) = 'APPROVED'
-GROUP BY p.currency_code`
-			frows2, err := pgxPool.Query(ctx, fq, wsStr, weStr)
-			if err != nil {
-				log.Printf("[WARN] cashDashboard forecast query failed for %s - %s: %v", wsStr, weStr, err)
-			} else {
-				for frows2.Next() {
-					var infl, outf float64
-					var cur string
-					if err := frows2.Scan(&infl, &outf, &cur); err == nil {
-						fIn += toINR(infl, cur)
-						fOut += toINR(outf, cur)
-					}
+			// iterate each day of the week and sum from the projected daily maps
+			for d := ws; !d.After(we); d = d.AddDate(0, 0, 1) {
+				key := d.Format(constants.DateFormat)
+				if v, ok := projectedDailyInflow[key]; ok {
+					fIn += v
 				}
-				frows2.Close()
+				if v, ok := projectedDailyOutflow[key]; ok {
+					fOut += v
+				}
 			}
 
 			weeks = append(weeks, map[string]interface{}{

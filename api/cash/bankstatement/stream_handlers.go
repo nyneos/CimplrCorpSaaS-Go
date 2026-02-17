@@ -1056,8 +1056,8 @@ func CommitHandler(db *sql.DB) http.Handler {
 					balance = sql.NullFloat64{Float64: *t.Balance, Valid: true}
 				}
 
-				// match category
-				matched := matchCategoryForTransaction(rules, narration, wd, dep)
+				// match category (use transaction value_date when available)
+				matched := matchCategoryForTransaction(rules, narration, wd, dep, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
 
 				raw, _ := json.Marshal(t)
 
@@ -1165,7 +1165,14 @@ func CommitHandler(db *sql.DB) http.Handler {
 			// Match category
 			wdNull := sql.NullFloat64{Valid: wd > 0, Float64: wd}
 			depNull := sql.NullFloat64{Valid: dep > 0, Float64: dep}
-			matched := matchCategoryForTransaction(rules, narration, wdNull, depNull)
+			// Try to parse value_date for effective_date comparisons
+			var parsedValDate sql.NullTime
+			if t.ValueDate != nil && strings.TrimSpace(*t.ValueDate) != "" {
+				if pd, err := time.Parse(constants.DateFormat, *t.ValueDate); err == nil {
+					parsedValDate = sql.NullTime{Time: pd, Valid: true}
+				}
+			}
+			matched := matchCategoryForTransaction(rules, narration, wdNull, depNull, parsedValDate)
 
 			if matched.Valid {
 				groupedTxns++

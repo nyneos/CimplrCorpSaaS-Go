@@ -21,6 +21,7 @@ import (
 	realtimebalances "CimplrCorpSaas/api/dash/real-time-balances"
 	reports "CimplrCorpSaas/api/dash/reports"
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
+	ticker "CimplrCorpSaas/api/dash/ticker"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"database/sql"
@@ -55,6 +56,9 @@ func StartDashService(db *sql.DB) {
 
 	// Real-time Balances KPI Route
 	mux.Handle("/dash/realtime-balances/kpi", middlewares.PreValidationMiddleware(pgxPool)(realtimebalances.GetKpiHandler(db)))
+
+	// Simple rates ticker (POST)
+	mux.Handle("/dash/ticker", middlewares.PreValidationMiddleware(pgxPool)(ticker.GetTickerHandler()))
 	// Bank balance endpoints: use PreValidationMiddleware ONLY (no BusinessUnitMiddleware to avoid overriding entity scope)
 	mux.Handle("/dash/bank-balance/approved", middlewares.PreValidationMiddleware(pgxPool)(bankbalance.GetApprovedBankBalances(pgxPool)))
 	mux.Handle("/dash/bank-balance/currency-wise", middlewares.PreValidationMiddleware(pgxPool)(bankbalance.GetCurrencyWiseBalancesFromManual(pgxPool)))

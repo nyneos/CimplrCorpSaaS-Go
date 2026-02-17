@@ -316,6 +316,7 @@ type categoryRuleComponent struct {
 	AmountValue    sql.NullFloat64
 	TxnFlow        sql.NullString
 	CurrencyCode   sql.NullString
+	EffectiveDate  sql.NullTime
 }
 
 // loadCategoryRuleComponents fetches all active rule components for a given
@@ -323,22 +324,23 @@ type categoryRuleComponent struct {
 // logic originally present in the upload handler so that recompute can reuse
 // the same rules.
 func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
-	q := `
-	SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	FROM cimplrcorpsaas.category_rules r
-	JOIN public.mastercashflowcategory c ON r.category_id = c.category_id
-	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
-	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
-	       WHERE r.is_active = true
-		 AND (
-		       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
-		       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
-		       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
-		       OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
-		       OR (s.scope_type = 'GLOBAL')
-		 )
-	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
-	   `
+		q := `
+		SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code, r.effective_date
+		FROM cimplrcorpsaas.category_rules r
+		JOIN public.mastercashflowcategory c ON r.category_id = c.category_id
+					 JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
+					 JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
+					 LEFT JOIN public.masterbankaccount mba ON mba.account_number = $1
+					 WHERE r.is_active = true
+				 AND (
+							 (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
+							 OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
+							 OR (s.scope_type = 'BANK' AND s.bank_code = mba.bank_id)
+							 OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
+							 OR (s.scope_type = 'GLOBAL')
+				 )
+					 ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
+			 `
 
 	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID, currencyCode)
 	if err != nil {
@@ -349,7 +351,7 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 	rules := []categoryRuleComponent{}
 	for rowsRule.Next() {
 		var rc categoryRuleComponent
-		if err := rowsRule.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode); err != nil {
+		if err := rowsRule.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode, &rc.EffectiveDate); err != nil {
 			return nil, err
 		}
 		rules = append(rules, rc)
@@ -364,95 +366,195 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 // transaction and returns the matched category_id, if any. The logic here is
 // exactly the same as what is used during upload so that recompute produces
 // consistent results when new rules are added.
-func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64) sql.NullString {
-	matchedCategoryID := sql.NullString{Valid: false}
+func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64, txnValueDate sql.NullTime) sql.NullString {
+	// Group components by rule_id (rules already ordered by priority, rule_id, component_id)
+	type candidate struct {
+		RuleID      int64
+		Priority    int
+		CategoryID  string
+		CategoryType string
+	}
+
+	var candidates []candidate
 	descLower := strings.ToLower(description)
-	for _, rule := range rules {
-		// NARRATION LOGIC
-		if rule.ComponentType == "NARRATION_LOGIC" && rule.MatchType.Valid && rule.MatchValue.Valid {
-			val := strings.ToLower(rule.MatchValue.String)
-			switch rule.MatchType.String {
-			case "CONTAINS", "ILIKE":
-				if strings.Contains(descLower, val) {
-					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
-				}
-			case "EQUALS":
-				if descLower == val {
-					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
-				}
-			case "STARTS_WITH":
-				if strings.HasPrefix(descLower, val) {
-					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
-				}
-			case "ENDS_WITH":
-				if strings.HasSuffix(descLower, val) {
-					matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
+	// Determine reference date for effective_date comparisons: prefer transaction value_date when available,
+	// otherwise fall back to current time to preserve previous behavior.
+	var refDate time.Time
+	if txnValueDate.Valid {
+		refDate = txnValueDate.Time
+	} else {
+		refDate = time.Now()
+	}
+
+	// iterate through rules grouping by RuleID
+	for i := 0; i < len(rules); {
+		r := rules[i]
+		rid := r.RuleID
+		prio := r.Priority
+		catID := r.CategoryID
+		catType := r.CategoryType
+		eff := r.EffectiveDate
+
+		// If effective_date is set and transaction value_date (or refDate) is before effective_date, skip this rule
+		if eff.Valid && refDate.Before(eff.Time) {
+			// skip all components for this rule
+			for i < len(rules) && rules[i].RuleID == rid {
+				i++
+			}
+			continue
+		}
+
+		ruleMatches := true
+		// evaluate all components for this rule (AND semantics)
+		for i < len(rules) && rules[i].RuleID == rid {
+			comp := rules[i]
+			ct := comp.ComponentType
+
+			switch ct {
+			case "NARRATION_LOGIC":
+				if comp.MatchType.Valid && comp.MatchValue.Valid {
+					val := strings.ToLower(comp.MatchValue.String)
+					mtrue := false
+					switch comp.MatchType.String {
+					case "CONTAINS", "ILIKE":
+						if strings.Contains(descLower, val) {
+							mtrue = true
+						}
+					case "EQUALS":
+						if descLower == val {
+							mtrue = true
+						}
+					case "STARTS_WITH":
+						if strings.HasPrefix(descLower, val) {
+							mtrue = true
+						}
+					case "ENDS_WITH":
+						if strings.HasSuffix(descLower, val) {
+							mtrue = true
+						}
+					case "REGEX":
+						// not implemented: treat as no-match
+					}
+					if !mtrue {
+						ruleMatches = false
+					}
+				} else {
+					// missing match data => treat as non-matching
+					ruleMatches = false
 				}
 
-			case "REGEX":
-				// Regex not implemented in original logic
-			}
-		}
-		// AMOUNT LOGIC (applies to both withdrawal and deposit)
-		if !matchedCategoryID.Valid && rule.ComponentType == "AMOUNT_LOGIC" && rule.AmountOperator.Valid && rule.AmountValue.Valid {
-			amounts := []float64{}
-			if withdrawal.Valid {
-				amounts = append(amounts, withdrawal.Float64)
-			}
-			if deposit.Valid {
-				amounts = append(amounts, deposit.Float64)
-			}
-			for _, amt := range amounts {
-				switch rule.AmountOperator.String {
-				case ">":
-					if amt > rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
+			case "AMOUNT_LOGIC":
+				if comp.AmountOperator.Valid && comp.AmountValue.Valid {
+					amounts := []float64{}
+					if withdrawal.Valid {
+						amounts = append(amounts, withdrawal.Float64)
 					}
-				case ">=":
-					if amt >= rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
+					if deposit.Valid {
+						amounts = append(amounts, deposit.Float64)
 					}
-				case "=":
-					if amt == rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
+					// component is satisfied if any applicable amount matches
+					sat := false
+					for _, amt := range amounts {
+						switch comp.AmountOperator.String {
+						case ">":
+							if amt > comp.AmountValue.Float64 {
+								sat = true
+							}
+						case ">=":
+							if amt >= comp.AmountValue.Float64 {
+								sat = true
+							}
+						case "=":
+							if amt == comp.AmountValue.Float64 {
+								sat = true
+							}
+						case "<=":
+							if amt <= comp.AmountValue.Float64 {
+								sat = true
+							}
+						case "<":
+							if amt < comp.AmountValue.Float64 {
+								sat = true
+							}
+						}
+						if sat {
+							break
+						}
 					}
-				case "<=":
-					if amt <= rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
+					if !sat {
+						ruleMatches = false
 					}
-				case "<":
-					if amt < rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
-					}
+				} else {
+					ruleMatches = false
 				}
+
+			case "TRANSACTION_LOGIC":
+				if comp.TxnFlow.Valid {
+					if comp.TxnFlow.String == "Outflow" {
+						if !(withdrawal.Valid && withdrawal.Float64 > 0) {
+							ruleMatches = false
+						}
+					} else if comp.TxnFlow.String == "Inflow" {
+						if !(deposit.Valid && deposit.Float64 > 0) {
+							ruleMatches = false
+						}
+					} else {
+						// unknown txn flow value -> non-match
+						ruleMatches = false
+					}
+				} else {
+					ruleMatches = false
+				}
+
+			case "CURRENCY_CONDITION":
+				// component-level currency condition: cannot reliably evaluate here
+				// because transaction currency is not passed to this matcher in all callers.
+				// We'll treat as pass-through (i.e., do not block rule) but log for visibility.
+				// Leave currency checks for callers that have transaction currency available.
+
+			default:
+				// Unrecognized component types: conservative approach -> do not match
+				ruleMatches = false
 			}
+
+			if !ruleMatches {
+				// short-circuit evaluating remaining components of this rule
+				// advance to end of this rule's components
+				for i < len(rules) && rules[i].RuleID == rid {
+					i++
+				}
+				break
+			}
+			i++
 		}
-		// TRANSACTION LOGIC (Outflow/Inflow)
-		if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
-			if rule.TxnFlow.String == "Outflow" && withdrawal.Valid && withdrawal.Float64 > 0 {
-				matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
-			}
-			if rule.TxnFlow.String == "Inflow" && deposit.Valid && deposit.Float64 > 0 {
-				matchedCategoryID = sql.NullString{String: rule.CategoryID, Valid: true}
-			}
-		}
-		// CURRENCY_CONDITION and other component types are ignored here because
-		// the original upload logic didn't implement them either.
-		if matchedCategoryID.Valid {
+
+		if ruleMatches {
 			// Validate category_type matches transaction type
-			if rule.CategoryType == "Outflow" && (!withdrawal.Valid || withdrawal.Float64 <= 0) {
-				matchedCategoryID = sql.NullString{Valid: false} // Reset - Outflow category can't match deposit
+			if catType == "Outflow" && (!withdrawal.Valid || withdrawal.Float64 <= 0) {
+				// doesn't match transaction direction
 				continue
 			}
-			if rule.CategoryType == "Inflow" && (!deposit.Valid || deposit.Float64 <= 0) {
-				matchedCategoryID = sql.NullString{Valid: false} // Reset - Inflow category can't match withdrawal
+			if catType == "Inflow" && (!deposit.Valid || deposit.Float64 <= 0) {
 				continue
 			}
-			// Both type is allowed for both withdrawals and deposits
-			break
+			candidates = append(candidates, candidate{RuleID: rid, Priority: prio, CategoryID: catID, CategoryType: catType})
 		}
 	}
-	return matchedCategoryID
+
+	if len(candidates) == 0 {
+		return sql.NullString{Valid: false}
+	}
+
+	// If multiple candidates, pick lowest priority value (higher priority)
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.Priority < best.Priority {
+			best = c
+		}
+	}
+	// If multiple candidates found, choose the one with highest priority (lowest priority value).
+
+	return sql.NullString{String: best.CategoryID, Valid: true}
 }
 
 // parseDate tries multiple date formats for CSV
@@ -2374,7 +2476,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 
 		// --- CATEGORY MATCHING ---
-		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
+		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
 		if matchedCategoryID.Valid {
 			categoryCount[matchedCategoryID.String]++
 			if withdrawal.Valid {
@@ -3446,7 +3548,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 
 			// Re-evaluate category for this transaction using the same logic as
 			// the upload flow so that new/updated rules are applied.
-			newCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
+			newCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: true})
 
 			// If the category has changed (including from/to NULL), persist the
 			// new category_id back to the database.
@@ -4882,7 +4984,7 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 		}
 
 		// Match category
-		categoryID := matchCategoryForTransaction(rules, txn.Description, withdrawal, deposit)
+		categoryID := matchCategoryForTransaction(rules, txn.Description, withdrawal, deposit, sql.NullTime{Time: valDate, Valid: true})
 
 		// Build transaction
 		t := BankStatementTransaction{
