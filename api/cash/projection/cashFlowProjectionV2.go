@@ -489,7 +489,8 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		insProp := `INSERT INTO cimplrcorpsaas.cashflow_proposal (proposal_name, base_currency_code, effective_date) VALUES ($1,$2,$3) RETURNING proposal_id`
 		err = tx.QueryRow(ctx, insProp, req.Proposal.ProposalName, req.Proposal.BaseCurrencyCode, req.Proposal.EffectiveDate).Scan(&proposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert proposal: "+err.Error())
+			errorMsg := parseConstraintError(err)
+			api.RespondWithError(w, http.StatusBadRequest, errorMsg)
 			return
 		}
 
@@ -529,7 +530,8 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				maturityDate, nullString(item.BankName), nullString(item.BankAccountNumber), nullString(item.EntityName),
 			).Scan(&itemID)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert item: "+err.Error())
+				errorMsg := parseConstraintError(err)
+				api.RespondWithError(w, http.StatusBadRequest, errorMsg)
 				return
 			}
 
@@ -861,7 +863,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) a ON TRUE
 			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, a.processing_status
-			ORDER BY p.effective_date DESC
+			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp) DESC
 		`
 
 		rows, err := pgxPool.Query(ctx, q)

@@ -86,7 +86,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Check for duplicate limit combination
-		if err := checkLimitUniqueness(ctx, pgxPool, req.EntityName, req.BankName, coreLimitType, 
+		if err := checkLimitUniqueness(ctx, pgxPool, req.EntityName, req.BankName, coreLimitType,
 			req.LimitType, req.LimitSubType, strings.ToUpper(req.CurrencyCode), ""); err != nil {
 			api.RespondWithResult(w, false, err.Error())
 			return
@@ -116,7 +116,7 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&limitID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to insert limit: "+err.Error())
+			api.RespondWithResult(w, false, parseLimitConstraintError(err))
 			return
 		}
 
@@ -191,14 +191,14 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// OPTIMIZED: First validate all fields and prepare data for bulk uniqueness check
 		validLimits := make([]struct {
-			Index          int
-			EntityName     string
-			BankName       string
-			CoreLimitType  string
-			LimitType      string
-			LimitSubType   string
-			CurrencyCode   string
-			OriginalData   LimitRequest
+			Index         int
+			EntityName    string
+			BankName      string
+			CoreLimitType string
+			LimitType     string
+			LimitSubType  string
+			CurrencyCode  string
+			OriginalData  LimitRequest
 		}, 0, len(req.Limits))
 
 		// Pre-validate entity access and enum values
@@ -229,7 +229,7 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result)
 				continue
 			}
-			
+
 			securityType := strings.ToUpper(strings.TrimSpace(lim.SecurityType))
 			if securityType != "SECURED" && securityType != "UNSECURED" {
 				result["success"] = false
@@ -240,14 +240,14 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Add to valid limits for bulk uniqueness checking
 			validLimits = append(validLimits, struct {
-				Index          int
-				EntityName     string
-				BankName       string
-				CoreLimitType  string
-				LimitType      string
-				LimitSubType   string
-				CurrencyCode   string
-				OriginalData   LimitRequest
+				Index         int
+				EntityName    string
+				BankName      string
+				CoreLimitType string
+				LimitType     string
+				LimitSubType  string
+				CurrencyCode  string
+				OriginalData  LimitRequest
 			}{
 				Index:         i,
 				EntityName:    lim.EntityName,
@@ -263,24 +263,24 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// OPTIMIZED: Bulk uniqueness validation for all valid limits
 		if len(validLimits) > 0 {
 			uniquenessData := make([]struct {
-				Index          int
-				EntityName     string
-				BankName       string
-				CoreLimitType  string
-				LimitType      string
-				LimitSubType   string
-				CurrencyCode   string
+				Index         int
+				EntityName    string
+				BankName      string
+				CoreLimitType string
+				LimitType     string
+				LimitSubType  string
+				CurrencyCode  string
 			}, len(validLimits))
 
 			for i, vl := range validLimits {
 				uniquenessData[i] = struct {
-					Index          int
-					EntityName     string
-					BankName       string
-					CoreLimitType  string
-					LimitType      string
-					LimitSubType   string
-					CurrencyCode   string
+					Index         int
+					EntityName    string
+					BankName      string
+					CoreLimitType string
+					LimitType     string
+					LimitSubType  string
+					CurrencyCode  string
 				}{
 					Index:         vl.Index,
 					EntityName:    vl.EntityName,
@@ -689,11 +689,10 @@ func GetAllBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE limit_id = l.limit_id
 				ORDER BY requested_at DESC
 				LIMIT 1
-			) a ON TRUE
-			WHERE COALESCE(l.is_deleted, false) = false
-				AND l.entity_name = ANY($1)
-			ORDER BY l.sanction_date DESC`
-
+		) a ON TRUE
+		WHERE COALESCE(l.is_deleted, false) = false
+			AND l.entity_name = ANY($1)
+		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
@@ -823,11 +822,10 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE limit_id = l.limit_id
 				ORDER BY requested_at DESC
 				LIMIT 1
-			) a ON a.processing_status = 'APPROVED'
-			WHERE COALESCE(l.is_deleted, false) = false
-				AND l.entity_name = ANY($1)
-			ORDER BY l.sanction_date DESC`
-
+		) a ON a.processing_status = 'APPROVED'
+		WHERE COALESCE(l.is_deleted, false) = false
+			AND l.entity_name = ANY($1)
+		ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 		rows, err := pgxPool.Query(ctx, query, entityNames)
 		if err != nil {
 			api.RespondWithResult(w, false, constants.ErrQueryFailed+err.Error())
@@ -854,25 +852,25 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			item := map[string]interface{}{
-				"limit_id":                     limitID,
-				"entity_name":                  entityName,
-				"bank_name":                    bankName,
-				"core_limit_type":              coreLimitType,
-				"limit_type":                   stringOrEmpty(limitType),
-				"limit_sub_type":               stringOrEmpty(limitSubType),
-				"sanction_date":                timeOrEmpty(sanctionDate),
-				"effective_date":               timeOrEmpty(effectiveDate),
-				"currency_code":                currencyCode,
-				"sanctioned_amount":            sanctionedAmount,
-				"fungibility_type":             fungibilityType,
-				"fungibility_pct":              floatOrZero(fungibilityPct),
-				"security_type":                securityType,
-				"remarks":                      stringOrEmpty(remarks),
-				"initial_utilization":          floatOrZero(initialUtilization),
-				"total_approved_utilization":   totalApprovedUtilization,
-				"total_utilized":               totalUtilized,
-				"headroom":                     headroom,
-				"over_utilization":             overUtilization,
+				"limit_id":                   limitID,
+				"entity_name":                entityName,
+				"bank_name":                  bankName,
+				"core_limit_type":            coreLimitType,
+				"limit_type":                 stringOrEmpty(limitType),
+				"limit_sub_type":             stringOrEmpty(limitSubType),
+				"sanction_date":              timeOrEmpty(sanctionDate),
+				"effective_date":             timeOrEmpty(effectiveDate),
+				"currency_code":              currencyCode,
+				"sanctioned_amount":          sanctionedAmount,
+				"fungibility_type":           fungibilityType,
+				"fungibility_pct":            floatOrZero(fungibilityPct),
+				"security_type":              securityType,
+				"remarks":                    stringOrEmpty(remarks),
+				"initial_utilization":        floatOrZero(initialUtilization),
+				"total_approved_utilization": totalApprovedUtilization,
+				"total_utilized":             totalUtilized,
+				"headroom":                   headroom,
+				"over_utilization":           overUtilization,
 			}
 
 			results = append(results, item)

@@ -238,7 +238,7 @@ const (
 	QuerrySweepID                  = " AND l.sweep_id = $%d"
 	QuerryInitiationID             = " AND i.sweep_id = $%d"
 	QuerryProcessingStatus         = " AND a.processing_status = $%d"
-	QuerryOrderByInitiationTime    = " ORDER BY i.initiation_time DESC"
+	QuerryOrderByInitiationTime    = " ORDER BY GREATEST(COALESCE((SELECT requested_at FROM cimplrcorpsaas.auditactionsweepinitiation WHERE initiation_id = i.initiation_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp), COALESCE((SELECT checker_at FROM cimplrcorpsaas.auditactionsweepinitiation WHERE initiation_id = i.initiation_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp)) DESC"
 	BearerPrefix                   = "Bearer "
 	NBSP                           = "\u00A0"
 	TransactionPostedDate          = "txn posted date"

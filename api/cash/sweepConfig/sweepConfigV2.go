@@ -668,7 +668,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								LIMIT 1
 						) bbal2 ON true
 						WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) 
-						ORDER BY created_at DESC, sweep_id`
+						ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q, norm)
 		} else {
 			q := `SELECT 
@@ -708,7 +708,7 @@ func GetSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 								LIMIT 1
 						) bbal2 ON true
 						WHERE is_deleted != TRUE 
-						ORDER BY created_at DESC, sweep_id`
+						ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {

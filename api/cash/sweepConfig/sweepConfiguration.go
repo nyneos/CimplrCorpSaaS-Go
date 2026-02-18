@@ -104,7 +104,7 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullifyEmpty(req.ActiveStatus),
 		)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to insert sweep configuration: "+err.Error())
+			api.RespondWithResult(w, false, parseSweepConstraintError(err))
 			return
 		}
 
@@ -332,10 +332,10 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithPayload(w, true, "", []map[string]interface{}{})
 				return
 			}
-			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) ORDER BY created_at DESC, sweep_id`
+			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q, norm)
 		} else {
-			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY created_at DESC, sweep_id`
+			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {

@@ -144,7 +144,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING proposal_id;
 		`, proposalName, baseCurrencyCode, effectiveDate).Scan(&proposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert proposal: "+err.Error())
+			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
 		log.Printf("Created V2 proposal %s", proposalID)
@@ -212,7 +212,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"cimplrcorpsaas", "cashflow_proposal_item"}, itemCols, pgx.CopyFromRows(copyRows)); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert items: "+err.Error())
+			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
 
@@ -320,7 +320,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via V2 uploader',$2,now())
 		`, proposalID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit record: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
 			return
 		}
 

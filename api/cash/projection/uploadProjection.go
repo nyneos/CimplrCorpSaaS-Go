@@ -122,7 +122,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RETURNING proposal_id;
 		`, proposalName, currency, effectiveDate, recurrenceType).Scan(&proposalID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert proposal: "+err.Error())
+			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
 		log.Printf("Created proposal %s", proposalID)
@@ -169,8 +169,8 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"cashflow_proposal_item"}, itemCols, pgx.CopyFromRows(copyRows)); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert items: "+err.Error())
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"cimplrcorpsaas", "cashflow_proposal_item"}, itemCols, pgx.CopyFromRows(copyRows)); err != nil {
+			api.RespondWithError(w, http.StatusUnprocessableEntity, parseConstraintError(err))
 			return
 		}
 
@@ -289,11 +289,11 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Insert audit record
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO audit_action_cashflow_proposal
+			INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal
 			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via uploader',$2,now())
 		`, proposalID, userEmail); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to insert audit record: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
 			return
 		}
 

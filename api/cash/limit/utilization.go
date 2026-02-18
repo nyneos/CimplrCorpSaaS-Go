@@ -89,7 +89,7 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		).Scan(&utilizationID)
 
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to insert utilization: "+err.Error())
+			api.RespondWithResult(w, false, parseLimitConstraintError(err))
 			return
 		}
 
@@ -534,7 +534,7 @@ func GetAllUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) la ON TRUE
 			WHERE COALESCE(u.is_deleted, false) = false
-			ORDER BY u.utilization_date DESC`
+			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC`
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
@@ -721,7 +721,7 @@ func GetApprovedUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) la ON TRUE
 			WHERE COALESCE(u.is_deleted, false) = false
-			ORDER BY u.utilization_date DESC`
+			ORDER BY GREATEST(COALESCE((SELECT requested_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp), COALESCE((SELECT checker_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp)) DESC`
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
@@ -838,7 +838,7 @@ func GetApprovedUtilizationsGrouped(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) a ON a.processing_status = 'APPROVED'
 			LEFT JOIN cimplrcorpsaas.bank_limit l ON l.limit_id = u.limit_id
 			WHERE COALESCE(u.is_deleted, false) = false
-			ORDER BY u.utilization_date DESC`
+			ORDER BY GREATEST(COALESCE((SELECT requested_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp), COALESCE((SELECT checker_at FROM cimplrcorpsaas.auditactionbanklimitutilization WHERE utilization_id = u.utilization_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp)) DESC`
 
 		rows, err := pgxPool.Query(ctx, query)
 		if err != nil {
