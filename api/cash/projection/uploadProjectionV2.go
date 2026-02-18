@@ -33,7 +33,7 @@ type itemInfoV2 struct {
 // Form fields:
 // - user_id (required)
 // - proposal_name (required)
-// - base_currency_code (required, 3-char code like USD, EUR)
+// - base_currency_code (required, 3-char code like USD, EUR) OR currency (V1 compatibility)
 // - effective_date (optional, defaults to today)
 //
 // CSV/XLSX columns (V2 schema):
@@ -41,14 +41,12 @@ type itemInfoV2 struct {
 // - type (required: Inflow/Outflow)
 // - categoryname (required: category_id)
 // - entity (required)
-// - department (optional)
 // - expectedamount (required)
 // - recurring (optional: true/false, defaults to false)
 // - frequency (optional: Monthly/Quarterly/Yearly, defaults to Yearly)
 // - maturity_date (optional: YYYY-MM-DD)
 // - bank_name (optional)
 // - bank_account_number (optional)
-// - counterparty_name (optional)
 // - currency_code (optional: per-item currency, defaults to base_currency_code)
 //
 // Monthly projections are AUTO-CALCULATED based on recurring + frequency
@@ -76,10 +74,14 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userID := r.FormValue(constants.KeyUserID)
 		proposalName := strings.TrimSpace(r.FormValue("proposal_name"))
 		baseCurrencyCode := strings.TrimSpace(r.FormValue("base_currency_code"))
+		// Fallback to "currency" field for V1 compatibility
+		if baseCurrencyCode == "" {
+			baseCurrencyCode = strings.TrimSpace(r.FormValue("currency"))
+		}
 		effectiveDate := strings.TrimSpace(r.FormValue("effective_date"))
 
 		if userID == "" || proposalName == "" || baseCurrencyCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id, proposal_name and base_currency_code are required")
+			api.RespondWithError(w, http.StatusBadRequest, "user_id, proposal_name and currency/base_currency_code are required")
 			return
 		}
 		if effectiveDate == "" {
@@ -155,8 +157,8 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		itemCols := []string{
 			"proposal_id", "description", "cashflow_type", "category_id",
 			"expected_amount", "is_recurring", "recurrence_frequency",
-			"maturity_date", "entity_name", "department_id",
-			"counterparty_name", "currency_code", "bank_name", "bank_account_number",
+			"maturity_date", "entity_name",
+			"currency_code", "bank_name", "bank_account_number",
 		}
 
 		copyRows := make([][]interface{}, 0, len(dataRows))
@@ -208,7 +210,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			copyRows = append(copyRows, []interface{}{
 				proposalID, get("description"), cfType, categoryID, amount,
 				recurring, frequency, maturityDateVal,
-				get("entity"), get("department"), get("counterparty_name"), itemCurrency,
+				get("entity"), itemCurrency,
 				nullStringV2(bankID), nullStringV2(bankAccountNumber),
 			})
 
