@@ -2076,12 +2076,12 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
-				// Create PENDING_APPROVAL audit for initiation update
-				insInitAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
-					initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
-				) VALUES ($1, $2, 'EDIT', 'PENDING_APPROVAL', $3, now())`
+			// Create PENDING_EDIT_APPROVAL audit for initiation update
+			insInitAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
+				initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
+			) VALUES ($1, $2, 'EDIT', 'PENDING_EDIT_APPROVAL', $3, now())`
 
-				_, err = tx.Exec(ctx, insInitAudit, req.InitiationID, sweepID, requestedBy)
+			_, err = tx.Exec(ctx, insInitAudit, req.InitiationID, sweepID, requestedBy)
 				if err != nil {
 					api.RespondWithResult(w, false, "failed to create initiation audit: "+err.Error())
 					return
@@ -2181,7 +2181,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Initiation and sweep config updated successfully", map[string]interface{}{
 			"initiation_id":       req.InitiationID,
 			"sweep_id":            sweepID,
-			"initiation_status":   "PENDING_APPROVAL",
+			"initiation_status":   "PENDING_EDIT_APPROVAL",
 			"sweep_config_status": "unchanged (keeps existing status)",
 		})
 	}

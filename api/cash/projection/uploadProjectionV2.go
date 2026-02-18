@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -181,6 +182,10 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				frequency = "Yearly" // default
 			}
 
+			// Lookup category_id from pre-loaded categories
+			categoryInput := get("categoryname")
+			categoryID := lookupCategoryFromContext(ctx, categoryInput)
+
 			// Per-item currency (defaults to base_currency_code)
 			itemCurrency := get("currency_code")
 			if itemCurrency == "" {
@@ -192,16 +197,19 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bankName := get("bank_name")
 			bankAccountNumber := get("bank_account_number")
 
+			// Use bank name as-is (pre-validation can handle bank lookups if needed)
+			bankID := bankName
+
 			var maturityDateVal interface{}
 			if maturityDate != "" {
 				maturityDateVal = maturityDate
 			}
 
 			copyRows = append(copyRows, []interface{}{
-				proposalID, get("description"), cfType, get("categoryname"), amount,
+				proposalID, get("description"), cfType, categoryID, amount,
 				recurring, frequency, maturityDateVal,
 				get("entity"), get("department"), get("counterparty_name"), itemCurrency,
-				nullStringV2(bankName), nullStringV2(bankAccountNumber),
+				nullStringV2(bankID), nullStringV2(bankAccountNumber),
 			})
 
 			itemInfos = append(itemInfos, itemInfoV2{
@@ -384,4 +392,26 @@ func nullStringV2(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// lookupCategoryFromContext finds category_id using pre-loaded context data
+func lookupCategoryFromContext(ctx context.Context, categoryName string) string {
+	if categoryName == "" {
+		return ""
+	}
+	
+	categories := api.GetCashFlowCategoriesFromCtx(ctx)
+	for _, cat := range categories {
+		// Try exact match first (if it's already an ID)
+		if cat["category_id"] == categoryName {
+			return categoryName
+		}
+		// Try name match (case insensitive)
+		if strings.EqualFold(strings.TrimSpace(cat["category_name"]), strings.TrimSpace(categoryName)) {
+			return cat["category_id"]
+		}
+	}
+	
+	// If not found, return original (might be an ID not in approved list)
+	return categoryName
 }

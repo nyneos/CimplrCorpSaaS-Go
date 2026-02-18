@@ -3,6 +3,7 @@ package projection
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -156,8 +157,12 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			recurring := strings.ToLower(get("recurring")) == "true"
 			pattern := get("frequency")
 
+			// Lookup category_id from pre-loaded categories
+			categoryInput := get("categoryname")
+			categoryID := lookupCategoryFromContextV1(ctx, categoryInput)
+
 			copyRows = append(copyRows, []interface{}{
-				proposalID, get("description"), cfType, get("categoryname"), amount,
+				proposalID, get("description"), cfType, categoryID, amount,
 				recurring, pattern, effectiveDate, nil,
 				get("entity"), get("department"), get("counterparty_name"), pattern,
 			})
@@ -350,4 +355,26 @@ func parseUploadFile(file multipart.File, ext string) ([][]string, error) {
 		return rows, nil
 	}
 	return nil, errors.New(constants.ErrUnsupportedFileType)
+}
+
+// lookupCategoryFromContextV1 finds category_id using pre-loaded context data for V1
+func lookupCategoryFromContextV1(ctx context.Context, categoryName string) string {
+	if categoryName == "" {
+		return ""
+	}
+	
+	categories := api.GetCashFlowCategoriesFromCtx(ctx)
+	for _, cat := range categories {
+		// Try exact match first (if it's already an ID)
+		if cat["category_id"] == categoryName {
+			return categoryName
+		}
+		// Try name match (case insensitive)
+		if strings.EqualFold(strings.TrimSpace(cat["category_name"]), strings.TrimSpace(categoryName)) {
+			return cat["category_id"]
+		}
+	}
+	
+	// If not found, return original (might be an ID not in approved list)
+	return categoryName
 }

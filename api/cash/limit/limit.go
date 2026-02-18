@@ -817,7 +817,7 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM cimplrcorpsaas.bank_limit l
 			LEFT JOIN approved_utilizations au ON au.limit_id = l.limit_id
 			INNER JOIN LATERAL (
-				SELECT processing_status
+				SELECT processing_status, requested_at, checker_at
 				FROM cimplrcorpsaas.auditactionbanklimit
 				WHERE limit_id = l.limit_id
 				ORDER BY requested_at DESC
