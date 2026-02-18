@@ -713,7 +713,7 @@ func logSweepFailure(ctx context.Context, db *pgxpool.Pool, info SweepFailureInf
 		INSERT INTO cimplrcorpsaas.sweep_execution_log (
 			sweep_id, initiation_id, from_account, to_account, status, 
 			balance_before, balance_after, amount_swept, error_message
-		) VALUES ($1, NULLIF($2, ''), $3, $4, 'FAILED', $5, $5, 0, $6)
+		) VALUES ($1, NULLIF($2, '')::uuid, $3, $4, 'FAILED', $5, $5, 0, $6)
 	`
 	_, err := db.Exec(ctx, query,
 		info.Params.SweepID,

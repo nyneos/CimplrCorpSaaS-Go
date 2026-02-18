@@ -106,10 +106,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bankNames = req.BankNames
 		}
 
-		fmt.Printf("\n[KPI DEBUG] ========================================\n")
-		fmt.Printf("[KPI DEBUG] User ID: %s\n", req.UserID)
-		fmt.Printf("[KPI DEBUG] Entity IDs from context: %v (count: %d)\n", entityIDs, len(entityIDs))
-		fmt.Printf("[KPI DEBUG] Bank Names from context: %v (count: %d)\n", bankNames, len(bankNames))
+		// debug prints removed
 
 		// Build entity filter for SQL (using entity_id from masterbankaccount)
 		entityFilter := ""
@@ -138,47 +135,44 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		fmt.Printf("[KPI DEBUG] Entity Filter SQL: %s\n", entityFilter)
-		fmt.Printf("[KPI DEBUG] Bank Filter SQL: %s\n", bankFilter)
-		fmt.Printf("[KPI DEBUG] ========================================\n\n")
+		// debug prints removed
 
 		// Execute KPI queries
-		fmt.Printf("[KPI DEBUG] Executing getOverallKPI...\n")
+		// Executing getOverallKPI
 		overall, err := getOverallKPI(ctx, pgxPool, entityFilter, bankFilter)
 		if err != nil {
-			fmt.Printf("[KPI ERROR] getOverallKPI failed: %v\n", err)
+			// getOverallKPI failed: %v
 			api.RespondWithResult(w, false, "Failed to fetch overall KPI: "+err.Error())
 			return
 		}
-		fmt.Printf("[KPI DEBUG] Overall KPI: TotalBalance=%.2f, ActiveAccounts=%d\n", overall.TotalBalance, overall.ActiveAccounts)
+		// Overall KPI computed
 
-		fmt.Printf("[KPI DEBUG] Executing getEntityWiseKPI...\n")
+		// Executing getEntityWiseKPI
 		entityWise, err := getEntityWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
 		if err != nil {
-			fmt.Printf("[KPI ERROR] getEntityWiseKPI failed: %v\n", err)
+			// getEntityWiseKPI failed
 			api.RespondWithResult(w, false, "Failed to fetch entity-wise KPI: "+err.Error())
 			return
 		}
-		fmt.Printf("[KPI DEBUG] Entity-wise KPI: %d entities found\n", len(entityWise))
+		// Entity-wise KPI computed
 
-		fmt.Printf("[KPI DEBUG] Executing getBankWiseKPI...\n")
+		// Executing getBankWiseKPI
 		bankWise, err := getBankWiseKPI(ctx, pgxPool, overall.TotalBalance, entityFilter, bankFilter)
 		if err != nil {
-			fmt.Printf("[KPI ERROR] getBankWiseKPI failed: %v\n", err)
+			// getBankWiseKPI failed
 			api.RespondWithResult(w, false, "Failed to fetch bank-wise KPI: "+err.Error())
 			return
 		}
-		fmt.Printf("[KPI DEBUG] Bank-wise KPI: %d banks found\n", len(bankWise))
+		// Bank-wise KPI computed
 
-		fmt.Printf("[KPI DEBUG] Executing getMoMComparison...\n")
+		// Executing getMoMComparison
 		mom, err := getMoMComparison(ctx, pgxPool, entityFilter, bankFilter)
 		if err != nil {
-			fmt.Printf("[KPI ERROR] getMoMComparison failed: %v\n", err)
+			// getMoMComparison failed
 			api.RespondWithResult(w, false, "Failed to fetch MoM comparison: "+err.Error())
 			return
 		}
-		fmt.Printf("[KPI DEBUG] MoM: Current=%.2f, Previous=%.2f, Change=%.2f%%\n",
-			mom.CurrentMonth.TotalBalance, mom.PreviousMonth.TotalBalance, mom.ChangePercent)
+		// MoM comparison computed
 
 		response := KPIResponse{
 			Overall:    overall,
@@ -187,7 +181,7 @@ func GetTreasuryKPI(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			MoM:        mom,
 		}
 
-		fmt.Printf("[KPI DEBUG] ✅ SUCCESS - Sending response\n\n")
+		// response ready
 		api.RespondWithPayload(w, true, "", response)
 	}
 }

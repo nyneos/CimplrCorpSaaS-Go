@@ -158,6 +158,29 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				overridden_source_bank_account, overridden_target_bank_account
 			) VALUES ($1,$2,now(),$3,$4,$5,$6) RETURNING initiation_id`
 
+			// compute final resolved accounts for duplicate check (consider overrides)
+			finalSource := req.SourceBankAccount
+			if req.OverriddenSourceBankAccount != nil && strings.TrimSpace(*req.OverriddenSourceBankAccount) != "" {
+				finalSource = *req.OverriddenSourceBankAccount
+			}
+			finalTarget := req.TargetBankAccount
+			if req.OverriddenTargetBankAccount != nil && strings.TrimSpace(*req.OverriddenTargetBankAccount) != "" {
+				finalTarget = *req.OverriddenTargetBankAccount
+			}
+
+			// Duplicate initiation check (prevent same logical sweep for same entity/accounts/time)
+			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, req.EntityName, finalSource, finalTarget, sweepType, effectiveDate, executionTime, req.BufferAmount, req.SweepAmount)
+			if dErr != nil {
+				tx.Rollback(ctx)
+				api.RespondWithResult(w, false, "failed to validate duplicate initiation: "+dErr.Error())
+				return
+			}
+			if isDup {
+				tx.Rollback(ctx)
+				api.RespondWithResult(w, false, "duplicate initiation/config exists for the same entity+accounts+time; cannot create initiation")
+				return
+			}
+
 			var initiationID string
 			err = tx.QueryRow(ctx, insInit,
 				sweepID,
@@ -279,12 +302,56 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Fetch sweep configuration fields needed for duplicate detection
+		var sweepType, frequency, cfgEffectiveDate, executionTime string
+		var cfgBufferAmount, cfgSweepAmount sqlNullFloat
+		err = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(sweep_type,''), COALESCE(frequency,''), COALESCE(effective_date::text,''), COALESCE(execution_time::text,''), buffer_amount, sweep_amount
+			FROM cimplrcorpsaas.sweepconfiguration
+			WHERE sweep_id = $1 AND is_deleted = false
+		`, sweepID).Scan(&sweepType, &frequency, &cfgEffectiveDate, &executionTime, &cfgBufferAmount, &cfgSweepAmount)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to read sweep configuration: "+err.Error())
+			return
+		}
+
+		var bufPtr, sweepPtr *float64
+		if cfgBufferAmount.Valid {
+			v := cfgBufferAmount.F
+			bufPtr = &v
+		}
+		if cfgSweepAmount.Valid {
+			v := cfgSweepAmount.F
+			sweepPtr = &v
+		}
+
 		// Insert initiation record (removed status and initiation_type, added overridden accounts)
 		ins := `INSERT INTO cimplrcorpsaas.sweep_initiation (
 			sweep_id, initiated_by, initiation_time, 
 			overridden_amount, overridden_execution_time,
 			overridden_source_bank_account, overridden_target_bank_account
 		) VALUES ($1,$2,now(),$3,$4,$5,$6) RETURNING initiation_id`
+
+		// compute final resolved accounts for duplicate check (consider overrides)
+		finalSource := sourceAccount
+		if req.OverriddenSourceBankAccount != nil && strings.TrimSpace(*req.OverriddenSourceBankAccount) != "" {
+			finalSource = *req.OverriddenSourceBankAccount
+		}
+		finalTarget := targetAccount
+		if req.OverriddenTargetBankAccount != nil && strings.TrimSpace(*req.OverriddenTargetBankAccount) != "" {
+			finalTarget = *req.OverriddenTargetBankAccount
+		}
+
+		// Duplicate initiation check (prevent same logical sweep for same entity/accounts/time)
+		isDup, dErr := isDuplicateInitiation(ctx, pgxPool, entityName, finalSource, finalTarget, frequency, cfgEffectiveDate, executionTime, bufPtr, sweepPtr)
+		if dErr != nil {
+			api.RespondWithResult(w, false, "failed to validate duplicate initiation: "+dErr.Error())
+			return
+		}
+		if isDup {
+			api.RespondWithResult(w, false, "duplicate initiation/config exists for the same entity+accounts+time; cannot create initiation")
+			return
+		}
 
 		var initiationID string
 		err = pgxPool.QueryRow(ctx, ins,
@@ -807,6 +874,46 @@ func nullifyStringPtr(s *string) interface{} {
 	return *s
 }
 
+// isDuplicateInitiation checks whether an initiation (or an already-created initiation)
+// exists for the same logical parameters: entity, source account, target account,
+// frequency, effective_date, execution_time, buffer_amount and sweep_amount.
+// It considers initiation-level overrides (overridden_source/target) when present.
+func isDuplicateInitiation(ctx context.Context, pgxPool *pgxpool.Pool, entity, sourceAccount, targetAccount, frequency, effectiveDate, executionTime string, bufferAmount, sweepAmount *float64) (bool, error) {
+	// Normalize empty strings to '' for comparison
+	entityNorm := strings.TrimSpace(entity)
+	srcNorm := strings.TrimSpace(sourceAccount)
+	tgtNorm := strings.TrimSpace(targetAccount)
+	freqNorm := strings.ToUpper(strings.TrimSpace(frequency))
+	effNorm := strings.TrimSpace(effectiveDate)
+	execNorm := strings.TrimSpace(executionTime)
+
+	// Query looks for any initiation whose resolved source/target (overrides or config)
+	// match the provided values, and where the initiation audit is PENDING_APPROVAL or APPROVED.
+	// We compare execution_time and effective_date as text to keep comparisons simple.
+	q := `
+		SELECT COUNT(1)
+		FROM cimplrcorpsaas.sweep_initiation si
+		JOIN cimplrcorpsaas.sweepconfiguration sc ON sc.sweep_id = si.sweep_id
+		JOIN cimplrcorpsaas.auditactionsweepinitiation asi ON asi.initiation_id = si.initiation_id
+		WHERE COALESCE(NULLIF(COALESCE(si.overridden_source_bank_account, sc.source_bank_account), ''), '') = $1
+		  AND COALESCE(NULLIF(COALESCE(si.overridden_target_bank_account, sc.target_bank_account), ''), '') = $2
+		  AND COALESCE(NULLIF(COALESCE(sc.entity_name, ''), ''), '') = $3
+		  AND COALESCE(UPPER(TRIM(sc.frequency)), '') = $4
+		  AND COALESCE(sc.effective_date::text, '') = $5
+		  AND COALESCE(sc.execution_time::text, '') = $6
+		  AND COALESCE(sc.buffer_amount,0) = COALESCE($7,0)
+		  AND COALESCE(sc.sweep_amount,0) = COALESCE($8,0)
+		  AND COALESCE(asi.processing_status, '') IN ('PENDING_APPROVAL','APPROVED')
+	`
+
+	var count int
+	// Prepare numeric nils as interface{}; leaving nil is acceptable
+	if err := pgxPool.QueryRow(ctx, q, srcNorm, tgtNorm, entityNorm, freqNorm, effNorm, execNorm, bufferAmount, sweepAmount).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // BulkApproveSweepInitiations approves multiple sweep initiations
 func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1060,8 +1167,21 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		createdInitiations := make([]map[string]interface{}, 0)
 		autoCreatedSweeps := make([]string, 0)
 
+		// dedupe map to avoid creating duplicate initiations within the same bulk request
+		seen := make(map[string]bool)
+
 		for _, init := range req.Initiations {
 			var sweepID string
+			// declare vars that may be populated from either the initiation payload (auto-create)
+			// or from an existing sweep config (provided sweep_id)
+			var sweepType, frequency, effectiveDate, executionTime string
+			// config-scoped variables (declared at loop scope so they're available
+			// when we later resolve final parameters outside the creation-if block)
+			var entityName, configSourceAccount, configTargetAccount, configSweepType, configFrequency, configEffectiveDate, configExecutionTime sql.NullString
+			var configBufferAmount, configSweepAmount sqlNullFloat
+			// normalized config/string pointers for later comparison
+			var configFreqStr, configEffDateStr, configExecTimeStr string
+			var configBufPtr, configSweepPtr *float64
 
 			// Case 1: sweep_id is null → auto-create sweep
 			if init.SweepID == nil || *init.SweepID == "" {
@@ -1081,19 +1201,19 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				// Set defaults
-				sweepType := init.SweepType
+				sweepType = init.SweepType
 				if sweepType == "" {
 					sweepType = "ZBA"
 				}
-				frequency := init.Frequency
+				frequency = init.Frequency
 				if frequency == "" {
 					frequency = "SPECIFIC_DATE"
 				}
-				effectiveDate := init.EffectiveDate
+				effectiveDate = init.EffectiveDate
 				if effectiveDate == "" {
 					effectiveDate = time.Now().Format(constants.DateFormat)
 				}
-				executionTime := init.ExecutionTime
+				executionTime = init.ExecutionTime
 				if executionTime == "" {
 					executionTime = "10:00"
 				}
@@ -1142,11 +1262,11 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Case 2: sweep_id provided → verify it exists and is approved
 				sweepID = *init.SweepID
 
-				var entityName string
-				err := tx.QueryRow(ctx, `
-					SELECT entity_name FROM cimplrcorpsaas.sweepconfiguration
+				err = tx.QueryRow(ctx, `
+					SELECT entity_name, source_bank_account, target_bank_account, sweep_type, frequency, COALESCE(effective_date::text,''), COALESCE(execution_time::text,''), buffer_amount, sweep_amount
+					FROM cimplrcorpsaas.sweepconfiguration
 					WHERE sweep_id = $1 AND is_deleted = false
-				`, sweepID).Scan(&entityName)
+				`, sweepID).Scan(&entityName, &configSourceAccount, &configTargetAccount, &configSweepType, &configFrequency, &configEffectiveDate, &configExecutionTime, &configBufferAmount, &configSweepAmount)
 
 				if err != nil {
 					tx.Rollback(ctx)
@@ -1154,8 +1274,27 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
+				// normalize config values for later checks
+				if configFrequency.Valid {
+					configFreqStr = configFrequency.String
+				}
+				if configEffectiveDate.Valid {
+					configEffDateStr = configEffectiveDate.String
+				}
+				if configExecutionTime.Valid {
+					configExecTimeStr = configExecutionTime.String
+				}
+				if configBufferAmount.Valid {
+					v := configBufferAmount.F
+					configBufPtr = &v
+				}
+				if configSweepAmount.Valid {
+					v := configSweepAmount.F
+					configSweepPtr = &v
+				}
+
 				// Validate entity scope
-				if !api.IsEntityAllowed(ctx, entityName) {
+				if !api.IsEntityAllowed(ctx, entityName.String) {
 					tx.Rollback(ctx)
 					api.RespondWithResult(w, false, "unauthorized entity for sweep: "+sweepID)
 					return
@@ -1177,6 +1316,78 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 			}
+
+			// Resolve final parameters and check for duplicates before creating initiation
+			// finalSource/finalTarget: respect initiation-level overrides if provided
+			finalSource := ""
+			finalTarget := ""
+			var checkFreq, checkEffDate, checkExecTime string
+			var checkBufPtr, checkSweepPtr *float64
+
+			if init.SweepID == nil || *init.SweepID == "" {
+				// auto-created sweep: use init-provided/defaulted values
+				finalSource = init.SourceBankAccount
+				if init.OverriddenSourceBankAccount != nil && strings.TrimSpace(*init.OverriddenSourceBankAccount) != "" {
+					finalSource = *init.OverriddenSourceBankAccount
+				}
+				finalTarget = init.TargetBankAccount
+				if init.OverriddenTargetBankAccount != nil && strings.TrimSpace(*init.OverriddenTargetBankAccount) != "" {
+					finalTarget = *init.OverriddenTargetBankAccount
+				}
+				checkFreq = frequency
+				checkEffDate = effectiveDate
+				checkExecTime = executionTime
+				checkBufPtr = init.BufferAmount
+				checkSweepPtr = init.SweepAmount
+			} else {
+				// existing sweep: use config values fetched earlier and respect initiation overrides
+				finalSource = configSourceAccount.String
+				if init.OverriddenSourceBankAccount != nil && strings.TrimSpace(*init.OverriddenSourceBankAccount) != "" {
+					finalSource = *init.OverriddenSourceBankAccount
+				}
+				finalTarget = configTargetAccount.String
+				if init.OverriddenTargetBankAccount != nil && strings.TrimSpace(*init.OverriddenTargetBankAccount) != "" {
+					finalTarget = *init.OverriddenTargetBankAccount
+				}
+				checkFreq = configFreqStr
+				checkEffDate = configEffDateStr
+				checkExecTime = configExecTimeStr
+				checkBufPtr = configBufPtr
+				checkSweepPtr = configSweepPtr
+			}
+
+			// create a dedupe key for the incoming batch
+			dedupeKey := strings.Join([]string{strings.TrimSpace(init.EntityName), strings.TrimSpace(finalSource), strings.TrimSpace(finalTarget), strings.ToUpper(strings.TrimSpace(checkFreq)), strings.TrimSpace(checkEffDate), strings.TrimSpace(checkExecTime), fmt.Sprintf("%.6f", func() float64 {
+				if checkBufPtr == nil {
+					return 0
+				}
+				return *checkBufPtr
+			}()), fmt.Sprintf("%.6f", func() float64 {
+				if checkSweepPtr == nil {
+					return 0
+				}
+				return *checkSweepPtr
+			}())}, "|")
+			if seen[dedupeKey] {
+				tx.Rollback(ctx)
+				api.RespondWithResult(w, false, fmt.Sprintf("duplicate initiation in batch for entity=%s source=%s target=%s time=%s", init.EntityName, finalSource, finalTarget, checkExecTime))
+				return
+			}
+
+			// check existing initiations/configs in DB
+			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, init.EntityName, finalSource, finalTarget, checkFreq, checkEffDate, checkExecTime, checkBufPtr, checkSweepPtr)
+			if dErr != nil {
+				tx.Rollback(ctx)
+				api.RespondWithResult(w, false, "failed to validate duplicate initiation: "+dErr.Error())
+				return
+			}
+			if isDup {
+				tx.Rollback(ctx)
+				api.RespondWithResult(w, false, "duplicate initiation/config exists for the same entity+accounts+time; cannot create initiation")
+				return
+			}
+			// mark seen in this batch
+			seen[dedupeKey] = true
 
 			// Create initiation record
 			insInit := `INSERT INTO cimplrcorpsaas.sweep_initiation (
@@ -1868,7 +2079,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Create PENDING_APPROVAL audit for initiation update
 				insInitAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepinitiation (
 					initiation_id, sweep_id, actiontype, processing_status, requested_by, requested_at
-				) VALUES ($1, $2, 'UPDATE', 'PENDING_APPROVAL', $3, now())`
+				) VALUES ($1, $2, 'EDIT', 'PENDING_APPROVAL', $3, now())`
 
 				_, err = tx.Exec(ctx, insInitAudit, req.InitiationID, sweepID, requestedBy)
 				if err != nil {
@@ -1951,7 +2162,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				insConfigAudit := `INSERT INTO cimplrcorpsaas.auditactionsweepconfiguration (
 					sweep_id, actiontype, processing_status, reason, requested_by, requested_at
-				) VALUES ($1, 'UPDATE', $2, $3, $4, now())`
+				) VALUES ($1, 'EDIT', $2, $3, $4, now())`
 
 				_, err = tx.Exec(ctx, insConfigAudit, sweepID, currentStatus, reason, requestedBy)
 				if err != nil {

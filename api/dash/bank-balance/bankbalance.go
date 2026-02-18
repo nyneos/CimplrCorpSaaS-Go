@@ -280,32 +280,36 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		----------------------------------------------------------*/
 
 		rows, err := pgxPool.Query(ctx, `
-			WITH latest_approved_balance AS (
-				SELECT DISTINCT ON (balance_id)
-					   balance_id,
-					   processing_status
-				FROM public.auditactionbankbalances
-				ORDER BY balance_id, requested_at DESC
+			WITH latest_approved_balances AS (
+				SELECT DISTINCT ON (bbm.account_no) 
+					bbm.balance_id,
+					bbm.account_no,
+					bbm.closing_balance,
+					bbm.currency_code,
+					bbm.as_of_date,
+					bbm.as_of_time
+				FROM bank_balances_manual bbm
+				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				JOIN auditactionbankbalances a ON a.balance_id = bbm.balance_id
+				WHERE a.processing_status = 'APPROVED'
+					AND mba.is_deleted = false
+					AND mba.entity_id = ANY($1)
+					AND bbm.account_no = ANY($2)
+				ORDER BY bbm.account_no, bbm.as_of_date DESC, a.requested_at DESC
 			)
 			SELECT
 				e.entity_name,
 				b.bank_name,
-				bbm.account_no,
-				bbm.currency_code,
-				bbm.closing_balance
-			FROM public.bank_balances_manual bbm
-			JOIN latest_approved_balance lab
-			     ON lab.balance_id = bbm.balance_id
-			    AND lab.processing_status = 'APPROVED'
-			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				lab.account_no,
+				lab.currency_code,
+				lab.closing_balance
+			FROM latest_approved_balances lab
+			JOIN masterbankaccount mba ON lab.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			JOIN masterbank b ON mba.bank_id = b.bank_id
-			WHERE mba.is_deleted = false
-			  AND mba.entity_id = ANY($1)
-			  AND bbm.account_no = ANY($2)
-			  AND lower(trim(b.bank_name)) = ANY($3)
-			  AND upper(trim(COALESCE(bbm.currency_code,''))) = ANY($4)
-			ORDER BY e.entity_name, b.bank_name, bbm.account_no;
+			WHERE lower(trim(b.bank_name)) = ANY($3)
+			  AND upper(trim(COALESCE(lab.currency_code,''))) = ANY($4)
+			ORDER BY e.entity_name, b.bank_name, lab.account_no;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)

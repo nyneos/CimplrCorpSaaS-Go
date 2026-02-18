@@ -58,6 +58,12 @@ func CreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Validate utilization would not exceed limit
+		if err := validateUtilizationLimit(ctx, pgxPool, req.LimitID, req.UtilizedAmount); err != nil {
+			api.RespondWithResult(w, false, err.Error())
+			return
+		}
+
 		entryMode := strings.ToUpper(strings.TrimSpace(req.EntryMode))
 		if entryMode == "" {
 			entryMode = "MANUAL"
@@ -149,9 +155,45 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		results := make([]map[string]interface{}, 0, len(req.Utilizations))
 
-		for i, util := range req.Utilizations {
-			result := map[string]interface{}{"index": i}
+		// OPTIMIZED: Bulk validation instead of individual validation per record
+		utilizationData := make([]struct {
+			Index          int
+			LimitID        string
+			UtilizedAmount float64
+		}, len(req.Utilizations))
 
+		for i, util := range req.Utilizations {
+			utilizationData[i] = struct {
+				Index          int
+				LimitID        string
+				UtilizedAmount float64
+			}{
+				Index:          i,
+				LimitID:        util.LimitID,
+				UtilizedAmount: util.UtilizedAmount,
+			}
+		}
+
+		// Bulk validate all utilizations in a single query
+		validationResults, err := validateBulkUtilizationLimits(ctx, pgxPool, utilizationData)
+		if err != nil {
+			api.RespondWithResult(w, false, "bulk validation failed: "+err.Error())
+			return
+		}
+
+		// Create results array with validation outcomes
+		for i, validation := range validationResults {
+			result := map[string]interface{}{"index": validation.Index}
+			
+			if !validation.IsValid {
+				result["success"] = false
+				result["error"] = validation.Error
+				results = append(results, result)
+				continue
+			}
+
+			// Process valid records
+			util := req.Utilizations[i]
 			entryMode := strings.ToUpper(strings.TrimSpace(util.EntryMode))
 			if entryMode == "" {
 				entryMode = "MANUAL"
@@ -1219,6 +1261,19 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 
 	results := make([]map[string]interface{}, 0)
 
+	// OPTIMIZED: First parse and validate all rows, then do bulk validation
+	validRows := make([]struct {
+		Index          int
+		LimitID        string
+		UtilizationDate string
+		CurrencyCode   string
+		UtilizedAmount float64
+		Remarks        string
+		ReferenceDoc   string
+		RowNumber      int
+	}, 0, len(rows)-1)
+
+	// Parse all rows first
 	for i := 1; i < len(rows); i++ {
 		row := rows[i]
 		result := map[string]interface{}{"row": i + 1}
@@ -1245,55 +1300,135 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 			continue
 		}
 
-		tx, err := pgxPool.Begin(ctx)
+		// Add to valid rows for bulk validation
+		validRows = append(validRows, struct {
+			Index          int
+			LimitID        string
+			UtilizationDate string
+			CurrencyCode   string
+			UtilizedAmount float64
+			Remarks        string
+			ReferenceDoc   string
+			RowNumber      int
+		}{
+			Index:          len(validRows),
+			LimitID:        limitID,
+			UtilizationDate: utilizationDate,
+			CurrencyCode:   currencyCode,
+			UtilizedAmount: utilizedAmount,
+			Remarks:        remarks,
+			ReferenceDoc:   referenceDoc,
+			RowNumber:      i + 1,
+		})
+	}
+
+	// OPTIMIZED: Bulk validate all utilizations
+	if len(validRows) > 0 {
+		utilizationData := make([]struct {
+			Index          int
+			LimitID        string
+			UtilizedAmount float64
+		}, len(validRows))
+
+		for i, vr := range validRows {
+			utilizationData[i] = struct {
+				Index          int
+				LimitID        string
+				UtilizedAmount float64
+			}{
+				Index:          vr.Index,
+				LimitID:        vr.LimitID,
+				UtilizedAmount: vr.UtilizedAmount,
+			}
+		}
+
+		validationResults, err := validateBulkUtilizationLimits(ctx, pgxPool, utilizationData)
 		if err != nil {
-			result["success"] = false
-			result["error"] = constants.ErrFailedToBeginTransaction
-			results = append(results, result)
-			continue
+			// If bulk validation fails, fall back to individual processing
+			for _, vr := range validRows {
+				result := map[string]interface{}{"row": vr.RowNumber}
+				result["success"] = false
+				result["error"] = "validation failed: " + err.Error()
+				results = append(results, result)
+			}
+			return results
 		}
 
-		ins := `INSERT INTO cimplrcorpsaas.bank_limit_utilization (
-			limit_id, utilization_date, currency_code, utilized_amount,
-			remarks, reference_doc, entry_mode, status
-		) VALUES ($1,$2,$3,$4,$5,$6,'UPLOAD','DRAFT') RETURNING utilization_id`
-
-		var utilizationID string
-		err = tx.QueryRow(ctx, ins,
-			limitID, utilizationDate, strings.ToUpper(currencyCode), utilizedAmount,
-			nullifyEmpty(remarks), nullifyEmpty(referenceDoc),
-		).Scan(&utilizationID)
-
-		if err != nil {
-			tx.Rollback(ctx)
-			result["success"] = false
-			result["error"] = "failed to insert: " + err.Error()
-			results = append(results, result)
-			continue
+		// Process results based on validation
+		validRowMap := make(map[int]bool)
+		for _, vr := range validationResults {
+			if !vr.IsValid {
+				// Find the corresponding row number
+				rowNum := validRows[vr.Index].RowNumber
+				result := map[string]interface{}{
+					"row":     rowNum,
+					"success": false,
+					"error":   vr.Error,
+				}
+				results = append(results, result)
+			} else {
+				validRowMap[vr.Index] = true
+			}
 		}
 
-		auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimitutilization (
-			utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at
-		) VALUES ($1,$2,'CREATE','PENDING_APPROVAL',$3,$4,now())`
+		// Process valid rows
+		for i, vr := range validRows {
+			if !validRowMap[i] {
+				continue // Skip rows that failed validation
+			}
 
-		if _, err := tx.Exec(ctx, auditQ, utilizationID, limitID, nil, requestedBy); err != nil {
-			tx.Rollback(ctx)
-			result["success"] = false
-			result["error"] = "failed to create audit"
+			result := map[string]interface{}{"row": vr.RowNumber}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				result["success"] = false
+				result["error"] = constants.ErrFailedToBeginTransaction
+				results = append(results, result)
+				continue
+			}
+
+			ins := `INSERT INTO cimplrcorpsaas.bank_limit_utilization (
+				limit_id, utilization_date, currency_code, utilized_amount,
+				remarks, reference_doc, entry_mode, status
+			) VALUES ($1,$2,$3,$4,$5,$6,'UPLOAD','DRAFT') RETURNING utilization_id`
+
+			var utilizationID string
+			err = tx.QueryRow(ctx, ins,
+				vr.LimitID, vr.UtilizationDate, strings.ToUpper(vr.CurrencyCode), vr.UtilizedAmount,
+				nullifyEmpty(vr.Remarks), nullifyEmpty(vr.ReferenceDoc),
+			).Scan(&utilizationID)
+
+			if err != nil {
+				tx.Rollback(ctx)
+				result["success"] = false
+				result["error"] = "failed to insert: " + err.Error()
+				results = append(results, result)
+				continue
+			}
+
+			auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimitutilization (
+				utilization_id, limit_id, action_type, processing_status, reason, requested_by, requested_at
+			) VALUES ($1,$2,'CREATE','PENDING_APPROVAL',$3,$4,now())`
+
+			if _, err := tx.Exec(ctx, auditQ, utilizationID, vr.LimitID, nil, requestedBy); err != nil {
+				tx.Rollback(ctx)
+				result["success"] = false
+				result["error"] = "failed to create audit"
+				results = append(results, result)
+				continue
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				result["success"] = false
+				result["error"] = constants.ErrTxCommitFailed
+				results = append(results, result)
+				continue
+			}
+
+			result["success"] = true
+			result["utilization_id"] = utilizationID
 			results = append(results, result)
-			continue
 		}
-
-		if err := tx.Commit(ctx); err != nil {
-			result["success"] = false
-			result["error"] = constants.ErrTxCommitFailed
-			results = append(results, result)
-			continue
-		}
-
-		result["success"] = true
-		result["utilization_id"] = utilizationID
-		results = append(results, result)
 	}
 
 	return results

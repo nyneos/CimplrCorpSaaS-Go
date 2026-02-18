@@ -85,6 +85,13 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Check for duplicate limit combination
+		if err := checkLimitUniqueness(ctx, pgxPool, req.EntityName, req.BankName, coreLimitType, 
+			req.LimitType, req.LimitSubType, strings.ToUpper(req.CurrencyCode), ""); err != nil {
+			api.RespondWithResult(w, false, err.Error())
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithResult(w, false, "failed to begin transaction: "+err.Error())
@@ -182,6 +189,19 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		results := make([]map[string]interface{}, 0, len(req.Limits))
 
+		// OPTIMIZED: First validate all fields and prepare data for bulk uniqueness check
+		validLimits := make([]struct {
+			Index          int
+			EntityName     string
+			BankName       string
+			CoreLimitType  string
+			LimitType      string
+			LimitSubType   string
+			CurrencyCode   string
+			OriginalData   LimitRequest
+		}, 0, len(req.Limits))
+
+		// Pre-validate entity access and enum values
 		for i, lim := range req.Limits {
 			result := map[string]interface{}{"index": i}
 
@@ -204,9 +224,12 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
 			if fungibilityType != constants.InterCore && fungibilityType != constants.IntraCore && fungibilityType != constants.None {
-				api.RespondWithResult(w, false, "invalid fungibility_type. Allowed: Inter-Core, Intra-Core, None")
-				return
+				result["success"] = false
+				result["error"] = "invalid fungibility_type"
+				results = append(results, result)
+				continue
 			}
+			
 			securityType := strings.ToUpper(strings.TrimSpace(lim.SecurityType))
 			if securityType != "SECURED" && securityType != "UNSECURED" {
 				result["success"] = false
@@ -215,61 +238,150 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			// Individual transaction per limit
-			tx, err := pgxPool.Begin(ctx)
+			// Add to valid limits for bulk uniqueness checking
+			validLimits = append(validLimits, struct {
+				Index          int
+				EntityName     string
+				BankName       string
+				CoreLimitType  string
+				LimitType      string
+				LimitSubType   string
+				CurrencyCode   string
+				OriginalData   LimitRequest
+			}{
+				Index:         i,
+				EntityName:    lim.EntityName,
+				BankName:      lim.BankName,
+				CoreLimitType: coreLimitType,
+				LimitType:     lim.LimitType,
+				LimitSubType:  lim.LimitSubType,
+				CurrencyCode:  strings.ToUpper(lim.CurrencyCode),
+				OriginalData:  lim,
+			})
+		}
+
+		// OPTIMIZED: Bulk uniqueness validation for all valid limits
+		if len(validLimits) > 0 {
+			uniquenessData := make([]struct {
+				Index          int
+				EntityName     string
+				BankName       string
+				CoreLimitType  string
+				LimitType      string
+				LimitSubType   string
+				CurrencyCode   string
+			}, len(validLimits))
+
+			for i, vl := range validLimits {
+				uniquenessData[i] = struct {
+					Index          int
+					EntityName     string
+					BankName       string
+					CoreLimitType  string
+					LimitType      string
+					LimitSubType   string
+					CurrencyCode   string
+				}{
+					Index:         vl.Index,
+					EntityName:    vl.EntityName,
+					BankName:      vl.BankName,
+					CoreLimitType: vl.CoreLimitType,
+					LimitType:     vl.LimitType,
+					LimitSubType:  vl.LimitSubType,
+					CurrencyCode:  vl.CurrencyCode,
+				}
+			}
+
+			uniquenessResults, err := validateBulkLimitUniqueness(ctx, pgxPool, uniquenessData)
 			if err != nil {
-				result["success"] = false
-				result["error"] = constants.ErrFailedToBeginTransaction
-				results = append(results, result)
-				continue
+				api.RespondWithResult(w, false, "bulk uniqueness validation failed: "+err.Error())
+				return
 			}
 
-			ins := `INSERT INTO cimplrcorpsaas.bank_limit (
-				entity_name, bank_name, core_limit_type, limit_type, limit_sub_type,
-				sanction_date, effective_date, currency_code, sanctioned_amount,
-				fungibility_type, fungibility_pct, security_type, remarks, initial_utilization
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING limit_id`
-
-			var limitID string
-			err = tx.QueryRow(ctx, ins,
-				lim.EntityName, lim.BankName, coreLimitType,
-				nullifyEmpty(lim.LimitType), nullifyEmpty(lim.LimitSubType),
-				nullifyEmpty(lim.SanctionDate), nullifyEmpty(lim.EffectiveDate),
-				strings.ToUpper(lim.CurrencyCode), lim.SanctionedAmount,
-				fungibilityType, nullifyFloat(lim.FungibilityPct),
-				securityType, nullifyEmpty(lim.Remarks), nullifyFloat(lim.InitialUtilization),
-			).Scan(&limitID)
-
-			if err != nil {
-				tx.Rollback(ctx)
-				result["success"] = false
-				result["error"] = "failed to insert limit: " + err.Error()
-				results = append(results, result)
-				continue
+			// Process results based on uniqueness validation
+			validLimitMap := make(map[int]bool) // Track which original indices are valid
+			for _, ur := range uniquenessResults {
+				if !ur.IsValid {
+					result := map[string]interface{}{
+						"index":   ur.Index,
+						"success": false,
+						"error":   ur.Error,
+					}
+					results = append(results, result)
+				} else {
+					validLimitMap[ur.Index] = true
+				}
 			}
 
-			auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimit (
-				limit_id, action_type, processing_status, reason, requested_by, requested_at
-			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
+			// Now process only the valid, unique limits
+			for _, vl := range validLimits {
+				if !validLimitMap[vl.Index] {
+					continue // Skip limits that failed uniqueness validation
+				}
 
-			if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(lim.Reason), requestedBy); err != nil {
-				tx.Rollback(ctx)
-				result["success"] = false
-				result["error"] = "failed to create audit"
+				result := map[string]interface{}{"index": vl.Index}
+				lim := vl.OriginalData
+
+				// Get the processed enum values
+				coreLimitType := vl.CoreLimitType
+				fungibilityType := strings.ToUpper(strings.TrimSpace(lim.FungibilityType))
+				securityType := strings.ToUpper(strings.TrimSpace(lim.SecurityType))
+
+				tx, err := pgxPool.Begin(ctx)
+				if err != nil {
+					result["success"] = false
+					result["error"] = constants.ErrFailedToBeginTransaction
+					results = append(results, result)
+					continue
+				}
+
+				ins := `INSERT INTO cimplrcorpsaas.bank_limit (
+					entity_name, bank_name, core_limit_type, limit_type, limit_sub_type,
+					sanction_date, effective_date, currency_code, sanctioned_amount,
+					fungibility_type, fungibility_pct, security_type, remarks, initial_utilization
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING limit_id`
+
+				var limitID string
+				err = tx.QueryRow(ctx, ins,
+					lim.EntityName, lim.BankName, coreLimitType,
+					nullifyEmpty(lim.LimitType), nullifyEmpty(lim.LimitSubType),
+					nullifyEmpty(lim.SanctionDate), nullifyEmpty(lim.EffectiveDate),
+					strings.ToUpper(lim.CurrencyCode), lim.SanctionedAmount,
+					fungibilityType, nullifyFloat(lim.FungibilityPct),
+					securityType, nullifyEmpty(lim.Remarks), nullifyFloat(lim.InitialUtilization),
+				).Scan(&limitID)
+
+				if err != nil {
+					tx.Rollback(ctx)
+					result["success"] = false
+					result["error"] = "failed to insert limit: " + err.Error()
+					results = append(results, result)
+					continue
+				}
+
+				auditQ := `INSERT INTO cimplrcorpsaas.auditactionbanklimit (
+					limit_id, action_type, processing_status, reason, requested_by, requested_at
+				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,now())`
+
+				if _, err := tx.Exec(ctx, auditQ, limitID, nullifyEmpty(lim.Reason), requestedBy); err != nil {
+					tx.Rollback(ctx)
+					result["success"] = false
+					result["error"] = "failed to create audit"
+					results = append(results, result)
+					continue
+				}
+
+				if err := tx.Commit(ctx); err != nil {
+					result["success"] = false
+					result["error"] = constants.ErrTxCommitFailed
+					results = append(results, result)
+					continue
+				}
+
+				result["success"] = true
+				result["limit_id"] = limitID
 				results = append(results, result)
-				continue
 			}
-
-			if err := tx.Commit(ctx); err != nil {
-				result["success"] = false
-				result["error"] = constants.ErrTxCommitFailed
-				results = append(results, result)
-				continue
-			}
-
-			result["success"] = true
-			result["limit_id"] = limitID
-			results = append(results, result)
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
@@ -676,11 +788,35 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		entityNames := api.GetEntityNamesFromCtx(ctx)
 
 		query := `
+			WITH approved_utilizations AS (
+				SELECT 
+					u.limit_id,
+					COALESCE(SUM(u.utilized_amount), 0) AS total_approved_utilization
+				FROM cimplrcorpsaas.bank_limit_utilization u
+				INNER JOIN LATERAL (
+					SELECT processing_status
+					FROM cimplrcorpsaas.auditactionbanklimitutilization
+					WHERE utilization_id = u.utilization_id
+					ORDER BY requested_at DESC
+					LIMIT 1
+				) au ON au.processing_status = 'APPROVED'
+				WHERE COALESCE(u.is_deleted, false) = false
+				GROUP BY u.limit_id
+			)
 			SELECT 
 				l.limit_id, l.entity_name, l.bank_name, l.core_limit_type, l.limit_type, l.limit_sub_type,
 				l.sanction_date, l.effective_date, l.currency_code, l.sanctioned_amount,
-				l.fungibility_type, l.fungibility_pct, l.security_type, l.remarks, l.initial_utilization
+				l.fungibility_type, l.fungibility_pct, l.security_type, l.remarks, l.initial_utilization,
+				COALESCE(au.total_approved_utilization, 0) AS total_approved_utilization,
+				COALESCE(l.initial_utilization, 0) + COALESCE(au.total_approved_utilization, 0) AS total_utilized,
+				l.sanctioned_amount - (COALESCE(l.initial_utilization, 0) + COALESCE(au.total_approved_utilization, 0)) AS headroom,
+				CASE 
+					WHEN (COALESCE(l.initial_utilization, 0) + COALESCE(au.total_approved_utilization, 0)) > l.sanctioned_amount 
+					THEN (COALESCE(l.initial_utilization, 0) + COALESCE(au.total_approved_utilization, 0)) - l.sanctioned_amount 
+					ELSE 0 
+				END AS over_utilization
 			FROM cimplrcorpsaas.bank_limit l
+			LEFT JOIN approved_utilizations au ON au.limit_id = l.limit_id
 			INNER JOIN LATERAL (
 				SELECT processing_status
 				FROM cimplrcorpsaas.auditactionbanklimit
@@ -704,34 +840,39 @@ func GetApprovedBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var limitID, entityName, bankName, coreLimitType, currencyCode, fungibilityType, securityType string
 			var limitType, limitSubType, remarks *string
 			var sanctionDate, effectiveDate *time.Time
-			var sanctionedAmount float64
+			var sanctionedAmount, totalApprovedUtilization, totalUtilized, headroom, overUtilization float64
 			var fungibilityPct, initialUtilization *float64
 
 			err := rows.Scan(
 				&limitID, &entityName, &bankName, &coreLimitType, &limitType, &limitSubType,
 				&sanctionDate, &effectiveDate, &currencyCode, &sanctionedAmount,
 				&fungibilityType, &fungibilityPct, &securityType, &remarks, &initialUtilization,
+				&totalApprovedUtilization, &totalUtilized, &headroom, &overUtilization,
 			)
 			if err != nil {
 				continue
 			}
 
 			item := map[string]interface{}{
-				"limit_id":            limitID,
-				"entity_name":         entityName,
-				"bank_name":           bankName,
-				"core_limit_type":     coreLimitType,
-				"limit_type":          stringOrEmpty(limitType),
-				"limit_sub_type":      stringOrEmpty(limitSubType),
-				"sanction_date":       timeOrEmpty(sanctionDate),
-				"effective_date":      timeOrEmpty(effectiveDate),
-				"currency_code":       currencyCode,
-				"sanctioned_amount":   sanctionedAmount,
-				"fungibility_type":    fungibilityType,
-				"fungibility_pct":     floatOrZero(fungibilityPct),
-				"security_type":       securityType,
-				"remarks":             stringOrEmpty(remarks),
-				"initial_utilization": floatOrZero(initialUtilization),
+				"limit_id":                     limitID,
+				"entity_name":                  entityName,
+				"bank_name":                    bankName,
+				"core_limit_type":              coreLimitType,
+				"limit_type":                   stringOrEmpty(limitType),
+				"limit_sub_type":               stringOrEmpty(limitSubType),
+				"sanction_date":                timeOrEmpty(sanctionDate),
+				"effective_date":               timeOrEmpty(effectiveDate),
+				"currency_code":                currencyCode,
+				"sanctioned_amount":            sanctionedAmount,
+				"fungibility_type":             fungibilityType,
+				"fungibility_pct":              floatOrZero(fungibilityPct),
+				"security_type":                securityType,
+				"remarks":                      stringOrEmpty(remarks),
+				"initial_utilization":          floatOrZero(initialUtilization),
+				"total_approved_utilization":   totalApprovedUtilization,
+				"total_utilized":               totalUtilized,
+				"headroom":                     headroom,
+				"over_utilization":             overUtilization,
 			}
 
 			results = append(results, item)

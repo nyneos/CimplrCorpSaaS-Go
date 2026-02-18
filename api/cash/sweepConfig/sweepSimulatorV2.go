@@ -221,8 +221,8 @@ func SimulateSweepExecution(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		log.Printf("[SWEEP SIMULATION] Found %d approved sweeps to simulate", len(sweeps))
 
-		// Fetch current balances
-		balances, err := fetchCurrentBalances(ctx, pgxPool, entityNames, bankNames)
+		// Fetch current balances (including ALL accounts mentioned in sweeps)
+		balances, err := fetchCurrentBalancesWithSweepAccounts(ctx, pgxPool, sweeps, entityNames, bankNames)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to fetch balances: "+err.Error())
 			return
@@ -914,14 +914,14 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 		normEntities := make([]string, 0, len(entityNames))
 		for _, n := range entityNames {
 			if s := strings.TrimSpace(n); s != "" {
-				normEntities = append(normEntities, strings.ToLower(s))
+				normEntities = append(normEntities, s)
 			}
 		}
-		// if len(normEntities) > 0 {
-		// 	filters += fmt.Sprintf(" AND LOWER(TRIM(mba.entity_id)) = ANY($%d)", argPos)
-		// 	args = append(args, normEntities)
-		// 	argPos++
-		// }
+		if len(normEntities) > 0 {
+			filters += fmt.Sprintf(" AND me.entity_name = ANY($%d)", argPos)
+			args = append(args, normEntities)
+			argPos++
+		}
 	}
 
 	if len(bankNames) > 0 {
@@ -937,20 +937,31 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 		}
 	}
 
+	// Standardized latest approved balance query
 	query := fmt.Sprintf(`
-		SELECT DISTINCT ON (bb.account_no)
-			bb.account_no,
+		WITH latest_approved_balance AS (
+			SELECT DISTINCT ON (bbm.account_no)
+				bbm.account_no,
+				COALESCE(bbm.closing_balance, 0) AS balance_amount,
+				COALESCE(bbm.currency_code, 'INR') AS currency_code
+			FROM public.bank_balances_manual bbm
+			JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+			WHERE a.processing_status = 'APPROVED'
+			ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+		)
+		SELECT
+			lab.account_no,
 			mba.bank_name,
-			mba.entity_id,
-			COALESCE(bb.closing_balance, 0) as balance,
-			COALESCE(mba.currency, 'INR') as currency
-		FROM public.bank_balances_manual bb
-		JOIN public.masterbankaccount mba ON mba.account_number = bb.account_no
-		LEFT JOIN public.auditactionbankbalances audit ON audit.balance_id = bb.balance_id
+			COALESCE(me.entity_name, 'Unknown Entity') as entity_name,
+			lab.balance_amount as balance,
+			lab.currency_code as currency
+		FROM latest_approved_balance lab
+		JOIN public.masterbankaccount mba ON mba.account_number = lab.account_no
+		LEFT JOIN public.masterentitycash me ON me.entity_id = mba.entity_id::text
 		WHERE COALESCE(mba.is_deleted, false) = false
-			AND (audit.processing_status = 'APPROVED' OR audit.processing_status IS NULL)
+			AND COALESCE(mba.status, 'Active') = 'Active'
 			%s
-		ORDER BY bb.account_no, bb.as_of_date DESC, bb.as_of_time DESC
+		ORDER BY lab.account_no
 	`, filters)
 
 	log.Printf("[BALANCE FETCH] Query: %s", query)
@@ -969,26 +980,257 @@ func fetchCurrentBalances(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 	rowCount := 0
 	for rows.Next() {
 		rowCount++
-		var accountNo, bankName, entityID, currency string
+		var accountNo, bankName, entityName, currency string
 		var balance float64
 
-		if err := rows.Scan(&accountNo, &bankName, &entityID, &balance, &currency); err != nil {
+		if err := rows.Scan(&accountNo, &bankName, &entityName, &balance, &currency); err != nil {
 			log.Printf("[BALANCE FETCH] Scan error on row %d: %v", rowCount, err)
 			continue
 		}
 
-		log.Printf("[BALANCE FETCH] Found balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityID, balance)
+		log.Printf("[BALANCE FETCH] Found balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityName, balance)
 
 		balances = append(balances, AccountBalance{
 			AccountNumber: accountNo,
 			BankName:      bankName,
-			EntityName:    entityID,
+			EntityName:    entityName,
 			Balance:       balance,
 			Currency:      currency,
 		})
 	}
 
 	log.Printf("[BALANCE FETCH] Total rows: %d, Balances collected: %d", rowCount, len(balances))
+
+	return balances, nil
+}
+
+// fetchCurrentBalancesWithSweepAccounts fetches balances for all accounts mentioned in sweeps
+// This ensures target accounts without existing balance records are included with 0 balance
+func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool.Pool, sweeps []map[string]interface{}, entityNames, bankNames []string) ([]AccountBalance, error) {
+	// Extract all account numbers from sweeps
+	sweepAccounts := make(map[string]bool)
+	for _, sweep := range sweeps {
+		if sourceAcc := fmt.Sprint(sweep["source_account"]); sourceAcc != "" && sourceAcc != "<nil>" {
+			sweepAccounts[sourceAcc] = true
+		}
+		if targetAcc := fmt.Sprint(sweep["target_account"]); targetAcc != "" && targetAcc != "<nil>" {
+			sweepAccounts[targetAcc] = true
+		}
+	}
+
+	log.Printf("[BALANCE FETCH WITH SWEEPS] Sweep accounts identified: %v", sweepAccounts)
+
+	// Build filters
+	filters := ""
+	args := []interface{}{}
+	argPos := 1
+
+	if len(entityNames) > 0 {
+		normEntities := make([]string, 0, len(entityNames))
+		for _, n := range entityNames {
+			if s := strings.TrimSpace(n); s != "" {
+				normEntities = append(normEntities, s)
+			}
+		}
+		if len(normEntities) > 0 {
+			filters += fmt.Sprintf(" AND me.entity_name = ANY($%d)", argPos)
+			args = append(args, normEntities)
+			argPos++
+		}
+	}
+
+	if len(bankNames) > 0 {
+		normBanks := make([]string, 0, len(bankNames))
+		for _, b := range bankNames {
+			if s := strings.TrimSpace(b); s != "" {
+				normBanks = append(normBanks, strings.ToLower(s))
+			}
+		}
+		if len(normBanks) > 0 {
+			filters += fmt.Sprintf(" AND LOWER(TRIM(mba.bank_name)) = ANY($%d)", argPos)
+			args = append(args, normBanks)
+			argPos++
+		}
+	}
+
+	// Get existing balances for all accounts (not just sweep accounts) to maintain compatibility
+	existingBalancesQuery := fmt.Sprintf(`
+		WITH latest_approved_balance AS (
+			SELECT DISTINCT ON (bbm.account_no)
+				bbm.account_no,
+				COALESCE(bbm.closing_balance, 0) AS balance_amount,
+				COALESCE(bbm.currency_code, 'INR') AS currency_code
+			FROM public.bank_balances_manual bbm
+			JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+			WHERE a.processing_status = 'APPROVED'
+			ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+		),
+		latest_account_audit AS (
+			SELECT DISTINCT ON (aa.account_id)
+				aa.account_id,
+				aa.processing_status
+			FROM auditactionbankaccount aa
+			ORDER BY aa.account_id, aa.requested_at DESC
+		)
+		SELECT
+			lab.account_no,
+			COALESCE(mb.bank_name, 'Unknown Bank') as bank_name,
+			COALESCE(me.entity_name, mec.entity_name, 'Unknown Entity') as entity_name,
+			lab.balance_amount as balance,
+			lab.currency_code as currency
+		FROM latest_approved_balance lab
+		JOIN masterbankaccount mba ON mba.account_number = lab.account_no
+		LEFT JOIN masterbank mb ON mba.bank_id = mb.bank_id
+		LEFT JOIN masterentitycash me ON me.entity_id = mba.entity_id::text
+		LEFT JOIN masterentitycash mec ON mec.entity_id = mba.entity_id
+		LEFT JOIN latest_account_audit laa ON laa.account_id = mba.account_id
+		WHERE COALESCE(mba.is_deleted, false) = false
+			AND COALESCE(mba.status, 'Active') = 'Active'
+			AND laa.processing_status = 'APPROVED'
+			%s
+		ORDER BY lab.account_no
+	`, filters)
+
+	log.Printf("[BALANCE FETCH WITH SWEEPS] Existing balances query: %s", existingBalancesQuery)
+	log.Printf("[BALANCE FETCH WITH SWEEPS] Args: %v", args)
+
+	rows, err := pgxPool.Query(ctx, existingBalancesQuery, args...)
+	if err != nil {
+		log.Printf("[BALANCE FETCH WITH SWEEPS ERROR] %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	balances := []AccountBalance{}
+	accountsFound := make(map[string]bool)
+	rowCount := 0
+
+	// First, collect all existing balance records
+	for rows.Next() {
+		rowCount++
+		var accountNo, bankName, entityName, currency string
+		var balance float64
+
+		if err := rows.Scan(&accountNo, &bankName, &entityName, &balance, &currency); err != nil {
+			log.Printf("[BALANCE FETCH WITH SWEEPS] Scan error on row %d: %v", rowCount, err)
+			continue
+		}
+
+		log.Printf("[BALANCE FETCH WITH SWEEPS] Found existing balance: Account=%s, Bank=%s, Entity=%s, Balance=%.2f", accountNo, bankName, entityName, balance)
+
+		balances = append(balances, AccountBalance{
+			AccountNumber: accountNo,
+			BankName:      bankName,
+			EntityName:    entityName,
+			Balance:       balance,
+			Currency:      currency,
+		})
+		accountsFound[accountNo] = true
+	}
+
+	// Now add any sweep accounts that don't have existing balance records
+	missingAccounts := []string{}
+	for accountNo := range sweepAccounts {
+		if !accountsFound[accountNo] {
+			missingAccounts = append(missingAccounts, accountNo)
+		}
+	}
+
+	if len(missingAccounts) > 0 {
+		log.Printf("[BALANCE FETCH WITH SWEEPS] Missing accounts from sweep: %v", missingAccounts)
+
+		// Build query for missing accounts to get their bank/entity info
+		placeholders := make([]string, len(missingAccounts))
+		for i := range missingAccounts {
+			placeholders[i] = fmt.Sprintf("$%d", argPos+i)
+		}
+		for _, acc := range missingAccounts {
+			args = append(args, acc)
+		}
+
+		missingAccountsQuery := fmt.Sprintf(`
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (aa.account_id)
+					aa.account_id,
+					aa.processing_status
+				FROM auditactionbankaccount aa
+				ORDER BY aa.account_id, aa.requested_at DESC
+			)
+			SELECT
+				mba.account_number,
+				COALESCE(mb.bank_name, 'Unknown Bank') as bank_name,
+				COALESCE(me.entity_name, mec.entity_name, 'Unknown Entity') as entity_name,
+				'INR' as currency
+			FROM masterbankaccount mba
+			LEFT JOIN masterbank mb ON mba.bank_id = mb.bank_id
+			LEFT JOIN masterentitycash me ON me.entity_id = mba.entity_id::text
+			LEFT JOIN masterentitycash mec ON mec.entity_id = mba.entity_id
+			LEFT JOIN latest_audit la ON la.account_id = mba.account_id
+			WHERE mba.account_number = ANY(ARRAY[%s])
+				AND COALESCE(mba.is_deleted, false) = false
+				AND COALESCE(mba.status, 'Active') = 'Active'
+				AND la.processing_status = 'APPROVED'
+		`, strings.Join(placeholders, ","))
+
+		log.Printf("[BALANCE FETCH WITH SWEEPS] Missing accounts query: %s", missingAccountsQuery)
+		log.Printf("[BALANCE FETCH WITH SWEEPS] Missing accounts query args: %v", args[len(args)-len(missingAccounts):])
+
+		missingRows, err := pgxPool.Query(ctx, missingAccountsQuery, args...)
+		if err != nil {
+			log.Printf("[BALANCE FETCH WITH SWEEPS] Error fetching missing accounts: %v", err)
+			// Continue with existing balances even if we can't fetch missing account info
+		} else {
+			defer missingRows.Close()
+			
+			foundInMaster := 0
+			for missingRows.Next() {
+				var accountNo, bankName, entityName, currency string
+
+				if err := missingRows.Scan(&accountNo, &bankName, &entityName, &currency); err != nil {
+					log.Printf("[BALANCE FETCH WITH SWEEPS] Scan error for missing account: %v", err)
+					continue
+				}
+
+				foundInMaster++
+				log.Printf("[BALANCE FETCH WITH SWEEPS] Adding missing account with 0 balance: Account=%s, Bank=%s, Entity=%s", accountNo, bankName, entityName)
+
+				balances = append(balances, AccountBalance{
+					AccountNumber: accountNo,
+					BankName:      bankName,
+					EntityName:    entityName,
+					Balance:       0.0, // Start with 0 balance for accounts without records
+					Currency:      currency,
+				})
+			}
+			
+			log.Printf("[BALANCE FETCH WITH SWEEPS] Found %d missing accounts in masterbankaccount table", foundInMaster)
+		}
+
+		// For any accounts we still couldn't find in masterbankaccount, add minimal records
+		accountsStillMissing := make(map[string]bool)
+		for _, acc := range missingAccounts {
+			accountsStillMissing[acc] = true
+		}
+		for _, bal := range balances {
+			delete(accountsStillMissing, bal.AccountNumber)
+		}
+
+		if len(accountsStillMissing) > 0 {
+			log.Printf("[BALANCE FETCH WITH SWEEPS] Accounts not found in masterbankaccount: %v", accountsStillMissing)
+			for accountNo := range accountsStillMissing {
+				log.Printf("[BALANCE FETCH WITH SWEEPS] Adding fallback record for non-existent account: %s", accountNo)
+				balances = append(balances, AccountBalance{
+					AccountNumber: accountNo,
+					BankName:      "Account Not Found in Master",
+					EntityName:    "Account Not Found in Master", 
+					Balance:       0.0,
+					Currency:      "INR",
+				})
+			}
+		}
+	}
+
+	log.Printf("[BALANCE FETCH WITH SWEEPS] Total existing rows: %d, Total balances including missing: %d", rowCount, len(balances))
 
 	return balances, nil
 }
@@ -1140,7 +1382,7 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 		totalPlannedOutflow += requestedAmount
 
 		// Validation: Buffer check
-		if availableBalance <= bufferAmt {
+		if availableBalance < bufferAmt {
 			violations = append(violations, Violation{
 				SweepID:     sweepID,
 				Account:     sourceAcc,
@@ -1310,12 +1552,22 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 		AccountBreakdown:           accountBreakdown,
 	}
 
-	// Build balance impact
+	// Build balance impact - show actual simulation changes
 	beforeBalances := []AccountBalance{}
 	afterBalances := []AccountBalance{}
 
 	for _, bal := range balances {
-		beforeBalances = append(beforeBalances, bal)
+		// Before: use initial balance from initialBalanceMap
+		beforeBalance := initialBalanceMap[bal.AccountNumber]
+		beforeBalances = append(beforeBalances, AccountBalance{
+			AccountNumber: bal.AccountNumber,
+			BankName:      bal.BankName,
+			EntityName:    bal.EntityName,
+			Balance:       beforeBalance,
+			Currency:      bal.Currency,
+		})
+		
+		// After: use simulated balance from balanceMap
 		afterBalances = append(afterBalances, AccountBalance{
 			AccountNumber: bal.AccountNumber,
 			BankName:      bal.BankName,

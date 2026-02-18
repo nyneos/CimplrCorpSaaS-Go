@@ -59,26 +59,38 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// 1) Fetch latest APPROVED balances per account with account metadata
-		dateToday := time.Now().UTC().Format(constants.DateFormat)
+		// 1) Fetch latest APPROVED balances per account with account metadata (using KPI pattern)
 		q := `
-SELECT DISTINCT ON (COALESCE(bbm.account_no, bbm.iban, bbm.nickname))
-		bbm.account_no, COALESCE(bbm.nickname,'') as nickname, COALESCE(bbm.currency_code,'INR') as currency_code, COALESCE(bbm.closing_balance,0)::float8 as closing_balance,
-		COALESCE(mba.bank_name,'') as bank_name, COALESCE(me.entity_name,'') as entity_name,
-		COALESCE(bbm.country, mba.country, '') as country
-FROM bank_balances_manual bbm
-JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
-LEFT JOIN masterentitycash me ON mba.entity_id = me.entity_id
-JOIN (
-  SELECT DISTINCT ON (balance_id) balance_id, processing_status
-  FROM auditactionbankbalances
-  ORDER BY balance_id, requested_at DESC
-) a ON a.balance_id = bbm.balance_id AND a.processing_status = 'APPROVED'
-WHERE bbm.as_of_date <= $1
-ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, bbm.as_of_time DESC
-`
+		WITH latest_approved_balance AS (
+			SELECT DISTINCT ON (bbm.account_no)
+				bbm.account_no,
+				COALESCE(bbm.closing_balance, 0) AS closing_balance,
+				COALESCE(bbm.currency_code,'INR') as currency_code,
+				COALESCE(bbm.nickname,'') as nickname,
+				COALESCE(bbm.country, mba.country, '') as country
+			FROM public.bank_balances_manual bbm
+			JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+			WHERE a.processing_status = 'APPROVED'
+				AND mba.is_deleted = false
+				AND COALESCE(mba.status, 'Active') = 'Active'
+			ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+		)
+		SELECT 
+			lab.account_no,
+			lab.nickname,
+			lab.currency_code,
+			lab.closing_balance::float8 as closing_balance,
+			COALESCE(mba.bank_name,'') as bank_name,
+			COALESCE(me.entity_name,'') as entity_name,
+			lab.country
+		FROM latest_approved_balance lab
+		JOIN masterbankaccount mba ON lab.account_no = mba.account_number
+		LEFT JOIN masterentitycash me ON me.entity_id::text = mba.entity_id
+		ORDER BY lab.account_no
+		`
 
-		rows, err := pgxPool.Query(ctx, q, dateToday)
+		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
@@ -177,10 +189,18 @@ ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, 
 		startStr := start.Format(constants.DateFormat)
 		endStr := end.Format(constants.DateFormat)
 
-		// Actual inflows (receivables) - approved
-		inflowQ := `SELECT COALESCE(SUM(r.invoice_amount),0)::float8 as sum_amount, COALESCE(r.currency_code,'INR') FROM tr_receivables r
-JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
-WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
+		// Actual inflows/outflows computed from approved bank statement transactions
+		// Previous implementation used receivables/payables. Keep old queries commented
+		// for reference.
+		// OLD inflow/outflow queries (receivables/payables) are intentionally commented out.
+
+		inflowQ := `SELECT COALESCE(SUM(COALESCE(t.deposit_amount,0)),0)::float8 AS sum_amount, COALESCE(NULLIF(m.currency,''),'INR') as currency_code
+	FROM cimplrcorpsaas.bank_statement_transactions t
+	JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+	JOIN cimplrcorpsaas.auditactionbankstatement a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
+	LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
+	WHERE t.value_date BETWEEN $1 AND $2 GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
+
 		inflowRows, err := pgxPool.Query(ctx, inflowQ, startStr, endStr)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -199,10 +219,13 @@ WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
 		inflowRows.Close()
 		actualInflowsINR = math.Round(actualInflowsINR*100) / 100
 
-		// Actual outflows (payables) - approved
-		outflowQ := `SELECT COALESCE(SUM(p.amount),0)::float8 as sum_amount, COALESCE(p.currency_code,'INR') FROM tr_payables p
-JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
-WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
+		outflowQ := `SELECT COALESCE(SUM(COALESCE(t.withdrawal_amount,0)),0)::float8 AS sum_amount, COALESCE(NULLIF(m.currency,''),'INR') as currency_code
+	FROM cimplrcorpsaas.bank_statement_transactions t
+	JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+	JOIN cimplrcorpsaas.auditactionbankstatement a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
+	LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
+	WHERE t.value_date BETWEEN $1 AND $2 GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
+
 		outflowRows, err := pgxPool.Query(ctx, outflowQ, startStr, endStr)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -409,13 +432,19 @@ AND aa.processing_status = 'APPROVED'`
 			wsStr := ws.Format(constants.DateFormat)
 			weStr := we.Format(constants.DateFormat)
 
-			// actual inflow
+			// actual inflow/outflow for the week derived from approved bank statement transactions
 			var aIn float64
 			var aOut float64
-			// actual inflow
-			arq := `SELECT COALESCE(SUM(invoice_amount),0)::float8, COALESCE(currency_code,'INR') FROM tr_receivables r
-JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
-WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
+			// OLD: receivables/payables queries retained as comments for reference
+			// arq := `SELECT COALESCE(SUM(invoice_amount),0)::float8, COALESCE(currency_code,'INR') FROM tr_receivables r
+			// JOIN auditactionreceivable a ON a.receivable_id = r.receivable_id AND a.processing_status = 'APPROVED'
+			// WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
+			arq := `SELECT COALESCE(SUM(COALESCE(t.deposit_amount,0)),0)::float8 AS sum_amount, COALESCE(NULLIF(m.currency,''),'INR') as currency_code
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+JOIN cimplrcorpsaas.auditactionbankstatement a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
+LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
+WHERE t.value_date BETWEEN $1 AND $2 GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 			arrows, err := pgxPool.Query(ctx, arq, wsStr, weStr)
 			if err != nil {
 				log.Printf("[WARN] cashDashboard actual inflow query failed for %s - %s: %v", wsStr, weStr, err)
@@ -431,9 +460,15 @@ WHERE r.due_date BETWEEN $1 AND $2 GROUP BY r.currency_code`
 			}
 
 			// actual outflow
-			aoq := `SELECT COALESCE(SUM(amount),0)::float8, COALESCE(currency_code,'INR') FROM tr_payables p
-JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
-WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
+			// aoq := `SELECT COALESCE(SUM(amount),0)::float8, COALESCE(currency_code,'INR') FROM tr_payables p
+			// JOIN auditactionpayable a ON a.payable_id = p.payable_id AND a.processing_status = 'APPROVED'
+			// WHERE p.due_date BETWEEN $1 AND $2 GROUP BY p.currency_code`
+			aoq := `SELECT COALESCE(SUM(COALESCE(t.withdrawal_amount,0)),0)::float8 AS sum_amount, COALESCE(NULLIF(m.currency,''),'INR') as currency_code
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+JOIN cimplrcorpsaas.auditactionbankstatement a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
+LEFT JOIN public.masterbankaccount m ON bs.account_number = m.account_number
+WHERE t.value_date BETWEEN $1 AND $2 GROUP BY COALESCE(NULLIF(m.currency,''),'INR')`
 			arows2, err := pgxPool.Query(ctx, aoq, wsStr, weStr)
 			if err != nil {
 				log.Printf("[WARN] cashDashboard actual outflow query failed for %s - %s: %v", wsStr, weStr, err)

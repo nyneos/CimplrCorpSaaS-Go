@@ -392,38 +392,41 @@ func sumUnhedgedBetween(ctx context.Context, db *sql.DB, entities []string, star
 // getLatestBalanceINR sums latest balance per account up to asOfDate in INR.
 func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, entities []string) (float64, error) {
 	dateStr := asOfDate.Format(constants.DateFormat)
-	args := []interface{}{dateStr}
+	args := []interface{}{}
 	filter := ""
 	if len(entities) > 0 {
 		// tolerate both entity names and entity IDs passed in 'entities'
-		filter = " AND (mec.entity_name = ANY($2) OR mba.entity_id = ANY($2))"
+		filter = " AND (mec.entity_name = ANY($1) OR mba.entity_id = ANY($1))"
 		args = append(args, pqStringArray(entities))
 	}
 
 
 	// Prefer manual bank balances first (bank_balances_manual) and fall back to bank_statements.
 	// This avoids missing data when statements are not yet uploaded but manual balances exist.
-	mbArgs := []interface{}{dateStr}
+	mbArgs := []interface{}{}
 	if len(entities) > 0 {
 		mbArgs = append(mbArgs, pqStringArray(entities))
 	}
 
 	mbQuery := fmt.Sprintf(`SELECT closing_balance, COALESCE(currency_code,'INR') FROM (
 		WITH latest_approved_balance AS (
-			SELECT DISTINCT ON (balance_id) balance_id, processing_status
-			FROM public.auditactionbankbalances
-			ORDER BY balance_id, requested_at DESC
+			SELECT DISTINCT ON (bbm.account_no)
+				bbm.account_no,
+				COALESCE(bbm.closing_balance, 0) AS closing_balance,
+				COALESCE(bbm.currency_code,'INR') as currency_code
+			FROM public.bank_balances_manual bbm
+			JOIN public.auditactionbankbalances a ON a.balance_id = bbm.balance_id
+			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+			WHERE a.processing_status = 'APPROVED'
+				AND mba.is_deleted = false
+				AND COALESCE(mba.status, 'Active') = 'Active'
+			ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
 		)
-		SELECT DISTINCT ON (COALESCE(bbm.account_no, bbm.iban, bbm.nickname))
-			bbm.closing_balance,
-			bbm.currency_code,
-			mec.entity_name
-		FROM bank_balances_manual bbm
-		JOIN latest_approved_balance lab ON lab.balance_id = bbm.balance_id AND lab.processing_status = 'APPROVED'
-		JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
-		JOIN masterentitycash mec ON mba.entity_id = mec.entity_id
-		WHERE mba.is_deleted = false AND bbm.as_of_date <= $1%s
-		ORDER BY COALESCE(bbm.account_no, bbm.iban, bbm.nickname), bbm.as_of_date DESC, bbm.as_of_time DESC, bbm.balance_id DESC
+		SELECT lab.closing_balance, lab.currency_code
+		FROM latest_approved_balance lab
+		JOIN masterbankaccount mba ON lab.account_no = mba.account_number
+		JOIN masterentitycash mec ON mec.entity_id::text = mba.entity_id
+		WHERE true %s
 	) t`, filter)
 
 	mbRows, err := db.QueryContext(ctx, mbQuery, mbArgs...)
