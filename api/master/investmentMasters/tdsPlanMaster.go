@@ -1062,43 +1062,43 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		deleteQuery := `
-			UPDATE investment.fd_tds_plan_master
-			SET is_deleted = true
-			WHERE tds_plan_id = ANY($1::text[])
-			RETURNING tds_plan_id`
+		// Verify which TDS plan IDs exist and are not already deleted
+		verifyQuery := `
+			SELECT tds_plan_id 
+			FROM investment.fd_tds_plan_master 
+			WHERE tds_plan_id = ANY($1::text[]) AND COALESCE(is_deleted, false) = false`
 
-		rows, err := tx.Query(ctx, deleteQuery, req.TdsIDs)
+		rows, err := tx.Query(ctx, verifyQuery, req.TdsIDs)
 		if err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Batch delete failed")
+			msg, status := getUserFriendlyTDSPlanError(err, "Verification failed")
 			api.RespondWithError(w, status, msg)
-			api.LogError("Batch delete failed: %v", err)
+			api.LogError("Delete verification failed: %v", err)
 			return
 		}
 		defer rows.Close()
 
-		var deletedIDs []string
+		var validIDs []string
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete result scan failed: "+err.Error())
-				api.LogError("Delete result scan failed: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
+				api.LogError("Delete verification scan failed: %v", err)
 				return
 			}
-			deletedIDs = append(deletedIDs, id)
+			validIDs = append(validIDs, id)
 		}
 
-		if len(deletedIDs) > 0 {
-			auditValues := make([]string, len(deletedIDs))
-			auditArgs := make([]interface{}, 0, len(deletedIDs)*2)
-			for i, id := range deletedIDs {
-				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,now())", i*2+1, i*2+2)
-				auditArgs = append(auditArgs, id, userEmail)
+		if len(validIDs) > 0 {
+			auditValues := make([]string, len(validIDs))
+			auditArgs := make([]interface{}, 0, len(validIDs)*3)
+			for i, id := range validIDs {
+				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now())", i*3+1, i*3+2, i*3+3)
+				auditArgs = append(auditArgs, id, userEmail, req.Reason)
 			}
 
 			auditQuery := fmt.Sprintf(`
 				INSERT INTO investment.fd_audit_tds_plan
-					(tds_plan_id, action_type, processing_status, requested_by, requested_at)
+					(tds_plan_id, action_type, processing_status, requested_by, reason, requested_at)
 				VALUES %s
 			`, strings.Join(auditValues, ","))
 
@@ -1118,16 +1118,16 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var results []map[string]interface{}
-		deletedSet := make(map[string]bool)
-		for _, id := range deletedIDs {
-			deletedSet[id] = true
+		validSet := make(map[string]bool)
+		for _, id := range validIDs {
+			validSet[id] = true
 			results = append(results, map[string]interface{}{
 				constants.ValueSuccess: true,
 				"tds_plan_id":          id,
 			})
 		}
 		for _, id := range req.TdsIDs {
-			if !deletedSet[id] {
+			if !validSet[id] {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
 					"tds_plan_id":          id,
@@ -1136,9 +1136,9 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		success := len(deletedIDs) > 0
+		success := len(validIDs) > 0
 		api.RespondWithPayload(w, success, "", results)
-		api.LogInfo("ULTRA FAST bulk delete tds plan: %d deleted, %d errors, %d total - single transaction", len(deletedIDs), len(req.TdsIDs)-len(deletedIDs), len(req.TdsIDs))
+		api.LogInfo("Delete requests created for TDS plans: %d requested, %d errors, %d total", len(validIDs), len(req.TdsIDs)-len(validIDs), len(req.TdsIDs))
 	}
 }
 
@@ -1205,6 +1205,7 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		// Bulk approve by TDS IDs (existing working logic)
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_tds_plan
 			SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
@@ -1213,6 +1214,25 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyTDSPlanError(err, "Approval failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		// Handle DELETE approvals - set is_deleted=true for DELETE actions
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_tds_plan_master 
+			SET is_deleted = true 
+			WHERE tds_plan_id IN (
+				SELECT DISTINCT a.tds_plan_id 
+				FROM investment.fd_audit_tds_plan a 
+				WHERE a.tds_plan_id = ANY($1::text[]) 
+				  AND a.action_type = 'DELETE' 
+				  AND a.processing_status = 'APPROVED'
+			)
+		`, req.TdsIDs)
+
+		if err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Delete execution failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}

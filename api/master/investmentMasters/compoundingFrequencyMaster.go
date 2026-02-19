@@ -1021,43 +1021,43 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		deleteQuery := `
-			UPDATE investment.fd_compounding_frequency_master
-			SET is_deleted = true
-			WHERE frequency_id = ANY($1::text[])
-			RETURNING frequency_id`
+		// Verify which frequency IDs exist and are not already deleted
+		verifyQuery := `
+			SELECT frequency_id 
+			FROM investment.fd_compounding_frequency_master 
+			WHERE frequency_id = ANY($1::text[]) AND COALESCE(is_deleted, false) = false`
 
-		rows, err := tx.Query(ctx, deleteQuery, req.FrequencyIDs)
+		rows, err := tx.Query(ctx, verifyQuery, req.FrequencyIDs)
 		if err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch delete failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Verification failed")
 			api.RespondWithError(w, status, msg)
-			api.LogError("Batch delete failed: %v", err)
+			api.LogError("Delete verification failed: %v", err)
 			return
 		}
 		defer rows.Close()
 
-		var deletedIDs []string
+		var validIDs []string
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete result scan failed: "+err.Error())
-				api.LogError("Delete result scan failed: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
+				api.LogError("Delete verification scan failed: %v", err)
 				return
 			}
-			deletedIDs = append(deletedIDs, id)
+			validIDs = append(validIDs, id)
 		}
 
-		if len(deletedIDs) > 0 {
-			auditValues := make([]string, len(deletedIDs))
-			auditArgs := make([]interface{}, 0, len(deletedIDs)*2)
-			for i, id := range deletedIDs {
-				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,now())", i*2+1, i*2+2)
-				auditArgs = append(auditArgs, id, userEmail)
+		if len(validIDs) > 0 {
+			auditValues := make([]string, len(validIDs))
+			auditArgs := make([]interface{}, 0, len(validIDs)*3)
+			for i, id := range validIDs {
+				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now())", i*3+1, i*3+2, i*3+3)
+				auditArgs = append(auditArgs, id, userEmail, req.Reason)
 			}
 
 			auditQuery := fmt.Sprintf(`
 				INSERT INTO investment.fd_audit_compounding_frequency
-					(frequency_id, action_type, processing_status, requested_by, requested_at)
+					(frequency_id, action_type, processing_status, requested_by, reason, requested_at)
 				VALUES %s
 			`, strings.Join(auditValues, ","))
 
@@ -1077,16 +1077,16 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var results []map[string]interface{}
-		deletedSet := make(map[string]bool)
-		for _, id := range deletedIDs {
-			deletedSet[id] = true
+		validSet := make(map[string]bool)
+		for _, id := range validIDs {
+			validSet[id] = true
 			results = append(results, map[string]interface{}{
 				constants.ValueSuccess: true,
 				"frequency_id":         id,
 			})
 		}
 		for _, id := range req.FrequencyIDs {
-			if !deletedSet[id] {
+			if !validSet[id] {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
 					"frequency_id":         id,
@@ -1095,9 +1095,9 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		success := len(deletedIDs) > 0
+		success := len(validIDs) > 0
 		api.RespondWithPayload(w, success, "", results)
-		api.LogInfo("ULTRA FAST bulk delete frequency: %d deleted, %d errors, %d total - single transaction", len(deletedIDs), len(req.FrequencyIDs)-len(deletedIDs), len(req.FrequencyIDs))
+		api.LogInfo("Delete requests created for compounding frequency: %d requested, %d errors, %d total", len(validIDs), len(req.FrequencyIDs)-len(validIDs), len(req.FrequencyIDs))
 	}
 }
 
@@ -1139,6 +1139,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		// Bulk approve by frequency IDs (existing working logic)
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_compounding_frequency
 			SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
@@ -1147,6 +1148,25 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Approval failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		// Handle DELETE approvals - set is_deleted=true for DELETE actions
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_compounding_frequency_master 
+			SET is_deleted = true 
+			WHERE frequency_id IN (
+				SELECT DISTINCT a.frequency_id 
+				FROM investment.fd_audit_compounding_frequency a 
+				WHERE a.frequency_id = ANY($1::text[]) 
+				  AND a.action_type = 'DELETE' 
+				  AND a.processing_status = 'APPROVED'
+			)
+		`, req.FrequencyIDs)
+
+		if err != nil {
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Delete execution failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}

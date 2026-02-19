@@ -1256,48 +1256,47 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// BATCH DELETE - ALL records in ONE query
-		deleteQuery := `
-            UPDATE investment.fd_interest_type_master 
-            SET is_deleted = true 
-            WHERE interest_id = ANY($1::text[])
-            RETURNING interest_id`
+		// Verify which interest IDs exist and are not already deleted
+		verifyQuery := `
+			SELECT interest_id 
+			FROM investment.fd_interest_type_master 
+			WHERE interest_id = ANY($1::text[]) AND COALESCE(is_deleted, false) = false`
 
-		rows, err := tx.Query(ctx, deleteQuery, req.InterestIDs)
+		rows, err := tx.Query(ctx, verifyQuery, req.InterestIDs)
 		if err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Batch delete failed")
+			msg, status := getUserFriendlyInterestTypeError(err, "Verification failed")
 			api.RespondWithError(w, status, msg)
-			api.LogError("Batch delete failed: %v", err)
+			api.LogError("Delete verification failed: %v", err)
 			return
 		}
 		defer rows.Close()
 
-		// Collect successfully deleted IDs
-		var deletedIDs []string
+		// Collect valid IDs that can be marked for deletion
+		var validIDs []string
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Delete result scan failed: "+err.Error())
-				api.LogError("Delete result scan failed: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, "Verification scan failed: "+err.Error())
+				api.LogError("Delete verification scan failed: %v", err)
 				return
 			}
-			deletedIDs = append(deletedIDs, id)
+			validIDs = append(validIDs, id)
 		}
 
 		// BATCH AUDIT INSERT - ALL audit records in ONE query
-		if len(deletedIDs) > 0 {
-			auditValues := make([]string, len(deletedIDs))
-			auditArgs := make([]interface{}, 0, len(deletedIDs)*2)
+		if len(validIDs) > 0 {
+			auditValues := make([]string, len(validIDs))
+			auditArgs := make([]interface{}, 0, len(validIDs)*3)
 
-			for i, id := range deletedIDs {
-				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,now())",
-					i*2+1, i*2+2)
-				auditArgs = append(auditArgs, id, userEmail)
+			for i, id := range validIDs {
+				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now())",
+					i*3+1, i*3+2, i*3+3)
+				auditArgs = append(auditArgs, id, userEmail, req.Reason)
 			}
 
 			auditQuery := fmt.Sprintf(`
                 INSERT INTO investment.fd_audit_interest_type 
-                    (interest_id, action_type, processing_status, requested_by, requested_at)
+                    (interest_id, action_type, processing_status, requested_by, reason, requested_at)
                 VALUES %s
             `, strings.Join(auditValues, ","))
 
@@ -1316,20 +1315,20 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Build results - successful deletes and any missing IDs as errors
+		// Build results - successful delete requests and any missing IDs as errors
 		var results []map[string]interface{}
-		deletedSet := make(map[string]bool)
-		for _, id := range deletedIDs {
-			deletedSet[id] = true
+		validSet := make(map[string]bool)
+		for _, id := range validIDs {
+			validSet[id] = true
 			results = append(results, map[string]interface{}{
 				constants.ValueSuccess: true,
 				"interest_id":          id,
 			})
 		}
 
-		// Add errors for IDs that weren't deleted
+		// Add errors for IDs that weren't found or already deleted
 		for _, id := range req.InterestIDs {
-			if !deletedSet[id] {
+			if !validSet[id] {
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: false,
 					"interest_id":          id,
@@ -1338,10 +1337,10 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		success := len(deletedIDs) > 0
+		success := len(validIDs) > 0
 		api.RespondWithPayload(w, success, "", results)
-		api.LogInfo("ULTRA FAST bulk delete: %d deleted, %d errors, %d total - single transaction",
-			len(deletedIDs), len(req.InterestIDs)-len(deletedIDs), len(req.InterestIDs))
+		api.LogInfo("Delete requests created for interest types: %d requested, %d errors, %d total",
+			len(validIDs), len(req.InterestIDs)-len(validIDs), len(req.InterestIDs))
 	}
 }
 
@@ -1384,7 +1383,7 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Bulk approve by interest IDs
+		// Bulk approve by interest IDs (existing working logic)
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_interest_type 
 			SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
@@ -1393,6 +1392,25 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Approval failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		// Handle DELETE approvals - set is_deleted=true for DELETE actions
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_interest_type_master 
+			SET is_deleted = true 
+			WHERE interest_id IN (
+				SELECT DISTINCT a.interest_id 
+				FROM investment.fd_audit_interest_type a 
+				WHERE a.interest_id = ANY($1::text[]) 
+				  AND a.action_type = 'DELETE' 
+				  AND a.processing_status = 'APPROVED'
+			)
+		`, req.InterestIDs)
+
+		if err != nil {
+			msg, status := getUserFriendlyInterestTypeError(err, "Delete execution failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
