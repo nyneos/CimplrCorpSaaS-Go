@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+    "time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1426,7 +1427,28 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if idx, ok := fieldPairs[k]; ok {
 				oldField := "old_" + k
 				auditCols = append(auditCols, oldField)
-				auditVals = append(auditVals, oldVals[idx])
+
+				// Handle date fields explicitly to avoid sending Go's default time.String()
+				val := oldVals[idx]
+				if k == "applicable_from" || k == "applicable_to" {
+					if t, ok := val.(time.Time); ok {
+						if !t.IsZero() {
+							auditVals = append(auditVals, t.Format("2006-01-02"))
+						} else {
+							auditVals = append(auditVals, nil)
+						}
+					} else if tp, ok := val.(*time.Time); ok && tp != nil {
+						if !tp.IsZero() {
+							auditVals = append(auditVals, tp.Format("2006-01-02"))
+						} else {
+							auditVals = append(auditVals, nil)
+						}
+					} else {
+						auditVals = append(auditVals, nil)
+					}
+				} else {
+					auditVals = append(auditVals, oldVals[idx])
+				}
 				auditParams = append(auditParams, fmt.Sprintf("$%d", paramPos))
 				paramPos++
 			}
