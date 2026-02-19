@@ -16,10 +16,10 @@ var inrRates map[string]float64
 
 // TickerRequest represents the POST payload.
 type TickerRequest struct {
-	Base   string `json:"base"`
+	Base   string   `json:"base"`
 	Bases  []string `json:"bases,omitempty"`
-	Target string `json:"target,omitempty"`
-	Spot   bool   `json:"spot,omitempty"`
+	Target string   `json:"target,omitempty"`
+	Spot   bool     `json:"spot,omitempty"`
 }
 
 // RateEntry mirrors the minimal fields from rate.json
@@ -266,7 +266,7 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req TickerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid json"}` , http.StatusBadRequest)
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
 

@@ -12,7 +12,7 @@ import (
 func checkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, entityName, bankName, coreLimitType, limitType, limitSubType, currencyCode string, excludeLimitID string) error {
 	var query string
 	var args []interface{}
-	
+
 	if excludeLimitID != "" {
 		// For updates, exclude the current limit ID
 		query = `SELECT 1 FROM cimplrcorpsaas.bank_limit 
@@ -34,10 +34,10 @@ func checkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 	var exists int
 	err := pgxPool.QueryRow(ctx, query, args...).Scan(&exists)
 	if err == nil {
-		return fmt.Errorf("duplicate limit: combination of entity '%s', bank '%s', core limit type '%s', limit type '%s', limit sub type '%s', currency '%s' already exists", 
+		return fmt.Errorf("duplicate limit: combination of entity '%s', bank '%s', core limit type '%s', limit type '%s', limit sub type '%s', currency '%s' already exists",
 			entityName, bankName, coreLimitType, limitType, limitSubType, currencyCode)
 	}
-	
+
 	// If error is 'no rows', that's expected (no duplicate found)
 	return nil
 }

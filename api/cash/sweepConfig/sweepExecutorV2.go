@@ -1077,7 +1077,6 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // executeSweepV2WithInitiation executes a V2 sweep with initiation context
 func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, params jobs.SweepExecParams) (map[string]interface{}, error) {
 
-
 	sweepID := params.SweepID
 	initiationID := params.InitiationID
 	sourceAccount := params.FromAccount
@@ -1117,76 +1116,76 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, pa
 	}
 
 	// If overridden_amount is provided, use it directly (ignores sweep logic)
-		if overriddenAmount != nil && *overriddenAmount > 0 {
+	if overriddenAmount != nil && *overriddenAmount > 0 {
 		finalSweepAmount = *overriddenAmount
 
 		// For ZBA with override, allow sweeping to zero
 		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweepType))
-			if sweepTypeUpper != "ZBA" {
-				// For CONCENTRATION and TARGET_BALANCE, validate override doesn't violate buffer
-				if (currentBalance - finalSweepAmount) < buffer {
-					// log failure
-					_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+		if sweepTypeUpper != "ZBA" {
+			// For CONCENTRATION and TARGET_BALANCE, validate override doesn't violate buffer
+			if (currentBalance - finalSweepAmount) < buffer {
+				// log failure
+				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 					) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-						initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer), currentBalance, nil)
-					return nil, fmt.Errorf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
-				}
+					initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer), currentBalance, nil)
+				return nil, fmt.Errorf("BLOCKED: Override amount (%.2f) would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
 			}
+		}
 	} else {
 		// Normal sweep logic based on sweep_type
 		sweepTypeUpper := strings.ToUpper(strings.TrimSpace(sweepType))
 
 		switch sweepTypeUpper {
-			case "ZBA": // Zero Balance Account - sweep EVERYTHING to leave source at ZERO
-				// Only execute if current balance exceeds buffer threshold
-				if currentBalance <= buffer {
-					_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+		case "ZBA": // Zero Balance Account - sweep EVERYTHING to leave source at ZERO
+			// Only execute if current balance exceeds buffer threshold
+			if currentBalance <= buffer {
+				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 					) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-						initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer), currentBalance, nil)
-					return nil, fmt.Errorf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-				}
+					initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer), currentBalance, nil)
+				return nil, fmt.Errorf("BLOCKED: ZBA sweep - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
+			}
 			// Sweep entire balance to make source account zero
 			finalSweepAmount = currentBalance
 
-			case "CONCENTRATION": // Concentration - fixed amount sweep maintaining buffer
-				if sweepAmount == nil || *sweepAmount <= 0 {
-					_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+		case "CONCENTRATION": // Concentration - fixed amount sweep maintaining buffer
+			if sweepAmount == nil || *sweepAmount <= 0 {
+				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 					) VALUES (NULLIF($1,''),$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-						initiationID, sweepID, nil, sourceAccount, targetAccount, "BLOCKED: CONCENTRATION requires fixed sweep_amount", currentBalance, nil)
-					return nil, fmt.Errorf("BLOCKED: CONCENTRATION requires fixed sweep_amount")
-				}
+					initiationID, sweepID, nil, sourceAccount, targetAccount, "BLOCKED: CONCENTRATION requires fixed sweep_amount", currentBalance, nil)
+				return nil, fmt.Errorf("BLOCKED: CONCENTRATION requires fixed sweep_amount")
+			}
 
-				// Only sweep if current balance exceeds buffer
-				if currentBalance <= buffer {
-					_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+			// Only sweep if current balance exceeds buffer
+			if currentBalance <= buffer {
+				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 					) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-						initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: CONCENTRATION - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer), currentBalance, nil)
-					return nil, fmt.Errorf("BLOCKED: CONCENTRATION - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
-				}
+					initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: CONCENTRATION - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer), currentBalance, nil)
+				return nil, fmt.Errorf("BLOCKED: CONCENTRATION - Balance (%.2f) has not exceeded buffer threshold (%.2f)", currentBalance, buffer)
+			}
 
-				finalSweepAmount = *sweepAmount
+			finalSweepAmount = *sweepAmount
 
-				// Maintain buffer - ensure sweep doesn't violate buffer requirement
-				if (currentBalance - finalSweepAmount) < buffer {
-					_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+			// Maintain buffer - ensure sweep doesn't violate buffer requirement
+			if (currentBalance - finalSweepAmount) < buffer {
+				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 					) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-						initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: CONCENTRATION - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer), currentBalance, nil)
-					return nil, fmt.Errorf("BLOCKED: CONCENTRATION - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
-				}
+					initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: CONCENTRATION - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer), currentBalance, nil)
+				return nil, fmt.Errorf("BLOCKED: CONCENTRATION - Sweeping %.2f would leave balance below buffer (%.2f)", finalSweepAmount, buffer)
+			}
 
-			case "TARGET_BALANCE": // Target Balance - sweep excess above buffer
-				if currentBalance <= buffer {
-					_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+		case "TARGET_BALANCE": // Target Balance - sweep excess above buffer
+			if currentBalance <= buffer {
+				_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 						initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 					) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-						initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: TARGET_BALANCE - Balance (%.2f) is at or below target (%.2f)", currentBalance, buffer), currentBalance, nil)
-					return nil, fmt.Errorf("BLOCKED: TARGET_BALANCE - Balance (%.2f) is at or below target (%.2f)", currentBalance, buffer)
-				}
+					initiationID, sweepID, nil, sourceAccount, targetAccount, fmt.Sprintf("BLOCKED: TARGET_BALANCE - Balance (%.2f) is at or below target (%.2f)", currentBalance, buffer), currentBalance, nil)
+				return nil, fmt.Errorf("BLOCKED: TARGET_BALANCE - Balance (%.2f) is at or below target (%.2f)", currentBalance, buffer)
+			}
 			// Sweep only the excess above buffer, leaving buffer amount in source
 			finalSweepAmount = currentBalance - buffer
 
@@ -1195,13 +1194,13 @@ func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, pa
 		}
 	}
 
-		if finalSweepAmount <= 0 {
-			_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
+	if finalSweepAmount <= 0 {
+		_, _ = pgxPool.Exec(ctx, `INSERT INTO cimplrcorpsaas.sweep_execution_log (
 				initiation_id, sweep_id, amount_swept, from_account, to_account, status, error_message, balance_before, balance_after
 			) VALUES ($1,$2,$3,$4,$5,'FAILED',$6,$7,$8)`,
-				initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("no amount to sweep (calculated: %.2f)", finalSweepAmount), currentBalance, nil)
-			return nil, fmt.Errorf("no amount to sweep (calculated: %.2f)", finalSweepAmount)
-		}
+			initiationID, sweepID, finalSweepAmount, sourceAccount, targetAccount, fmt.Sprintf("no amount to sweep (calculated: %.2f)", finalSweepAmount), currentBalance, nil)
+		return nil, fmt.Errorf("no amount to sweep (calculated: %.2f)", finalSweepAmount)
+	}
 
 	// Begin transaction
 	tx, err := pgxPool.Begin(ctx)

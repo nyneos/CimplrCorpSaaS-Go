@@ -400,7 +400,6 @@ func getLatestBalanceINR(ctx context.Context, db *sql.DB, asOfDate time.Time, en
 		args = append(args, pqStringArray(entities))
 	}
 
-
 	// Prefer manual bank balances first (bank_balances_manual) and fall back to bank_statements.
 	// This avoids missing data when statements are not yet uploaded but manual balances exist.
 	mbArgs := []interface{}{}

@@ -213,6 +213,35 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/interest-type/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestTypesWithAudit(pgxPool)))
 	mux.Handle("/master/interest-type/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestTypeAuditHistory(pgxPool)))
 	mux.Handle("/master/interest-type/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadInterestTypeSimple(pgxPool)))
+	mux.Handle("/master/interest-type/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestType(pgxPool)))
+
+	// Compounding Frequency Master routes
+	mux.Handle("/master/compounding-frequency/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateCompoundingFrequencySingle(pgxPool)))
+	mux.Handle("/master/compounding-frequency/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateCompoundingFrequency(pgxPool)))
+	mux.Handle("/master/compounding-frequency/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateCompoundingFrequency(pgxPool)))
+	mux.Handle("/master/compounding-frequency/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateCompoundingFrequencyBulk(pgxPool)))
+	mux.Handle("/master/compounding-frequency/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeleteCompoundingFrequency(pgxPool)))
+	mux.Handle("/master/compounding-frequency/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApproveCompoundingFrequency(pgxPool)))
+	mux.Handle("/master/compounding-frequency/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectCompoundingFrequency(pgxPool)))
+	mux.Handle("/master/compounding-frequency/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetCompoundingFrequenciesApprovedActive(pgxPool)))
+	mux.Handle("/master/compounding-frequency/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetCompoundingFrequenciesWithAudit(pgxPool)))
+	mux.Handle("/master/compounding-frequency/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetCompoundingFrequencyAuditHistory(pgxPool)))
+	mux.Handle("/master/compounding-frequency/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadCompoundingFrequencySimple(pgxPool)))
+	mux.Handle("/master/compounding-frequency/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetCompoundingFrequency(pgxPool)))
+
+	// TDS Plan Master routes
+	mux.Handle("/master/tds-plan/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateTDSPlanSingle(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateTDSPlanBulk(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeleteTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApproveTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectTDSPlan(pgxPool)))
+	mux.Handle("/master/tds-plan/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetTDSPlansApprovedActive(pgxPool)))
+	mux.Handle("/master/tds-plan/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetTDSPlansWithAudit(pgxPool)))
+	mux.Handle("/master/tds-plan/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetTDSPlanAuditHistory(pgxPool)))
+	mux.Handle("/master/tds-plan/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadTDSPlanSimple(pgxPool)))
+	mux.Handle("/master/tds-plan/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetTDSPlan(pgxPool)))
 
 	// Folio Master routes
 	mux.Handle("/master/folio/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadFolio(pgxPool)))

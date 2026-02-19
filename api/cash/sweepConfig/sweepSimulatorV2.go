@@ -1181,7 +1181,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 			// Continue with existing balances even if we can't fetch missing account info
 		} else {
 			defer missingRows.Close()
-			
+
 			foundInMaster := 0
 			for missingRows.Next() {
 				var accountNo, bankName, entityName, currency string
@@ -1202,7 +1202,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 					Currency:      currency,
 				})
 			}
-			
+
 			log.Printf("[BALANCE FETCH WITH SWEEPS] Found %d missing accounts in masterbankaccount table", foundInMaster)
 		}
 
@@ -1222,7 +1222,7 @@ func fetchCurrentBalancesWithSweepAccounts(ctx context.Context, pgxPool *pgxpool
 				balances = append(balances, AccountBalance{
 					AccountNumber: accountNo,
 					BankName:      "Account Not Found in Master",
-					EntityName:    "Account Not Found in Master", 
+					EntityName:    "Account Not Found in Master",
 					Balance:       0.0,
 					Currency:      "INR",
 				})
@@ -1566,7 +1566,7 @@ func runSweepSimulation(sweeps []map[string]interface{}, balances []AccountBalan
 			Balance:       beforeBalance,
 			Currency:      bal.Currency,
 		})
-		
+
 		// After: use simulated balance from balanceMap
 		afterBalances = append(afterBalances, AccountBalance{
 			AccountNumber: bal.AccountNumber,

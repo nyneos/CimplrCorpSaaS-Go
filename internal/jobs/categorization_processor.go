@@ -287,8 +287,6 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	return nil
 }
 
-
-
 // loadCategoryRuleComponentsForJob fetches all active rule components for a given account/entity/currency scope
 // INCLUDING the effective_date for each rule
 func loadCategoryRuleComponentsForJob(ctx context.Context, db *sql.DB, accountNumber, entityID string, accountCurrency *string) ([]categoryRuleComponentForJob, error) {

@@ -401,7 +401,7 @@ func lookupCategoryFromContext(ctx context.Context, categoryName string) string 
 	if categoryName == "" {
 		return ""
 	}
-	
+
 	categories := api.GetCashFlowCategoriesFromCtx(ctx)
 	for _, cat := range categories {
 		// Try exact match first (if it's already an ID)
@@ -413,7 +413,7 @@ func lookupCategoryFromContext(ctx context.Context, categoryName string) string 
 			return cat["category_id"]
 		}
 	}
-	
+
 	// If not found, return original (might be an ID not in approved list)
 	return categoryName
 }

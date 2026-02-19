@@ -324,7 +324,7 @@ type categoryRuleComponent struct {
 // logic originally present in the upload handler so that recompute can reuse
 // the same rules.
 func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
-		q := `
+	q := `
 		SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code, r.effective_date
 		FROM cimplrcorpsaas.category_rules r
 		JOIN public.mastercashflowcategory c ON r.category_id = c.category_id
@@ -369,9 +369,9 @@ func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, 
 func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64, txnValueDate sql.NullTime) sql.NullString {
 	// Group components by rule_id (rules already ordered by priority, rule_id, component_id)
 	type candidate struct {
-		RuleID      int64
-		Priority    int
-		CategoryID  string
+		RuleID       int64
+		Priority     int
+		CategoryID   string
 		CategoryType string
 	}
 

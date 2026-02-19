@@ -1730,10 +1730,10 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-				// Only return entities user has access to (from their hierarchy).
-				// Additionally require that the latest audit processing_status for the entity is 'APPROVED',
-				// and if the entity has a parent, require the parent's latest audit processing_status is also 'APPROVED'.
-				query := `
+		// Only return entities user has access to (from their hierarchy).
+		// Additionally require that the latest audit processing_status for the entity is 'APPROVED',
+		// and if the entity has a parent, require the parent's latest audit processing_status is also 'APPROVED'.
+		query := `
 												SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
 												FROM masterentitycash m
 												LEFT JOIN LATERAL (

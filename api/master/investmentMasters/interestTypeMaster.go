@@ -390,7 +390,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allResults := append(insertedRecords, errors...)
 		success := len(insertedRecords) > 0
 		api.RespondWithPayload(w, success, "", allResults)
-		api.LogInfo("ULTRA FAST upload: %d inserted, %d errors, %d total from file %s", 
+		api.LogInfo("ULTRA FAST upload: %d inserted, %d errors, %d total from file %s",
 			len(insertedRecords), len(errors), len(data), handler.Filename)
 	}
 }
@@ -541,11 +541,11 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		
+
 		// Pre-validate ALL rows first - fail fast for efficiency
 		var validRows []InterestTypeInput
 		var errors []map[string]interface{}
-		
+
 		for i, row := range req.Rows {
 			// Set defaults
 			if row.IsDefault == nil {
@@ -556,7 +556,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				defaultVal := true
 				row.IsActive = &defaultVal
 			}
-			
+
 			if err := validateInterestTypeFields(row); err != nil {
 				errors = append(errors, map[string]interface{}{
 					"row_index":            i,
@@ -568,7 +568,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				validRows = append(validRows, row)
 			}
 		}
-		
+
 		if len(validRows) == 0 {
 			api.RespondWithPayload(w, false, "All rows failed validation", errors)
 			return
@@ -586,11 +586,11 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Build batch insert VALUES - ALL records in ONE query
 		valueStrings := make([]string, len(validRows))
 		valueArgs := make([]interface{}, 0, len(validRows)*8)
-		
+
 		for i, row := range validRows {
-			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", 
+			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8)
-			
+
 			valueArgs = append(valueArgs,
 				row.InterestTypeCode,
 				row.InterestTypeName,
@@ -624,7 +624,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Collect all inserted records
 		var insertedRecords []map[string]interface{}
 		var interestIDs []string
-		
+
 		for rows.Next() {
 			var id, code string
 			if err := rows.Scan(&id, &code); err != nil {
@@ -644,18 +644,18 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(interestIDs) > 0 {
 			auditValues := make([]string, len(interestIDs))
 			auditArgs := make([]interface{}, 0, len(interestIDs)*2)
-			
+
 			for i, id := range interestIDs {
 				auditValues[i] = fmt.Sprintf("($%d,'CREATE','PENDING_APPROVAL',$%d,now())", i*2+1, i*2+2)
 				auditArgs = append(auditArgs, id, userEmail)
 			}
-			
+
 			auditQuery := fmt.Sprintf(`
 				INSERT INTO investment.fd_audit_interest_type 
 					(interest_id, action_type, processing_status, requested_by, requested_at)
 				VALUES %s
 			`, strings.Join(auditValues, ","))
-			
+
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyInterestTypeError(err, "Batch audit failed")
 				api.RespondWithError(w, status, msg)
@@ -675,7 +675,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allResults := append(insertedRecords, errors...)
 		success := len(insertedRecords) > 0
 		api.RespondWithPayload(w, success, "", allResults)
-		api.LogInfo("ULTRA FAST bulk create: %d inserted, %d errors, %d total - single transaction", 
+		api.LogInfo("ULTRA FAST bulk create: %d inserted, %d errors, %d total - single transaction",
 			len(insertedRecords), len(errors), len(req.Rows))
 	}
 }
@@ -857,7 +857,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		
+
 		// Pre-validate all IDs and fields
 		var validUpdates []struct {
 			InterestID string
@@ -865,9 +865,9 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string
 		}
 		var errors []map[string]interface{}
-		
+
 		allInterestIDs := make([]string, 0, len(req.Rows))
-		
+
 		for i, row := range req.Rows {
 			if row.InterestID == "" {
 				errors = append(errors, map[string]interface{}{
@@ -886,16 +886,16 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
-			
+
 			validUpdates = append(validUpdates, struct {
 				InterestID string
 				Fields     map[string]interface{}
 				Reason     string
 			}{row.InterestID, row.Fields, row.Reason})
-			
+
 			allInterestIDs = append(allInterestIDs, row.InterestID)
 		}
-		
+
 		if len(validUpdates) == 0 {
 			api.RespondWithPayload(w, false, "All rows failed validation", errors)
 			return
@@ -916,7 +916,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   min_tenor_days, max_tenor_days, is_default, description, is_active
 			FROM investment.fd_interest_type_master
 			WHERE interest_id = ANY($1::text[])`
-		
+
 		rows, err := tx.Query(ctx, oldValuesQuery, allInterestIDs)
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Fetch old values failed")
@@ -925,7 +925,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		
+
 		// Store old values by ID
 		oldValuesMap := make(map[string][8]interface{})
 		for rows.Next() {
@@ -938,7 +938,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			oldValuesMap[id] = oldVals
 		}
-		
+
 		// Field mapping for updates
 		fieldPairs := map[string]int{
 			"interest_type_code": 0,
@@ -950,13 +950,13 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"description":        6,
 			"is_active":          7,
 		}
-		
+
 		// Group updates by field for ultra-fast CASE statements
 		fieldUpdates := make(map[string][]struct {
 			ID    string
 			Value interface{}
 		})
-		
+
 		for _, update := range validUpdates {
 			for field, value := range update.Fields {
 				field = strings.ToLower(field)
@@ -968,13 +968,13 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		
+
 		// BUILD ULTRA-FAST batch update with CASE statements
 		if len(fieldUpdates) > 0 {
 			var setClauses []string
 			var updateArgs []interface{}
 			argIndex := 1
-			
+
 			for field, updates := range fieldUpdates {
 				var caseWhen []string
 				for _, update := range updates {
@@ -982,19 +982,19 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					updateArgs = append(updateArgs, update.ID, update.Value)
 					argIndex += 2
 				}
-				
-				caseClause := fmt.Sprintf("%s = CASE %s ELSE %s END", 
+
+				caseClause := fmt.Sprintf("%s = CASE %s ELSE %s END",
 					field, strings.Join(caseWhen, " "), field)
 				setClauses = append(setClauses, caseClause)
 			}
-			
+
 			updateQuery := fmt.Sprintf(`
 				UPDATE investment.fd_interest_type_master 
 				SET %s
 				WHERE interest_id = ANY($%d::text[])
 			`, strings.Join(setClauses, ", "), argIndex)
 			updateArgs = append(updateArgs, allInterestIDs)
-			
+
 			if _, err := tx.Exec(ctx, updateQuery, updateArgs...); err != nil {
 				msg, status := getUserFriendlyInterestTypeError(err, "Batch update failed")
 				api.RespondWithError(w, status, msg)
@@ -1002,7 +1002,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-		
+
 		// BATCH audit insert with old values
 		var successResults []map[string]interface{}
 		for _, update := range validUpdates {
@@ -1015,13 +1015,13 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
-			
+
 			// Build audit record
 			auditCols := []string{"interest_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
 			auditVals := []interface{}{update.InterestID, "EDIT", "PENDING_EDIT_APPROVAL", update.Reason, userEmail}
 			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
-			
+
 			// Add old values for changed fields
 			for field := range update.Fields {
 				field = strings.ToLower(field)
@@ -1033,10 +1033,10 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					paramPos++
 				}
 			}
-			
+
 			auditQuery := fmt.Sprintf("INSERT INTO investment.fd_audit_interest_type (%s) VALUES (%s)",
 				strings.Join(auditCols, ", "), strings.Join(auditParams, ", "))
-			
+
 			if _, err := tx.Exec(ctx, auditQuery, auditVals...); err != nil {
 				errors = append(errors, map[string]interface{}{
 					"interest_id":          update.InterestID,
@@ -1045,7 +1045,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
-			
+
 			successResults = append(successResults, map[string]interface{}{
 				constants.ValueSuccess: true,
 				"interest_id":          update.InterestID,
@@ -1058,11 +1058,11 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.LogError("Bulk update commit failed: %v", err)
 			return
 		}
-		
+
 		allResults := append(successResults, errors...)
 		success := len(successResults) > 0
 		api.RespondWithPayload(w, success, "", allResults)
-		api.LogInfo("ULTRA FAST bulk update: %d updated, %d errors, %d total - single transaction", 
+		api.LogInfo("ULTRA FAST bulk update: %d updated, %d errors, %d total - single transaction",
 			len(successResults), len(errors), len(req.Rows))
 	}
 }
@@ -1110,11 +1110,11 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// BATCH DELETE - ALL records in ONE query
 		deleteQuery := `
-			UPDATE investment.fd_interest_type_master 
-			SET is_deleted = true 
-			WHERE interest_id = ANY($1::text[])
-			RETURNING interest_id`
-		
+            UPDATE investment.fd_interest_type_master 
+            SET is_deleted = true 
+            WHERE interest_id = ANY($1::text[])
+            RETURNING interest_id`
+
 		rows, err := tx.Query(ctx, deleteQuery, req.InterestIDs)
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Batch delete failed")
@@ -1136,23 +1136,23 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			deletedIDs = append(deletedIDs, id)
 		}
 
-		// BATCH AUDIT INSERT - ALL audit records in ONE query  
+		// BATCH AUDIT INSERT - ALL audit records in ONE query
 		if len(deletedIDs) > 0 {
 			auditValues := make([]string, len(deletedIDs))
-			auditArgs := make([]interface{}, 0, len(deletedIDs)*3)
-			
+			auditArgs := make([]interface{}, 0, len(deletedIDs)*2)
+
 			for i, id := range deletedIDs {
-				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,$%d,now())", 
-					i*3+1, i*3+2, i*3+3)
-				auditArgs = append(auditArgs, id, req.Reason, userEmail)
+				auditValues[i] = fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,now())",
+					i*2+1, i*2+2)
+				auditArgs = append(auditArgs, id, userEmail)
 			}
-			
+
 			auditQuery := fmt.Sprintf(`
-				INSERT INTO investment.fd_audit_interest_type 
-					(interest_id, action_type, processing_status, reason, requested_by, requested_at)
-				VALUES %s
-			`, strings.Join(auditValues, ","))
-			
+                INSERT INTO investment.fd_audit_interest_type 
+                    (interest_id, action_type, processing_status, requested_by, requested_at)
+                VALUES %s
+            `, strings.Join(auditValues, ","))
+
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyInterestTypeError(err, "Batch audit failed")
 				api.RespondWithError(w, status, msg)
@@ -1192,7 +1192,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		success := len(deletedIDs) > 0
 		api.RespondWithPayload(w, success, "", results)
-		api.LogInfo("ULTRA FAST bulk delete: %d deleted, %d errors, %d total - single transaction", 
+		api.LogInfo("ULTRA FAST bulk delete: %d deleted, %d errors, %d total - single transaction",
 			len(deletedIDs), len(req.InterestIDs)-len(deletedIDs), len(req.InterestIDs))
 	}
 }
@@ -1201,17 +1201,17 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string   `json:"user_id"`
-			AuditIDs []string `json:"audit_ids"`
-			Comment  string   `json:"comment"`
+			UserID      string   `json:"user_id"`
+			InterestIDs []string `json:"interest_ids"`
+			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
-		if len(req.AuditIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No audit IDs provided")
+		if len(req.InterestIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No interest IDs provided")
 			return
 		}
 
@@ -1236,12 +1236,12 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Bulk approve
+		// Bulk approve by interest IDs
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_interest_type 
 			SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
-			WHERE audit_id = ANY($3) AND processing_status LIKE '%PENDING%'
-		`, userEmail, req.Comment, req.AuditIDs)
+			WHERE interest_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+		`, userEmail, req.Comment, req.InterestIDs)
 
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Approval failed")
@@ -1257,11 +1257,11 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"approved_count":       len(req.AuditIDs),
+			"approved_count":       len(req.InterestIDs),
 			"checker":              userEmail,
 		}
 		api.RespondWithPayload(w, true, "", response)
-		api.LogInfo("Bulk approval completed: %d audit IDs approved by %s", len(req.AuditIDs), userEmail)
+		api.LogInfo("Bulk approval completed: %d audit IDs approved by %s", len(req.InterestIDs), userEmail)
 	}
 }
 
@@ -1269,17 +1269,17 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string   `json:"user_id"`
-			AuditIDs []string `json:"audit_ids"`
-			Comment  string   `json:"comment"`
+			UserID      string   `json:"user_id"`
+			InterestIDs []string `json:"interest_ids"`
+			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 
-		if len(req.AuditIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No audit IDs provided")
+		if len(req.InterestIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No interest IDs provided")
 			return
 		}
 
@@ -1304,12 +1304,12 @@ func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Bulk reject
+		// Bulk reject by interest IDs
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_audit_interest_type 
 			SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
-			WHERE audit_id = ANY($3) AND processing_status LIKE '%PENDING%'
-		`, userEmail, req.Comment, req.AuditIDs)
+			WHERE interest_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+		`, userEmail, req.Comment, req.InterestIDs)
 
 		if err != nil {
 			msg, status := getUserFriendlyInterestTypeError(err, "Rejection failed")
@@ -1325,11 +1325,11 @@ func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"rejected_count":       len(req.AuditIDs),
+			"rejected_count":       len(req.InterestIDs),
 			"checker":              userEmail,
 		}
 		api.RespondWithPayload(w, true, "", response)
-		api.LogInfo("Bulk rejection completed: %d audit IDs rejected by %s", len(req.AuditIDs), userEmail)
+		api.LogInfo("Bulk rejection completed: %d interest IDs rejected by %s", len(req.InterestIDs), userEmail)
 	}
 }
 
@@ -1760,5 +1760,90 @@ func parseBoolPtr(s string) (*bool, error) {
 		return &val, nil
 	default:
 		return nil, errors.New("invalid boolean value")
+	}
+}
+
+func parseFloatPtr(s string) (*float64, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var val float64
+	if _, err := fmt.Sscanf(s, "%f", &val); err != nil {
+		return nil, err
+	}
+	return &val, nil
+}
+
+// --- Get Single Interest Type Handler ---
+func GetInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string `json:"user_id"`
+			InterestID string `json:"interest_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+
+		if req.InterestID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "interest_id is required")
+			return
+		}
+
+		// Verify session
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		row := pgxPool.QueryRow(ctx, `
+			SELECT interest_id, interest_type_code, interest_type_name, calculation_method,
+				   calculation_frequency, description, is_active, is_deleted, 
+				   created_at, updated_at
+			FROM investment.fd_interest_type_master 
+			WHERE interest_id = $1
+		`, req.InterestID)
+
+		var result map[string]interface{}
+		var iid, icode, iname, icalcMethod, icalcFreq, idesc string
+		var isActive, isDeleted bool
+		var createdAt, updatedAt interface{}
+
+		err := row.Scan(&iid, &icode, &iname, &icalcMethod, &icalcFreq, &idesc, &isActive, &isDeleted, &createdAt, &updatedAt)
+		if err != nil {
+			if err.Error() == "no rows in result set" {
+				api.RespondWithError(w, http.StatusNotFound, "Interest type not found")
+			} else {
+				msg, status := getUserFriendlyInterestTypeError(err, "Get failed")
+				api.RespondWithError(w, status, msg)
+				api.LogError("Get interest type failed: %v", err)
+			}
+			return
+		}
+
+		result = map[string]interface{}{
+			"interest_id":           iid,
+			"interest_type_code":    icode,
+			"interest_type_name":    iname,
+			"calculation_method":    icalcMethod,
+			"calculation_frequency": icalcFreq,
+			"description":           idesc,
+			"is_active":             isActive,
+			"is_deleted":            isDeleted,
+			"created_at":            createdAt,
+			"updated_at":            updatedAt,
+		}
+
+		api.RespondWithPayload(w, true, "", result)
+		api.LogInfo("Get interest type completed for ID %s by %s", req.InterestID, userEmail)
 	}
 }

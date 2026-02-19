@@ -184,7 +184,7 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Create results array with validation outcomes
 		for i, validation := range validationResults {
 			result := map[string]interface{}{"index": validation.Index}
-			
+
 			if !validation.IsValid {
 				result["success"] = false
 				result["error"] = validation.Error
@@ -1263,14 +1263,14 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 
 	// OPTIMIZED: First parse and validate all rows, then do bulk validation
 	validRows := make([]struct {
-		Index          int
-		LimitID        string
+		Index           int
+		LimitID         string
 		UtilizationDate string
-		CurrencyCode   string
-		UtilizedAmount float64
-		Remarks        string
-		ReferenceDoc   string
-		RowNumber      int
+		CurrencyCode    string
+		UtilizedAmount  float64
+		Remarks         string
+		ReferenceDoc    string
+		RowNumber       int
 	}, 0, len(rows)-1)
 
 	// Parse all rows first
@@ -1302,23 +1302,23 @@ func processUtilizationRows(ctx context.Context, pgxPool *pgxpool.Pool, rows [][
 
 		// Add to valid rows for bulk validation
 		validRows = append(validRows, struct {
-			Index          int
-			LimitID        string
+			Index           int
+			LimitID         string
 			UtilizationDate string
-			CurrencyCode   string
-			UtilizedAmount float64
-			Remarks        string
-			ReferenceDoc   string
-			RowNumber      int
+			CurrencyCode    string
+			UtilizedAmount  float64
+			Remarks         string
+			ReferenceDoc    string
+			RowNumber       int
 		}{
-			Index:          len(validRows),
-			LimitID:        limitID,
+			Index:           len(validRows),
+			LimitID:         limitID,
 			UtilizationDate: utilizationDate,
-			CurrencyCode:   currencyCode,
-			UtilizedAmount: utilizedAmount,
-			Remarks:        remarks,
-			ReferenceDoc:   referenceDoc,
-			RowNumber:      i + 1,
+			CurrencyCode:    currencyCode,
+			UtilizedAmount:  utilizedAmount,
+			Remarks:         remarks,
+			ReferenceDoc:    referenceDoc,
+			RowNumber:       i + 1,
 		})
 	}
 
