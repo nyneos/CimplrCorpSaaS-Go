@@ -287,9 +287,74 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		valueStrings := make([]string, len(validRows))
-		valueArgs := make([]interface{}, 0, len(validRows)*7)
-		for i, v := range validRows {
+		// EFFICIENT: Batch check for existing codes/names 
+		codes := make([]string, len(validRows))
+		names := make([]string, len(validRows))
+		for i, input := range validRows {
+			codes[i] = input["frequency_code"].(string)
+			names[i] = input["frequency_name"].(string)
+		}
+
+		// Single query to check ALL potential duplicates at once
+		duplicateQuery := `
+			SELECT frequency_code, frequency_name 
+			FROM investment.fd_compounding_frequency_master 
+			WHERE (frequency_code = ANY($1::text[]) OR frequency_name = ANY($2::text[]))
+			  AND is_active = true AND COALESCE(is_deleted, false) = false
+		`
+		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
+		if err != nil { 
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Duplicate check failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer duplicateRows.Close()
+
+		// Build map of existing codes/names
+		existingCodes := make(map[string]bool)
+		existingNames := make(map[string]bool)
+		for duplicateRows.Next() {
+			var code, name string
+			if err := duplicateRows.Scan(&code, &name); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				return
+			}
+			existingCodes[code] = true
+			existingNames[name] = true
+		}
+
+		// Filter out duplicates and create error reports
+		var finalValidInputs []map[string]interface{}
+		for i, input := range validRows {
+			code := input["frequency_code"].(string)
+			name := input["frequency_name"].(string)
+			if existingCodes[code] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"row_index": i,
+					"frequency_code": code,
+					constants.ValueSuccess: false,
+					constants.ValueError: "Frequency code already exists and is active.",
+				})
+			} else if existingNames[name] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"row_index": i,
+					"frequency_code": code,
+					constants.ValueSuccess: false,
+					constants.ValueError: "Frequency name already exists and is active.",
+				})
+			} else {
+				finalValidInputs = append(finalValidInputs, input)
+			}
+		}
+
+		if len(finalValidInputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			return
+		}
+
+		valueStrings := make([]string, len(finalValidInputs))
+		valueArgs := make([]interface{}, 0, len(finalValidInputs)*7)
+		for i, v := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*7+1, i*7+2, i*7+3, i*7+4, i*7+5, i*7+6, i*7+7)
 			valueArgs = append(valueArgs, v["frequency_code"], v["frequency_name"], v["frequency_type"], v["compounding_periods_per_year"], v["days_per_period"], v["description"], v["is_active"])
 		}
@@ -467,9 +532,72 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		valueStrings := make([]string, len(inputs))
-		valueArgs := make([]interface{}, 0, len(inputs)*7)
-		for i, v := range inputs {
+		// EFFICIENT: Batch check for existing codes/names 
+		codes := make([]string, len(inputs))
+		names := make([]string, len(inputs))
+		for i, input := range inputs {
+			codes[i] = input["frequency_code"].(string)
+			names[i] = input["frequency_name"].(string)
+		}
+
+		// Single query to check ALL potential duplicates at once
+		duplicateQuery := `
+			SELECT frequency_code, frequency_name 
+			FROM investment.fd_compounding_frequency_master 
+			WHERE (frequency_code = ANY($1::text[]) OR frequency_name = ANY($2::text[]))
+			  AND is_active = true AND COALESCE(is_deleted, false) = false
+		`
+		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
+		if err != nil { 
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Duplicate check failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer duplicateRows.Close()
+
+		// Build map of existing codes/names
+		existingCodes := make(map[string]bool)
+		existingNames := make(map[string]bool)
+		for duplicateRows.Next() {
+			var code, name string
+			if err := duplicateRows.Scan(&code, &name); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				return
+			}
+			existingCodes[code] = true
+			existingNames[name] = true
+		}
+
+		// Filter out duplicates and create error reports
+		var finalValidInputs []map[string]interface{}
+		for _, input := range inputs {
+			code := input["frequency_code"].(string)
+			name := input["frequency_name"].(string)
+			if existingCodes[code] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"frequency_code": code,
+					constants.ValueSuccess: false,
+					constants.ValueError: "Frequency code already exists and is active.",
+				})
+			} else if existingNames[name] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"frequency_code": code,
+					constants.ValueSuccess: false,
+					constants.ValueError: "Frequency name already exists and is active.",
+				})
+			} else {
+				finalValidInputs = append(finalValidInputs, input)
+			}
+		}
+
+		if len(finalValidInputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			return
+		}
+
+		valueStrings := make([]string, len(finalValidInputs))
+		valueArgs := make([]interface{}, 0, len(finalValidInputs)*7)
+		for i, v := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*7+1, i*7+2, i*7+3, i*7+4, i*7+5, i*7+6, i*7+7)
 			valueArgs = append(valueArgs, v["frequency_code"], v["frequency_name"], v["frequency_type"], v["compounding_periods_per_year"], v["days_per_period"], v["description"], v["is_active"])
 		}

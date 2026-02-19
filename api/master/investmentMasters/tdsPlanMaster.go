@@ -156,19 +156,19 @@ func GetTdsPlansApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func CreateTDSPlanSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			TdsPlanCode string `json:"tds_plan_code"`
-			TdsPlanName string `json:"tds_plan_name"`
-			TdsSection string `json:"tds_section"`
-			TdsRate float64 `json:"tds_rate"`
-			HasPan bool `json:"has_pan"`
+			UserID          string   `json:"user_id"`
+			TdsPlanCode     string   `json:"tds_plan_code"`
+			TdsPlanName     string   `json:"tds_plan_name"`
+			TdsSection      string   `json:"tds_section"`
+			TdsRate         float64  `json:"tds_rate"`
+			HasPan          bool     `json:"has_pan"`
 			ThresholdAmount *float64 `json:"threshold_amount"`
-			ThresholdType string `json:"threshold_type"`
-			DeductionTiming string `json:"deduction_timing"`
-			ApplicableFrom string `json:"applicable_from"`
-			ApplicableTo *string `json:"applicable_to"`
-			Description string `json:"description"`
-			IsActive *bool `json:"is_active"`
+			ThresholdType   string   `json:"threshold_type"`
+			DeductionTiming string   `json:"deduction_timing"`
+			ApplicableFrom  string   `json:"applicable_from"`
+			ApplicableTo    *string  `json:"applicable_to"`
+			Description     string   `json:"description"`
+			IsActive        *bool    `json:"is_active"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -179,11 +179,17 @@ func CreateTDSPlanSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "tds_plan_code, tds_plan_name and tds_section are required")
 			return
 		}
-		if req.IsActive == nil { dv := true; req.IsActive = &dv }
+		if req.IsActive == nil {
+			dv := true
+			req.IsActive = &dv
+		}
 
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID { userEmail = s.Email; break }
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
 		}
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
@@ -232,21 +238,21 @@ func CreateTDSPlanSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // --- Bulk Create Handler ---
 func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct{
+		var req struct {
 			UserID string `json:"user_id"`
-			Rows []struct{
-				TdsPlanCode string `json:"tds_plan_code"`
-				TdsPlanName string `json:"tds_plan_name"`
-				TdsSection string `json:"tds_section"`
-				TdsRate float64 `json:"tds_rate"`
-				HasPan bool `json:"has_pan"`
+			Rows   []struct {
+				TdsPlanCode     string   `json:"tds_plan_code"`
+				TdsPlanName     string   `json:"tds_plan_name"`
+				TdsSection      string   `json:"tds_section"`
+				TdsRate         float64  `json:"tds_rate"`
+				HasPan          bool     `json:"has_pan"`
 				ThresholdAmount *float64 `json:"threshold_amount"`
-				ThresholdType string `json:"threshold_type"`
-				DeductionTiming string `json:"deduction_timing"`
-				ApplicableFrom string `json:"applicable_from"`
-				ApplicableTo *string `json:"applicable_to"`
-				Description string `json:"description"`
-				IsActive *bool `json:"is_active"`
+				ThresholdType   string   `json:"threshold_type"`
+				DeductionTiming string   `json:"deduction_timing"`
+				ApplicableFrom  string   `json:"applicable_from"`
+				ApplicableTo    *string  `json:"applicable_to"`
+				Description     string   `json:"description"`
+				IsActive        *bool    `json:"is_active"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -260,9 +266,15 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID { userEmail = s.Email; break }
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
 		}
-		if userEmail == "" { api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort); return }
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
 
 		ctx := r.Context()
 		var validRows []map[string]interface{}
@@ -272,31 +284,106 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errorsList = append(errorsList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: "Missing required fields"})
 				continue
 			}
-			if row.IsActive == nil { dv := true; row.IsActive = &dv }
+			if row.IsActive == nil {
+				dv := true
+				row.IsActive = &dv
+			}
 			validRows = append(validRows, map[string]interface{}{
-				"tds_plan_code": row.TdsPlanCode,
-				"tds_plan_name": row.TdsPlanName,
-				"tds_section": row.TdsSection,
-				"tds_rate": row.TdsRate,
-				"has_pan": row.HasPan,
+				"tds_plan_code":    row.TdsPlanCode,
+				"tds_plan_name":    row.TdsPlanName,
+				"tds_section":      row.TdsSection,
+				"tds_rate":         row.TdsRate,
+				"has_pan":          row.HasPan,
 				"threshold_amount": row.ThresholdAmount,
-				"threshold_type": row.ThresholdType,
+				"threshold_type":   row.ThresholdType,
 				"deduction_timing": row.DeductionTiming,
-				"applicable_from": row.ApplicableFrom,
-				"applicable_to": row.ApplicableTo,
-				"description": row.Description,
-				"is_active": row.IsActive,
+				"applicable_from":  row.ApplicableFrom,
+				"applicable_to":    row.ApplicableTo,
+				"description":      row.Description,
+				"is_active":        row.IsActive,
 			})
 		}
-		if len(validRows) == 0 { api.RespondWithPayload(w, false, "All rows failed validation", errorsList); return }
+		if len(validRows) == 0 {
+			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
+			return
+		}
 
 		tx, err := pgxPool.Begin(ctx)
-		if err != nil { api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error()); api.LogError("Bulk create transaction begin failed: %v", err); return }
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.LogError("Bulk create transaction begin failed: %v", err)
+			return
+		}
 		defer tx.Rollback(ctx)
 
-		valueStrings := make([]string, len(validRows))
-		valueArgs := make([]interface{}, 0, len(validRows)*12)
-		for i, v := range validRows {
+		// EFFICIENT: Batch check for existing codes/names
+		codes := make([]string, len(validRows))
+		names := make([]string, len(validRows))
+		for i, input := range validRows {
+			codes[i] = input["tds_plan_code"].(string)
+			names[i] = input["tds_plan_name"].(string)
+		}
+
+		// Single query to check ALL potential duplicates at once
+		duplicateQuery := `
+			SELECT tds_plan_code, tds_plan_name 
+			FROM investment.fd_tds_plan_master 
+			WHERE (tds_plan_code = ANY($1::text[]) OR tds_plan_name = ANY($2::text[]))
+			  AND is_active = true AND COALESCE(is_deleted, false) = false
+		`
+		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
+		if err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Duplicate check failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer duplicateRows.Close()
+
+		// Build map of existing codes/names
+		existingCodes := make(map[string]bool)
+		existingNames := make(map[string]bool)
+		for duplicateRows.Next() {
+			var code, name string
+			if err := duplicateRows.Scan(&code, &name); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				return
+			}
+			existingCodes[code] = true
+			existingNames[name] = true
+		}
+
+		// Filter out duplicates and create error reports
+		var finalValidInputs []map[string]interface{}
+		for i, input := range validRows {
+			code := input["tds_plan_code"].(string)
+			name := input["tds_plan_name"].(string)
+			if existingCodes[code] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"row_index":            i,
+					"tds_plan_code":        code,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "TDS plan code already exists and is active.",
+				})
+			} else if existingNames[name] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"row_index":            i,
+					"tds_plan_code":        code,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "TDS plan name already exists and is active.",
+				})
+			} else {
+				finalValidInputs = append(finalValidInputs, input)
+			}
+		}
+
+		if len(finalValidInputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			return
+		}
+
+		valueStrings := make([]string, len(finalValidInputs))
+		valueArgs := make([]interface{}, 0, len(finalValidInputs)*12)
+		for i, v := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*12+1, i*12+2, i*12+3, i*12+4, i*12+5, i*12+6, i*12+7, i*12+8, i*12+9, i*12+10, i*12+11, i*12+12)
 			valueArgs = append(valueArgs, v["tds_plan_code"], v["tds_plan_name"], v["tds_section"], v["tds_rate"], v["has_pan"], v["threshold_amount"], v["threshold_type"], v["deduction_timing"], v["applicable_from"], v["applicable_to"], v["description"], v["is_active"])
 		}
@@ -320,7 +407,11 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var ids []string
 		for rowsR.Next() {
 			var id, code string
-			if err := rowsR.Scan(&id, &code); err != nil { api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error()); api.LogError("Insert scan failed: %v", err); return }
+			if err := rowsR.Scan(&id, &code); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.LogError("Insert scan failed: %v", err)
+				return
+			}
 			ids = append(ids, id)
 			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "tds_plan_id": id, "tds_plan_code": code})
 		}
@@ -328,12 +419,25 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if len(ids) > 0 {
 			auditVals := make([]string, len(ids))
 			auditArgs := make([]interface{}, 0, len(ids)*2)
-			for i, id := range ids { auditVals[i] = fmt.Sprintf("($%d,'CREATE','PENDING_APPROVAL',$%d,now())", i*2+1, i*2+2); auditArgs = append(auditArgs, id, userEmail) }
+			for i, id := range ids {
+				auditVals[i] = fmt.Sprintf("($%d,'CREATE','PENDING_APPROVAL',$%d,now())", i*2+1, i*2+2)
+				auditArgs = append(auditArgs, id, userEmail)
+			}
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (tds_plan_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
-			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil { msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed"); api.RespondWithError(w, status, msg); api.LogError("Batch audit failed: %v", err); return }
+			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
+				msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed")
+				api.RespondWithError(w, status, msg)
+				api.LogError("Batch audit failed: %v", err)
+				return
+			}
 		}
 
-		if err := tx.Commit(ctx); err != nil { msg, status := getUserFriendlyTDSPlanError(err, "Commit failed"); api.RespondWithError(w, status, msg); api.LogError("Bulk create commit failed: %v", err); return }
+		if err := tx.Commit(ctx); err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
+			api.RespondWithError(w, status, msg)
+			api.LogError("Bulk create commit failed: %v", err)
+			return
+		}
 
 		allResults := append(inserted, errorsList...)
 		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
@@ -344,34 +448,74 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // --- Simple Upload Handler ---
 func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseMultipartForm(10 << 20); err != nil { api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form"); api.LogError("ParseMultipartForm failed: %v", err); return }
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			api.LogError("ParseMultipartForm failed: %v", err)
+			return
+		}
 
 		userID := r.FormValue("user_id")
-		if userID == "" { api.RespondWithError(w, http.StatusBadRequest, "user_id is required"); return }
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
 
 		file, handler, err := r.FormFile("file")
-		if err != nil { api.RespondWithError(w, http.StatusBadRequest, "File upload failed"); api.LogError("File upload failed: %v", err); return }
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "File upload failed")
+			api.LogError("File upload failed: %v", err)
+			return
+		}
 		defer file.Close()
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
-		if ext != ".csv" && ext != ".xlsx" { api.RespondWithError(w, http.StatusBadRequest, "Only CSV and XLSX files are supported"); return }
+		if ext != ".csv" && ext != ".xlsx" {
+			api.RespondWithError(w, http.StatusBadRequest, "Only CSV and XLSX files are supported")
+			return
+		}
 
 		userEmail := ""
-		for _, s := range auth.GetActiveSessions() { if s.UserID == userID { userEmail = s.Email; break } }
-		if userEmail == "" { api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort); return }
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
 
 		var rows [][]string
-		if ext == ".csv" { rows, err = parseCSVFile(file) } else { rows, err = parseXLSXFile(file) }
-		if err != nil { api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error()); api.LogError("File parsing failed: %v", err); return }
-		if len(rows) < 2 { api.RespondWithError(w, http.StatusBadRequest, "File must contain header and at least one data row"); return }
+		if ext == ".csv" {
+			rows, err = parseCSVFile(file)
+		} else {
+			rows, err = parseXLSXFile(file)
+		}
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "File parsing failed: "+err.Error())
+			api.LogError("File parsing failed: %v", err)
+			return
+		}
+		if len(rows) < 2 {
+			api.RespondWithError(w, http.StatusBadRequest, "File must contain header and at least one data row")
+			return
+		}
 
 		header := rows[0]
 		data := rows[1:]
 		colMap := make(map[string]int)
-		for i, col := range header { colMap[strings.ToLower(strings.TrimSpace(col))] = i }
+		for i, col := range header {
+			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+		}
 
 		requiredCols := []string{"tds_plan_code", "tds_plan_name", "tds_section", "tds_rate"}
-		for _, rc := range requiredCols { if _, ok := colMap[rc]; !ok { api.RespondWithError(w, http.StatusBadRequest, "Required column '"+rc+"' not found"); return } }
+		for _, rc := range requiredCols {
+			if _, ok := colMap[rc]; !ok {
+				api.RespondWithError(w, http.StatusBadRequest, "Required column '"+rc+"' not found")
+				return
+			}
+		}
 
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
@@ -380,39 +524,121 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			name := getColumnValue(row, colMap, "tds_plan_name")
 			section := getColumnValue(row, colMap, "tds_section")
 			rateStr := getColumnValue(row, colMap, "tds_rate")
-			if code == "" || name == "" || section == "" || rateStr == "" { errorsList = append(errorsList, map[string]interface{}{"row": ri+2, constants.ValueSuccess: false, constants.ValueError: "Missing required columns"}); continue }
+			if code == "" || name == "" || section == "" || rateStr == "" {
+				errorsList = append(errorsList, map[string]interface{}{"row": ri + 2, constants.ValueSuccess: false, constants.ValueError: "Missing required columns"})
+				continue
+			}
 			rate := 0.0
-			if parsed, err := parseFloatPtr(rateStr); err == nil { rate = *parsed }
+			if parsed, err := parseFloatPtr(rateStr); err == nil {
+				rate = *parsed
+			}
 			hasPan := false
-			if v := getColumnValue(row, colMap, "has_pan"); v != "" { if p, err := parseBoolPtr(v); err == nil { hasPan = *p } }
+			if v := getColumnValue(row, colMap, "has_pan"); v != "" {
+				if p, err := parseBoolPtr(v); err == nil {
+					hasPan = *p
+				}
+			}
 			thr := (*float64)(nil)
-			if v := getColumnValue(row, colMap, "threshold_amount"); v != "" { if p, err := parseFloatPtr(v); err == nil { thr = p } }
+			if v := getColumnValue(row, colMap, "threshold_amount"); v != "" {
+				if p, err := parseFloatPtr(v); err == nil {
+					thr = p
+				}
+			}
 			inputs = append(inputs, map[string]interface{}{
-				"tds_plan_code": code,
-				"tds_plan_name": name,
-				"tds_section": section,
-				"tds_rate": rate,
-				"has_pan": hasPan,
+				"tds_plan_code":    code,
+				"tds_plan_name":    name,
+				"tds_section":      section,
+				"tds_rate":         rate,
+				"has_pan":          hasPan,
 				"threshold_amount": thr,
-				"threshold_type": getColumnValue(row, colMap, "threshold_type"),
+				"threshold_type":   getColumnValue(row, colMap, "threshold_type"),
 				"deduction_timing": getColumnValue(row, colMap, "deduction_timing"),
-				"applicable_from": getColumnValue(row, colMap, "applicable_from"),
-				"applicable_to": getColumnValue(row, colMap, "applicable_to"),
-				"description": getColumnValue(row, colMap, "description"),
-				"is_active": func() *bool { b := true; return &b }(),
+				"applicable_from":  getColumnValue(row, colMap, "applicable_from"),
+				"applicable_to":    getColumnValue(row, colMap, "applicable_to"),
+				"description":      getColumnValue(row, colMap, "description"),
+				"is_active":        func() *bool { b := true; return &b }(),
 			})
 		}
-		if len(inputs) == 0 { api.RespondWithPayload(w, false, "All rows failed validation", errorsList); return }
+		if len(inputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
+			return
+		}
 
 		// Bulk insert (similar to CreateTDSPlan)
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
-		if err != nil { api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error()); return }
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			return
+		}
 		defer tx.Rollback(ctx)
 
-		valueStrings := make([]string, len(inputs))
-		valueArgs := make([]interface{}, 0, len(inputs)*12)
-		for i, v := range inputs {
+		// EFFICIENT: Batch check for existing codes/names
+		codes := make([]string, len(inputs))
+		names := make([]string, len(inputs))
+		for i, input := range inputs {
+			codes[i] = input["tds_plan_code"].(string)
+			names[i] = input["tds_plan_name"].(string)
+		}
+
+		// Single query to check ALL potential duplicates at once
+		duplicateQuery := `
+			SELECT tds_plan_code, tds_plan_name 
+			FROM investment.fd_tds_plan_master 
+			WHERE (tds_plan_code = ANY($1::text[]) OR tds_plan_name = ANY($2::text[]))
+			  AND is_active = true AND COALESCE(is_deleted, false) = false
+		`
+		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
+		if err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Duplicate check failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer duplicateRows.Close()
+
+		// Build map of existing codes/names
+		existingCodes := make(map[string]bool)
+		existingNames := make(map[string]bool)
+		for duplicateRows.Next() {
+			var code, name string
+			if err := duplicateRows.Scan(&code, &name); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				return
+			}
+			existingCodes[code] = true
+			existingNames[name] = true
+		}
+
+		// Filter out duplicates and create error reports
+		var finalValidInputs []map[string]interface{}
+		for _, input := range inputs {
+			code := input["tds_plan_code"].(string)
+			name := input["tds_plan_name"].(string)
+			if existingCodes[code] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"tds_plan_code":        code,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "TDS plan code already exists and is active.",
+				})
+			} else if existingNames[name] {
+				errorsList = append(errorsList, map[string]interface{}{
+					"tds_plan_code":        code,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "TDS plan name already exists and is active.",
+				})
+			} else {
+				finalValidInputs = append(finalValidInputs, input)
+			}
+		}
+
+		if len(finalValidInputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
+			return
+		}
+
+		valueStrings := make([]string, len(finalValidInputs))
+		valueArgs := make([]interface{}, 0, len(finalValidInputs)*12)
+		for i, v := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*12+1, i*12+2, i*12+3, i*12+4, i*12+5, i*12+6, i*12+7, i*12+8, i*12+9, i*12+10, i*12+11, i*12+12)
 			valueArgs = append(valueArgs, v["tds_plan_code"], v["tds_plan_name"], v["tds_section"], v["tds_rate"], v["has_pan"], v["threshold_amount"], v["threshold_type"], v["deduction_timing"], v["applicable_from"], v["applicable_to"], v["description"], v["is_active"])
 		}
@@ -424,16 +650,49 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`, strings.Join(valueStrings, ","))
 
 		rowsR, err := tx.Query(ctx, batchInsert, valueArgs...)
-		if err != nil { msg, status := getUserFriendlyTDSPlanError(err, "Batch insert failed"); api.RespondWithError(w, status, msg); api.LogError("Batch insert failed: %v", err); return }
+		if err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Batch insert failed")
+			api.RespondWithError(w, status, msg)
+			api.LogError("Batch insert failed: %v", err)
+			return
+		}
 		defer rowsR.Close()
 
 		var inserted []map[string]interface{}
 		var ids []string
-		for rowsR.Next() { var id, code string; if err := rowsR.Scan(&id, &code); err != nil { api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error()); api.LogError("Insert scan failed: %v", err); return }; ids = append(ids, id); inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "tds_plan_id": id, "tds_plan_code": code}) }
+		for rowsR.Next() {
+			var id, code string
+			if err := rowsR.Scan(&id, &code); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+				api.LogError("Insert scan failed: %v", err)
+				return
+			}
+			ids = append(ids, id)
+			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "tds_plan_id": id, "tds_plan_code": code})
+		}
 
-		if len(ids) > 0 { auditVals := make([]string, len(ids)); auditArgs := make([]interface{}, 0, len(ids)*2); for i, id := range ids { auditVals[i] = fmt.Sprintf("($%d,'CREATE','PENDING_APPROVAL',$%d,now())", i*2+1, i*2+2); auditArgs = append(auditArgs, id, userEmail) }; auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (tds_plan_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ",")); if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil { msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed"); api.RespondWithError(w, status, msg); api.LogError("Batch audit failed: %v", err); return } }
+		if len(ids) > 0 {
+			auditVals := make([]string, len(ids))
+			auditArgs := make([]interface{}, 0, len(ids)*2)
+			for i, id := range ids {
+				auditVals[i] = fmt.Sprintf("($%d,'CREATE','PENDING_APPROVAL',$%d,now())", i*2+1, i*2+2)
+				auditArgs = append(auditArgs, id, userEmail)
+			}
+			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (tds_plan_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
+			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
+				msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed")
+				api.RespondWithError(w, status, msg)
+				api.LogError("Batch audit failed: %v", err)
+				return
+			}
+		}
 
-		if err := tx.Commit(ctx); err != nil { msg, status := getUserFriendlyTDSPlanError(err, "Commit failed"); api.RespondWithError(w, status, msg); api.LogError("Bulk create commit failed: %v", err); return }
+		if err := tx.Commit(ctx); err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
+			api.RespondWithError(w, status, msg)
+			api.LogError("Bulk create commit failed: %v", err)
+			return
+		}
 
 		allResults := append(inserted, errorsList...)
 		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
@@ -445,7 +704,10 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("tds_plan_id")
-		if id == "" { api.RespondWithError(w, http.StatusBadRequest, "tds_plan_id is required"); return }
+		if id == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "tds_plan_id is required")
+			return
+		}
 		ctx := r.Context()
 		q := `SELECT tds_plan_id, tds_plan_code, tds_plan_name, tds_section, tds_rate, has_pan, threshold_amount, threshold_type, deduction_timing, applicable_from, applicable_to, description, is_active, is_deleted FROM investment.fd_tds_plan_master WHERE tds_plan_id=$1`
 		var tid, code, name, section, thresholdType, deductionTiming, description string
@@ -455,7 +717,11 @@ func GetTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var applicableFrom string
 		var applicableTo *string
 		var isActive, isDeleted bool
-		if err := pgxPool.QueryRow(ctx, q, id).Scan(&tid, &code, &name, &section, &rate, &hasPan, &thresholdAmount, &thresholdType, &deductionTiming, &applicableFrom, &applicableTo, &description, &isActive, &isDeleted); err != nil { msg, status := getUserFriendlyTDSPlanError(err, "Query failed"); api.RespondWithError(w, status, msg); return }
+		if err := pgxPool.QueryRow(ctx, q, id).Scan(&tid, &code, &name, &section, &rate, &hasPan, &thresholdAmount, &thresholdType, &deductionTiming, &applicableFrom, &applicableTo, &description, &isActive, &isDeleted); err != nil {
+			msg, status := getUserFriendlyTDSPlanError(err, "Query failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"tds_plan_id": tid, "tds_plan_code": code, "tds_plan_name": name, "tds_section": section, "tds_rate": rate, "has_pan": hasPan, "threshold_amount": thresholdAmount, "threshold_type": thresholdType, "deduction_timing": deductionTiming, "applicable_from": applicableFrom, "applicable_to": applicableTo, "description": description, "is_active": isActive, "is_deleted": isDeleted})
 	}
 }
@@ -1037,10 +1303,10 @@ func BulkRejectTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID  string                 `json:"user_id"`
-			TdsID   string                 `json:"tds_plan_id"`
-			Fields  map[string]interface{} `json:"fields"`
-			Reason  string                 `json:"reason"`
+			UserID string                 `json:"user_id"`
+			TdsID  string                 `json:"tds_plan_id"`
+			Fields map[string]interface{} `json:"fields"`
+			Reason string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1090,18 +1356,18 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		fieldPairs := map[string]int{
-			"tds_plan_code": 0,
-			"tds_plan_name": 1,
-			"tds_section": 2,
-			"tds_rate": 3,
-			"has_pan": 4,
+			"tds_plan_code":    0,
+			"tds_plan_name":    1,
+			"tds_section":      2,
+			"tds_rate":         3,
+			"has_pan":          4,
 			"threshold_amount": 5,
-			"threshold_type": 6,
+			"threshold_type":   6,
 			"deduction_timing": 7,
-			"applicable_from": 8,
-			"applicable_to": 9,
-			"description": 10,
-			"is_active": 11,
+			"applicable_from":  8,
+			"applicable_to":    9,
+			"description":      10,
+			"is_active":        11,
 		}
 
 		var sets []string
@@ -1130,9 +1396,9 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		auditCols := []string{"tds_plan_id","action_type","processing_status","reason","requested_by","requested_at"}
+		auditCols := []string{"tds_plan_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
 		auditVals := []interface{}{req.TdsID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
-		auditParams := []string{"$1","$2","$3","$4","$5","now()"}
+		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 		paramPos := 6
 
 		for k := range req.Fields {
@@ -1161,9 +1427,9 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"tds_plan_id": req.TdsID,
-			"requested": userEmail,
-			"reason": req.Reason,
+			"tds_plan_id":          req.TdsID,
+			"requested":            userEmail,
+			"reason":               req.Reason,
 		}
 		api.RespondWithPayload(w, true, "", response)
 		api.LogInfo("TDS plan updated successfully: ID=%s, Reason=%s", req.TdsID, req.Reason)
@@ -1175,10 +1441,10 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
-			Rows []struct{
-				TdsID string `json:"tds_plan_id"`
+			Rows   []struct {
+				TdsID  string                 `json:"tds_plan_id"`
 				Fields map[string]interface{} `json:"fields"`
-				Reason string `json:"reason"`
+				Reason string                 `json:"reason"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1204,7 +1470,11 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		var validUpdates []struct{TdsID string; Fields map[string]interface{}; Reason string}
+		var validUpdates []struct {
+			TdsID  string
+			Fields map[string]interface{}
+			Reason string
+		}
 		var errors []map[string]interface{}
 		allIDs := make([]string, 0, len(req.Rows))
 
@@ -1217,7 +1487,11 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, map[string]interface{}{"row_index": i, "tds_plan_id": row.TdsID, constants.ValueSuccess: false, constants.ValueError: "No fields to update"})
 				continue
 			}
-			validUpdates = append(validUpdates, struct{TdsID string; Fields map[string]interface{}; Reason string}{row.TdsID, row.Fields, row.Reason})
+			validUpdates = append(validUpdates, struct {
+				TdsID  string
+				Fields map[string]interface{}
+				Reason string
+			}{row.TdsID, row.Fields, row.Reason})
 			allIDs = append(allIDs, row.TdsID)
 		}
 
@@ -1265,26 +1539,32 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		fieldPairs := map[string]int{
-			"tds_plan_code": 0,
-			"tds_plan_name": 1,
-			"tds_section": 2,
-			"tds_rate": 3,
-			"has_pan": 4,
+			"tds_plan_code":    0,
+			"tds_plan_name":    1,
+			"tds_section":      2,
+			"tds_rate":         3,
+			"has_pan":          4,
 			"threshold_amount": 5,
-			"threshold_type": 6,
+			"threshold_type":   6,
 			"deduction_timing": 7,
-			"applicable_from": 8,
-			"applicable_to": 9,
-			"description": 10,
-			"is_active": 11,
+			"applicable_from":  8,
+			"applicable_to":    9,
+			"description":      10,
+			"is_active":        11,
 		}
 
-		fieldUpdates := make(map[string][]struct{ID string; Value interface{}})
+		fieldUpdates := make(map[string][]struct {
+			ID    string
+			Value interface{}
+		})
 		for _, up := range validUpdates {
 			for f, v := range up.Fields {
 				f = strings.ToLower(f)
 				if _, ok := fieldPairs[f]; ok {
-					fieldUpdates[f] = append(fieldUpdates[f], struct{ID string; Value interface{}}{up.TdsID, v})
+					fieldUpdates[f] = append(fieldUpdates[f], struct {
+						ID    string
+						Value interface{}
+					}{up.TdsID, v})
 				}
 			}
 		}
@@ -1325,9 +1605,9 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			auditCols := []string{"tds_plan_id","action_type","processing_status","reason","requested_by","requested_at"}
+			auditCols := []string{"tds_plan_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
 			auditVals := []interface{}{up.TdsID, "EDIT", "PENDING_EDIT_APPROVAL", up.Reason, userEmail}
-			auditParams := []string{"$1","$2","$3","$4","$5","now()"}
+			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 
 			for field := range up.Fields {
@@ -1363,5 +1643,3 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("ULTRA FAST bulk update tds plan: %d updated, %d errors, %d total - single transaction", len(successResults), len(errors), len(req.Rows))
 	}
 }
-
- 

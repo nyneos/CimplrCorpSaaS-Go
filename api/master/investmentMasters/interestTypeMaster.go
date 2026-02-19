@@ -36,12 +36,14 @@ func getUserFriendlyInterestTypeError(err error, context string) (string, int) {
 	}
 
 	// Constraint violations - Business logic error (200 OK)
-	if strings.Contains(errStr, "uniq_interest_type_code_active") {
-		return "Interest type code already exists.", http.StatusOK
+	if strings.Contains(errStr, "uniq_interest_type_code_active") || 
+		strings.Contains(errStr, "duplicate key value violates unique constraint") && strings.Contains(errStr, "interest_type_code") {
+		return "Interest type code already exists and is active.", http.StatusOK
 	}
 
-	if strings.Contains(errStr, "uniq_interest_type_name_active") {
-		return "Interest type name already exists.", http.StatusOK
+	if strings.Contains(errStr, "uniq_interest_type_name_active") || 
+		strings.Contains(errStr, "duplicate key value violates unique constraint") && strings.Contains(errStr, "interest_type_name") {
+		return "Interest type name already exists and is active.", http.StatusOK
 	}
 
 	if strings.Contains(errStr, "inv_interest_type_method_chk") {
@@ -53,6 +55,9 @@ func getUserFriendlyInterestTypeError(err error, context string) (string, int) {
 	}
 
 	// Standard database constraint errors
+	if strings.Contains(errStr, "duplicate key value violates unique constraint") {
+		return "Duplicate entry detected. This record already exists in the system.", http.StatusOK
+	}
 	if strings.Contains(errStr, "unique constraint") || strings.Contains(errStr, "duplicate key") {
 		return "Duplicate entry detected. Please check for existing records.", http.StatusOK
 	}
@@ -236,19 +241,27 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				CalculationMethod: strings.ToUpper(getColumnValue(row, colMap, "calculation_method")),
 			}
 
-			// Parse optional fields
+			// Parse optional fields with detailed error handling
+			var fieldErrors []string
+			
 			if val := getColumnValue(row, colMap, "min_tenor_days"); val != "" {
-				if parsed, err := parseIntPtr(val); err == nil {
+				if parsed, err := parseIntPtr(val); err != nil {
+					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid min_tenor_days '%s'", val))
+				} else {
 					input.MinTenorDays = parsed
 				}
 			}
 			if val := getColumnValue(row, colMap, "max_tenor_days"); val != "" {
-				if parsed, err := parseIntPtr(val); err == nil {
+				if parsed, err := parseIntPtr(val); err != nil {
+					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid max_tenor_days '%s'", val))
+				} else {
 					input.MaxTenorDays = parsed
 				}
 			}
 			if val := getColumnValue(row, colMap, "is_default"); val != "" {
-				if parsed, err := parseBoolPtr(val); err == nil {
+				if parsed, err := parseBoolPtr(val); err != nil {
+					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid is_default '%s' (use true/false)", val))
+				} else {
 					input.IsDefault = parsed
 				}
 			}
@@ -256,7 +269,9 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				input.Description = val
 			}
 			if val := getColumnValue(row, colMap, "is_active"); val != "" {
-				if parsed, err := parseBoolPtr(val); err == nil {
+				if parsed, err := parseBoolPtr(val); err != nil {
+					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid is_active '%s' (use true/false)", val))
+				} else {
 					input.IsActive = parsed
 				}
 			}
@@ -271,7 +286,18 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				input.IsActive = &defaultVal
 			}
 
-			// Validate
+			// Validate field parsing errors first
+			if len(fieldErrors) > 0 {
+				errors = append(errors, map[string]interface{}{
+					"row":                  rowIdx + 2,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Field parsing errors: " + strings.Join(fieldErrors, ", "),
+					"interest_type_code":   input.InterestTypeCode,
+				})
+				continue
+			}
+			
+			// Validate business logic
 			if err := validateInterestTypeFields(input); err != nil {
 				errors = append(errors, map[string]interface{}{
 					"row":                  rowIdx + 2,
@@ -284,11 +310,6 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errors)
-			return
-		}
-
 		// ULTRA FAST: Single transaction for ALL inserts
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -298,11 +319,73 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Build batch insert - ALL valid rows in ONE query
-		valueStrings := make([]string, len(validInputs))
-		valueArgs := make([]interface{}, 0, len(validInputs)*8)
-
+		// EFFICIENT: Batch check for existing codes/names for large uploads
+		codes := make([]string, len(validInputs))
+		names := make([]string, len(validInputs))
 		for i, input := range validInputs {
+			codes[i] = input.InterestTypeCode
+			names[i] = input.InterestTypeName
+		}
+
+		// Single query to check ALL potential duplicates at once
+		duplicateQuery := `
+			SELECT interest_type_code, interest_type_name 
+			FROM investment.fd_interest_type_master 
+			WHERE (interest_type_code = ANY($1::text[]) OR interest_type_name = ANY($2::text[]))
+			  AND is_active = true AND COALESCE(is_deleted, false) = false
+		`
+		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
+		if err != nil {
+			msg, status := getUserFriendlyInterestTypeError(err, "Duplicate check failed")
+			api.RespondWithError(w, status, msg)
+			api.LogError("Duplicate check query failed: %v", err)
+			return
+		}
+		defer duplicateRows.Close()
+
+		// Build map of existing codes/names
+		existingCodes := make(map[string]bool)
+		existingNames := make(map[string]bool)
+		for duplicateRows.Next() {
+			var code, name string
+			if err := duplicateRows.Scan(&code, &name); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				return
+			}
+			existingCodes[code] = true
+			existingNames[name] = true
+		}
+
+		// Filter out duplicates and create error reports
+		var finalValidInputs []InterestTypeInput
+		for _, input := range validInputs {
+			if existingCodes[input.InterestTypeCode] {
+				errors = append(errors, map[string]interface{}{
+					"interest_type_code":   input.InterestTypeCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Interest type code already exists and is active.",
+				})
+			} else if existingNames[input.InterestTypeName] {
+				errors = append(errors, map[string]interface{}{
+					"interest_type_code":   input.InterestTypeCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Interest type name already exists and is active.",
+				})
+			} else {
+				finalValidInputs = append(finalValidInputs, input)
+			}
+		}
+
+		if len(finalValidInputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows failed validation or are duplicates", errors)
+			return
+		}
+
+		// Build batch insert - ALL remaining valid rows in ONE query
+		valueStrings := make([]string, len(finalValidInputs))
+		valueArgs := make([]interface{}, 0, len(finalValidInputs)*8)
+
+		for i, input := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8)
 
@@ -329,9 +412,10 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Execute batch insert
 		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
 		if err != nil {
+			// Get user-friendly error
 			msg, status := getUserFriendlyInterestTypeError(err, "Batch upload insert failed")
+			api.LogError("Database error: %v", err)
 			api.RespondWithError(w, status, msg)
-			api.LogError("Batch upload insert failed: %v", err)
 			return
 		}
 		defer insertRows.Close()
@@ -373,16 +457,17 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyInterestTypeError(err, "Batch upload audit failed")
+				api.LogError("Audit insert error: %v", err)
 				api.RespondWithError(w, status, msg)
-				api.LogError("Batch upload audit insert failed: %v", err)
 				return
 			}
 		}
 
+		// Commit transaction
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Upload commit failed")
+			msg, status := getUserFriendlyInterestTypeError(err, "Upload transaction commit failed")
+			api.LogError("Commit failed: %v", err)
 			api.RespondWithError(w, status, msg)
-			api.LogError("Upload commit failed: %v", err)
 			return
 		}
 
@@ -390,7 +475,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allResults := append(insertedRecords, errors...)
 		success := len(insertedRecords) > 0
 		api.RespondWithPayload(w, success, "", allResults)
-		api.LogInfo("ULTRA FAST upload: %d inserted, %d errors, %d total from file %s",
+		api.LogInfo("Upload completed: %d inserted, %d errors, %d total from file %s",
 			len(insertedRecords), len(errors), len(data), handler.Filename)
 	}
 }
@@ -583,11 +668,74 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Build batch insert VALUES - ALL records in ONE query
-		valueStrings := make([]string, len(validRows))
-		valueArgs := make([]interface{}, 0, len(validRows)*8)
+		// EFFICIENT: Batch check for existing codes/names 
+		codes := make([]string, len(validRows))
+		names := make([]string, len(validRows))
+		for i, input := range validRows {
+			codes[i] = input.InterestTypeCode
+			names[i] = input.InterestTypeName
+		}
 
-		for i, row := range validRows {
+		// Single query to check ALL potential duplicates at once
+		duplicateQuery := `
+			SELECT interest_type_code, interest_type_name 
+			FROM investment.fd_interest_type_master 
+			WHERE (interest_type_code = ANY($1::text[]) OR interest_type_name = ANY($2::text[]))
+			  AND is_active = true AND COALESCE(is_deleted, false) = false
+		`
+		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
+		if err != nil {
+			msg, status := getUserFriendlyInterestTypeError(err, "Duplicate check failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer duplicateRows.Close()
+
+		// Build map of existing codes/names
+		existingCodes := make(map[string]bool)
+		existingNames := make(map[string]bool)
+		for duplicateRows.Next() {
+			var code, name string
+			if err := duplicateRows.Scan(&code, &name); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate check scan failed")
+				return
+			}
+			existingCodes[code] = true
+			existingNames[name] = true
+		}
+
+		// Filter out duplicates and create error reports
+		var finalValidInputs []InterestTypeInput
+		for i, input := range validRows {
+			if existingCodes[input.InterestTypeCode] {
+				errors = append(errors, map[string]interface{}{
+					"row_index":            i,
+					"interest_type_code":   input.InterestTypeCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Interest type code already exists and is active.",
+				})
+			} else if existingNames[input.InterestTypeName] {
+				errors = append(errors, map[string]interface{}{
+					"row_index":            i,
+					"interest_type_code":   input.InterestTypeCode,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Interest type name already exists and is active.",
+				})
+			} else {
+				finalValidInputs = append(finalValidInputs, input)
+			}
+		}
+
+		if len(finalValidInputs) == 0 {
+			api.RespondWithPayload(w, false, "All rows are duplicates", errors)
+			return
+		}
+
+		// Build batch insert VALUES - ALL records in ONE query
+		valueStrings := make([]string, len(finalValidInputs))
+		valueArgs := make([]interface{}, 0, len(finalValidInputs)*8)
+
+		for i, row := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8)
 
@@ -1729,7 +1877,12 @@ func parseXLSXFile(file multipart.File) ([][]string, error) {
 
 func getColumnValue(row []string, colMap map[string]int, colName string) string {
 	if idx, exists := colMap[colName]; exists && idx < len(row) {
-		return strings.TrimSpace(row[idx])
+		val := strings.TrimSpace(row[idx])
+		// Remove surrounding quotes if present
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		return val
 	}
 	return ""
 }
