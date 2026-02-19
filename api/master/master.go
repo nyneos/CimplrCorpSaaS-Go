@@ -201,6 +201,19 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/demat/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetApprovedActiveDemats(pgxPool)))
 	mux.Handle("/master/demat/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDematsWithAudit(pgxPool)))
 
+	// Interest Type Master routes
+	mux.Handle("/master/interest-type/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateInterestTypeSingle(pgxPool)))
+	mux.Handle("/master/interest-type/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateInterestType(pgxPool)))
+	mux.Handle("/master/interest-type/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateInterestType(pgxPool)))
+	mux.Handle("/master/interest-type/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateInterestTypeBulk(pgxPool)))
+	mux.Handle("/master/interest-type/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeleteInterestType(pgxPool)))
+	mux.Handle("/master/interest-type/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApproveInterestType(pgxPool)))
+	mux.Handle("/master/interest-type/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectInterestType(pgxPool)))
+	mux.Handle("/master/interest-type/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestTypesApprovedActive(pgxPool)))
+	mux.Handle("/master/interest-type/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestTypesWithAudit(pgxPool)))
+	mux.Handle("/master/interest-type/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestTypeAuditHistory(pgxPool)))
+	mux.Handle("/master/interest-type/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadInterestTypeSimple(pgxPool)))
+
 	// Folio Master routes
 	mux.Handle("/master/folio/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadFolio(pgxPool)))
 	mux.Handle("/master/folio/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetFoliosWithAudit(pgxPool)))
