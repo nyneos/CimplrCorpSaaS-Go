@@ -19,6 +19,78 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+func parseDate(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	// Prefer dd/mm/yyyy for bank statements before falling back to the broader parser set.
+	if t, err := time.Parse("02/01/2006", s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2/1/2006", s); err == nil {
+		return t, nil
+	}
+	s = strings.TrimSpace(s)
+
+	// Critical: dd/mm/yyyy formats MUST come before mm/dd/yyyy to prevent misparsing Indian bank statements
+	layouts := []string{
+		// dd/mm/yyyy variants (Indian/European format) - MUST BE FIRST
+		"02/01/2006", "02/01/06", "2/1/2006", "2/1/06",
+		"02/01/2006 03:04:05 PM", "02/01/06 03:04:05 PM", "2/1/2006 03:04:05 PM", "2/1/06 03:04:05 PM",
+		"02/01/2006 3:04:05 PM", "02/01/06 3:04:05 PM", "2/1/2006 3:04:05 PM", "2/1/06 3:04:05 PM",
+		"02/01/06 15:04", "02/01/06 3:04", "02/01/06 15:04:05", "02/01/06 3:04:05",
+		"2/1/06 15:04", "2/1/06 3:04", "2/1/06 15:04:05", "2/1/06 3:04:05",
+		// mm/dd/yyyy variants (American format) - AFTER dd/mm/yyyy
+		"01/02/2006", "01/02/06", "1/2/2006", "1/2/06",
+		"01/02/2006 03:04:05 PM", "01/02/2006 03:04 PM", "01/02/06 03:04:05 PM", "01/02/06 03:04 PM",
+		"1/2/2006 03:04:05 PM", "1/2/2006 03:04 PM", "1/2/06 03:04:05 PM", "1/2/06 03:04 PM",
+		"01/02/06 15:04", "01/02/06 3:04", "01/02/06 15:04:05", "01/02/06 3:04:05",
+		"1/2/06 15:04", "1/2/06 3:04", "1/2/06 15:04:05", "1/2/06 3:04:05",
+		// Named month formats
+		constants.DateFormatSlash, constants.DateFormatDash, // for 29/Aug/2025 and 29-Aug-2025
+		"2-Jan-2006", "1/Feb/2006",
+		// ISO and other formats
+		constants.DateFormat, "2006/01/02", "2006.01.02", "01.02.2006", "1.2.2006", "01-02-2006", "1-2-2006",
+		"01-02-06", "1-2-06", "2006/1/2", "2006-1-2",
+		// dd-Mon-yy and dd/Mon/yy variants
+		"02-Jan-06", "02-Jan-2006", "02/Jan/06", "02/Jan/2006",
+		"02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",
+		"02-Jan-06 15:04:05", "02-Jan-2006 15:04:05", "02-Jan-06 3:04:05", "02-Jan-2006 3:04:05",
+		"02/Jan/06 15:04", "02/Jan/2006 15:04", "02/Jan/06 3:04", "02/Jan/2006 3:04",
+		"02/Jan/06 15:04:05", "02/Jan/2006 15:04:05", "02/Jan/06 3:04:05", "02/Jan/2006 3:04:05",
+		"02-Jan-2006 03:04:05 PM", "02-Jan-06 03:04:05 PM", "02-Jan-2006 3:04:05 PM", "02-Jan-06 3:04:05 PM",
+		"02/Jan/2006 03:04:05 PM", "02/Jan/06 03:04:05 PM", "02/Jan/2006 3:04:05 PM", "02/Jan/06 3:04:05 PM",
+		// dd-Mon-yy variants (American style)
+		"01-Feb-06", "01-Feb-2006", "01/Feb/06", "01/Feb/2006",
+		"01-Feb-06 15:04", "01-Feb-2006 15:04", "01-Feb-06 3:04", "01-Feb-2006 3:04",
+		"01-Feb-06 15:04:05", "01-Feb-2006 15:04:05", "01-Feb-06 3:04:05", "01-Feb-2006 3:04:05",
+		"01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
+		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
+		// ISO-ish layouts to catch Excel exports that already render as 2026-01-15 or RFC3339 strings
+		constants.DateFormat, constants.DateTimeFormat, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
+	}
+	// Try all layouts
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	// Try to parse with 2-digit year fallback (e.g., 13-Dec-25 as 2025)
+	if len(s) == 9 && s[2] == '-' && s[6] == '-' { // e.g., 13-Dec-25
+		t, err := time.Parse("02-Jan-06", s)
+		if err == nil {
+			// If year < 100, add 2000
+			y := t.Year()
+			if y < 100 {
+				t = t.AddDate(2000, 0, 0)
+			}
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
+}
+
 // CreateSweepInitiation creates a new initiation record with optional overrides, creates PENDING_APPROVAL audit entry
 // If sweep_id doesn't exist, auto-creates sweep with APPROVED status (enabling unplanned sweeps)
 func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -901,8 +973,8 @@ func isDuplicateInitiation(ctx context.Context, pgxPool *pgxpool.Pool, entity, s
 		  AND COALESCE(UPPER(TRIM(sc.frequency)), '') = $4
 		  AND COALESCE(sc.effective_date::text, '') = $5
 		  AND COALESCE(sc.execution_time::text, '') = $6
-		  AND COALESCE(sc.buffer_amount,0) = COALESCE($7,0)
-		  AND COALESCE(sc.sweep_amount,0) = COALESCE($8,0)
+		  AND COALESCE(sc.buffer_amount::double precision,0) = COALESCE($7::double precision,0)
+		  AND COALESCE(sc.sweep_amount::double precision,0) = COALESCE($8::double precision,0)
 		  AND COALESCE(asi.processing_status, '') IN ('PENDING_APPROVAL','APPROVED')
 	`
 
@@ -1631,18 +1703,18 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"initiation_requested_by":      requestedBy,
 				"initiation_checker_by":        checkerBy,
 				"initiation_checker_comment":   checkerComment,
-				// Sweep config fields
-				"entity_name":         entityName,
-				"source_bank_name":    sourceBank,
-				"source_bank_account": sourceAccount,
-				"target_bank_name":    targetBank,
-				"target_bank_account": targetAccount,
-				"sweep_type":          sweepType,
-				"frequency":           frequency,
-				"effective_date":      effectiveDateStr,
-				"execution_time":      executionTime,
-				"buffer_amount":       bufferAmount,
-				"sweep_amount":        sweepAmount,
+				// Sweep config fields (base values)
+				"entity_name":                    entityName,
+				"source_bank_name":               sourceBank,
+				"source_bank_account":            sourceAccount,
+				"target_bank_name":               targetBank,
+				"target_bank_account":            targetAccount,
+				"sweep_type":                     sweepType,
+				"frequency":                      frequency,
+				"effective_date":                 effectiveDateStr,
+				"execution_time":                 executionTime,
+				"buffer_amount":                  bufferAmount,
+				"sweep_amount":                   sweepAmount,
 				// Sweep config audit fields
 				"sweep_config_processing_status": sweepConfigStatus,
 				"sweep_config_requested_by":      sweepConfigRequestedBy,
@@ -1650,6 +1722,47 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"sweep_config_requested_at":      sweepConfigRequestedAt,
 				"sweep_config_checker_at":        sweepConfigCheckerAt,
 			}
+
+			// Apply overrides: execution time, amount, and source/target accounts
+			var resolvedExecutionTime *string
+			if overriddenExecutionTime != nil && strings.TrimSpace(*overriddenExecutionTime) != "" {
+				resolvedExecutionTime = overriddenExecutionTime
+			} else {
+				resolvedExecutionTime = executionTime
+			}
+
+			var resolvedBufferAmount, resolvedSweepAmount *float64
+			if overriddenAmount != nil {
+				resolvedBufferAmount = overriddenAmount
+				resolvedSweepAmount = overriddenAmount
+			} else {
+				resolvedBufferAmount = bufferAmount
+				resolvedSweepAmount = sweepAmount
+			}
+
+			resolvedSourceAccount := sourceAccount
+			if overriddenSourceAccount != nil && strings.TrimSpace(*overriddenSourceAccount) != "" {
+				resolvedSourceAccount = *overriddenSourceAccount
+			}
+			resolvedTargetAccount := targetAccount
+			if overriddenTargetAccount != nil && strings.TrimSpace(*overriddenTargetAccount) != "" {
+				resolvedTargetAccount = *overriddenTargetAccount
+			}
+
+			// Now update the map with resolved values (so callers see the effective values)
+			initiation["execution_time"] = resolvedExecutionTime
+			initiation["buffer_amount"] = resolvedBufferAmount
+			initiation["sweep_amount"] = resolvedSweepAmount
+			initiation["source_bank_account"] = resolvedSourceAccount
+			initiation["target_bank_account"] = resolvedTargetAccount
+
+			// Also provide explicit resolved_* fields for clarity
+			initiation["resolved_execution_time"] = resolvedExecutionTime
+			initiation["resolved_buffer_amount"] = resolvedBufferAmount
+			initiation["resolved_sweep_amount"] = resolvedSweepAmount
+			initiation["resolved_source_bank_account"] = resolvedSourceAccount
+			initiation["resolved_target_bank_account"] = resolvedTargetAccount
+
 			initiations = append(initiations, initiation)
 		}
 
@@ -2110,7 +2223,12 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if req.EffectiveDate != nil {
 				updates = append(updates, fmt.Sprintf("effective_date = $%d", argPos))
-				args = append(args, nullifyStringPtr(req.EffectiveDate))
+				// Normalize incoming date string to YYYY-MM-DD to avoid passing Go's default time.String()
+				if d, err := parseDate(*req.EffectiveDate); err == nil {
+					args = append(args, d.Format("2006-01-02"))
+				} else {
+					args = append(args, nullifyStringPtr(req.EffectiveDate))
+				}
 				argPos++
 			}
 			if req.ExecutionTime != nil {
@@ -2119,12 +2237,12 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				argPos++
 			}
 			if req.BufferAmount != nil {
-				updates = append(updates, fmt.Sprintf("buffer_amount = $%d", argPos))
+				updates = append(updates, fmt.Sprintf("buffer_amount = $%d::double precision", argPos))
 				args = append(args, req.BufferAmount)
 				argPos++
 			}
 			if req.SweepAmount != nil {
-				updates = append(updates, fmt.Sprintf("sweep_amount = $%d", argPos))
+				updates = append(updates, fmt.Sprintf("sweep_amount = $%d::double precision", argPos))
 				args = append(args, req.SweepAmount)
 				argPos++
 			}

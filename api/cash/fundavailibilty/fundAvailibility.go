@@ -380,8 +380,8 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		SELECT 
 			COALESCE(me.entity_id, i.entity_name, '') AS entity_id,
 			COALESCE(me.entity_name, i.entity_name, '') AS entity_name,
-			COALESCE(i.bank_name, '') AS bank_name,
-			COALESCE(i.bank_account_number, '') AS bank_account,
+			COALESCE(mba.bank_name, i.bank_name, '') AS bank_name,
+			COALESCE(mba.account_number, i.bank_account_number, '') AS bank_account,
 			i.currency_code,
 			COALESCE(mba.usage, '') AS usage,
 			CASE 
@@ -401,7 +401,8 @@ func fetchProjections(ctx context.Context, pgxPool *pgxpool.Pool, asOfDate, endD
 		JOIN cimplrcorpsaas.cashflow_proposal_item i ON i.item_id = pm.item_id
 		JOIN approved_proposals ap ON ap.proposal_id = i.proposal_id
 		LEFT JOIN public.masterentitycash me ON LOWER(TRIM(me.entity_name)) = LOWER(TRIM(i.entity_name))
-		LEFT JOIN public.masterbankaccount mba ON mba.account_number = i.bank_account_number AND mba.entity_id = me.entity_id
+		-- Prefer matching master bank account by account_number first (entity_id may not be present in proposals)
+		LEFT JOIN public.masterbankaccount mba ON mba.account_number = i.bank_account_number
 		LEFT JOIN public.mastercashflowcategory mcc ON mcc.category_id = i.category_id
 		WHERE (
 			pm.year > EXTRACT(YEAR FROM $1::timestamp)::int 
