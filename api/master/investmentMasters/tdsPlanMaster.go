@@ -5,14 +5,89 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
-    "time"
 
+	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// coerceDateValue converts various date input representations to either
+// a non-empty string (passed to Postgres) or nil (so DB receives NULL).
+func coerceDateValue(iv interface{}) interface{} {
+	if iv == nil {
+		return nil
+	}
+	switch v := iv.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		return v
+	case *string:
+		if v == nil {
+			return nil
+		}
+		if strings.TrimSpace(*v) == "" {
+			return nil
+		}
+		return *v
+	default:
+		return nil
+	}
+}
+
+// logDBError provides richer logging for database errors (commit failures etc.).
+func logDBError(err error, context string) {
+	if err == nil {
+		return
+	}
+	api.LogError("%s: %v", context, err)
+	// Always log the plain error string and a verbose representation
+	api.LogError("Error string: %s", err.Error())
+	api.LogError("Verbose error: %#v", err)
+
+	// Walk the unwrap chain to capture wrapped errors
+	for u := errors.Unwrap(err); u != nil; u = errors.Unwrap(u) {
+		api.LogError("Unwrapped: %T -> %v", u, u)
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		api.LogError("Postgres error detail: Code=%s Message=%s Detail=%s Where=%s Constraint=%s Table=%s Column=%s", pgErr.Code, pgErr.Message, pgErr.Detail, pgErr.Where, pgErr.ConstraintName, pgErr.TableName, pgErr.ColumnName)
+	} else {
+		api.LogError("Non-pg error type: %T", err)
+	}
+}
+
+// validateTDSPlanFields validates TDS plan fields against database constraints
+func validateTDSPlanFields(input map[string]interface{}) string {
+	// Check threshold_type
+	if thresholdType, ok := input["threshold_type"].(string); ok && thresholdType != "" {
+		validThresholdTypes := map[string]bool{"PER_BANK": true, "PER_BRANCH": true, "AGGREGATE": true}
+		if !validThresholdTypes[thresholdType] {
+			return fmt.Sprintf("Invalid threshold_type '%s'. Must be PER_BANK, PER_BRANCH, or AGGREGATE.", thresholdType)
+		}
+	}
+
+	// Check deduction_timing
+	if deductionTiming, ok := input["deduction_timing"].(string); ok && deductionTiming != "" {
+		validTimings := map[string]bool{"ACCRUAL": true, "RECEIPT": true, "MATURITY": true}
+		if !validTimings[deductionTiming] {
+			return fmt.Sprintf("Invalid deduction_timing '%s'. Must be ACCRUAL, RECEIPT, or MATURITY.", deductionTiming)
+		}
+	}
+
+	// Check tds_rate >= 0
+	if rate, ok := input["tds_rate"].(float64); ok && rate < 0 {
+		return "TDS rate must be greater than or equal to 0."
+	}
+
+	return ""
+}
 
 // getUserFriendlyTDSPlanError converts database errors to user-friendly messages for TDS plans
 func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
@@ -212,7 +287,9 @@ func CreateTDSPlanSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING tds_plan_id
 		`
 		var id string
-		if err := tx.QueryRow(ctx, insertQ, req.TdsPlanCode, req.TdsPlanName, req.TdsSection, req.TdsRate, req.HasPan, req.ThresholdAmount, req.ThresholdType, req.DeductionTiming, req.ApplicableFrom, req.ApplicableTo, req.Description, req.IsActive).Scan(&id); err != nil {
+		af := coerceDateValue(req.ApplicableFrom)
+		at := coerceDateValue(req.ApplicableTo)
+		if err := tx.QueryRow(ctx, insertQ, req.TdsPlanCode, req.TdsPlanName, req.TdsSection, req.TdsRate, req.HasPan, req.ThresholdAmount, req.ThresholdType, req.DeductionTiming, af, at, req.Description, req.IsActive).Scan(&id); err != nil {
 			msg, status := getUserFriendlyTDSPlanError(err, "Insert failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -289,7 +366,7 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				dv := true
 				row.IsActive = &dv
 			}
-			validRows = append(validRows, map[string]interface{}{
+			inputMap := map[string]interface{}{
 				"tds_plan_code":    row.TdsPlanCode,
 				"tds_plan_name":    row.TdsPlanName,
 				"tds_section":      row.TdsSection,
@@ -302,7 +379,13 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"applicable_to":    row.ApplicableTo,
 				"description":      row.Description,
 				"is_active":        row.IsActive,
-			})
+			}
+			// Validate constraints before DB operations
+			if validationErr := validateTDSPlanFields(inputMap); validationErr != "" {
+				errorsList = append(errorsList, map[string]interface{}{"row_index": i, "tds_plan_code": row.TdsPlanCode, constants.ValueSuccess: false, constants.ValueError: validationErr})
+				continue
+			}
+			validRows = append(validRows, inputMap)
 		}
 		if len(validRows) == 0 {
 			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
@@ -386,7 +469,10 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		valueArgs := make([]interface{}, 0, len(finalValidInputs)*12)
 		for i, v := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*12+1, i*12+2, i*12+3, i*12+4, i*12+5, i*12+6, i*12+7, i*12+8, i*12+9, i*12+10, i*12+11, i*12+12)
-			valueArgs = append(valueArgs, v["tds_plan_code"], v["tds_plan_name"], v["tds_section"], v["tds_rate"], v["has_pan"], v["threshold_amount"], v["threshold_type"], v["deduction_timing"], v["applicable_from"], v["applicable_to"], v["description"], v["is_active"])
+			// ensure empty date strings are passed as NULL to Postgres
+			af := coerceDateValue(v["applicable_from"])
+			at := coerceDateValue(v["applicable_to"])
+			valueArgs = append(valueArgs, v["tds_plan_code"], v["tds_plan_name"], v["tds_section"], v["tds_rate"], v["has_pan"], v["threshold_amount"], v["threshold_type"], v["deduction_timing"], af, at, v["description"], v["is_active"])
 		}
 
 		batchInsert := fmt.Sprintf(`
@@ -434,9 +520,10 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			// Log rich DB error details for debugging
+			logDBError(err, "Bulk create commit failed")
 			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
 			api.RespondWithError(w, status, msg)
-			api.LogError("Bulk create commit failed: %v", err)
 			return
 		}
 
@@ -545,7 +632,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					thr = p
 				}
 			}
-			inputs = append(inputs, map[string]interface{}{
+			inputMap := map[string]interface{}{
 				"tds_plan_code":    code,
 				"tds_plan_name":    name,
 				"tds_section":      section,
@@ -558,7 +645,13 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"applicable_to":    getColumnValue(row, colMap, "applicable_to"),
 				"description":      getColumnValue(row, colMap, "description"),
 				"is_active":        func() *bool { b := true; return &b }(),
-			})
+			}
+			// Validate constraints before DB operations
+			if validationErr := validateTDSPlanFields(inputMap); validationErr != "" {
+				errorsList = append(errorsList, map[string]interface{}{"row": ri + 2, "tds_plan_code": code, constants.ValueSuccess: false, constants.ValueError: validationErr})
+				continue
+			}
+			inputs = append(inputs, inputMap)
 		}
 		if len(inputs) == 0 {
 			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
@@ -567,6 +660,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Bulk insert (similar to CreateTDSPlan)
 		ctx := r.Context()
+		api.LogInfo("Starting TDS plan upload transaction with %d input rows", len(inputs))
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
@@ -589,13 +683,16 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE (tds_plan_code = ANY($1::text[]) OR tds_plan_name = ANY($2::text[]))
 			  AND is_active = true AND COALESCE(is_deleted, false) = false
 		`
+		api.LogInfo("Upload: Running duplicate check query for %d codes and %d names", len(codes), len(names))
 		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
 		if err != nil {
+			logDBError(err, "Upload duplicate check query failed")
 			msg, status := getUserFriendlyTDSPlanError(err, "Duplicate check failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer duplicateRows.Close()
+		api.LogInfo("Upload: Duplicate check query executed successfully")
 
 		// Build map of existing codes/names
 		existingCodes := make(map[string]bool)
@@ -641,7 +738,10 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		valueArgs := make([]interface{}, 0, len(finalValidInputs)*12)
 		for i, v := range finalValidInputs {
 			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*12+1, i*12+2, i*12+3, i*12+4, i*12+5, i*12+6, i*12+7, i*12+8, i*12+9, i*12+10, i*12+11, i*12+12)
-			valueArgs = append(valueArgs, v["tds_plan_code"], v["tds_plan_name"], v["tds_section"], v["tds_rate"], v["has_pan"], v["threshold_amount"], v["threshold_type"], v["deduction_timing"], v["applicable_from"], v["applicable_to"], v["description"], v["is_active"])
+			// ensure empty date strings are passed as NULL to Postgres
+			af := coerceDateValue(v["applicable_from"])
+			at := coerceDateValue(v["applicable_to"])
+			valueArgs = append(valueArgs, v["tds_plan_code"], v["tds_plan_name"], v["tds_section"], v["tds_rate"], v["has_pan"], v["threshold_amount"], v["threshold_type"], v["deduction_timing"], af, at, v["description"], v["is_active"])
 		}
 
 		batchInsert := fmt.Sprintf(`
@@ -688,12 +788,15 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		api.LogInfo("All queries executed successfully, attempting transaction commit")
 		if err := tx.Commit(ctx); err != nil {
+			// Log rich DB error details for debugging
+			logDBError(err, "Upload bulk create commit failed")
 			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
 			api.RespondWithError(w, status, msg)
-			api.LogError("Bulk create commit failed: %v", err)
 			return
 		}
+		api.LogInfo("Transaction committed successfully")
 
 		allResults := append(inserted, errorsList...)
 		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
@@ -1333,6 +1436,8 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+		
+		api.LogInfo("UpdateTDSPlan request: UserID=%s, TdsID=%s, Fields=%+v, Reason=%s", req.UserID, req.TdsID, req.Fields, req.Reason)
 
 		if req.TdsID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "tds_plan_id is required")
@@ -1397,6 +1502,12 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			k = strings.ToLower(k)
 			if _, ok := fieldPairs[k]; ok {
+				// Validate constraint fields before database update
+				if errMsg := validateTDSPlanFields(map[string]interface{}{k: v}); errMsg != "" {
+					api.RespondWithError(w, http.StatusBadRequest, errMsg)
+					return
+				}
+				
 				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
 				args = append(args, v)
 				pos++
@@ -1410,8 +1521,12 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		q := fmt.Sprintf("UPDATE investment.fd_tds_plan_master SET %s WHERE tds_plan_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.TdsID)
+		
+		api.LogInfo("Debug update query: %s", q)
+		api.LogInfo("Debug update args: %+v", args)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			logDBError(err, "Update failed in UpdateTDSPlan")
 			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrUpdateFailed)
 			api.RespondWithError(w, status, msg)
 			return
@@ -1420,42 +1535,12 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		auditCols := []string{"tds_plan_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
 		auditVals := []interface{}{req.TdsID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
-		paramPos := 6
-
-		for k := range req.Fields {
-			k = strings.ToLower(k)
-			if idx, ok := fieldPairs[k]; ok {
-				oldField := "old_" + k
-				auditCols = append(auditCols, oldField)
-
-				// Handle date fields explicitly to avoid sending Go's default time.String()
-				val := oldVals[idx]
-				if k == "applicable_from" || k == "applicable_to" {
-					if t, ok := val.(time.Time); ok {
-						if !t.IsZero() {
-							auditVals = append(auditVals, t.Format("2006-01-02"))
-						} else {
-							auditVals = append(auditVals, nil)
-						}
-					} else if tp, ok := val.(*time.Time); ok && tp != nil {
-						if !tp.IsZero() {
-							auditVals = append(auditVals, tp.Format("2006-01-02"))
-						} else {
-							auditVals = append(auditVals, nil)
-						}
-					} else {
-						auditVals = append(auditVals, nil)
-					}
-				} else {
-					auditVals = append(auditVals, oldVals[idx])
-				}
-				auditParams = append(auditParams, fmt.Sprintf("$%d", paramPos))
-				paramPos++
-			}
-		}
 
 		auditQuery := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (%s) VALUES (%s)", strings.Join(auditCols, ", "), strings.Join(auditParams, ", "))
+		api.LogInfo("Debug audit insert query: %s", auditQuery)
+		api.LogInfo("Debug audit insert values: %+v", auditVals)
 		if _, err := tx.Exec(ctx, auditQuery, auditVals...); err != nil {
+			logDBError(err, "Audit insert failed in UpdateTDSPlan")
 			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
