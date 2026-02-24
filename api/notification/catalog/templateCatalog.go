@@ -839,11 +839,12 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TemplateID      string `json:"template_id"`
-			RecipientType   string `json:"recipient_type"`
-			RecipientUserID string `json:"recipient_user_id"`
-			RecipientRole   string `json:"recipient_role"`
-			IsActive        *bool  `json:"is_active"`
+			TemplateID        string `json:"template_id"`
+			RecipientType     string `json:"recipient_type"`
+			RecipientUserID   string `json:"recipient_user_id"`
+			RecipientRole     string `json:"recipient_role"`
+			IsActive          *bool  `json:"is_active"`
+			RecipientPriority *int   `json:"recipient_priority"` // 1=highest urgency, default 3
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithPayload(w, false, "invalid request body", nil)
@@ -865,6 +866,10 @@ func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			d := true
 			req.IsActive = &d
 		}
+		priority := 3
+		if req.RecipientPriority != nil && *req.RecipientPriority > 0 {
+			priority = *req.RecipientPriority
+		}
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
@@ -872,13 +877,22 @@ func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		q := `INSERT INTO notification_svc.template_recipient (template_id, recipient_type, recipient_user_id, recipient_role, is_active, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING recipient_id`
+		q := `INSERT INTO notification_svc.template_recipient
+			(template_id, recipient_type, recipient_user_id, recipient_role, is_active, created_by, recipient_priority)
+			VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING recipient_id`
 		var rid string
-		if err := pgxPool.QueryRow(ctx, q, req.TemplateID, strings.ToUpper(req.RecipientType), req.RecipientUserID, req.RecipientRole, req.IsActive, userEmail).Scan(&rid); err != nil {
+		if err := pgxPool.QueryRow(ctx, q,
+			req.TemplateID, strings.ToUpper(req.RecipientType),
+			nullableStr(req.RecipientUserID), nullableStr(req.RecipientRole),
+			req.IsActive, userEmail, priority,
+		).Scan(&rid); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"recipient_id": rid})
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"recipient_id":       rid,
+			"recipient_priority": priority,
+		})
 	}
 }
 
@@ -893,7 +907,13 @@ func GetRecipientsByTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		q := `SELECT recipient_id, template_id, recipient_type, recipient_user_id, recipient_role, is_active, created_at, created_by FROM notification_svc.template_recipient WHERE template_id=$1`
+		q := `SELECT recipient_id, template_id, recipient_type,
+			     COALESCE(recipient_user_id,'') AS recipient_user_id,
+			     COALESCE(recipient_role,'')    AS recipient_role,
+			     is_active, created_at, created_by,
+			     COALESCE(recipient_priority,3) AS recipient_priority
+			  FROM notification_svc.template_recipient WHERE template_id=$1
+			  ORDER BY recipient_priority ASC, created_at ASC`
 		rows, err := pgxPool.Query(ctx, q, req.TemplateID)
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
@@ -904,9 +924,20 @@ func GetRecipientsByTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var rid, tid, rtype, ruser, rrole, createdBy string
 			var isActive bool
+			var recipPriority int
 			var createdAt interface{}
-			if err := rows.Scan(&rid, &tid, &rtype, &ruser, &rrole, &isActive, &createdAt, &createdBy); err == nil {
-				out = append(out, map[string]interface{}{"recipient_id": rid, "template_id": tid, "recipient_type": rtype, "recipient_user_id": ruser, "recipient_role": rrole, "is_active": isActive, "created_at": createdAt, "created_by": createdBy})
+			if err := rows.Scan(&rid, &tid, &rtype, &ruser, &rrole, &isActive, &createdAt, &createdBy, &recipPriority); err == nil {
+				out = append(out, map[string]interface{}{
+					"recipient_id":       rid,
+					"template_id":        tid,
+					"recipient_type":     rtype,
+					"recipient_user_id":  ruser,
+					"recipient_role":     rrole,
+					"is_active":          isActive,
+					"created_at":         createdAt,
+					"created_by":         createdBy,
+					"recipient_priority": recipPriority,
+				})
 			}
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -933,6 +964,206 @@ func DeleteTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// UpdateTemplateRecipient patches is_active and/or recipient_priority for a single recipient.
+//
+//	{ "recipient_id": "RCP-xxx", "is_active": true, "recipient_priority": 2 }
+func UpdateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RecipientID       string `json:"recipient_id"`
+			IsActive          *bool  `json:"is_active"`
+			RecipientPriority *int   `json:"recipient_priority"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RecipientID == "" {
+			api.RespondWithPayload(w, false, "recipient_id required", nil)
+			return
+		}
+		if req.IsActive == nil && req.RecipientPriority == nil {
+			api.RespondWithPayload(w, false, "at least one of is_active or recipient_priority is required", nil)
+			return
+		}
+
+		var sets []string
+		var args []interface{}
+		pos := 1
+		if req.IsActive != nil {
+			sets = append(sets, fmt.Sprintf("is_active = $%d", pos))
+			args = append(args, *req.IsActive)
+			pos++
+		}
+		if req.RecipientPriority != nil {
+			sets = append(sets, fmt.Sprintf("recipient_priority = $%d", pos))
+			args = append(args, *req.RecipientPriority)
+			pos++
+		}
+		args = append(args, req.RecipientID)
+
+		q := fmt.Sprintf(`UPDATE notification_svc.template_recipient SET %s WHERE recipient_id = $%d
+			RETURNING recipient_id, is_active, recipient_priority`,
+			strings.Join(sets, ", "), pos)
+
+		ctx := r.Context()
+		var rid string
+		var isActiveOut bool
+		var priorityOut int
+		if err := pgxPool.QueryRow(ctx, q, args...).Scan(&rid, &isActiveOut, &priorityOut); err != nil {
+			api.RespondWithPayload(w, false, "recipient not found or update failed: "+err.Error(), nil)
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"recipient_id":       rid,
+			"is_active":          isActiveOut,
+			"recipient_priority": priorityOut,
+		})
+	}
+}
+
+// BulkCreateRecipients creates multiple template_recipient rows in a single call.
+// Accepts an array of recipient objects, all sharing the same template_id.
+//
+//	{
+//	  "template_id": "TPL-xxx",
+//	  "recipients": [
+//	    { "recipient_type": "USER", "recipient_user_id": "uid-1", "recipient_priority": 1 },
+//	    { "recipient_type": "ROLE", "recipient_role": "TREASURY", "recipient_priority": 2 },
+//	    { "recipient_type": "USER", "recipient_user_id": "uid-2" }
+//	  ]
+//	}
+func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			TemplateID string `json:"template_id"`
+			Recipients []struct {
+				RecipientType     string `json:"recipient_type"`
+				RecipientUserID   string `json:"recipient_user_id"`
+				RecipientRole     string `json:"recipient_role"`
+				IsActive          *bool  `json:"is_active"`
+				RecipientPriority *int   `json:"recipient_priority"`
+			} `json:"recipients"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithPayload(w, false, "invalid request body", nil)
+			return
+		}
+		if req.TemplateID == "" {
+			api.RespondWithPayload(w, false, "template_id required", nil)
+			return
+		}
+		if len(req.Recipients) == 0 {
+			api.RespondWithPayload(w, false, "recipients array must not be empty", nil)
+			return
+		}
+		userEmail := getRequesterEmailTemplate()
+		if userEmail == "" {
+			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			return
+		}
+
+		ctx := r.Context()
+		// Validate and build rows
+		rows := make([][]interface{}, 0, len(req.Recipients))
+		var validationErrors []string
+		for i, rec := range req.Recipients {
+			rtype := strings.ToUpper(strings.TrimSpace(rec.RecipientType))
+			if rtype == "" {
+				validationErrors = append(validationErrors, fmt.Sprintf("recipients[%d]: recipient_type required", i))
+				continue
+			}
+			if rtype == "USER" && rec.RecipientUserID == "" {
+				validationErrors = append(validationErrors, fmt.Sprintf("recipients[%d]: recipient_user_id required for USER type", i))
+				continue
+			}
+			if rtype == "ROLE" && rec.RecipientRole == "" {
+				validationErrors = append(validationErrors, fmt.Sprintf("recipients[%d]: recipient_role required for ROLE type", i))
+				continue
+			}
+			isActive := true
+			if rec.IsActive != nil {
+				isActive = *rec.IsActive
+			}
+			priority := 3
+			if rec.RecipientPriority != nil && *rec.RecipientPriority > 0 {
+				priority = *rec.RecipientPriority
+			}
+			rows = append(rows, []interface{}{
+				req.TemplateID,
+				rtype,
+				nullableStr(rec.RecipientUserID),
+				nullableStr(rec.RecipientRole),
+				isActive,
+				userEmail,
+				priority,
+			})
+		}
+		if len(validationErrors) > 0 {
+			api.RespondWithPayload(w, false, strings.Join(validationErrors, "; "), nil)
+			return
+		}
+
+		// Insert via transaction
+		tx, err := pgxPool.Begin(ctx)
+		if err != nil {
+			api.RespondWithPayload(w, false, "db error: "+err.Error(), nil)
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		if err := batchInsertRecipientsOnTx(ctx, tx, rows); err != nil {
+			api.RespondWithPayload(w, false, "insert failed: "+err.Error(), nil)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			return
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"template_id":    req.TemplateID,
+			"inserted_count": len(rows),
+		})
+	}
+}
+
+// nullableStr returns nil for empty strings so they land as SQL NULL.
+func nullableStr(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// batchInsertRecipientsOnTx inserts recipient rows using an already-open pgx transaction.
+// All rows land in the same tx as the parent template insert, guaranteeing atomicity.
+func batchInsertRecipientsOnTx(ctx context.Context, tx pgx.Tx, rows [][]interface{}) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	singleQ := `INSERT INTO notification_svc.template_recipient (template_id, recipient_type, recipient_user_id, recipient_role, is_active, created_by, recipient_priority) VALUES ($1::varchar,$2::varchar,$3::varchar,$4::varchar,$5::boolean,$6::varchar,$7::int)`
+	for idx, r := range rows {
+		args := make([]interface{}, 7)
+		for i := 0; i < 7; i++ {
+			if i < len(r) && r[i] != nil {
+				args[i] = r[i]
+			} else {
+				switch i {
+				case 4:
+					args[i] = true
+				case 2, 3:
+					args[i] = nil
+				case 6:
+					args[i] = 3 // default recipient_priority
+				default:
+					args[i] = ""
+				}
+			}
+		}
+		if _, err := tx.Exec(ctx, singleQ, args...); err != nil {
+			api.LogError("batchInsertRecipientsOnTx row %d failed: %v", idx, err)
+			return err
+		}
+	}
+	return nil
+}
+
 // helper: batch insert recipients
 func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateID string, rows [][]interface{}) error {
 	if len(rows) == 0 {
@@ -945,9 +1176,9 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 		// prepare rows for CopyFrom
 		cfRows := make([][]interface{}, 0, len(rows))
 		for _, r := range rows {
-			// ensure length 6 and normalize nils
-			row := make([]interface{}, 6)
-			for i := 0; i < 6; i++ {
+			// ensure length 7 and normalize nils
+			row := make([]interface{}, 7)
+			for i := 0; i < 7; i++ {
 				if i < len(r) {
 					if r[i] == nil {
 						// replace nils with appropriate typed zero-values or NULL
@@ -956,6 +1187,8 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 						} else if i == 2 || i == 3 {
 							// recipient_user_id and recipient_role should be NULL when absent
 							row[i] = nil
+						} else if i == 6 { // recipient_priority
+							row[i] = 3
 						} else {
 							row[i] = ""
 						}
@@ -967,6 +1200,8 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 						row[i] = true
 					} else if i == 2 || i == 3 {
 						row[i] = nil
+					} else if i == 6 {
+						row[i] = 3
 					} else {
 						row[i] = ""
 					}
@@ -974,7 +1209,7 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 			}
 			cfRows = append(cfRows, row)
 		}
-		_, err = conn.CopyFrom(ctx, pgx.Identifier{"notification_svc", "template_recipient"}, []string{"template_id", "recipient_type", "recipient_user_id", "recipient_role", "is_active", "created_by"}, pgx.CopyFromRows(cfRows))
+		_, err = conn.CopyFrom(ctx, pgx.Identifier{"notification_svc", "template_recipient"}, []string{"template_id", "recipient_type", "recipient_user_id", "recipient_role", "is_active", "created_by", "recipient_priority"}, pgx.CopyFromRows(cfRows))
 		if err == nil {
 			return nil
 		}
@@ -986,14 +1221,14 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 
 	// Fallback: insert rows one-by-one inside a transaction to avoid Postgres
 	// ambiguous type inference across multi-row parameter lists (SQLSTATE 42P08).
-	singleQ := `INSERT INTO notification_svc.template_recipient (template_id, recipient_type, recipient_user_id, recipient_role, is_active, created_by) VALUES ($1::varchar,$2::varchar,$3::varchar,$4::varchar,$5::boolean,$6::varchar)`
+	singleQ := `INSERT INTO notification_svc.template_recipient (template_id, recipient_type, recipient_user_id, recipient_role, is_active, created_by, recipient_priority) VALUES ($1::varchar,$2::varchar,$3::varchar,$4::varchar,$5::boolean,$6::varchar,$7::int)`
 	tx, tErr := pgxPool.Begin(ctx)
 	if tErr != nil {
 		api.LogError("batchInsertRecipients begin tx failed: %v", tErr)
 		// fallback to executing each on pool (best-effort)
 		for idx, r := range rows {
-			args := make([]interface{}, 6)
-			for i := 0; i < 6; i++ {
+			args := make([]interface{}, 7)
+			for i := 0; i < 7; i++ {
 				if i < len(r) && r[i] != nil {
 					args[i] = r[i]
 				} else {
@@ -1001,6 +1236,8 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 						args[i] = true
 					} else if i == 2 || i == 3 {
 						args[i] = nil
+					} else if i == 6 {
+						args[i] = 3
 					} else {
 						args[i] = ""
 					}
@@ -1019,8 +1256,8 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 	}()
 
 	for idx, r := range rows {
-		args := make([]interface{}, 6)
-		for i := 0; i < 6; i++ {
+		args := make([]interface{}, 7)
+		for i := 0; i < 7; i++ {
 			if i < len(r) && r[i] != nil {
 				args[i] = r[i]
 			} else {
@@ -1028,6 +1265,8 @@ func batchInsertRecipients(ctx context.Context, pgxPool *pgxpool.Pool, templateI
 					args[i] = true
 				} else if i == 2 || i == 3 {
 					args[i] = nil
+				} else if i == 6 {
+					args[i] = 3
 				} else {
 					args[i] = ""
 				}
@@ -1084,7 +1323,11 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 			if v, ok := rmap["is_active"].(bool); ok {
 				isActive = v
 			}
-			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy})
+			recipPriority := 3
+			if v, ok := rmap["recipient_priority"].(float64); ok && v > 0 {
+				recipPriority = int(v)
+			}
+			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy, recipPriority})
 		}
 		if err := batchInsertRecipients(ctx, pgxPool, templateID, rows); err != nil {
 			return 0, err
@@ -1166,6 +1409,122 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 	}
 }
 
+// populateRecipientsOnTx is the tx-bound version of populateRecipientsForTemplate.
+// All writes go through tx; read-only lookups (e.g. role→user expansion) use pgxPool.
+func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Pool, templateID string, strategy map[string]interface{}, createdBy string) (int, error) {
+	modeRaw, _ := strategy["mode"].(string)
+	mode := strings.ToUpper(strings.TrimSpace(modeRaw))
+	switch mode {
+	case "EXPLICIT":
+		recs, ok := strategy["recipients"].([]interface{})
+		if !ok || len(recs) == 0 {
+			return 0, fmt.Errorf("no explicit recipients provided")
+		}
+		var rows [][]interface{}
+		for _, ri := range recs {
+			rmap, ok := ri.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			rtype, _ := rmap["recipient_type"].(string)
+			var ruser, rrole interface{}
+			if s, ok := rmap["recipient_user_id"].(string); ok && s != "" {
+				ruser = s
+			}
+			if s, ok := rmap["recipient_role"].(string); ok && s != "" {
+				rrole = s
+			}
+			isActive := true
+			if v, ok := rmap["is_active"].(bool); ok {
+				isActive = v
+			}
+			recipPriority := 3
+			if v, ok := rmap["recipient_priority"].(float64); ok && v > 0 {
+				recipPriority = int(v)
+			}
+			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy, recipPriority})
+		}
+		return len(rows), batchInsertRecipientsOnTx(ctx, tx, rows)
+
+	case "ROLE":
+		roleName, _ := strategy["role"].(string)
+		if roleName == "" {
+			return 0, fmt.Errorf("role required for ROLE mode")
+		}
+		rollePriority := 3
+		if v, ok := strategy["recipient_priority"].(float64); ok && v > 0 {
+			rollePriority = int(v)
+		}
+		// Read-only lookup on pool (role→users) — this is fine, no write conflict
+		rowsU, err := pgxPool.Query(ctx,
+			`SELECT u.id FROM users u
+			  JOIN user_roles ur ON ur.user_id = u.id
+			  JOIN roles ro ON ro.id = ur.role_id
+			 WHERE ro.name = $1 OR ro.rolecode = $1`, roleName)
+		if err != nil {
+			return 0, err
+		}
+		defer rowsU.Close()
+		var userRows [][]interface{}
+		for rowsU.Next() {
+			var uid string
+			if err := rowsU.Scan(&uid); err == nil {
+				userRows = append(userRows, []interface{}{templateID, "USER", uid, nil, true, createdBy, rollePriority})
+			}
+		}
+		rowsU.Close()
+		if len(userRows) > 0 {
+			return len(userRows), batchInsertRecipientsOnTx(ctx, tx, userRows)
+		}
+		// fallback: insert a ROLE sentinel row
+		err = batchInsertRecipientsOnTx(ctx, tx, [][]interface{}{{templateID, "ROLE", nil, roleName, true, createdBy, rollePriority}})
+		if err != nil {
+			return 0, err
+		}
+		return 1, nil
+
+	case "USER":
+		uids, ok := strategy["user_ids"].([]interface{})
+		if !ok || len(uids) == 0 {
+			return 0, fmt.Errorf("user_ids required for USER mode")
+		}
+		userPriority := 3
+		if v, ok := strategy["recipient_priority"].(float64); ok && v > 0 {
+			userPriority = int(v)
+		}
+		var rows [][]interface{}
+		for _, ui := range uids {
+			if uid, ok := ui.(string); ok && uid != "" {
+				rows = append(rows, []interface{}{templateID, "USER", uid, nil, true, createdBy, userPriority})
+			}
+		}
+		return len(rows), batchInsertRecipientsOnTx(ctx, tx, rows)
+
+	case "ALL":
+		allPriority := 3
+		if v, ok := strategy["recipient_priority"].(float64); ok && v > 0 {
+			allPriority = int(v)
+		}
+		rowsU, err := pgxPool.Query(ctx, `SELECT id FROM users WHERE COALESCE(status,'') IN ('approved','active')`)
+		if err != nil {
+			return 0, err
+		}
+		defer rowsU.Close()
+		var rows [][]interface{}
+		for rowsU.Next() {
+			var uid string
+			if err := rowsU.Scan(&uid); err == nil {
+				rows = append(rows, []interface{}{templateID, "USER", uid, nil, true, createdBy, allPriority})
+			}
+		}
+		rowsU.Close()
+		return len(rows), batchInsertRecipientsOnTx(ctx, tx, rows)
+
+	default:
+		return 0, fmt.Errorf("unsupported recipient population mode: %s", mode)
+	}
+}
+
 // CreateTemplateWithRecipients creates a template and populates recipients per strategy
 func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1202,22 +1561,28 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// ── single transaction: template + audit_template + recipients ────────
+		// If recipients fail → whole tx rolls back → no dangling template row.
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
-		defer tx.Rollback(ctx)
+		defer tx.Rollback(ctx) // no-op after Commit
 
-		// create template
+		// 1. Insert template master row
 		insertQ := `INSERT INTO notification_svc.template (event_id, channel, role_scope, template_name, description, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING template_id`
 		var tplID string
-		if err := tx.QueryRow(ctx, insertQ, req.EventID, strings.ToUpper(req.Channel), req.RoleScope, req.TemplateName, req.Description, creator).Scan(&tplID); err != nil {
+		if err := tx.QueryRow(ctx, insertQ,
+			req.EventID, strings.ToUpper(req.Channel), req.RoleScope,
+			req.TemplateName, req.Description, creator,
+		).Scan(&tplID); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 
-		// insert audit_template (compute version_label)
+		// 2. Insert audit_template row
 		isHTMLVal := false
 		if req.IsHTML != nil {
 			isHTMLVal = *req.IsHTML
@@ -1228,24 +1593,35 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				formulaVal = jf
 			}
 		}
-		auditQ := `INSERT INTO notification_svc.audit_template (template_id, action_type, processing_status, subject, body_text, body_html, is_html_enabled, formula_steps, version_label, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,$4,$5,$6,(SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $8),$7,now())`
-		if _, err := tx.Exec(ctx, auditQ, tplID, req.Subject, req.BodyText, req.BodyHTML, isHTMLVal, formulaVal, creator, tplID); err != nil {
+		auditQ := `INSERT INTO notification_svc.audit_template
+			(template_id, action_type, processing_status, subject, body_text, body_html,
+			 is_html_enabled, formula_steps, version_label, requested_by, requested_at)
+			VALUES ($1,'CREATE','PENDING_APPROVAL',$2,$3,$4,$5,$6,
+			        (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $8),
+			        $7, now())`
+		if _, err := tx.Exec(ctx, auditQ,
+			tplID, req.Subject, req.BodyText, req.BodyHTML,
+			isHTMLVal, formulaVal, creator, tplID,
+		); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 
-		// populate recipients if strategy provided
+		// 3. Insert recipients inside the SAME tx (FK satisfied because template row
+		//    is visible within the transaction — Postgres sees intra-tx uncommitted rows).
+		//    populateRecipientsOnTx does read-only lookups on pgxPool and all writes via tx.
 		added := 0
 		if req.Strategy != nil {
-			// We operate outside tx for bulk recipient insert using pgxPool directly for simplicity
-			if c, err := populateRecipientsForTemplate(ctx, pgxPool, tplID, req.Strategy, creator); err != nil {
-				api.RespondWithPayload(w, false, "failed to populate recipients: "+err.Error(), nil)
+			c, err := populateRecipientsOnTx(ctx, tx, pgxPool, tplID, req.Strategy, creator)
+			if err != nil {
+				// tx.Rollback fires via defer — nothing is committed
+				api.RespondWithPayload(w, false, "recipients failed — rolled back: "+err.Error(), nil)
 				return
-			} else {
-				added = c
 			}
+			added = c
 		}
 
+		// 4. Commit everything atomically
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -1358,7 +1734,7 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Now populate recipients per-row (outside tx for performance)
+		// Now populate recipients per-row (outside tx — each uses its own pool conn)
 		totalAdded := 0
 		summary := make([]map[string]interface{}, 0, len(templateIDs))
 		for i, tplID := range templateIDs {

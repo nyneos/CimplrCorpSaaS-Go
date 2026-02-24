@@ -342,10 +342,22 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Handle DELETE approvals: mark master as deleted
+		// Activate the master event row so the dispatcher can find it
 		_, err = tx.Exec(ctx, `
 			UPDATE notification_svc.event
-			SET is_deleted = true
+			SET is_active = true
+			WHERE event_id = ANY($1::text[])
+			  AND COALESCE(is_deleted, false) = false
+		`, req.EventIDs)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// Handle DELETE approvals: mark master as deleted (overrides is_active above)
+		_, err = tx.Exec(ctx, `
+			UPDATE notification_svc.event
+			SET is_deleted = true, is_active = false
 			WHERE event_id IN (
 				SELECT DISTINCT a.event_id FROM notification_svc.audit_event a
 				WHERE a.event_id = ANY($1::text[]) AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'

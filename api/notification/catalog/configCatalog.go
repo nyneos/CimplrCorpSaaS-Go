@@ -29,7 +29,7 @@ func seedNotifConfigForEvents(ctx context.Context, pgxPool *pgxpool.Pool, eventI
 	pos := 1
 	for _, eid := range eventIDs {
 		for _, ch := range defaultChannels {
-			valParts = append(valParts, fmt.Sprintf("($%d,$%d,true,3,60,$%d,now())", pos, pos+1, pos+2))
+			valParts = append(valParts, fmt.Sprintf("($%d,$%d,true,3,60,3,$%d,now())", pos, pos+1, pos+2))
 			args = append(args, eid, ch, updatedBy)
 			pos += 3
 		}
@@ -37,7 +37,7 @@ func seedNotifConfigForEvents(ctx context.Context, pgxPool *pgxpool.Pool, eventI
 
 	q := fmt.Sprintf(`
 		INSERT INTO notification_svc.notification_config
-			(event_id, channel, is_enabled, retry_max, retry_backoff_secs, updated_by, updated_at)
+			(event_id, channel, is_enabled, retry_max, retry_backoff_secs, priority_level, updated_by, updated_at)
 		VALUES %s
 		ON CONFLICT (event_id, channel) DO NOTHING
 	`, strings.Join(valParts, ","))
@@ -67,6 +67,7 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			IsEnabled       *bool  `json:"is_enabled"`
 			RetryMax        *int   `json:"retry_max"`
 			RetryBackoffSec *int   `json:"retry_backoff_secs"`
+			PriorityLevel   *int   `json:"priority_level"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithPayload(w, false, "invalid request body", nil)
@@ -110,6 +111,11 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, *req.RetryBackoffSec)
 			pos++
 		}
+		if req.PriorityLevel != nil {
+			sets = append(sets, fmt.Sprintf("priority_level = $%d", pos))
+			args = append(args, *req.PriorityLevel)
+			pos++
+		}
 		sets = append(sets, fmt.Sprintf("updated_by = $%d", pos))
 		args = append(args, editor)
 		pos++
@@ -128,28 +134,32 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if req.RetryBackoffSec != nil {
 			retryBackoff = *req.RetryBackoffSec
 		}
+		priorityLevel := 3
+		if req.PriorityLevel != nil {
+			priorityLevel = *req.PriorityLevel
+		}
 
 		// pos now points to the next free param — append INSERT values after SET args
 		q := fmt.Sprintf(`
 			INSERT INTO notification_svc.notification_config
-				(event_id, channel, is_enabled, retry_max, retry_backoff_secs, updated_by, updated_at)
-			VALUES ($%d, $%d, $%d, $%d, $%d, $%d, now())
+				(event_id, channel, is_enabled, retry_max, retry_backoff_secs, priority_level, updated_by, updated_at)
+			VALUES ($%d, $%d, $%d, $%d, $%d, $%d, $%d, now())
 			ON CONFLICT (event_id, channel) DO UPDATE SET %s
-			RETURNING config_id, event_id, channel, is_enabled, retry_max, retry_backoff_secs,
+			RETURNING config_id, event_id, channel, is_enabled, retry_max, retry_backoff_secs, priority_level,
 			          COALESCE(updated_by,'') AS updated_by,
 			          TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at
 		`,
-			pos, pos+1, pos+2, pos+3, pos+4, pos+5,
+			pos, pos+1, pos+2, pos+3, pos+4, pos+5, pos+6,
 			strings.Join(sets, ", "),
 		)
-		args = append(args, req.EventID, req.Channel, isEnabled, retryMax, retryBackoff, editor)
+		args = append(args, req.EventID, req.Channel, isEnabled, retryMax, retryBackoff, priorityLevel, editor)
 
 		var configID, eventID, channel, updatedBy, updatedAt string
 		var isEnabledOut bool
-		var retryMaxOut, retryBackoffOut int
+		var retryMaxOut, retryBackoffOut, priorityLevelOut int
 		if err := pgxPool.QueryRow(ctx, q, args...).Scan(
 			&configID, &eventID, &channel, &isEnabledOut,
-			&retryMaxOut, &retryBackoffOut, &updatedBy, &updatedAt,
+			&retryMaxOut, &retryBackoffOut, &priorityLevelOut, &updatedBy, &updatedAt,
 		); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -162,6 +172,7 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"is_enabled":         isEnabledOut,
 			"retry_max":          retryMaxOut,
 			"retry_backoff_secs": retryBackoffOut,
+			"priority_level":     priorityLevelOut,
 			"updated_by":         updatedBy,
 			"updated_at":         updatedAt,
 		})

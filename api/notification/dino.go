@@ -65,6 +65,8 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB) {
 
 	// Template recipients
 	mux.Handle("/notification/template/recipient/create", middlewares.PreValidationMiddleware(pool)(catalog.CreateTemplateRecipient(pool)))
+	mux.Handle("/notification/template/recipient/bulk-create", middlewares.PreValidationMiddleware(pool)(catalog.BulkCreateRecipients(pool)))
+	mux.Handle("/notification/template/recipient/update", middlewares.PreValidationMiddleware(pool)(catalog.UpdateTemplateRecipient(pool)))
 	mux.Handle("/notification/template/recipient/list", middlewares.PreValidationMiddleware(pool)(catalog.GetRecipientsByTemplate(pool)))
 	mux.Handle("/notification/template/recipient/delete", middlewares.PreValidationMiddleware(pool)(catalog.DeleteTemplateRecipient(pool)))
 
