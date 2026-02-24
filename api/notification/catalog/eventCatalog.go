@@ -419,11 +419,25 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		// Use EXISTS subquery to avoid duplicates when an event has multiple audit rows.
+		// COALESCE all nullable columns so pgx never tries to scan NULL into a plain string.
 		q := `
-			SELECT m.event_id, m.module_code, m.sub_module_code, m.event_code, m.event_display_name, m.description, m.source_route
+			SELECT
+				m.event_id,
+				COALESCE(m.module_code,'')       AS module_code,
+				COALESCE(m.sub_module_code,'')   AS sub_module_code,
+				COALESCE(m.event_code,'')        AS event_code,
+				COALESCE(m.event_display_name,'') AS event_display_name,
+				COALESCE(m.description,'')       AS description,
+				COALESCE(m.source_route,'')      AS source_route
 			FROM notification_svc.event m
-			INNER JOIN notification_svc.audit_event a ON a.event_id = m.event_id
-			WHERE a.processing_status = 'APPROVED' AND m.is_active = true AND COALESCE(m.is_deleted,false) = false
+			WHERE m.is_active = true
+			  AND COALESCE(m.is_deleted, false) = false
+			  AND EXISTS (
+				  SELECT 1 FROM notification_svc.audit_event a
+				  WHERE a.event_id = m.event_id
+				    AND a.processing_status = 'APPROVED'
+			  )
 			ORDER BY m.event_display_name
 		`
 		rows, err := pgxPool.Query(ctx, q)
@@ -435,17 +449,23 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var id, module, sub, code, name, desc, route string
-			if err := rows.Scan(&id, &module, &sub, &code, &name, &desc, &route); err == nil {
-				out = append(out, map[string]interface{}{
-					"event_id":           id,
-					"module_code":        module,
-					"sub_module_code":    sub,
-					"event_code":         code,
-					"event_display_name": name,
-					"description":        desc,
-					"source_route":       route,
-				})
+			if err := rows.Scan(&id, &module, &sub, &code, &name, &desc, &route); err != nil {
+				api.LogError("GetEventsApprovedActive scan error: %v", err)
+				continue
 			}
+			out = append(out, map[string]interface{}{
+				"event_id":           id,
+				"module_code":        module,
+				"sub_module_code":    sub,
+				"event_code":         code,
+				"event_display_name": name,
+				"description":        desc,
+				"source_route":       route,
+			})
+		}
+		if rows.Err() != nil {
+			respondWithError(w, http.StatusInternalServerError, rows.Err().Error())
+			return
 		}
 		api.RespondWithPayload(w, true, "", out)
 	}
