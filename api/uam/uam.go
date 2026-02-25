@@ -19,6 +19,7 @@ func StartUAMService(db *sql.DB) {
 	/*users*/
 	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db))))
 	mux.Handle("/uam/users/get-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUsers(db))))
+	mux.Handle("/uam/users/get-approved-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetApprovedUser(db))))
 	mux.Handle("/uam/users/get-user-by-id", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUserById(db))))
 	mux.Handle("/uam/users/update-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.UpdateUser(db))))
 	mux.Handle("/uam/users/delete-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.DeleteUser(db))))
@@ -48,7 +49,3 @@ func StartUAMService(db *sql.DB) {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
 }
-
-
-
-

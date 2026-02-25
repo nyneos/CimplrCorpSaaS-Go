@@ -231,6 +231,71 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// Handler: Get all approved users
+// Expects JSON body: { "user_id": "<session-user-id>" }
+// Returns all users with status = 'Approved'
+func GetApprovedUser(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+			respondWithError(w, http.StatusBadRequest, "Missing user_id in request body")
+			return
+		}
+
+		// Get business units from middleware
+		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
+		if !ok || len(buNames) == 0 {
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
+		}
+
+		// Query all approved users
+		rows, err := db.Query(`
+			SELECT * FROM users 
+			WHERE business_unit_name = ANY($1::text[]) 
+			AND LOWER(TRIM(status)) = 'approved'
+			ORDER BY id DESC
+		`, pq.Array(buNames))
+
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer rows.Close()
+
+		cols, _ := rows.Columns()
+		users := []map[string]interface{}{}
+
+		for rows.Next() {
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+
+			rows.Scan(valPtrs...)
+
+			userMap := map[string]interface{}{}
+			for i, col := range cols {
+				userMap[col] = vals[i]
+			}
+
+			users = append(users, userMap)
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"users":   users,
+		})
+	}
+}
+
 // Handler: Update user
 func UpdateUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
