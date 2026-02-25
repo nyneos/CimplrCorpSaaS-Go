@@ -449,7 +449,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE 1=1
 			  AND COALESCE(a.is_deleted, false) = false
 			` + filterClause + `
-			ORDER BY t.template_name, a.requested_at DESC NULLS LAST
+			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamptz), COALESCE(a.checker_at, '1970-01-01'::timestamptz)) DESC NULLS LAST
 		`
 
 		var rows pgx.Rows
@@ -752,6 +752,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Accepts { "audit_ids": ["uuid1","uuid2"], "comment": "" }
 // For CREATE/EDIT approvals: activates the parent template row.
 // For DELETE approvals: sets is_deleted=true on the audit_template row itself.
+// Returns per-ID results so caller knows exactly which ones were skipped and why.
 func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -773,6 +774,66 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+
+		// Fetch current status of every supplied audit_id in one round-trip
+		statusRows, err := pgxPool.Query(ctx,
+			`SELECT audit_id::text, processing_status, COALESCE(is_deleted, false)
+			 FROM notification_svc.audit_template
+			 WHERE audit_id = ANY($1::uuid[])`,
+			req.AuditIDs)
+		if err != nil {
+			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
+			return
+		}
+		defer statusRows.Close()
+
+		type rowInfo struct{ status string; deleted bool }
+		current := make(map[string]rowInfo, len(req.AuditIDs))
+		for statusRows.Next() {
+			var id, status string
+			var deleted bool
+			if err := statusRows.Scan(&id, &status, &deleted); err != nil {
+				api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
+				return
+			}
+			current[id] = rowInfo{status, deleted}
+		}
+		if statusRows.Err() != nil {
+			api.RespondWithPayload(w, false, statusRows.Err().Error(), nil)
+			return
+		}
+
+		var eligible []string
+		var results []map[string]interface{}
+		for _, id := range req.AuditIDs {
+			info, found := current[id]
+			if !found {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": false, "reason": "not found",
+				})
+				continue
+			}
+			if info.deleted {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": false, "reason": "already deleted",
+				})
+				continue
+			}
+			if !strings.Contains(info.status, "PENDING") {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": false,
+					"reason": fmt.Sprintf("cannot approve — current status is '%s'", info.status),
+				})
+				continue
+			}
+			eligible = append(eligible, id)
+		}
+
+		if len(eligible) == 0 {
+			api.RespondWithPayload(w, false, "no eligible audit rows to approve", results)
+			return
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
@@ -780,14 +841,14 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// 1. Stamp all matching PENDING rows as APPROVED in one shot
-		_, err = tx.Exec(ctx,
+		// 1. Stamp all eligible PENDING rows as APPROVED in one shot
+		tag, err := tx.Exec(ctx,
 			`UPDATE notification_svc.audit_template
 			 SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
 			 WHERE audit_id = ANY($3::uuid[])
 			   AND processing_status LIKE '%PENDING%'
 			   AND COALESCE(is_deleted, false) = false`,
-			userEmail, req.Comment, req.AuditIDs)
+			userEmail, req.Comment, eligible)
 		if err != nil {
 			api.RespondWithPayload(w, false, "approve stamp failed: "+err.Error(), nil)
 			return
@@ -800,7 +861,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 SELECT DISTINCT template_id FROM notification_svc.audit_template
 				 WHERE audit_id = ANY($1::uuid[]) AND action_type = 'CREATE' AND processing_status = 'APPROVED'
 			 )`,
-			req.AuditIDs)
+			eligible)
 		if err != nil {
 			api.RespondWithPayload(w, false, "activate template failed: "+err.Error(), nil)
 			return
@@ -813,7 +874,7 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			 WHERE audit_id = ANY($1::uuid[])
 			   AND action_type = 'DELETE'
 			   AND processing_status = 'APPROVED'`,
-			req.AuditIDs)
+			eligible)
 		if err != nil {
 			api.RespondWithPayload(w, false, "delete flag failed: "+err.Error(), nil)
 			return
@@ -823,13 +884,23 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(req.AuditIDs), "checker": userEmail})
+
+		for _, id := range eligible {
+			results = append(results, map[string]interface{}{
+				"audit_id": id, "success": true, "status": "APPROVED",
+			})
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"approved_count": tag.RowsAffected(),
+			"checker":        userEmail,
+			"results":        results,
+		})
 	}
 }
 
 // BulkRejectTemplate rejects specific audit_template versions by audit_id.
 // Accepts { "audit_ids": ["uuid1","uuid2"], "comment": "" }
-// Single UPDATE — no transaction overhead needed.
+// Returns per-ID result so caller knows exactly which ones were skipped and why.
 func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -852,18 +923,87 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		// Single query — UPDATE is atomic on its own, no explicit tx needed
-		if _, err := pgxPool.Exec(ctx,
-			`UPDATE notification_svc.audit_template
-			 SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
-			 WHERE audit_id = ANY($3::uuid[])
-			   AND processing_status LIKE '%PENDING%'
-			   AND COALESCE(is_deleted, false) = false`,
-			userEmail, req.Comment, req.AuditIDs); err != nil {
-			api.RespondWithPayload(w, false, err.Error(), nil)
+		// Fetch current status of every supplied audit_id in one round-trip
+		statusRows, err := pgxPool.Query(ctx,
+			`SELECT audit_id::text, processing_status, COALESCE(is_deleted, false)
+			 FROM notification_svc.audit_template
+			 WHERE audit_id = ANY($1::uuid[])`,
+			req.AuditIDs)
+		if err != nil {
+			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"rejected_count": len(req.AuditIDs), "checker": userEmail})
+		defer statusRows.Close()
+
+		type rowInfo struct{ status string; deleted bool }
+		current := make(map[string]rowInfo, len(req.AuditIDs))
+		for statusRows.Next() {
+			var id, status string
+			var deleted bool
+			if err := statusRows.Scan(&id, &status, &deleted); err != nil {
+				api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
+				return
+			}
+			current[id] = rowInfo{status, deleted}
+		}
+		if statusRows.Err() != nil {
+			api.RespondWithPayload(w, false, statusRows.Err().Error(), nil)
+			return
+		}
+
+		var eligible []string
+		var results []map[string]interface{}
+		for _, id := range req.AuditIDs {
+			info, found := current[id]
+			if !found {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": false, "reason": "not found",
+				})
+				continue
+			}
+			if info.deleted {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": false, "reason": "already deleted",
+				})
+				continue
+			}
+			if !strings.Contains(info.status, "PENDING") {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": false,
+					"reason": fmt.Sprintf("cannot reject — current status is '%s'", info.status),
+				})
+				continue
+			}
+			eligible = append(eligible, id)
+		}
+
+		if len(eligible) > 0 {
+			tag, err := pgxPool.Exec(ctx,
+				`UPDATE notification_svc.audit_template
+				 SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
+				 WHERE audit_id = ANY($3::uuid[])
+				   AND processing_status LIKE '%PENDING%'
+				   AND COALESCE(is_deleted, false) = false`,
+				userEmail, req.Comment, eligible)
+			if err != nil {
+				api.RespondWithPayload(w, false, err.Error(), nil)
+				return
+			}
+			for _, id := range eligible {
+				results = append(results, map[string]interface{}{
+					"audit_id": id, "success": true, "status": "REJECTED",
+				})
+			}
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"rejected_count": tag.RowsAffected(),
+				"checker":        userEmail,
+				"results":        results,
+			})
+			return
+		}
+
+		// All IDs were ineligible — return detailed failures
+		api.RespondWithPayload(w, false, "no eligible audit rows to reject", results)
 	}
 }
 
