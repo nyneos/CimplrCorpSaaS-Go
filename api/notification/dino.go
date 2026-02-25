@@ -62,6 +62,7 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/notification/template/audit-history", middlewares.PreValidationMiddleware(pool)(catalog.GetTemplateAuditHistory(pool)))
 	mux.Handle("/notification/template/bulk-approve", middlewares.PreValidationMiddleware(pool)(catalog.BulkApproveTemplate(pool)))
 	mux.Handle("/notification/template/bulk-reject", middlewares.PreValidationMiddleware(pool)(catalog.BulkRejectTemplate(pool)))
+	mux.Handle("/notification/template/version/delete", middlewares.PreValidationMiddleware(pool)(catalog.DeleteTemplateVersion(pool)))
 
 	// Template recipients
 	mux.Handle("/notification/template/recipient/create", middlewares.PreValidationMiddleware(pool)(catalog.CreateTemplateRecipient(pool)))

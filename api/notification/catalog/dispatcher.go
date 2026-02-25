@@ -60,6 +60,7 @@ package catalog
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	notificationFunctions "CimplrCorpSaas/api/notification/functions"
 	"context"
 	"encoding/json"
@@ -223,20 +224,47 @@ func dispatchNotification(
 
 	// Step 4 — evaluate templates per recipient concurrently
 
-	// Resolve sender info from payload (e.g. ApprovedBy) so outbox/send_history
-	// can record who approved/triggered the notification. ApprovedBy may be
-	// a user id or an email; try to resolve into user id, email, and name.
+	// Resolve the identity of the person who TRIGGERED this event so that
+	// outbox.sender_* and send_history.sender_* are always populated.
+	//
+	// Strategy (fastest → slowest):
+	//   1. Pick the first non-empty actor UUID from the payload using every key
+	//      any event can carry (RequestedBy, CheckerBy, ApprovedBy, …).
+	//   2. Check the in-memory active session map — already has UserID + Email + Name,
+	//      so no DB hit needed for logged-in users.
+	//   3. Fall back to a DB query (id OR email match) for non-session actors.
+	//   4. If everything fails, store the raw string as sender_name so the field
+	//      is never blank.
 	var senderID, senderEmail, senderName, senderCode, senderIdentifier string
-	if approver := payloadString(payload, "ApprovedBy", "Approver", "ApproverEmail", "ApprovedByEmail"); approver != "" {
-		var uid, uemail, uname string
-		q := `SELECT id::text, COALESCE(email,''), COALESCE(employee_name,'') FROM users WHERE id::text=$1 OR email=$1 LIMIT 1`
-		if err := pool.QueryRow(ctx, q, approver).Scan(&uid, &uemail, &uname); err == nil {
+	actorValue := payloadString(payload,
+		"ApprovedBy", "CheckerBy",
+		"RejectedBy",
+		"RequestedBy",
+		"UploadedBy", "CreatedBy", "UpdatedBy",
+		"Approver", "ApproverEmail", "ApprovedByEmail",
+		"UserID",
+	)
+	if actorValue != "" {
+		// Pass 1 — check active sessions (in-memory, free)
+		if uid, uemail, uname, ok := lookupSenderFromSession(actorValue); ok {
 			senderID = uid
 			senderEmail = uemail
 			senderName = uname
-			// senderCode / senderIdentifier not currently present on users table — leave empty
+			api.LogInfo("dispatchNotification: resolved sender from session userID=%s name=%s email=%s", uid, uname, uemail)
 		} else {
-			api.LogInfo("dispatchNotification: approver lookup failed for '%s': %v", approver, err)
+			// Pass 2 — hit the DB (id::text = $1 OR email = $1)
+			var uid, uemail, uname string
+			q := `SELECT id::text, COALESCE(email,''), COALESCE(employee_name,'') FROM users WHERE id::text=$1 OR email=$1 LIMIT 1`
+			if err := pool.QueryRow(ctx, q, actorValue).Scan(&uid, &uemail, &uname); err == nil {
+				senderID = uid
+				senderEmail = uemail
+				senderName = uname
+				api.LogInfo("dispatchNotification: resolved sender from DB userID=%s name=%s email=%s", uid, uname, uemail)
+			} else {
+				// Pass 3 — raw fallback so sender_name is never blank
+				senderName = actorValue
+				api.LogInfo("dispatchNotification: actor '%s' not in session or DB (%v); using raw value as sender_name", actorValue, err)
+			}
 		}
 	}
 
@@ -772,6 +800,20 @@ func shallowCopyPayload(src map[string]interface{}) map[string]interface{} {
 		dst[k] = v
 	}
 	return dst
+}
+
+// lookupSenderFromSession checks the in-memory active session list for a user
+// whose UserID or Email matches actorValue. Returns (userID, email, name, true)
+// when found, or ("", "", "", false) when not found.
+// This avoids a DB round-trip for the common case where the triggering user
+// is currently logged in.
+func lookupSenderFromSession(actorValue string) (string, string, string, bool) {
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == actorValue || s.Email == actorValue {
+			return s.UserID, s.Email, s.Name, true
+		}
+	}
+	return "", "", "", false
 }
 
 // payloadString returns the first non-empty string value for any of the given keys.
