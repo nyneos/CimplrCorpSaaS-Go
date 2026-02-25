@@ -348,21 +348,31 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Flat: one row per audit_template entry (every version of every template).
 // Same template_id appears multiple times — one row per version, newest first.
 // history CTE gives created_by/at, edited_by/at, deleted_by/at on every row.
-// Optional body filter: { "template_id": "TPL-xxx" }
+// Optional body filter: { "template_id": "TPL-xxx", "version_label": "v2" }
 func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TemplateID string `json:"template_id"`
+			TemplateID   string `json:"template_id"`
+			VersionLabel string `json:"version_label"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		ctx := r.Context()
 
-		filterClause := ""
+		// Build dynamic filter clause with correct positional args
+		var filterParts []string
 		var args []interface{}
 		if req.TemplateID != "" {
-			filterClause = "AND a.template_id = $1"
 			args = append(args, req.TemplateID)
+			filterParts = append(filterParts, fmt.Sprintf("AND a.template_id = $%d", len(args)))
+		}
+		if req.VersionLabel != "" {
+			args = append(args, req.VersionLabel)
+			filterParts = append(filterParts, fmt.Sprintf("AND a.version_label = $%d", len(args)))
+		}
+		filterClause := ""
+		if len(filterParts) > 0 {
+			filterClause = " " + strings.Join(filterParts, " ")
 		}
 
 		q := `

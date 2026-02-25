@@ -712,15 +712,30 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return sb.String(), nil
 
 	case "FORMAT_CURRENCY":
-		// FORMAT_CURRENCY(val) → same as FORMAT_NUMBER but explicit alias
-		if len(args) != 1 {
-			return "", errors.New("FORMAT_CURRENCY expects 1 numeric argument")
+		// FORMAT_CURRENCY(val) or FORMAT_CURRENCY(val, 'CurrencyCode')
+		// The optional second argument is a currency-code label (e.g. 'INR') that
+		// is prepended to the formatted number. It is accepted but not required.
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("FORMAT_CURRENCY expects 1 or 2 arguments: value [, 'currency_code']")
 		}
 		v, ok := resolveNumericArg(args[0], payload)
 		if !ok {
 			return "", nil
 		}
-		return formatCurrency(v), nil
+		formatted := formatCurrency(v)
+		if len(args) == 2 {
+			// second arg is a currency code literal like 'INR' or a payload var
+			code := unquote(args[1])
+			if code == "" {
+				if cv, ok2 := lookupPayload(args[1], payload); ok2 {
+					code = fmt.Sprintf("%v", cv)
+				}
+			}
+			if code != "" {
+				formatted = code + " " + formatted
+			}
+		}
+		return formatted, nil
 
 	case "IF":
 		// IF(condition_field, 'true_value', 'false_value')
