@@ -15,6 +15,7 @@ import (
 	investmentdashboards "CimplrCorpSaas/api/dash/investmentDashboards"
 	landingpage "CimplrCorpSaas/api/dash/landing-page"
 	liqsnap "CimplrCorpSaas/api/dash/liqsnap"
+	notifDash "CimplrCorpSaas/api/dash/notification"
 	payablereceivabledash "CimplrCorpSaas/api/dash/payableReceivableDash"
 	plannedinflowoutflowdash "CimplrCorpSaas/api/dash/plannedInflowOutflowDash"
 	projectiondash "CimplrCorpSaas/api/dash/projectionDash"
@@ -194,6 +195,19 @@ func StartDashService(db *sql.DB) {
 
 	// Planned Inflow/Outflow Dashboard
 	mux.Handle("/dash/planned-inflow-outflow", middlewares.PreValidationMiddleware(pgxPool)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
+
+	// ── Notification Dashboard ────────────────────────────────────────────────
+	mux.Handle("/dash/notification/kpi",               middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetKPI(pgxPool)))
+	mux.Handle("/dash/notification/logs",              middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetLogs(pgxPool)))
+	mux.Handle("/dash/notification/channel-breakdown", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetChannelBreakdown(pgxPool)))
+	mux.Handle("/dash/notification/hourly-trend",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetHourlyTrend(pgxPool)))
+	mux.Handle("/dash/notification/top-events",        middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTopEvents(pgxPool)))
+	mux.Handle("/dash/notification/timeline",          middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTimeline(pgxPool)))
+	mux.Handle("/dash/notification/retry-stats",       middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetRetryStats(pgxPool)))
+	mux.Handle("/dash/notification/send-history",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetSendHistory(pgxPool)))
+	mux.Handle("/dash/notification/provider-stats",    middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetProviderStats(pgxPool)))
+	mux.Handle("/dash/notification/event-config",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetEventConfig(pgxPool)))
+	mux.Handle("/dash/notification/overview",          middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
 	log.Println("Dashboard Service started on :4143")
 	err = http.ListenAndServe(":4143", mux)
