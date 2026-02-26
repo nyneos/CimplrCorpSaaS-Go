@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -308,6 +309,7 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ov.old_body_html,'')        AS old_body_html,
 				COALESCE(ov.old_is_html_enabled,false) AS old_is_html_enabled,
 				COALESCE(ov.old_version_label,'')    AS old_version_label,
+				COALESCE(l.old_recipients, '{}')     AS old_recipients,
 
 				` + recipientSubquery + ` AS recipients
 
@@ -439,6 +441,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(ov.old_is_html_enabled,false) AS old_is_html_enabled,
 				COALESCE(ov.old_version_label,'')    AS old_version_label,
 				COALESCE(a.is_deleted, false)         AS version_is_deleted,
+				COALESCE(a.old_recipients, '{}')      AS old_recipients,
 
 				` + recipientSubquery + ` AS recipients
 
@@ -489,20 +492,27 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // EditTemplateSingle — POST /notification/template/edit
 //
-// Creates a NEW audit_template row with action_type='EDIT' and
-// processing_status='PENDING_APPROVAL'. The version_label is auto-incremented
-// (COUNT(*)+1 across ALL audit rows for this template, regardless of status).
-// The notification_svc.template master row is NOT touched until a checker
-// approves the edit. Every call produces a new version — no overwrites.
+// Accepts the same shape as CreateTemplateWithRecipients plus template_id.
+// Snapshots the current APPROVED audit row's content into old_subject/body/html/formula
+// and the live template_recipient rows into old_recipients (JSONB).
+// Inserts a new audit_template row with action_type='EDIT', processing_status='PENDING_EDIT_APPROVAL'.
+// Also accepts optional recipient_strategy to record the intended recipient change.
+// The template master row and recipient rows are NOT modified until a checker approves.
 func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TemplateID string `json:"template_id"`
-			Subject    string `json:"subject"`
-			BodyText   string `json:"body_text"`
-			BodyHTML   string `json:"body_html"`
-			IsHTML     *bool  `json:"is_html_enabled"`
-			Formula    any    `json:"formula_steps"`
+			TemplateID   string                 `json:"template_id"`
+			Subject      string                 `json:"subject"`
+			BodyText     string                 `json:"body_text"`
+			BodyHTML     string                 `json:"body_html"`
+			IsHTML       *bool                  `json:"is_html_enabled"`
+			Formula      any                    `json:"formula_steps"`
+			ChangeNote   string                 `json:"change_note"`
+			Strategy     map[string]interface{} `json:"recipient_strategy"`
+			// template-level fields (optional — update template master on approval)
+			TemplateName string `json:"template_name"`
+			Description  string `json:"description"`
+			RoleScope    string `json:"role_scope"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithPayload(w, false, "invalid request body", nil)
@@ -516,7 +526,6 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			def := false
 			req.IsHTML = &def
 		}
-
 		editor := getRequesterEmailTemplate()
 		if editor == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
@@ -532,45 +541,101 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Verify template exists
+		// ── Step 1: verify template exists ──────────────────────────────────────
 		var exists bool
-		if err := pgxPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM notification_svc.template WHERE template_id=$1)`, req.TemplateID).Scan(&exists); err != nil || !exists {
+		if err := pgxPool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM notification_svc.template WHERE template_id=$1)`,
+			req.TemplateID).Scan(&exists); err != nil || !exists {
 			api.RespondWithPayload(w, false, "template not found", nil)
 			return
 		}
 
-		// Insert a new EDIT audit row. Version = COUNT(*)+1 across ALL audit rows
-		// for this template (same formula used by CREATE), guaranteeing strictly
-		// increasing version numbers regardless of action_type.
+		// ── Step 2: snapshot current APPROVED audit row (old_* fields) ──────────
+		var oldSubject, oldBodyText, oldBodyHTML sql.NullString
+		var oldIsHTML sql.NullBool
+		var oldFormula []byte
+		_ = pgxPool.QueryRow(ctx,
+			`SELECT COALESCE(subject,''), COALESCE(body_text,''), COALESCE(body_html,''),
+			        COALESCE(is_html_enabled,false), COALESCE(formula_steps,'[]'::jsonb)
+			 FROM notification_svc.audit_template
+			 WHERE template_id = $1 AND processing_status = 'APPROVED'
+			   AND COALESCE(is_deleted,false) = false
+			 ORDER BY requested_at DESC LIMIT 1`,
+			req.TemplateID,
+		).Scan(&oldSubject, &oldBodyText, &oldBodyHTML, &oldIsHTML, &oldFormula)
+		// Not fatal if no approved version yet — old_* will just be empty
+
+		// ── Step 3: snapshot current live recipients as JSONB ────────────────────
+		var oldRecipientsJSON []byte
+		_ = pgxPool.QueryRow(ctx,
+			`SELECT COALESCE(
+				(SELECT json_agg(json_build_object(
+					'recipient_type',    tr.recipient_type,
+					'recipient_role',    COALESCE(tr.recipient_role,''),
+					'recipient_user_id', COALESCE(tr.recipient_user_id,''),
+					'recipient_priority', tr.recipient_priority,
+					'is_active',         tr.is_active
+				))
+				FROM notification_svc.template_recipient tr
+				WHERE tr.template_id = $1 AND tr.is_active = true
+			), '[]'::json)::jsonb`,
+			req.TemplateID,
+		).Scan(&oldRecipientsJSON)
+		if len(oldRecipientsJSON) == 0 {
+			oldRecipientsJSON = []byte("[]")
+		}
+
+		// ── Step 4: marshal recipient_strategy for storage if provided ───────────
+		var strategyJSON []byte
+		if req.Strategy != nil {
+			if sj, err := json.Marshal(req.Strategy); err == nil {
+				strategyJSON = sj
+			}
+		}
+		// We store strategy in change_note as JSON prefix if no dedicated column;
+		// change_note field is used directly from req.ChangeNote.
+		changeNote := req.ChangeNote
+		if len(strategyJSON) > 0 && changeNote == "" {
+			changeNote = string(strategyJSON)
+		}
+
+		// ── Step 5: insert new EDIT audit row with all old_* snapshots ───────────
 		auditQ := `
 			INSERT INTO notification_svc.audit_template
 				(template_id, action_type, processing_status,
 				 subject, body_text, body_html, is_html_enabled, formula_steps,
-				 version_label, requested_by, requested_at)
+				 version_label, requested_by, requested_at, change_note,
+				 old_subject, old_body_text, old_body_html, old_formula_steps,
+				 old_recipients)
 			VALUES
 				($1, 'EDIT', 'PENDING_EDIT_APPROVAL',
 				 $2, $3, $4, $5, $6,
-				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $7),
-				 $8, now())
+				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $1),
+				 $7, now(), $8,
+				 $9, $10, $11, $12,
+				 $13)
 			RETURNING audit_id::text, version_label
 		`
 		var newAuditID, newVersion string
 		if err := pgxPool.QueryRow(ctx, auditQ,
 			req.TemplateID,
 			req.Subject, req.BodyText, req.BodyHTML, *req.IsHTML, formulaVal,
-			req.TemplateID, editor,
+			editor, changeNote,
+			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldFormula,
+			oldRecipientsJSON,
 		).Scan(&newAuditID, &newVersion); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"template_id":   req.TemplateID,
-			"audit_id":      newAuditID,
-			"version_label": newVersion,
-			"action_type":   "EDIT",
-			"status":        "PENDING_EDIT_APPROVAL",
-			"requested_by":  editor,
+			"template_id":    req.TemplateID,
+			"audit_id":       newAuditID,
+			"version_label":  newVersion,
+			"action_type":    "EDIT",
+			"status":         "PENDING_EDIT_APPROVAL",
+			"requested_by":   editor,
+			"old_recipients": string(oldRecipientsJSON),
 		})
 	}
 }
@@ -595,7 +660,8 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					'formula_steps', a.formula_steps, 'version_label', COALESCE(a.version_label,''),
 					'requested_by', COALESCE(a.requested_by,''), 'requested_at', TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),
 					'checker_by', COALESCE(a.checker_by,''), 'checker_at', TO_CHAR(a.checker_at,'YYYY-MM-DD HH24:MI:SS'),
-					'checker_comment', COALESCE(a.checker_comment,'')
+					'checker_comment', COALESCE(a.checker_comment,''),
+					'old_recipients', COALESCE(a.old_recipients, '{}')
 				) ORDER BY a.requested_at DESC) FROM notification_svc.audit_template a WHERE a.template_id = t.template_id AND COALESCE(a.is_deleted, false) = false), '[]'::json) AS audits,
 				%s AS recipients
 			FROM notification_svc.template t WHERE t.template_id = $1 LIMIT 1`, recipientSubquery)
@@ -701,7 +767,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		q := `SELECT audit_id, template_id, action_type, processing_status, subject, body_text, body_html, is_html_enabled, formula_steps, version_label, requested_by, requested_at, checker_by, checker_at, checker_comment, old_subject, old_body_text, old_body_html, old_formula_steps, COALESCE(is_deleted,false) AS is_deleted FROM notification_svc.audit_template WHERE template_id = $1 ORDER BY requested_at DESC`
+		q := `SELECT audit_id, template_id, action_type, processing_status, subject, body_text, body_html, is_html_enabled, formula_steps, version_label, requested_by, requested_at, checker_by, checker_at, checker_comment, old_subject, old_body_text, old_body_html, old_formula_steps, COALESCE(is_deleted,false) AS is_deleted, COALESCE(old_recipients,'{}') AS old_recipients FROM notification_svc.audit_template WHERE template_id = $1 ORDER BY requested_at DESC`
 		rows, err := pgxPool.Query(ctx, q, req.TemplateID)
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
@@ -719,7 +785,8 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var oldSubject, oldBodyText, oldBodyHTML *string
 			var oldFormula interface{}
 			var isDeleted bool
-			if err := rows.Scan(&auditID, &templateID, &action, &proc, &subject, &bodyText, &bodyHTML, &isHTML, &formula, &versionLabel, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &oldSubject, &oldBodyText, &oldBodyHTML, &oldFormula, &isDeleted); err == nil {
+			var oldRecipients interface{}
+			if err := rows.Scan(&auditID, &templateID, &action, &proc, &subject, &bodyText, &bodyHTML, &isHTML, &formula, &versionLabel, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &oldSubject, &oldBodyText, &oldBodyHTML, &oldFormula, &isDeleted, &oldRecipients); err == nil {
 				out = append(out, map[string]interface{}{
 					"audit_id":          auditID,
 					"template_id":       templateID,
@@ -741,6 +808,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"old_body_html":     oldBodyHTML,
 					"old_formula_steps": oldFormula,
 					"is_deleted":        isDeleted,
+					"old_recipients":    oldRecipients,
 				})
 			}
 		}

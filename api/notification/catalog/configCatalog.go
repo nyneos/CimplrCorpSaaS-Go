@@ -29,7 +29,7 @@ func seedNotifConfigForEvents(ctx context.Context, pgxPool *pgxpool.Pool, eventI
 	pos := 1
 	for _, eid := range eventIDs {
 		for _, ch := range defaultChannels {
-			valParts = append(valParts, fmt.Sprintf("($%d,$%d,true,3,60,3,$%d,now())", pos, pos+1, pos+2))
+			valParts = append(valParts, fmt.Sprintf("($%d,$%d,false,3,60,3,$%d,now())", pos, pos+1, pos+2))
 			args = append(args, eid, ch, updatedBy)
 			pos += 3
 		}
