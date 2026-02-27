@@ -4,6 +4,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -385,6 +387,25 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		// Notify: bulk limit creation submitted with FULL record data
+		// Collect successful limit_ids from results
+		createdLimitIDs := []string{}
+		for _, r := range results {
+			if success, ok := r["success"].(bool); ok && success {
+				if limitID, ok := r["limit_id"].(string); ok && limitID != "" {
+					createdLimitIDs = append(createdLimitIDs, limitID)
+				}
+			}
+		}
+		if len(createdLimitIDs) > 0 {
+			payload := BuildLimitNotifPayload(context.Background(), pgxPool, createdLimitIDs, "CREATE", requestedBy)
+			go catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/cash/limit/bulk-create",
+				fmt.Sprintf("LIMIT_BULK_CREATE/%s/%d", req.UserID, time.Now().UnixMilli()),
+				payload.ToMap(),
+			)
+		}
 	}
 }
 
@@ -591,6 +612,16 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithResult(w, true, req.LimitID)
+		// Notify: limit updated with FULL record data
+		capturedLimitID := req.LimitID
+		capturedUser := req.UserID
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, []string{capturedLimitID}, "UPDATE", requestedBy)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/limit/update",
+			fmt.Sprintf("LIMIT_UPDATE/%s/%s", capturedLimitID, capturedUser),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -663,6 +694,16 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		// Notify: limits submitted for deletion with FULL record data
+		capturedUser := req.UserID
+		capturedIDs := req.LimitIDs
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/limit/delete",
+			fmt.Sprintf("LIMIT_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -976,6 +1017,19 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"approved_count": len(actionIDs),
 			"deleted":        deleted,
 		})
+		// Notify: limits approved with FULL record data
+		capturedUser := req.UserID
+		capturedIDs := req.LimitIDs
+		capturedDeleted := deleted
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", checkerBy)
+		payloadMap := payload.ToMap()
+		payloadMap["DeletedIDs"] = capturedDeleted
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/limit/approve",
+			fmt.Sprintf("LIMIT_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -1053,6 +1107,16 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rejected_count": len(actionIDs),
 		})
+		// Notify: limits rejected with FULL record data
+		capturedUser := req.UserID
+		capturedIDs := req.LimitIDs
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", checkerBy)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/limit/reject",
+			fmt.Sprintf("LIMIT_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 

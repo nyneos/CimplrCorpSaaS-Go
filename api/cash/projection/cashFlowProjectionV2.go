@@ -3,6 +3,7 @@ package projection
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -157,6 +158,19 @@ func DeleteCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		elapsed := time.Since(start)
 		log.Printf("[DeleteCashFlowProposalV2] Processed %d proposals in %v", len(req.ProposalIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Marked %d proposals for deletion in %v", len(req.ProposalIDs), elapsed))
+		// Notify: FULL proposal data for rich templates
+		capturedIDs := req.ProposalIDs
+		capturedUser := req.UserID
+		capturedReason := req.Reason
+		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["Reason"] = capturedReason
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/projection/v2/delete",
+			fmt.Sprintf("PROJ_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -277,6 +291,19 @@ func BulkRejectCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFunc
 		elapsed := time.Since(start)
 		log.Printf("[BulkRejectCashFlowProposalActionsV2] Rejected %d proposals in %v", len(actionIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Rejected %d proposals in %v", len(actionIDs), elapsed))
+		// Notify: FULL proposal data for rich templates
+		capturedIDs := req.ProposalIDs
+		capturedUser := req.UserID
+		capturedComment := req.Comment
+		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["CheckerComment"] = capturedComment
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/projection/v2/reject",
+			fmt.Sprintf("PROJ_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -422,6 +449,25 @@ func BulkApproveCashFlowProposalActionsV2(pgxPool *pgxpool.Pool) http.HandlerFun
 			len(actionIDs), len(deleteProposalIDs), elapsed)
 		api.RespondWithResult(w, true, fmt.Sprintf("Approved %d proposals (%d deleted) in %v",
 			len(actionIDs), len(deleteProposalIDs), elapsed))
+		// Notify: FULL proposal data for rich templates including deleted proposals
+		capturedIDs := req.ProposalIDs
+		capturedDeletedIDs := deleteProposalIDs
+		capturedUser := req.UserID
+		capturedComment := req.Comment
+		capturedCheckerBy := checkerBy
+		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["CheckerComment"] = capturedComment
+		payloadMap["CheckerBy"] = capturedCheckerBy
+		payloadMap["DeletedIDs"] = capturedDeletedIDs
+		// Scalar aliases for template {{Count}}, {{TotalExpectedAmount}} etc.
+		payloadMap["Count"] = len(capturedIDs)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/projection/v2/approve",
+			fmt.Sprintf("PROJ_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -580,11 +626,20 @@ func CreateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		// Notify: FULL proposal data for rich templates
+		capturedProposalID := proposalID
+		capturedUser := req.UserID
+		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, []string{capturedProposalID}, "CREATE", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/projection/v2/create",
+			fmt.Sprintf("PROJ_CREATE/%s/%d", capturedProposalID, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
+
 		api.RespondWithResult(w, true, fmt.Sprintf("Successfully created proposal %s with %d items", proposalID, created))
 	}
 }
-
-// Helper to create NULL string
 func nullString(s string) interface{} {
 	if s == "" {
 		return nil
@@ -1084,6 +1139,32 @@ func UpdateCashFlowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		elapsed := time.Since(start)
 		log.Printf("[UpdateCashFlowProposalV2] Updated proposal %s with %d items in %v", req.ProposalID, updated, elapsed)
+		// Notify: FULL proposal data for rich templates
+		capturedProposalID := req.ProposalID
+		capturedUser := req.UserID
+		capturedReason := req.Reason
+		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, []string{capturedProposalID}, "UPDATE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["Reason"] = capturedReason
+		// Scalar aliases for template {{ProposalID}}, {{ProposalName}}, {{UpdatedBy}} etc.
+		payloadMap["ProposalID"] = capturedProposalID
+		payloadMap["UpdatedBy"] = capturedUser
+		payloadMap["ItemCount"] = payload.TotalItemCount
+		if len(payload.Proposals) > 0 {
+			prop := payload.Proposals[0]
+			if name, ok := prop["proposal_name"]; ok && name != nil {
+				payloadMap["ProposalName"] = fmt.Sprintf("%v", name)
+			}
+			if status, ok := prop["processing_status"]; ok && status != nil {
+				payloadMap["Status"] = fmt.Sprintf("%v", status)
+			}
+		}
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/projection/v2/update",
+			fmt.Sprintf("PROJ_UPDATE/%s/%d", capturedProposalID, time.Now().UnixMilli()),
+			payloadMap,
+		)
 		api.RespondWithResult(w, true, fmt.Sprintf("Updated proposal with %d items in %v", updated, elapsed))
 	}
 }

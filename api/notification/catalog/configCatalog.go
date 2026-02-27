@@ -234,19 +234,29 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				nc.retry_backoff_secs,
 				COALESCE(nc.updated_by,'')         AS updated_by,
 				TO_CHAR(nc.updated_at,'YYYY-MM-DD HH24:MI:SS') AS updated_at,
-				-- has_template: true if at least one non-deleted template exists
+				-- has_template: true if at least one approved, non-archived template exists
 				-- for this (event_id, channel) combination
 				EXISTS (
 					SELECT 1
 					FROM notification_svc.template t
+					JOIN notification_svc.audit_template at ON at.template_id = t.template_id
 					WHERE t.event_id  = nc.event_id
 					  AND t.channel   = nc.channel
-					  AND COALESCE(t.is_deleted, false) = false
+					  AND at.processing_status = 'APPROVED'
+					  AND COALESCE(at.is_deleted, false) = false
 				) AS has_template
 			FROM notification_svc.notification_config nc
 			LEFT JOIN notification_svc.event e ON e.event_id = nc.event_id
+			LEFT JOIN LATERAL (
+				SELECT GREATEST(
+					COALESCE(MAX(a.requested_at), '1970-01-01'::timestamp),
+					COALESCE(MAX(a.checker_at),   '1970-01-01'::timestamp)
+				) AS latest_ts
+				FROM notification_svc.audit_event a
+				WHERE a.event_id = nc.event_id
+			) la ON true
 		` + whereClause + `
-			ORDER BY e.event_display_name, nc.channel
+			ORDER BY la.latest_ts DESC, e.event_display_name, nc.channel
 		`
 
 		rows, err := pgxPool.Query(ctx, q, args...)

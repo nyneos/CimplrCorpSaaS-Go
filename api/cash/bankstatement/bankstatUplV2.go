@@ -3,9 +3,12 @@ package bankstatement
 import (
 	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"bytes"
 	"context"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	// "regexp"
 	"log"
@@ -3680,7 +3683,7 @@ func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
 }
 
 // 3. Approve a bank statement (POST, req: user_id, bank_statement_id)
-func ApproveBankStatementHandler(db *sql.DB) http.Handler {
+func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -3971,6 +3974,17 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 					continue
 				}
 
+				// Fire notification asynchronously with FULL bank statement data
+				capturedID := bsid
+				capturedUser := body.UserID
+				payload := BuildBankStatementNotifPayload(context.Background(), pgxPool, []string{capturedID}, "APPROVE", capturedUser)
+				go catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/cash/bank-statements/v2/approve",
+					fmt.Sprintf("BSAPPROVE/%s/%d", bsid, time.Now().UnixMilli()),
+					payload,
+				)
+
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
 					"success":           true,
@@ -3987,7 +4001,7 @@ func ApproveBankStatementHandler(db *sql.DB) http.Handler {
 }
 
 // 4. Reject a bank statement (POST, req: user_id, bank_statement_id)
-func RejectBankStatementHandler(db *sql.DB) http.Handler {
+func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -4038,11 +4052,25 @@ func RejectBankStatementHandler(db *sql.DB) http.Handler {
 			"success": true,
 			"results": results,
 		})
+		// Fire notification — use FULL bank statement data for rich templates
+		if pgxPool != nil {
+			capturedIDs := body.BankStatementIDs
+			capturedUser := body.UserID
+			capturedComment := body.Comment
+			payload := BuildBankStatementNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+			payload["Comment"] = capturedComment
+			go catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/cash/bank-statements/v2/reject",
+				fmt.Sprintf("BSREJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+				payload,
+			)
+		}
 	})
 }
 
 // 5. Delete bank statement, its transactions, and its balance (POST, req: user_id, bank_statement_id)
-func DeleteBankStatementHandler(db *sql.DB) http.Handler {
+func DeleteBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -4097,11 +4125,30 @@ func DeleteBankStatementHandler(db *sql.DB) http.Handler {
 			"success": true,
 			"results": results,
 		})
+		// Fire notification with full delete request payload
+		if pgxPool != nil {
+			capturedIDs := body.BankStatementIDs
+			capturedUser := body.UserID
+			capturedComment := body.Comment
+			go catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/cash/bank-statements/v2/delete",
+				fmt.Sprintf("BSDELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
+				map[string]interface{}{
+					"BankStatementIDs": capturedIDs,
+					"Count":            len(capturedIDs),
+					"UserID":           capturedUser,
+					"Comment":          capturedComment,
+					"Action":           "DELETE_PENDING_APPROVAL",
+					"ActionAt":         time.Now().Format(time.RFC3339),
+				},
+			)
+		}
 	})
 
 }
 
-func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
+func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 
@@ -4207,15 +4254,25 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			log.Printf("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
 		}
 
-		file, _, err := r.FormFile("file")
+		file, fileHeader, err := r.FormFile("file")
+		uploadFileName := ""
+		if fileHeader != nil {
+			uploadFileName = fileHeader.Filename
+		}
 		if err != nil {
 			log.Printf("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
 			// Try alternative field names commonly used in file uploads
 			if file == nil {
-				file, _, err = r.FormFile("statement")
+				file, fileHeader, err = r.FormFile("statement")
+				if fileHeader != nil {
+					uploadFileName = fileHeader.Filename
+				}
 			}
 			if err != nil && file == nil {
-				file, _, err = r.FormFile("bankStatement")
+				file, fileHeader, err = r.FormFile("bankStatement")
+				if fileHeader != nil {
+					uploadFileName = fileHeader.Filename
+				}
 			}
 			if err != nil && file == nil {
 				// Try to use any available file field
@@ -4225,6 +4282,7 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 						if len(files) > 0 {
 							log.Printf("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
 							file, err = files[0].Open()
+							uploadFileName = files[0].Filename
 							break
 						}
 					}
@@ -4281,6 +4339,35 @@ func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
 			"message": msg,
 			"data":    result,
 		})
+
+		// Fire notification asynchronously — does not block the HTTP response.
+		// This covers the /cash/preview path (xlsx/csv delegated from V3Handler)
+		// as well as the direct /cash/upload-bank-statement route.
+		if pgxPool != nil {
+			capturedResult := result
+			capturedUser := r.FormValue("user_id")
+			capturedFile := uploadFileName
+			go func() {
+				notifPayload := BuildBankStatementPayloadFromV2Result(
+					capturedResult,
+					capturedUser,
+					capturedFile,
+					"PREVIEW",
+				)
+				bsID := notifPayload.BankStatementID
+				if bsID == "" {
+					if v, ok := capturedResult["bank_statement_id"].(string); ok {
+						bsID = v
+					}
+				}
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/cash/preview",
+					fmt.Sprintf("BSUPLOAD/%s/%d", bsID, time.Now().UnixMilli()),
+					notifPayload.ToMap(),
+				)
+			}()
+		}
 	})
 }
 
@@ -5324,7 +5411,7 @@ func joinStrings(strs []string, sep string) string {
 
 // UploadZippedBankStatementsHandler accepts a zip file containing multiple bank statement files,
 // unzips them, processes each file one by one, and returns aggregated results.
-func UploadZippedBankStatementsHandler(db *sql.DB) http.Handler {
+func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -5486,5 +5573,34 @@ func UploadZippedBankStatementsHandler(db *sql.DB) http.Handler {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
+
+		// Fire notifications asynchronously for each uploaded id (best-effort)
+		if pool != nil {
+			for _, fres := range results {
+				if fres.Success && fres.Result != nil {
+					if rid, ok := fres.Result["id"].(string); ok && rid == "" {
+						// id might be under bank_statement_id key
+						if bsid, ok2 := fres.Result["bank_statement_id"].(string); ok2 {
+							rid = bsid
+						}
+					}
+					capturedResult := fres.Result // capture for goroutine
+					capturedZipFile := zipHeader.Filename
+					go func() {
+						notifPayload := BuildBankStatementPayloadFromV2Result(
+							capturedResult,
+							userID,
+							capturedZipFile,
+							"PENDING_APPROVAL",
+						)
+						catalog.TriggerNotification(context.Background(), pool,
+							"/cash/upload-bank-statement-zip",
+							fmt.Sprintf("BSUPLOAD/%s/%d", notifPayload.BankStatementID, time.Now().UnixMilli()),
+							notifPayload.ToMap(),
+						)
+					}()
+				}
+			}
+		}
 	})
 }

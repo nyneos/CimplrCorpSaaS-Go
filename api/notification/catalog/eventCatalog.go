@@ -166,6 +166,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO notification_svc.event (
 				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active
 			) VALUES %s
+			
 			RETURNING event_id, event_display_name
 		`, strings.Join(valueStrings, ","))
 
@@ -174,7 +175,6 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		defer rows.Close()
 
 		var inserted []map[string]interface{}
 		var eventIDs []string
@@ -185,6 +185,15 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				eventIDs = append(eventIDs, id)
 			}
 		}
+		// MUST check rows.Err() — if the INSERT hit a constraint violation mid-batch,
+		// pgx marks the transaction aborted; rows.Err() carries the real error.
+		// Without this check tx.Commit() returns "commit unexpectedly resulted in rollback".
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			respondWithError(w, http.StatusConflict, "event insert failed: "+err.Error())
+			return
+		}
+		rows.Close()
 
 		if len(eventIDs) > 0 {
 			// batch audit insert
@@ -561,31 +570,31 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		// verify ids exist and are not already deleted
-		verifyQ := `SELECT event_id FROM notification_svc.event WHERE event_id = ANY($1::text[]) AND COALESCE(is_deleted,false)=false`
-		rows, err := tx.Query(ctx, verifyQ, req.EventIDs)
-		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		defer rows.Close()
-		var validIDs []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				validIDs = append(validIDs, id)
-			}
-		}
+		// verifyQ := `SELECT event_id FROM notification_svc.event WHERE event_id = ANY($1::text[]) AND action_type != 'DELETE' AND COALESCE(is_deleted, false) = false`
+		// rows, err := tx.Query(ctx, verifyQ, req.EventIDs)
+		// if err != nil {
+		// 	respondWithError(w, http.StatusInternalServerError, err.Error())
+		// 	return
+		// }
+		// defer rows.Close()
+		// var validIDs []string
+		// for rows.Next() {
+		// 	var id string
+		// 	if err := rows.Scan(&id); err == nil {
+		// 		validIDs = append(validIDs, id)
+		// 	}
+		// }
 
-		if len(validIDs) == 0 {
-			api.RespondWithPayload(w, false, "no valid event ids to delete", nil)
-			return
-		}
+		// if len(validIDs) == 0 {
+		// 	api.RespondWithPayload(w, false, "no valid event ids to delete", nil)
+		// 	return
+		// }
 
 		// batch audit insert
-		auditVals := make([]string, 0, len(validIDs))
-		auditArgs := make([]interface{}, 0, len(validIDs)*2)
+		auditVals := make([]string, 0, len(req.EventIDs))
+		auditArgs := make([]interface{}, 0, len(req.EventIDs)*2)
 		pos := 1
-		for _, id := range validIDs {
+		for _, id := range req.EventIDs {
 			auditVals = append(auditVals, fmt.Sprintf("($%d,'DELETE','PENDING_DELETE_APPROVAL',$%d,now(),$%d)", pos, pos+1, pos+2))
 			// Using an extra param for reason (pos+2)
 			auditArgs = append(auditArgs, id, userEmail, req.Reason)
@@ -602,8 +611,8 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"requested": userEmail, "requested_count": len(validIDs)})
-		api.LogInfo("Delete requests created for events: %d", len(validIDs))
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"requested": userEmail, "requested_count": len(req.EventIDs)})
+		api.LogInfo("Delete requests created for events: %d", len(req.EventIDs))
 	}
 }
 
@@ -765,6 +774,11 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM notification_svc.event m
 			LEFT JOIN latest_audit l ON l.event_id = m.event_id
 			LEFT JOIN history h ON h.event_id = m.event_id
+			WHERE COALESCE(m.is_deleted, false) = false
+			  AND NOT (
+			      COALESCE(l.action_type, '') = 'DELETE'
+			      AND COALESCE(l.processing_status, '') = 'APPROVED'
+			  )
 			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
 		rows, err := pgxPool.Query(ctx, q)

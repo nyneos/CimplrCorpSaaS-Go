@@ -2,6 +2,8 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	notif "CimplrCorpSaas/api/notification/catalog"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -281,7 +283,7 @@ func attachStreamKey(u string) string {
 	return u + "?stream_key=" + url.QueryEscape(first)
 }
 
-func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
+func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 
@@ -315,7 +317,7 @@ func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, filename st
 	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
 
 	rr := httptest.NewRecorder()
-	UploadBankStatementV2Handler(db).ServeHTTP(rr, req)
+	UploadBankStatementV2Handler(db, pool).ServeHTTP(rr, req)
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
@@ -324,7 +326,7 @@ func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, filename st
 	return payload, nil
 }
 
-func handleZipBankStatementUpload(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	file, header, err := r.FormFile("file")
@@ -403,7 +405,7 @@ func handleZipBankStatementUpload(db *sql.DB, w http.ResponseWriter, r *http.Req
 			continue
 		}
 
-		resp, err := uploadBankStatementV2FromBytes(ctx, db, filename, fileBytes, formValues, r.URL.Query())
+		resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, filename, fileBytes, formValues, r.URL.Query())
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"file":   filename,
@@ -470,7 +472,7 @@ func handleZipBankStatementUpload(db *sql.DB, w http.ResponseWriter, r *http.Req
 }
 
 // UploadBankStatementV3Handler returns http.Handler that accepts file upload and streams preview
-func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
+func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -492,12 +494,14 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
 		log.Printf("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
 		// try to log user_id field if present
+		uploadUserID := ""
 		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
+			uploadUserID = vals[0]
 			log.Printf("[BANK-PREVIEW] user_id=%s", vals[0])
 		}
 		if ext == ".zip" {
 			log.Printf("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
-			handleZipBankStatementUpload(db, w, r)
+			handleZipBankStatementUpload(db, pool, w, r)
 			return
 		}
 
@@ -505,7 +509,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
 			log.Printf("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
-			h := UploadBankStatementV2Handler(db)
+			h := UploadBankStatementV2Handler(db, pool)
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -688,6 +692,36 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
 			log.Printf("failed to write response: %v", err)
 		}
+
+		// Fire notification asynchronously — does not block the HTTP response.
+		// For PDF/DOCX: this is the "preview uploaded" event. The "committed" event
+		// fires later from CommitHandler once the user confirms and saves to DB.
+		// We pass the full combinedResponse so template authors have all AI-parsed
+		// fields (AccountNumber, BankName, transactions, period, balances, etc.).
+		if pool != nil {
+			capturedResp := combinedResponse
+			capturedID := id
+			capturedUser := uploadUserID
+			capturedFile := header.Filename
+			go func() {
+				notifPayload := BuildBankStatementPayloadFromV2Result(
+					capturedResp,
+					capturedUser,
+					capturedFile,
+					"PREVIEW",
+				)
+				// Override BankStatementID with our upload-row id (combinedResponse uses "id" key)
+				if notifPayload.BankStatementID == "" {
+					notifPayload.BankStatementID = capturedID
+				}
+				notif.TriggerNotification(
+					context.Background(), pool,
+					"/cash/preview",
+					fmt.Sprintf("BSUPLOAD/%s/%d", capturedID, time.Now().UnixMilli()),
+					notifPayload.ToMap(),
+				)
+			}()
+		}
 	})
 }
 
@@ -831,7 +865,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 }
 
 // CommitHandler persists clean JSON into bank_pdf_uploads.committed_json by id
-func CommitHandler(db *sql.DB) http.Handler {
+func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			ID    string               `json:"user_id"`
@@ -1371,6 +1405,31 @@ func CommitHandler(db *sql.DB) http.Handler {
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
+
+		// Fire rich notification for the commit event (PDF path).
+		// For CSV/XLS the V2 handler fires its own notification via UploadBankStatementV2Handler.
+		if pool != nil {
+			notifPayload := BuildBankStatementPayload(
+				bankStatementID,
+				accountNumber,
+				&payload.Clean.Metadata,
+				openingBalance,
+				closingBalance,
+				entityIDStr,
+				requestedBy,
+				"", // filename not available from commit payload
+				payload.Clean.Transactions,
+				kpiCats,
+				rules,
+				"PENDING_APPROVAL",
+			)
+			go notif.TriggerNotification(
+				context.Background(), pool,
+				"/cash/commit",
+				fmt.Sprintf("BSCOMMIT/%s/%d", bankStatementID, time.Now().UnixMilli()),
+				notifPayload.ToMap(),
+			)
+		}
 	})
 }
 

@@ -5,6 +5,170 @@ import (
 	"testing"
 )
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FLEXIBLE TEMPLATE ENGINE TESTS
+// Tests both WRAPPED {{...}} and UNWRAPPED (seed script) template formats
+// ═══════════════════════════════════════════════════════════════════════════
+
+// TestUnwrappedTemplate_BasicFunctions tests unwrapped function calls (seed script format)
+func TestUnwrappedTemplate_BasicFunctions(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		payload  map[string]interface{}
+		expected string
+	}{
+		{
+			name:     "COUNT_OF unwrapped",
+			template: "You have COUNT_OF(BankStatementIDs) statement(s)",
+			payload:  map[string]interface{}{"BankStatementIDs": []interface{}{"BST-1", "BST-2", "BST-3"}},
+			expected: "You have 3 statement(s)",
+		},
+		{
+			name:     "CONCAT unwrapped",
+			template: "CONCAT(COUNT_OF(Items), ' items by ', UserID)",
+			payload:  map[string]interface{}{"Items": []interface{}{1, 2}, "UserID": "admin"},
+			expected: "2 items by admin",
+		},
+		{
+			name:     "FORMAT_NUMBER unwrapped",
+			template: "Total: FORMAT_NUMBER(Amount)",
+			payload:  map[string]interface{}{"Amount": 12345.67},
+			expected: "Total: ₹ 12,345.67",
+		},
+		{
+			name:     "Mixed functions unwrapped",
+			template: "Bank Statement Rejected — COUNT_OF(BankStatementIDs) Statement(s) — Action: {{Action}}",
+			payload:  map[string]interface{}{"BankStatementIDs": []interface{}{"BST-1"}, "Action": "REJECT"},
+			expected: "Bank Statement Rejected — 1 Statement(s) — Action: REJECT",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateTemplate(tt.template, tt.payload)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("expected '%s', got '%s'", tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestUnwrappedTemplate_SeedScriptExamples tests exact examples from seed scripts
+func TestUnwrappedTemplate_SeedScriptExamples(t *testing.T) {
+	// From seed_notification_events.sh BS_DELETE templates
+	t.Run("BS_DELETE subject", func(t *testing.T) {
+		tpl := "CONCAT(COUNT_OF(BankStatementIDs), ' stmt delete(s) awaiting approval')"
+		payload := map[string]interface{}{
+			"BankStatementIDs": []interface{}{"BST-87D6801"},
+		}
+		result, err := EvaluateTemplate(tpl, payload)
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		expected := "1 stmt delete(s) awaiting approval"
+		if result != expected {
+			t.Errorf("expected '%s', got '%s'", expected, result)
+		}
+	})
+
+	t.Run("BS_DELETE body", func(t *testing.T) {
+		tpl := "CONCAT(COUNT_OF(BankStatementIDs), ' delete request(s) by ', UserID, ' awaiting approval.')"
+		payload := map[string]interface{}{
+			"BankStatementIDs": []interface{}{"BST-87D6801"},
+			"UserID":           "1",
+		}
+		result, err := EvaluateTemplate(tpl, payload)
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		expected := "1 delete request(s) by 1 awaiting approval."
+		if result != expected {
+			t.Errorf("expected '%s', got '%s'", expected, result)
+		}
+	})
+
+	t.Run("BS_REJECT SMS", func(t *testing.T) {
+		tpl := "CONCAT(COUNT_OF(BankStatementIDs), ' bank statement(s) REJECTED by ', UserID)"
+		payload := map[string]interface{}{
+			"BankStatementIDs": []interface{}{"BST-1", "BST-2"},
+			"UserID":           "admin@example.com",
+		}
+		result, err := EvaluateTemplate(tpl, payload)
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		expected := "2 bank statement(s) REJECTED by admin@example.com"
+		if result != expected {
+			t.Errorf("expected '%s', got '%s'", expected, result)
+		}
+	})
+}
+
+// TestWrappedTemplate_BackwardCompatibility ensures wrapped templates still work
+func TestWrappedTemplate_BackwardCompatibility(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		payload  map[string]interface{}
+		expected string
+	}{
+		{
+			name:     "Wrapped COUNT_OF",
+			template: "You have {{COUNT_OF(BankStatementIDs)}} statement(s)",
+			payload:  map[string]interface{}{"BankStatementIDs": []interface{}{"BST-1", "BST-2"}},
+			expected: "You have 2 statement(s)",
+		},
+		{
+			name:     "Wrapped CONCAT",
+			template: "{{CONCAT('Total: ', COUNT_OF(Items))}}",
+			payload:  map[string]interface{}{"Items": []interface{}{1, 2, 3}},
+			expected: "Total: 3",
+		},
+		{
+			name:     "Wrapped variables",
+			template: "Hello {{UserName}}, Policy {{PolicyID}}",
+			payload:  map[string]interface{}{"UserName": "John", "PolicyID": "P-123"},
+			expected: "Hello John, Policy P-123",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateTemplate(tt.template, tt.payload)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expected {
+				t.Errorf("expected '%s', got '%s'", tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestMixedTemplate_WrappedAndUnwrapped should NOT auto-wrap if {{}} exists
+func TestMixedTemplate_PreservesWrappedFormat(t *testing.T) {
+	// If template has ANY {{...}}, it's treated as wrapped format
+	// Unwrapped portions are NOT auto-wrapped (backward compatible)
+	tpl := "{{COUNT_OF(Items)}} items - Status is Pending"
+	payload := map[string]interface{}{
+		"Items":  []interface{}{1, 2},
+		"Status": "APPROVED",
+	}
+	result, err := EvaluateTemplate(tpl, payload)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	// "Status" should NOT be auto-wrapped because template contains {{}}
+	expected := "2 items - Status is Pending"
+	if result != expected {
+		t.Errorf("expected '%s', got '%s'", expected, result)
+	}
+}
+
 func TestEvaluateTemplate_Nested(t *testing.T) {
 	tpl := "Result: ADD( ADD(1,2) , MULTIPLY(3,4) )"
 	out, err := EvaluateTemplate(tpl, nil)
@@ -264,6 +428,74 @@ func TestBadgeHTML(t *testing.T) {
 	}
 }
 
+// TestKPICardsHTML_NestedFuncInJSON tests that {{FUNC()}} inside a JSON string
+// value inside KPI_CARDS_HTML is evaluated correctly.
+// This reproduces the real-world bug where the EMAIL outbox showed unresolved
+// {{COUNT_OF(BankStatementIDs)}} because findInnermostFunction was skipping
+// inside double-quoted JSON strings.
+func TestKPICardsHTML_NestedFuncInJSON(t *testing.T) {
+	payload := map[string]interface{}{
+		"BankStatementIDs": []interface{}{"BST-001"},
+		"UserID":           "admin",
+		"Action":           "REJECTED",
+		"RecipientName":    "Hardik",
+	}
+	// Simulate the exact template stored in audit_template body_html
+	tpl := `<p>Dear <strong>{{RecipientName}}</strong>,</p>` +
+		`{{KPI_CARDS_HTML([{"label":"Rejected Count","value":"{{COUNT_OF(BankStatementIDs)}}"},{"label":"Rejected By","value":"{{UserID}}"},{"label":"Action","value":"{{Action}}"}])}}`
+
+	out, err := EvaluateTemplate(tpl, payload)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	// RecipientName must be resolved
+	if strings.Contains(out, "{{RecipientName}}") {
+		t.Errorf("RecipientName was not resolved; got: %s", out)
+	}
+	if !strings.Contains(out, "Hardik") {
+		t.Errorf("expected 'Hardik' in output; got: %s", out)
+	}
+	// KPI cards must be rendered (COUNT_OF → 1)
+	if strings.Contains(out, "COUNT_OF") {
+		t.Errorf("COUNT_OF was not resolved inside KPI JSON; got: %s", out)
+	}
+	if !strings.Contains(out, "1") {
+		t.Errorf("expected count '1' in KPI card output; got: %s", out)
+	}
+	if !strings.Contains(out, "admin") {
+		t.Errorf("expected UserID 'admin' in output; got: %s", out)
+	}
+	if !strings.Contains(out, "REJECTED") {
+		t.Errorf("expected Action 'REJECTED' in output; got: %s", out)
+	}
+}
+
+func TestHTMLAttributeQuotes_DoNotBreakVarResolution(t *testing.T) {
+	// HTML attributes with single quotes must NOT prevent {{VarName}} resolution.
+	// This was a bug where style='...' caused inSingleQuote=true for the rest of the body.
+	payload := map[string]interface{}{
+		"RecipientName": "Hardik",
+		"UserID":        "admin",
+		"Comment":       "ok",
+	}
+	tpl := `<div style='padding:24px'>` +
+		`<p>Dear <strong>{{RecipientName}}</strong>,</p>` +
+		`<tr><td style='border:1px solid #e5e7eb'>{{UserID}}</td></tr>` +
+		`<tr><td>{{Comment}}</td></tr>` +
+		`</div>`
+
+	out, err := EvaluateTemplate(tpl, payload)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if strings.Contains(out, "{{RecipientName}}") || strings.Contains(out, "{{UserID}}") || strings.Contains(out, "{{Comment}}") {
+		t.Errorf("variables not resolved in HTML with single-quote attributes; got: %s", out)
+	}
+	if !strings.Contains(out, "Hardik") || !strings.Contains(out, "admin") || !strings.Contains(out, "ok") {
+		t.Errorf("expected resolved values in output; got: %s", out)
+	}
+}
+
 func TestChainedFilterAndSum(t *testing.T) {
 	// Real-world pattern: filter CREDIT txns then sum their deposit
 	payload := map[string]interface{}{"Transactions": testTxns()}
@@ -278,3 +510,58 @@ func TestChainedFilterAndSum(t *testing.T) {
 		t.Fatalf("expected ₹ 60,000.00, got '%s'", out)
 	}
 }
+
+// TestTableHTML_AliasedFormat verifies TABLE_HTML with JSON array column + alias args.
+// This uses the calling convention:  TABLE_HTML(Items, ["col1","col2"], ["Alias 1","Alias 2"])
+// splitArgs must NOT split on commas inside the [...] arrays.
+func TestTableHTML_AliasedFormat(t *testing.T) {
+	payload := map[string]interface{}{
+		"Items": []map[string]interface{}{
+			{"item_code": "INV-001", "amount": 5000.0, "due_date": "2024-01-15"},
+			{"item_code": "INV-002", "amount": 12500.0, "due_date": "2024-01-20"},
+		},
+	}
+	// Aliased format with JSON arrays
+	tpl := `{{TABLE_HTML(Items,["item_code","amount","due_date"],["Invoice","Amount","Due Date"])}}`
+	out, err := EvaluateTemplate(tpl, payload)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(out, "<table") {
+		t.Fatalf("expected html table, got: %s", out)
+	}
+	// Headers should be the aliases, not raw column names
+	if !strings.Contains(out, "Invoice") {
+		t.Fatalf("expected 'Invoice' alias header, got: %s", out)
+	}
+	if !strings.Contains(out, "Due&nbsp;Date") {
+		t.Fatalf("expected 'Due Date' alias header (nbsp-escaped), got: %s", out)
+	}
+	// Column headers must NOT appear twice
+	headerCount := strings.Count(out, "Invoice")
+	if headerCount != 1 {
+		t.Fatalf("expected 'Invoice' header exactly once, got %d times in: %s", headerCount, out)
+	}
+	// Data rows must be present
+	if !strings.Contains(out, "INV-001") || !strings.Contains(out, "INV-002") {
+		t.Fatalf("expected row data in table, got: %s", out)
+	}
+}
+
+// TestSplitArgs_BracketDepth verifies that splitArgs does not split on commas inside [...].
+func TestSplitArgs_BracketDepth(t *testing.T) {
+	args := splitArgs(`Items, ["col1","col2"], ["Alias 1","Alias 2"]`)
+	if len(args) != 3 {
+		t.Fatalf("expected 3 args, got %d: %v", len(args), args)
+	}
+	if args[0] != "Items" {
+		t.Errorf("args[0] want 'Items', got %q", args[0])
+	}
+	if args[1] != `["col1","col2"]` {
+		t.Errorf("args[1] want '[\"col1\",\"col2\"]', got %q", args[1])
+	}
+	if args[2] != `["Alias 1","Alias 2"]` {
+		t.Errorf("args[2] want '[\"Alias 1\",\"Alias 2\"]', got %q", args[2])
+	}
+}
+

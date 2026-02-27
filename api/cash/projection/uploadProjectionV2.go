@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -347,6 +348,19 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		json.NewEncoder(w).Encode(resp)
 		log.Printf("Committed V2 proposal %s (%d items, %d monthly rows)", proposalID, len(itemInfos), len(itemInfos)*12)
+		// Notify: FULL proposal data for rich templates
+		capturedProposalID := proposalID
+		capturedUser := userID
+		capturedFile := fh.Filename
+		payload := BuildProjectionNotifPayload(context.Background(), pgxPool, []string{capturedProposalID}, "UPLOAD", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["FileName"] = capturedFile
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/projection/v2/upload",
+			fmt.Sprintf("PROJ_UPLOAD/%s/%d", capturedProposalID, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 

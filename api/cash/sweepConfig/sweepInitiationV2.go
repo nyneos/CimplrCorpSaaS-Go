@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1048,6 +1049,19 @@ func BulkApproveSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"approved_initiation_ids": approvedIDs,
 			"total_approved":          len(approvedIDs),
 		})
+		// Notify with FULL initiation data for rich templates
+		capturedIDs := approvedIDs
+		capturedUser := req.UserID
+		capturedComment := req.CheckerComment
+		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["CheckerComment"] = capturedComment
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-initiation/bulk-approve",
+			fmt.Sprintf("SWEEPINIT_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -1113,6 +1127,19 @@ func BulkRejectSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"rejected_initiation_ids": rejectedIDs,
 			"total_rejected":          len(rejectedIDs),
 		})
+		// Notify with FULL initiation data for rich templates
+		capturedIDs := rejectedIDs
+		capturedUser := req.UserID
+		capturedComment := req.CheckerComment
+		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["CheckerComment"] = capturedComment
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-initiation/bulk-reject",
+			fmt.Sprintf("SWEEPINIT_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -1166,6 +1193,16 @@ func BulkDeleteSweepInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"deleted_initiation_ids": req.InitiationIDs,
 			"total_deleted":          len(req.InitiationIDs),
 		})
+		// Notify with FULL initiation data for rich templates
+		capturedIDs := req.InitiationIDs
+		capturedUser := req.UserID
+		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-initiation/bulk-delete",
+			fmt.Sprintf("SWEEPINIT_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -1516,6 +1553,24 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"auto_created_sweeps": autoCreatedSweeps,
 			"total_auto_created":  len(autoCreatedSweeps),
 		})
+		// Notify: pass FULL initiation data for rich templates
+		capturedUser := req.UserID
+		// Extract initiation_ids from created initiations
+		createdInitiationIDs := []string{}
+		for _, init := range createdInitiations {
+			if initID, ok := init["initiation_id"].(string); ok && initID != "" {
+				createdInitiationIDs = append(createdInitiationIDs, initID)
+			}
+		}
+		if len(createdInitiationIDs) > 0 {
+			payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, createdInitiationIDs, "CREATE", capturedUser)
+			go catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/cash/sweep-initiation/bulk-create",
+				fmt.Sprintf("SWEEPINIT_CREATE/%s/%d", capturedUser, time.Now().UnixMilli()),
+				payload.ToMap(),
+			)
+		}
 	}
 }
 
@@ -2302,6 +2357,19 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"initiation_status":   "PENDING_EDIT_APPROVAL",
 			"sweep_config_status": "unchanged (keeps existing status)",
 		})
+		// Notify: pass FULL initiation data for rich templates
+		capturedInitID := req.InitiationID
+		capturedUser := req.UserID
+		capturedReason := req.Reason
+		payload := BuildSweepInitiationNotifPayload(context.Background(), pgxPool, []string{capturedInitID}, "UPDATE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["Reason"] = capturedReason
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-initiation/update",
+			fmt.Sprintf("SWEEPINIT_UPDATE/%s/%d", capturedInitID, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 

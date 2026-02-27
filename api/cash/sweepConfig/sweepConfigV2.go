@@ -4,13 +4,11 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
-
-	// "context"
+	"CimplrCorpSaas/api/notification/catalog"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-
-	// "strconv"
 	"strings"
 	"time"
 
@@ -327,6 +325,16 @@ func BulkCreateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"sweep_ids": createdIDs,
 			"count":     len(createdIDs),
 		})
+		// Notify: pass FULL sweep config data for rich templates
+		capturedIDs := createdIDs
+		capturedUser := req.UserID
+		payload := BuildSweepConfigNotifPayload(context.Background(), pgxPool, capturedIDs, "CREATE", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-config-v2/bulk-create",
+			fmt.Sprintf("SWEEPCFG_CREATE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -601,6 +609,20 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		// Notify: pass FULL sweep config data for rich templates
+		capturedSweepID := req.SweepID
+		capturedUser := req.UserID
+		capturedReason := req.Reason
+		payload := BuildSweepConfigNotifPayload(context.Background(), pgxPool, []string{capturedSweepID}, "UPDATE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["Reason"] = capturedReason
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-config-v2/update",
+			fmt.Sprintf("SWEEPCFG_UPDATE/%s/%d", capturedSweepID, time.Now().UnixMilli()),
+			payloadMap,
+		)
 
 		api.RespondWithResult(w, true, req.SweepID)
 	}
@@ -990,6 +1012,20 @@ func BulkApproveSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"approved_count": len(actionIDs), "deleted": deleted})
+		// Notify: FULL sweep config data for rich templates
+		capturedIDs := req.SweepIDs
+		capturedUser := req.UserID
+		capturedComment := req.Comment
+		payload := BuildSweepConfigNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["CheckerComment"] = capturedComment
+		payloadMap["DeletedIDs"] = deleted
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-config-v2/bulk-approve",
+			fmt.Sprintf("SWEEPCFG_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -1054,6 +1090,19 @@ func BulkRejectSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"rejected_count": len(actionIDs)})
+		// Notify: FULL sweep config data for rich templates
+		capturedIDs := req.SweepIDs
+		capturedUser := req.UserID
+		capturedComment := req.Comment
+		payload := BuildSweepConfigNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["CheckerComment"] = capturedComment
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-config-v2/bulk-reject",
+			fmt.Sprintf("SWEEPCFG_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -1108,6 +1157,19 @@ func BulkRequestDeleteSweepConfigurationsV2(pgxPool *pgxpool.Pool) http.HandlerF
 		committed = true
 
 		api.RespondWithResult(w, true, fmt.Sprintf("created %d delete requests", len(req.SweepIDs)))
+		// Notify: FULL sweep config data for rich templates
+		capturedIDs := req.SweepIDs
+		capturedUser := req.UserID
+		capturedReason := req.Reason
+		payload := BuildSweepConfigNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["Reason"] = capturedReason
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-config-v2/bulk-delete",
+			fmt.Sprintf("SWEEPCFG_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 

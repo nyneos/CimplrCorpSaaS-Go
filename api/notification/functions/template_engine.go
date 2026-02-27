@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	"CimplrCorpSaas/api/constants"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ExtractVariables returns a list of unique variable names found in the template
@@ -36,9 +38,28 @@ func ExtractVariables(tpl string) []string {
 
 // EvaluateTemplate resolves functions and variables in the template using the provided payload.
 // The payload is a map[string]interface{} containing keys referenced by variables and functions.
+//
+// FLEXIBLE TEMPLATE SYNTAX SUPPORT:
+// This engine now intelligently handles BOTH template formats:
+//   1. WRAPPED (classic):   "Hello {{CONCAT(UserName, '!')}} — {{COUNT_OF(Items)}} items"
+//   2. UNWRAPPED (seed scripts): "Hello CONCAT(UserName, '!') — COUNT_OF(Items) items"
+//
+// Auto-detection logic:
+//   - If template contains {{...}}, processes only wrapped expressions (backward compatible)
+//   - If template has NO {{...}} but contains known function calls or payload variables,
+//     intelligently wraps them and processes (flexible mode for seed scripts)
+//
+// Supported functions (case-insensitive):
+//   SUM, AVERAGE/AVG, SUMPRODUCT, FORMAT_NUMBER, FORMAT_DATE, FORMAT_CURRENCY,
+//   CONCAT, COUNT_OF, SUM_OF_FIELD, FILTER, ORDER_BY, GROUP_BY,
+//   TABLE_HTML, KPI_CARDS_HTML, ROWS_HTML, SUMMARY_TABLE_HTML,
+//   IF, BADGE_HTML, SUBTRACT, and more.
 func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error) {
+	// Normalize template: auto-wrap if needed
+	normalized := normalizeTemplate(tpl, payload)
+
 	// Evaluate nested function calls by repeatedly locating the innermost function
-	result := tpl
+	result := normalized
 	for {
 		start, end, name, argsRaw, found := findInnermostFunction(result)
 		if !found {
@@ -54,6 +75,7 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 	}
 
 	// Replace variables {{Var}} with payload values
+	// Also unwrap {{literal}} (result of function evaluations that left literal values)
 	varRe := regexp.MustCompile(`{{\s*([^}]+?)\s*}}`)
 	result = varRe.ReplaceAllStringFunc(result, func(s string) string {
 		sub := varRe.FindStringSubmatch(s)
@@ -61,22 +83,305 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 			return s
 		}
 		key := strings.TrimSpace(sub[1])
+		
+		// Try to look up in payload
 		v, ok := lookupPayload(key, payload)
-		if !ok {
-			return ""
+		if ok {
+			return toString(v)
 		}
-		return toString(v)
+		
+		// If not in payload, treat as a literal value (result of function evaluation)
+		// This handles cases like {{3}} or {{some text}} that resulted from function calls
+		return key
 	})
 
 	return result, nil
 }
 
-// splitArgs splits a comma-separated argument string into trimmed args while handling quoted strings.
+// normalizeTemplate intelligently wraps unwrapped function calls and variables with {{...}}
+// if the template doesn't already use {{...}} syntax.
+//
+// Strategy:
+//   1. If template already contains {{...}}, return as-is (backward compatible)
+//   2. Otherwise, scan for:
+//      - Known function calls: FUNCTION_NAME(args)
+//      - Payload variable references (standalone words matching payload keys)
+//      - Wrap each occurrence with {{...}}
+func normalizeTemplate(tpl string, payload map[string]interface{}) string {
+	// NOTE: We normalize even if template has SOME {{}} because it might have unwrapped functions too
+	// Only skip if ALL functions are already wrapped (checked later)
+
+	// Known template functions (case-insensitive match)
+	// This list MUST include ALL functions implemented in evaluateFunction()
+	knownFunctions := []string{
+		"SUM", "AVERAGE", "AVG", "SUMPRODUCT",
+		"FORMAT_NUMBER", "FORMAT_DATE", "FORMAT_DATE_TZ", "FORMAT_CURRENCY",
+		"ESCAPE_HTML", "CONCAT", "UPPER", "LOWER", "SUBSTRING",
+		"ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
+		"COUNT_OF", "SUM_OF_FIELD", "TOTAL_OF", "AVG_OF_FIELD",
+		"MAX_OF_FIELD", "MIN_OF_FIELD",
+		"FILTER", "ORDER_BY", "GROUP_BY",
+		"TABLE_HTML", "KPI_CARDS_HTML", "ROWS_HTML", "SUMMARY_TABLE_HTML",
+		"IF", "BADGE_HTML",
+		// Additional functions that may be added later
+		"MIN", "MAX", "ROUND", "CEIL", "FLOOR", "ABS",
+		"TRIM", "REPLACE", "SPLIT", "JOIN", "LENGTH",
+		"CONTAINS", "STARTS_WITH", "ENDS_WITH", "INDEX_OF",
+	}
+
+	result := tpl
+
+	// Step 1: Wrap function calls — FUNCTION_NAME(...)
+	// Process from INNERMOST to OUTERMOST to handle nesting correctly
+	matches := findAllFunctionCalls(result)
+	
+	// Sort by size (ascending) so innermost functions are wrapped first
+	sort.Slice(matches, func(i, j int) bool {
+		sizeI := matches[i].end - matches[i].start
+		sizeJ := matches[j].end - matches[j].start
+		return sizeI < sizeJ
+	})
+	
+	// Track cumulative offset changes as we wrap functions
+	// Key: we need to adjust positions AFTER each wrapping
+	wrappedCount := 0
+	
+	for idx, m := range matches {
+		// Recalculate positions after each wrapping by searching again
+		// This is necessary because wrapping changes string positions
+		if wrappedCount > 0 {
+			// Rescan to get updated positions
+			matches = findAllFunctionCalls(result)
+			sort.Slice(matches, func(i, j int) bool {
+				sizeI := matches[i].end - matches[i].start
+				sizeJ := matches[j].end - matches[j].start
+				return sizeI < sizeJ
+			})
+			// Skip already-wrapped functions
+			if idx >= len(matches) {
+				break
+			}
+			m = matches[idx]
+		}
+		
+		funcName := m.name
+		
+		// Check if this is a known function
+		isKnown := false
+		for _, kf := range knownFunctions {
+			if strings.EqualFold(funcName, kf) {
+				isKnown = true
+				break
+			}
+		}
+		
+		if isKnown {
+			// Check if already wrapped (has {{ before and }} after)
+			if m.start >= 2 && result[m.start-2:m.start] == "{{" &&
+				m.end+2 <= len(result) && result[m.end:m.end+2] == "}}" {
+				continue
+			}
+			
+			// Wrap the entire function call: FUNC(...) → {{FUNC(...)}}
+			fullCall := result[m.start:m.end]
+			wrapped := "{{" + fullCall + "}}"
+			result = result[:m.start] + wrapped + result[m.end:]
+			
+			wrappedCount++
+		}
+	}
+
+	// NOTE: We DON'T auto-wrap standalone variables because:
+	// 1. Variables are referenced by name inside function arguments (e.g., CONCAT(..., UserID))
+	// 2. It's ambiguous which occurrences should be wrapped (labels vs values)
+	// 3. Seed scripts expect variables to be used inside functions, not standalone
+	
+	return result
+}
+
+// functionCallMatch represents a matched function call with its position
+type functionCallMatch struct {
+	start int
+	end   int
+	name  string
+}
+
+// findAllFunctionCalls locates ALL function calls in the text, including nested ones
+// Returns byte positions for correct string slicing with multi-byte characters
+func findAllFunctionCalls(s string) []functionCallMatch {
+	matches := []functionCallMatch{}
+	runes := []rune(s)
+	
+	// Build rune-to-byte position map
+	runeToBytePos := make([]int, len(runes)+1)
+	bytePos := 0
+	for i, r := range runes {
+		runeToBytePos[i] = bytePos
+		bytePos += len(string(r))
+	}
+	runeToBytePos[len(runes)] = bytePos // end position
+	
+	// Recursively find all function calls
+	var findInRange func(start, end int)
+	findInRange = func(start, end int) {
+		i := start
+		for i < end {
+			// Look for function pattern: WORD_CHARS followed by '('
+			if !unicode.IsLetter(runes[i]) && runes[i] != '_' {
+				i++
+				continue
+			}
+			
+			// Extract function name
+			nameStart := i
+			for i < end && (unicode.IsLetter(runes[i]) || unicode.IsDigit(runes[i]) || runes[i] == '_') {
+				i++
+			}
+			nameEnd := i
+			
+			// Skip whitespace
+			for i < end && unicode.IsSpace(runes[i]) {
+				i++
+			}
+			
+			// Check for opening parenthesis
+			if i >= end || runes[i] != '(' {
+				// Not a function call
+				continue
+			}
+			
+			name := string(runes[nameStart:nameEnd])
+			
+			// Only match names that start with uppercase (our template functions are all uppercase)
+			// This prevents matching lowercase English words like "delete(s)", "request(s)"
+			if len(name) == 0 || !unicode.IsUpper(runes[nameStart]) {
+				continue
+			}
+			
+			openParen := i
+			
+			// Find matching closing parenthesis
+			depth := 1
+			i++ // skip opening '('
+			for i < end && depth > 0 {
+				if runes[i] == '(' {
+					depth++
+				} else if runes[i] == ')' {
+					depth--
+				}
+				i++
+			}
+			
+			if depth == 0 {
+				closeParen := i - 1 // position of ')'
+				
+				// Add this function call
+				matches = append(matches, functionCallMatch{
+					start: runeToBytePos[nameStart],
+					end:   runeToBytePos[i],
+					name:  name,
+				})
+				
+				// Recursively search INSIDE the function arguments for nested calls
+				findInRange(openParen+1, closeParen)
+			}
+		}
+	}
+	
+	findInRange(0, len(runes))
+	return matches
+}
+
+// wrapStandaloneVariable wraps a variable name with {{...}} if it's standalone
+// (not inside quotes, not already wrapped, not part of a function call)
+func wrapStandaloneVariable(text string, varName string, pattern *regexp.Regexp) string {
+	// Find all matches
+	indices := pattern.FindAllStringIndex(text, -1)
+	if len(indices) == 0 {
+		return text
+	}
+	
+	// Process from right to left to avoid index shifting
+	for i := len(indices) - 1; i >= 0; i-- {
+		match := indices[i]
+		start := match[0]
+		end := match[1]
+		
+		// Check if already wrapped or inside quotes
+		if isAlreadyWrapped(text, start, end) || isInsideQuotes(text, start) {
+			continue
+		}
+		
+		// Wrap it
+		wrapped := "{{" + text[start:end] + "}}"
+		text = text[:start] + wrapped + text[end:]
+	}
+	
+	return text
+}
+
+// isAlreadyWrapped checks if position is already inside {{...}}
+func isAlreadyWrapped(text string, start, end int) bool {
+	// Look backward for {{
+	openPos := -1
+	for i := start - 1; i >= 0; i-- {
+		if i > 0 && text[i-1:i+1] == "{{" {
+			openPos = i - 1
+			break
+		}
+		if text[i] == '}' && i > 0 && text[i-1] == '}' {
+			return false // Found }} before {{
+		}
+	}
+	
+	if openPos == -1 {
+		return false
+	}
+	
+	// Look forward for }}
+	for i := end; i < len(text)-1; i++ {
+		if text[i:i+2] == "}}" {
+			return true // Found matching }}
+		}
+		if text[i:i+2] == "{{" {
+			return false // Found {{ before }}
+		}
+	}
+	
+	return false
+}
+
+// isInsideQuotes checks if position is inside single or double quotes
+func isInsideQuotes(text string, pos int) bool {
+	inSingle := false
+	inDouble := false
+	
+	for i := 0; i < pos && i < len(text); i++ {
+		if text[i] == '\'' && (i == 0 || text[i-1] != '\\') {
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		}
+		if text[i] == '"' && (i == 0 || text[i-1] != '\\') {
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		}
+	}
+	
+	return inSingle || inDouble
+}
+
+// splitArgs splits a comma-separated argument string into trimmed args while handling quoted strings
+// and JSON array/object brackets. Commas inside single-quotes, double-quotes, [...] or {...} are
+// NOT treated as argument separators.
 func splitArgs(s string) []string {
 	args := []string{}
 	current := strings.Builder{}
 	inSingle := false
 	inDouble := false
+	bracketDepth := 0 // depth of '[' nesting
+	braceDepth := 0   // depth of '{' nesting (for JSON objects inside args)
 	for _, r := range s {
 		if r == '\'' && !inDouble {
 			inSingle = !inSingle
@@ -88,7 +393,29 @@ func splitArgs(s string) []string {
 			current.WriteRune(r)
 			continue
 		}
-		if r == ',' && !inSingle && !inDouble {
+		if !inSingle && !inDouble {
+			if r == '[' {
+				bracketDepth++
+				current.WriteRune(r)
+				continue
+			}
+			if r == ']' {
+				bracketDepth--
+				current.WriteRune(r)
+				continue
+			}
+			if r == '{' {
+				braceDepth++
+				current.WriteRune(r)
+				continue
+			}
+			if r == '}' {
+				braceDepth--
+				current.WriteRune(r)
+				continue
+			}
+		}
+		if r == ',' && !inSingle && !inDouble && bracketDepth == 0 && braceDepth == 0 {
 			args = append(args, strings.TrimSpace(current.String()))
 			current.Reset()
 			continue
@@ -101,13 +428,79 @@ func splitArgs(s string) []string {
 	return args
 }
 
-// findInnermostFunction scans s and returns the indexes (start of name, index of closing ')'),
+// findInnermostFunction scans s and returns the indexes (start of function name, index of closing ')'),
 // function name, raw args (between parentheses), and found flag.
-// It finds the innermost parentheses pair and the function name immediately preceding the '('.
+// It finds the innermost parentheses pair WITHIN {{...}} blocks and the function name immediately preceding the '('.
+// Parentheses outside {{...}} blocks OR inside quoted strings are ignored.
+// findInnermostFunction finds the innermost function inside {{...}} and outside quotes.
+// Returns byte positions (not rune positions) for correct string slicing with multi-byte characters.
 func findInnermostFunction(s string) (int, int, string, string, bool) {
 	stack := []int{}
 	runes := []rune(s)
+	braceDepth := 0 // Track nesting depth of {{...}}
+	var inSingleQuote bool = false
+	var inDoubleQuote bool = false
+	
+	// Build rune-to-byte position map
+	runeToBytePos := make([]int, len(runes)+1)
+	bytePos := 0
 	for i, r := range runes {
+		runeToBytePos[i] = bytePos
+		bytePos += len(string(r))
+	}
+	runeToBytePos[len(runes)] = bytePos
+	
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		prevR := rune(0)
+		if i > 0 {
+			prevR = runes[i-1]
+		}
+
+		// Track {{...}} boundaries FIRST — these always take precedence over quotes.
+		// This ensures {{FUNC()}} embedded inside JSON string values (e.g. KPI_CARDS_HTML
+		// JSON with "value":"{{COUNT_OF(X)}}") are still detected correctly.
+		if i < len(runes)-1 && r == '{' && runes[i+1] == '{' {
+			braceDepth++
+			i++ // skip next '{'
+			// Reset quote tracking when entering a new {{...}} block so that
+			// quotes from HTML attributes outside don't bleed into the block.
+			if braceDepth == 1 {
+				inSingleQuote = false
+				inDoubleQuote = false
+			}
+			continue
+		}
+		if i < len(runes)-1 && r == '}' && runes[i+1] == '}' {
+			braceDepth--
+			i++ // skip next '}'
+			// Reset quote state when leaving a {{...}} block.
+			if braceDepth == 0 {
+				inSingleQuote = false
+				inDoubleQuote = false
+			}
+			continue
+		}
+
+		// Only process quote tracking and parentheses while inside {{...}} (braceDepth > 0).
+		// Outside {{...}} we don't care about parens — nothing to evaluate.
+		if braceDepth == 0 {
+			continue
+		}
+
+		// Inside {{...}}: track single-quote boundaries (CONCAT string literals use single quotes).
+		// Do NOT track double-quote boundaries here — double quotes appear inside JSON arguments
+		// like KPI_CARDS_HTML([{"label":"x","value":"{{COUNT_OF(Y)}}"}]) and we must NOT
+		// suppress paren/brace scanning for them.
+		if r == '\'' && prevR != '\\' && !inDoubleQuote {
+			inSingleQuote = !inSingleQuote
+		}
+
+		// Skip parens inside single-quoted string literals (CONCAT args like 'hello')
+		if inSingleQuote {
+			continue
+		}
+
 		if r == '(' {
 			stack = append(stack, i)
 		} else if r == ')' {
@@ -126,8 +519,17 @@ func findInnermostFunction(s string) (int, int, string, string, bool) {
 				continue
 			}
 			name := string(runes[nameStart:openIdx])
+			
+			// Only treat as function if name starts with an uppercase letter
+			// This prevents matching lowercase words with parens like "delete(s)"
+			if len(name) == 0 || !unicode.IsUpper(runes[nameStart]) {
+				continue
+			}
+			
 			argsRaw := string(runes[openIdx+1 : i])
-			return nameStart, i, name, argsRaw, true
+			
+			// Convert rune positions to byte positions for string slicing
+			return runeToBytePos[nameStart], runeToBytePos[i], name, argsRaw, true
 		}
 	}
 	return 0, 0, "", "", false
@@ -253,7 +655,13 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 	case "CONCAT":
 		out := strings.Builder{}
 		for _, a := range args {
-			if isQuoted(a) {
+			a = strings.TrimSpace(a)
+			// Check if it's a {{...}} wrapped value (result of inner function evaluation)
+			if strings.HasPrefix(a, "{{") && strings.HasSuffix(a, "}}") {
+				// Extract the literal value inside {{}}
+				literal := strings.TrimSpace(a[2 : len(a)-2])
+				out.WriteString(literal)
+			} else if isQuoted(a) {
 				out.WriteString(unquote(a))
 			} else {
 				val, ok := lookupPayload(a, payload)
@@ -357,14 +765,33 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 
 	case "COUNT_OF":
 		// COUNT_OF(listVar) → number of items in the list
+		// Works with both simple arrays and arrays of maps/rows
 		if len(args) != 1 {
 			return "", errors.New("COUNT_OF expects 1 argument: list variable name")
 		}
-		rows, ok := getRowList(args[0], payload)
+		
+		// Try to get value from payload
+		v, ok := lookupPayload(args[0], payload)
 		if !ok {
 			return "0", nil
 		}
-		return strconv.Itoa(len(rows)), nil
+		
+		// Count elements based on type
+		switch val := v.(type) {
+		case []map[string]interface{}:
+			return strconv.Itoa(len(val)), nil
+		case []interface{}:
+			return strconv.Itoa(len(val)), nil
+		case []string:
+			return strconv.Itoa(len(val)), nil
+		case []int:
+			return strconv.Itoa(len(val)), nil
+		case []float64:
+			return strconv.Itoa(len(val)), nil
+		default:
+			// Not a list/array type
+			return "0", nil
+		}
 
 	case "SUM_OF_FIELD":
 		// SUM_OF_FIELD(listVar, 'field') → sum numeric field across all rows
@@ -565,8 +992,9 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 
 	case "TABLE_HTML":
 		// TABLE_HTML(listVar, 'col1', 'col2', ...) → renders an HTML <table>
-		// with headers = column names, rows = values from each map row.
-		// TABLE_HTML(Transactions, 'tran_date', 'description', 'withdrawal_amount', 'deposit_amount', 'category')
+		// Supports two calling conventions:
+		//   1. Simple:  TABLE_HTML(Items, 'col1', 'col2', ...)
+		//   2. Aliased: TABLE_HTML(Items, ["col1","col2"], ["Alias 1","Alias 2"])
 		if len(args) < 2 {
 			return "", errors.New("TABLE_HTML expects listVar + at least 1 column")
 		}
@@ -574,16 +1002,45 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		if !ok {
 			return "<table><tr><td>No data</td></tr></table>", nil
 		}
-		cols := make([]string, len(args)-1)
-		for i, a := range args[1:] {
-			cols[i] = unquote(a)
+		// Detect aliased format: second arg starts with '['
+		var cols, labels []string
+		if strings.HasPrefix(strings.TrimSpace(args[1]), "[") {
+			// Parse JSON array for cols
+			colsRaw := strings.TrimSpace(args[1])
+			var parsed []string
+			if err := json.Unmarshal([]byte(colsRaw), &parsed); err == nil {
+				cols = parsed
+			} else {
+				cols = []string{unquote(args[1])}
+			}
+			// Parse optional alias array (third arg)
+			if len(args) >= 3 && strings.HasPrefix(strings.TrimSpace(args[2]), "[") {
+				aliasRaw := strings.TrimSpace(args[2])
+				var aliases []string
+				if err := json.Unmarshal([]byte(aliasRaw), &aliases); err == nil {
+					labels = aliases
+				}
+			}
+		} else {
+			// Simple format: each remaining arg is a quoted column name
+			cols = make([]string, len(args)-1)
+			for i, a := range args[1:] {
+				cols[i] = unquote(a)
+			}
+		}
+		// Build labels from cols if not provided
+		if len(labels) == 0 {
+			labels = make([]string, len(cols))
+			for i, c := range cols {
+				labels[i] = strings.Title(strings.ReplaceAll(c, "_", " "))
+			}
 		}
 		var sb strings.Builder
 		sb.WriteString(`<table style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px">`)
 		// header
 		sb.WriteString(`<thead><tr>`)
-		for _, c := range cols {
-			label := strings.ReplaceAll(strings.Title(strings.ReplaceAll(c, "_", " ")), " ", "&nbsp;")
+		for _, lbl := range labels {
+			label := strings.ReplaceAll(lbl, " ", "&nbsp;")
 			sb.WriteString(fmt.Sprintf(`<th style="border:1px solid #ddd;padding:8px;background:#f2f2f2;text-align:left">%s</th>`, label))
 		}
 		sb.WriteString(`</tr></thead><tbody>`)
@@ -675,8 +1132,100 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return sb.String(), nil
 
 	case "KPI_CARDS_HTML":
-		// KPI_CARDS_HTML(groupedListVar) → renders colourful KPI summary cards from GROUP_BY result.
-		// Each card: category name, transaction count, debit total, credit total.
+		// KPI_CARDS_HTML supports two calling conventions:
+		//
+		// 1. JSON array of label/value objects (primary template syntax):
+		//    {{KPI_CARDS_HTML([{"label":"Count","value":"3"},{"label":"By","value":"admin","color":"#1565c0"}])}}
+		//    The "value" fields are already-evaluated strings (all inner {{...}} have been
+		//    resolved by the engine before this function is called).
+		//
+		// 2. Pipe-separated pairs (legacy convenience syntax):
+		//    {{KPI_CARDS_HTML(Label1|Value1, Label2|Value2)}}
+		//
+		// 3. GROUP_BY result variable (original GROUP_BY → KPI flow):
+		//    {{KPI_CARDS_HTML(groupedVar)}}
+		colors := []string{"#4e73df", "#1cc88a", "#36b9cc", "#f6c23e", "#e74a3b", "#858796"}
+		var sb strings.Builder
+		sb.WriteString(`<div style="display:flex;flex-wrap:wrap;gap:12px;margin:8px 0">`)
+
+		if len(args) == 0 {
+			return "", errors.New("KPI_CARDS_HTML requires at least 1 argument")
+		}
+
+		// Convention 1: single arg starting with '[' → JSON array of label/value cards
+		firstArg := strings.TrimSpace(args[0])
+		if strings.HasPrefix(firstArg, "[") {
+			// Reconstruct the full JSON by joining all args (splitArgs splits on commas
+			// but JSON also has commas, so we need the raw joined form).
+			// We re-join with commas since splitArgs already split on unquoted commas.
+			rawJSON := strings.Join(args, ",")
+			rawJSON = strings.TrimSpace(rawJSON)
+
+			// Unwrap surrounding {{...}} from individual value strings that were already
+			// resolved by the engine (e.g. "value":"1" after COUNT_OF resolved).
+			// Nothing to do here — values are plain strings at this point.
+
+			type kpiCard struct {
+				Label string `json:"label"`
+				Value string `json:"value"`
+				Color string `json:"color"`
+			}
+			var cards []kpiCard
+			if err := json.Unmarshal([]byte(rawJSON), &cards); err != nil {
+				// Fallback: try to extract label/value pairs with a simple regex
+				// to be resilient against minor JSON formatting issues.
+				return "", fmt.Errorf("KPI_CARDS_HTML: invalid JSON array: %v (raw: %s)", err, rawJSON)
+			}
+			for i, card := range cards {
+				c := colors[i%len(colors)]
+				if card.Color != "" {
+					c = card.Color
+				}
+				val := card.Value
+				// If value is still a {{VarName}} reference (variable was not resolved as a
+				// function earlier because it's not a function call), resolve it now against payload.
+				if strings.HasPrefix(val, "{{") && strings.HasSuffix(val, "}}") {
+					inner := strings.TrimSpace(val[2 : len(val)-2])
+					if pv, ok := lookupPayload(inner, payload); ok {
+						val = toString(pv)
+					} else {
+						val = inner // strip braces, show the key name as fallback
+					}
+				}
+				sb.WriteString(fmt.Sprintf(
+					`<div style="background:%s;color:#fff;border-radius:8px;padding:14px 20px;min-width:160px;flex:1;text-align:center">
+<div style="font-size:22px;font-weight:700;margin:4px 0">%s</div>
+<div style="font-size:11px;text-transform:uppercase;opacity:.85;margin-top:4px">%s</div>
+</div>`,
+					c, html.EscapeString(val), html.EscapeString(card.Label),
+				))
+			}
+			sb.WriteString(`</div>`)
+			return sb.String(), nil
+		}
+
+		// Convention 2: multiple args with '|' separator → Label|Value pairs
+		if len(args) > 1 || strings.Contains(firstArg, "|") {
+			for i, arg := range args {
+				parts := strings.SplitN(arg, "|", 2)
+				label, value := strings.TrimSpace(parts[0]), ""
+				if len(parts) == 2 {
+					value = strings.TrimSpace(parts[1])
+				}
+				c := colors[i%len(colors)]
+				sb.WriteString(fmt.Sprintf(
+					`<div style="background:%s;color:#fff;border-radius:8px;padding:14px 20px;min-width:160px;flex:1;text-align:center">
+<div style="font-size:22px;font-weight:700;margin:4px 0">%s</div>
+<div style="font-size:11px;text-transform:uppercase;opacity:.85;margin-top:4px">%s</div>
+</div>`,
+					c, html.EscapeString(value), html.EscapeString(label),
+				))
+			}
+			sb.WriteString(`</div>`)
+			return sb.String(), nil
+		}
+
+		// Convention 3: single arg → GROUP_BY result variable
 		if len(args) != 1 {
 			return "", errors.New("KPI_CARDS_HTML expects 1 argument: grouped list variable")
 		}
@@ -688,9 +1237,6 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		if !ok {
 			return "", nil
 		}
-		colors := []string{"#4e73df", "#1cc88a", "#36b9cc", "#f6c23e", "#e74a3b", "#858796"}
-		var sb strings.Builder
-		sb.WriteString(`<div style="display:flex;flex-wrap:wrap;gap:12px;margin:8px 0">`)
 		for i, g := range grouped {
 			c := colors[i%len(colors)]
 			grpName := rowString(g, "group")
@@ -713,8 +1259,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 
 	case "FORMAT_CURRENCY":
 		// FORMAT_CURRENCY(val) or FORMAT_CURRENCY(val, 'CurrencyCode')
-		// The optional second argument is a currency-code label (e.g. 'INR') that
-		// is prepended to the formatted number. It is accepted but not required.
+		// Output: '₹ 1,00,000.00' or 'INR ₹ 1,00,000.00'
 		if len(args) < 1 || len(args) > 2 {
 			return "", errors.New("FORMAT_CURRENCY expects 1 or 2 arguments: value [, 'currency_code']")
 		}
@@ -724,14 +1269,18 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		formatted := formatCurrency(v)
 		if len(args) == 2 {
-			// second arg is a currency code literal like 'INR' or a payload var
-			code := unquote(args[1])
-			if code == "" {
-				if cv, ok2 := lookupPayload(args[1], payload); ok2 {
+			// second arg is a currency code literal like 'INR', '"INR"' or a payload var
+			raw := strings.TrimSpace(args[1])
+			// strip both single and double quotes
+			code := strings.Trim(raw, "'\"")
+			if code == "" || code == raw {
+				// try as payload variable
+				if cv, ok2 := lookupPayload(raw, payload); ok2 {
 					code = fmt.Sprintf("%v", cv)
 				}
 			}
 			if code != "" {
+				// Place code BEFORE the ₹ symbol: 'INR ₹ 1,00,000.00'
 				formatted = code + " " + formatted
 			}
 		}
@@ -800,6 +1349,10 @@ func lookupPayload(key string, payload map[string]interface{}) (interface{}, boo
 	if key == "" {
 		return nil, false
 	}
+	// Unwrap {{...}} — this happens when inner function results are passed as args
+	if strings.HasPrefix(key, "{{") && strings.HasSuffix(key, "}}") {
+		key = strings.TrimSpace(key[2 : len(key)-2])
+	}
 	if v, ok := payload[key]; ok {
 		return v, true
 	}
@@ -853,6 +1406,10 @@ func toStringFloat(f float64) string {
 
 func resolveNumericArg(token string, payload map[string]interface{}) (float64, bool) {
 	token = strings.TrimSpace(token)
+	// Unwrap {{...}} — result of inner function evaluation passed as outer arg
+	if strings.HasPrefix(token, "{{") && strings.HasSuffix(token, "}}") {
+		token = strings.TrimSpace(token[2 : len(token)-2])
+	}
 	if isQuoted(token) {
 		// quoted numeric literal
 		u := unquote(token)
@@ -885,6 +1442,14 @@ func resolveNumericArg(token string, payload map[string]interface{}) (float64, b
 		if f, err := strconv.ParseFloat(t, 64); err == nil {
 			return f, true
 		}
+	case pgtype.Numeric:
+		if t.Valid {
+			f, err := t.Float64Value()
+			if err == nil {
+				return f.Float64, true
+			}
+		}
+		return 0, true
 	}
 	return 0, false
 }
@@ -1128,6 +1693,15 @@ func rowString(row map[string]interface{}, key string) string {
 func rowDisplayValue(row map[string]interface{}, key string) string {
 	for k, v := range row {
 		if strings.EqualFold(k, key) {
+			// Normalize pgtype.Numeric → float64 before display
+			if pn, ok := v.(pgtype.Numeric); ok {
+				if pn.Valid {
+					f, _ := pn.Float64Value()
+					v = f.Float64
+				} else {
+					v = float64(0)
+				}
+			}
 			// Monetary field detection
 			lk := strings.ToLower(k)
 			isMonetary := strings.Contains(lk, "amount") || strings.Contains(lk, "balance") ||

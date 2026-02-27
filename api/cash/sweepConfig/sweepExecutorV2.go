@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/jobs"
 	"context"
 	"database/sql"
@@ -1071,6 +1072,17 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "Sweep executed successfully", result)
+		// Notify: pass FULL execution context for rich templates
+		capturedSweepID := req.SweepID
+		capturedUser := req.UserID
+		capturedResult := result
+		payload := BuildSweepExecutionNotifPayload(context.Background(), pgxPool, capturedSweepID, capturedResult, "MANUAL_TRIGGER", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-execution-v2/manual-trigger",
+			fmt.Sprintf("SWEEPEXEC_MANUAL/%s/%d", capturedSweepID, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -1673,5 +1685,22 @@ func BulkManualTriggerSweepV2WithAutoApproval(pgxPool *pgxpool.Pool) http.Handle
 				"successful": successCount,
 				"failed":     failureCount,
 			})
+		// Notify: pass bulk execution summary (for now, just counts - could enhance with individual sweep payloads)
+		capturedResults := results
+		capturedUser := req.UserID
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/sweep-execution-v2/bulk-manual",
+			fmt.Sprintf("SWEEPEXEC_BULK/%s/%d", capturedUser, time.Now().UnixMilli()),
+			map[string]interface{}{
+				"Results":     capturedResults,
+				"Total":       len(capturedResults),
+				"Successful":  successCount,
+				"Failed":      failureCount,
+				"RequestedBy": capturedUser,
+				"Action":      "BULK_MANUAL_TRIGGER",
+				"ActionAt":    time.Now().Format(time.RFC3339),
+			},
+		)
 	}
 }

@@ -34,8 +34,8 @@ func StartCashService(db *sql.DB) {
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
 	}
-	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db)))
-	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db)))
+	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db, pgxPool)))
+	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db, pgxPool)))
 
 	// Preview and categorization endpoints (NO DB insertion, fast preview with categorization)
 	mux.Handle("/cash/preview-categorize", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.PreviewBankStatementHandler(db)))
@@ -44,9 +44,9 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/uncategorized-transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetUncategorizedTransactionsHandler(db)))
 
 	// New streaming preview and management endpoints
-	mux.Handle("/cash/preview", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV3Handler(db)))
+	mux.Handle("/cash/preview", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV3Handler(db, pgxPool)))
 	mux.Handle("/cash/recalculate", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecalculateHandler(db)))
-	mux.Handle("/cash/commit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CommitHandler(db)))
+	mux.Handle("/cash/commit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.CommitHandler(db, pgxPool)))
 	mux.Handle("/cash/get-pdf", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetPDFMetadataHandler(db)))
 	mux.Handle("/cash/download-pdf", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadPDFHandler(db)))
 	// Category Master APIs
@@ -66,9 +66,9 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-statements/v2/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetAllBankStatementsHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionsHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/recompute-kpis", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecomputeBankStatementSummaryHandler(db)))
-	mux.Handle("/cash/bank-statements/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveBankStatementHandler(db)))
-	mux.Handle("/cash/bank-statements/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectBankStatementHandler(db)))
-	mux.Handle("/cash/bank-statements/v2/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteBankStatementHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveBankStatementHandler(db, pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectBankStatementHandler(db, pgxPool)))
+	mux.Handle("/cash/bank-statements/v2/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteBankStatementHandler(db, pgxPool)))
 	mux.Handle("/cash/upload-payrec", api.BusinessUnitMiddleware(db)(payablerecievable.UploadPayRec(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/transactions/misclassify", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.MarkBankStatementTransactionsMisclassifiedHandler(db)))
 	// mux.Handle("/cash/bank-statements/all", api.BusinessUnitMiddleware(db)(bankstatement.GetBankStatements(pgxPool)))

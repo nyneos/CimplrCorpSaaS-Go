@@ -441,7 +441,7 @@ func lookupTemplate(ctx context.Context, pool *pgxpool.Pool, eventID, channel st
 		WHERE t.event_id = $1
 		  AND UPPER(t.channel) = UPPER($2)
 		  AND at.processing_status = 'APPROVED'
-		  AND COALESCE(t.is_deleted, false) = false
+		  AND COALESCE(at.is_deleted, false) = false
 		ORDER BY at.requested_at DESC NULLS LAST
 		LIMIT 1
 	`
@@ -510,6 +510,11 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 			continue
 		}
 		seen[key] = true
+		// If employee_name is empty in users table, derive a friendly name from email
+		// (e.g. "hardik.mishra@company.com" → "Hardik Mishra")
+		if r.name == "" && r.email != "" {
+			r.name = nameFromEmail(r.email)
+		}
 		out = append(out, r)
 	}
 	if rows.Err() != nil {
@@ -582,7 +587,22 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) err
 			rendered_subject, rendered_body, variables_payload, scheduled_at,
 			priority_level, sender_id, sender_code, sender_name, sender_email, sender_identifier
 		) VALUES %s
-		ON CONFLICT (correlation_id, channel, recipient_user_id) DO NOTHING
+		ON CONFLICT (correlation_id, channel, recipient_user_id) DO UPDATE SET
+			rendered_subject = CASE
+				WHEN notification_svc.outbox.processing_status = 'PENDING'
+				THEN EXCLUDED.rendered_subject
+				ELSE notification_svc.outbox.rendered_subject
+			END,
+			rendered_body = CASE
+				WHEN notification_svc.outbox.processing_status = 'PENDING'
+				THEN EXCLUDED.rendered_body
+				ELSE notification_svc.outbox.rendered_body
+			END,
+			variables_payload = CASE
+				WHEN notification_svc.outbox.processing_status = 'PENDING'
+				THEN EXCLUDED.variables_payload
+				ELSE notification_svc.outbox.variables_payload
+			END
 		RETURNING outbox_id, correlation_id, event_id, audit_id, channel,
 		          recipient_user_id, recipient_email, recipient_phone,
 		          sender_name, sender_email, sender_identifier,
@@ -769,6 +789,26 @@ func nullStr(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// nameFromEmail derives a human-readable display name from an email address.
+// "hardik.mishra@company.com" → "Hardik Mishra"
+// "admin@company.com"        → "Admin"
+// Falls back to the local-part as-is if no dots found.
+func nameFromEmail(email string) string {
+	local := email
+	if at := strings.Index(email, "@"); at > 0 {
+		local = email[:at]
+	}
+	// Replace dots/underscores/hyphens with spaces and title-case each word
+	local = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(local)
+	words := strings.Fields(local)
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // derefStr safely dereferences a *string returned from a nullable DB column.

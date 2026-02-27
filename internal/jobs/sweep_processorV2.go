@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/config"
 	"CimplrCorpSaas/internal/logger"
 
@@ -444,6 +445,24 @@ func ProcessPendingInitiations(ctx context.Context, db *pgxpool.Pool, batchSize 
 
 		if err != nil {
 			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution failed: %v", sweepID, initiationID, err)
+
+			// Ensure failure is persisted to sweep_execution_log. Some error paths
+			// inside executeSweepWithInitiation may return without calling
+			// logSweepFailure, so write a FAILED row here if none exists yet.
+			var existing int
+			_ = db.QueryRow(ctx, `SELECT COUNT(1) FROM cimplrcorpsaas.sweep_execution_log WHERE initiation_id = $1 AND status = 'FAILED'`, initiationID).Scan(&existing)
+			if existing == 0 {
+				// Best-effort: fetch latest source balance for balance_before
+				var balanceBefore float64
+				_ = db.QueryRow(ctx, `SELECT COALESCE(closing_balance,0) FROM bank_balances_manual WHERE account_no = $1 ORDER BY as_of_date DESC, as_of_time DESC LIMIT 1`, finalSourceAccount).Scan(&balanceBefore)
+				logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+					SweepID:      sweepID,
+					InitiationID: initiationID,
+					FromAccount:  finalSourceAccount,
+					ToAccount:    finalTargetAccount,
+				}, BalanceBefore: balanceBefore, Reason: err.Error()})
+			}
+
 			failCount++
 		} else {
 			log.Printf("[SWEEP V2] %s (initiation: %s) - Execution successful", sweepID, initiationID)
@@ -754,7 +773,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	`, sourceAccount).Scan(&balanceID, &currentBalance)
 
 	if err != nil {
-		return fmt.Errorf("failed to fetch source account balance: %w", err)
+		errMsg := fmt.Sprintf("SYSTEM ERROR: failed to fetch source account balance for %s: %v", sourceAccount, err)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: 0, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Get buffer amount
@@ -873,7 +899,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 			finalSweepAmount = currentBalance - buffer
 
 		default:
-			return fmt.Errorf("unknown sweep type: %s", sweepType)
+			errMsg := fmt.Sprintf("BLOCKED: unknown sweep type: %s", sweepType)
+			logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+				SweepID:      sweepID,
+				InitiationID: initiationID,
+				FromAccount:  sourceAccount,
+				ToAccount:    targetAccount,
+			}, BalanceBefore: currentBalance, Reason: errMsg})
+			return errors.New(errMsg)
 		}
 	}
 
@@ -921,7 +954,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	`, newBalance, finalSweepAmount, balanceID)
 
 	if err != nil {
-		return fmt.Errorf("failed to update source account: %w", err)
+		errMsg := fmt.Sprintf("SYSTEM ERROR: failed to update source account: %v", err)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Create audit for source
@@ -932,7 +972,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	`, balanceID, fmt.Sprintf("Sweep V2 execution (initiation: %s): %s", initiationID, sweepID))
 
 	if err != nil {
-		return fmt.Errorf("failed to create audit for source: %w", err)
+		errMsg := fmt.Sprintf("SYSTEM ERROR: failed to create audit for source account: %v", err)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Get target account
@@ -948,7 +995,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	`, targetAccount).Scan(&targetBalanceID, &targetBalance)
 
 	if err != nil {
-		return fmt.Errorf("target account not found: %w", err)
+		errMsg := fmt.Sprintf("SYSTEM ERROR: target account not found (%s): %v", targetAccount, err)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Update target account
@@ -968,7 +1022,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	`, targetNewBalance, finalSweepAmount, targetBalanceID)
 
 	if err != nil {
-		return fmt.Errorf("failed to update target account: %w", err)
+		errMsg := fmt.Sprintf("SYSTEM ERROR: failed to update target account: %v", err)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Create audit for target
@@ -979,7 +1040,14 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 	`, targetBalanceID, fmt.Sprintf("Sweep V2 receipt (initiation: %s): %s", initiationID, sweepID))
 
 	if err != nil {
-		return fmt.Errorf("failed to create audit for target: %w", err)
+		errMsg := fmt.Sprintf("SYSTEM ERROR: failed to create audit for target account: %v", err)
+		logSweepFailure(ctx, db, SweepFailureInfo{Params: SweepExecParams{
+			SweepID:      sweepID,
+			InitiationID: initiationID,
+			FromAccount:  sourceAccount,
+			ToAccount:    targetAccount,
+		}, BalanceBefore: currentBalance, Reason: errMsg})
+		return errors.New(errMsg)
 	}
 
 	// Log execution with initiation_id
@@ -1015,6 +1083,26 @@ func executeSweepWithInitiation(ctx context.Context, db *pgxpool.Pool, params Sw
 
 	log.Printf("[SWEEP V2] %s SUCCESS (Initiation: %s) | Type: %s | Amount: %.2f | Buffer: %.2f",
 		sweepID, initiationID, sweepType, finalSweepAmount, buffer)
+
+	// Fire notification for successful sweep execution (fire-and-forget)
+	go catalog.TriggerNotification(
+		context.Background(), db,
+		"/cash/sweep/executed",
+		fmt.Sprintf("SWEEP_EXEC/%s/%s", sweepID, initiationID),
+		map[string]interface{}{
+			"SweepID":         sweepID,
+			"InitiationID":    initiationID,
+			"FromAccount":     sourceAccount,
+			"ToAccount":       targetAccount,
+			"SweepType":       sweepType,
+			"AmountSwept":     finalSweepAmount,
+			"BalanceBefore":   currentBalance,
+			"BalanceAfter":    newBalance,
+			"BufferAmount":    buffer,
+			"ExecutedAt":      time.Now().Format(time.RFC3339),
+			"Status":          "SUCCESS",
+		},
+	)
 
 	return nil
 }

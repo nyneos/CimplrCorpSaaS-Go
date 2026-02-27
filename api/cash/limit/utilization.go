@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -252,6 +253,26 @@ func BulkCreateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		// Notify: bulk utilizations created with FULL record data
+		capturedUser := req.UserID
+		// Collect successful utilization_ids from results
+		createdUtilizationIDs := []string{}
+		for _, r := range results {
+			if success, ok := r["success"].(bool); ok && success {
+				if utilID, ok := r["utilization_id"].(string); ok && utilID != "" {
+					createdUtilizationIDs = append(createdUtilizationIDs, utilID)
+				}
+			}
+		}
+		if len(createdUtilizationIDs) > 0 {
+			payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, createdUtilizationIDs, "CREATE", capturedUser)
+			go catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/cash/utilization/bulk-create",
+				fmt.Sprintf("UTIL_BULK_CREATE/%s/%d", capturedUser, time.Now().UnixMilli()),
+				payload.ToMap(),
+			)
+		}
 	}
 }
 
@@ -410,6 +431,16 @@ func UpdateUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithResult(w, true, req.UtilizationID)
+		// Notify: utilization updated with FULL record data
+		capturedUID := req.UtilizationID
+		capturedUser := req.UserID
+		payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, []string{capturedUID}, "UPDATE", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/utilization/update",
+			fmt.Sprintf("UTIL_UPDATE/%s/%s", capturedUID, capturedUser),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -493,6 +524,16 @@ func DeleteUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		// Notify: utilizations submitted for deletion with FULL record data
+		capturedUser := req.UserID
+		capturedIDs := req.UtilizationIDs
+		payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/utilization/delete",
+			fmt.Sprintf("UTIL_DELETE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -1073,6 +1114,19 @@ func BulkApproveUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"approved_count": len(actionIDs),
 			"deleted":        deleted,
 		})
+		// Notify: utilizations approved with FULL record data
+		capturedUser := req.UserID
+		capturedIDs := req.UtilizationIDs
+		capturedDeleted := deleted
+		payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
+		payloadMap := payload.ToMap()
+		payloadMap["DeletedIDs"] = capturedDeleted
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/utilization/approve",
+			fmt.Sprintf("UTIL_APPROVE/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payloadMap,
+		)
 	}
 }
 
@@ -1150,6 +1204,16 @@ func BulkRejectUtilizations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rejected_count": len(actionIDs),
 		})
+		// Notify: utilizations rejected with FULL record data
+		capturedUser := req.UserID
+		capturedIDs := req.UtilizationIDs
+		payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
+		go catalog.TriggerNotification(
+			context.Background(), pgxPool,
+			"/cash/utilization/reject",
+			fmt.Sprintf("UTIL_REJECT/%s/%d", capturedUser, time.Now().UnixMilli()),
+			payload.ToMap(),
+		)
 	}
 }
 
@@ -1221,6 +1285,30 @@ func UploadUtilization(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		results := processUtilizationRows(ctx, pgxPool, rows, requestedBy)
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
+		// Notify: utilization file uploaded with FULL record data
+		capturedUser := userID
+		capturedFile := file.Filename
+		// Collect successful utilization_ids from results
+		uploadedUtilizationIDs := []string{}
+		for _, r := range results {
+			if success, ok := r["success"].(bool); ok && success {
+				if utilID, ok := r["utilization_id"].(string); ok && utilID != "" {
+					uploadedUtilizationIDs = append(uploadedUtilizationIDs, utilID)
+				}
+			}
+		}
+		if len(uploadedUtilizationIDs) > 0 {
+			payload := BuildUtilizationNotifPayload(context.Background(), pgxPool, uploadedUtilizationIDs, "UPLOAD", capturedUser)
+			payloadMap := payload.ToMap()
+			payloadMap["FileName"] = capturedFile
+			payloadMap["RowsUploaded"] = len(results)
+			go catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/cash/utilization/upload",
+				fmt.Sprintf("UTIL_UPLOAD/%s/%d", capturedUser, time.Now().UnixMilli()),
+				payloadMap,
+			)
+		}
 	}
 }
 

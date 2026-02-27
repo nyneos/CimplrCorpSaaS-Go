@@ -245,9 +245,11 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.is_deleted
 				FROM notification_svc.audit_template a
-				WHERE COALESCE(a.is_deleted, false) = false
-				ORDER BY a.template_id, a.requested_at DESC NULLS LAST
+				ORDER BY a.template_id,
+				         GREATEST(COALESCE(a.checker_at, '1970-01-01'::timestamptz),
+				                  COALESCE(a.requested_at, '1970-01-01'::timestamptz)) DESC NULLS LAST
 			),
+			-- history CTE gives flat created/edited/deleted by+at
 			history AS (
 				SELECT
 					template_id,
@@ -259,19 +261,6 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM notification_svc.audit_template
 				GROUP BY template_id
-			),
-			-- old_* = content of the last APPROVED row (the "before" snapshot)
-			old_vals AS (
-				SELECT DISTINCT ON (template_id)
-					template_id,
-					COALESCE(subject,'')                                        AS old_subject,
-					COALESCE(body_text,'')                                      AS old_body_text,
-					COALESCE(body_html,'')                                      AS old_body_html,
-					COALESCE(is_html_enabled,false)                             AS old_is_html_enabled,
-					COALESCE(version_label,'')                                  AS old_version_label
-				FROM notification_svc.audit_template
-				WHERE processing_status = 'APPROVED'
-				ORDER BY template_id, requested_at DESC NULLS LAST
 			)
 			SELECT
 				t.template_id,
@@ -304,11 +293,12 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.deleted_by,'')        AS deleted_by,
 				COALESCE(h.deleted_at,'')        AS deleted_at,
 
-				COALESCE(ov.old_subject,'')          AS old_subject,
-				COALESCE(ov.old_body_text,'')        AS old_body_text,
-				COALESCE(ov.old_body_html,'')        AS old_body_html,
-				COALESCE(ov.old_is_html_enabled,false) AS old_is_html_enabled,
-				COALESCE(ov.old_version_label,'')    AS old_version_label,
+				-- old_* come from the audit row's own snapshot (stored at edit time)
+				COALESCE(l.old_subject,'')           AS old_subject,
+				COALESCE(l.old_body_text,'')         AS old_body_text,
+				COALESCE(l.old_body_html,'')         AS old_body_html,
+				false                                AS old_is_html_enabled,
+				''                                   AS old_version_label,
 				COALESCE(l.old_recipients, '{}')     AS old_recipients,
 
 				` + recipientSubquery + ` AS recipients
@@ -316,7 +306,6 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM notification_svc.template t
 			LEFT JOIN latest_audit l ON l.template_id = t.template_id
 			LEFT JOIN history h ON h.template_id = t.template_id
-			LEFT JOIN old_vals ov ON ov.template_id = t.template_id
 			ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC
 		`
 		rows, err := pgxPool.Query(ctx, q)
@@ -391,19 +380,6 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
 				FROM notification_svc.audit_template
 				GROUP BY template_id
-			),
-			-- old_* = content of the last APPROVED row ("before" snapshot for diff view)
-			old_vals AS (
-				SELECT DISTINCT ON (template_id)
-					template_id,
-					COALESCE(subject,'')                                        AS old_subject,
-					COALESCE(body_text,'')                                      AS old_body_text,
-					COALESCE(body_html,'')                                      AS old_body_html,
-					COALESCE(is_html_enabled,false)                             AS old_is_html_enabled,
-					COALESCE(version_label,'')                                  AS old_version_label
-				FROM notification_svc.audit_template
-				WHERE processing_status = 'APPROVED'
-				ORDER BY template_id, requested_at DESC NULLS LAST
 			)
 			SELECT
 				t.template_id,
@@ -435,22 +411,22 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.deleted_by,'')        AS deleted_by,
 				COALESCE(h.deleted_at,'')        AS deleted_at,
 
-				COALESCE(ov.old_subject,'')          AS old_subject,
-				COALESCE(ov.old_body_text,'')        AS old_body_text,
-				COALESCE(ov.old_body_html,'')        AS old_body_html,
-				COALESCE(ov.old_is_html_enabled,false) AS old_is_html_enabled,
-				COALESCE(ov.old_version_label,'')    AS old_version_label,
-				COALESCE(a.is_deleted, false)         AS version_is_deleted,
-				COALESCE(a.old_recipients, '{}')      AS old_recipients,
+				-- each row's own stored snapshot (correct per-version, not the current live version)
+				COALESCE(a.old_subject,'')        AS old_subject,
+				COALESCE(a.old_body_text,'')      AS old_body_text,
+				COALESCE(a.old_body_html,'')      AS old_body_html,
+				false                             AS old_is_html_enabled,
+				''                                AS old_version_label,
+				COALESCE(a.is_deleted, false)     AS version_is_deleted,
+				COALESCE(a.old_recipients, '{}')  AS old_recipients,
 
 				` + recipientSubquery + ` AS recipients
 
 			FROM notification_svc.audit_template a
 			JOIN notification_svc.template t ON t.template_id = a.template_id
 			LEFT JOIN history h ON h.template_id = a.template_id
-			LEFT JOIN old_vals ov ON ov.template_id = a.template_id
-			WHERE 1=1
-			  AND COALESCE(a.is_deleted, false) = false
+			WHERE a.is_deleted =false AND
+			1=1
 			` + filterClause + `
 			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamptz), COALESCE(a.checker_at, '1970-01-01'::timestamptz)) DESC NULLS LAST
 		`
@@ -501,14 +477,14 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			TemplateID   string                 `json:"template_id"`
-			Subject      string                 `json:"subject"`
-			BodyText     string                 `json:"body_text"`
-			BodyHTML     string                 `json:"body_html"`
-			IsHTML       *bool                  `json:"is_html_enabled"`
-			Formula      any                    `json:"formula_steps"`
-			ChangeNote   string                 `json:"change_note"`
-			Strategy     map[string]interface{} `json:"recipient_strategy"`
+			TemplateID string                 `json:"template_id"`
+			Subject    string                 `json:"subject"`
+			BodyText   string                 `json:"body_text"`
+			BodyHTML   string                 `json:"body_html"`
+			IsHTML     *bool                  `json:"is_html_enabled"`
+			Formula    any                    `json:"formula_steps"`
+			ChangeNote string                 `json:"change_note"`
+			Strategy   map[string]interface{} `json:"recipient_strategy"`
 			// template-level fields (optional — update template master on approval)
 			TemplateName string `json:"template_name"`
 			Description  string `json:"description"`
@@ -610,7 +586,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			VALUES
 				($1, 'EDIT', 'PENDING_EDIT_APPROVAL',
 				 $2, $3, $4, $5, $6,
-				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $1),
+				 (SELECT 'v' || (COUNT(*)+1) FROM notification_svc.audit_template WHERE template_id = $14::varchar),
 				 $7, now(), $8,
 				 $9, $10, $11, $12,
 				 $13)
@@ -618,11 +594,12 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		`
 		var newAuditID, newVersion string
 		if err := pgxPool.QueryRow(ctx, auditQ,
-			req.TemplateID,
-			req.Subject, req.BodyText, req.BodyHTML, *req.IsHTML, formulaVal,
-			editor, changeNote,
-			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldFormula,
-			oldRecipientsJSON,
+			req.TemplateID,                                                   // $1
+			req.Subject, req.BodyText, req.BodyHTML, *req.IsHTML, formulaVal, // $2–$6
+			editor, changeNote, // $7, $8
+			oldSubject.String, oldBodyText.String, oldBodyHTML.String, oldFormula, // $9–$12
+			oldRecipientsJSON, // $13
+			req.TemplateID,    // $14 — subquery ref (avoids 42P08)
 		).Scan(&newAuditID, &newVersion); err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -816,91 +793,32 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// BulkApproveTemplate approves specific audit_template versions by audit_id.
-// Accepts { "audit_ids": ["uuid1","uuid2"], "comment": "" }
-// For CREATE/EDIT approvals: activates the parent template row.
-// For DELETE approvals: sets is_deleted=true on the audit_template row itself.
-// Returns per-ID results so caller knows exactly which ones were skipped and why.
 func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+
 		var req struct {
 			UserID   string   `json:"user_id"`
 			AuditIDs []string `json:"audit_ids"`
 			Comment  string   `json:"comment"`
 		}
+
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithPayload(w, false, "invalid request body", nil)
 			return
 		}
+
 		if len(req.AuditIDs) == 0 {
 			api.RespondWithPayload(w, false, "audit_ids required", nil)
 			return
 		}
+
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
 		}
+
 		ctx := r.Context()
-
-		// Fetch current status of every supplied audit_id in one round-trip
-		statusRows, err := pgxPool.Query(ctx,
-			`SELECT audit_id::text, processing_status, COALESCE(is_deleted, false)
-			 FROM notification_svc.audit_template
-			 WHERE audit_id = ANY($1::uuid[])`,
-			req.AuditIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
-			return
-		}
-		defer statusRows.Close()
-
-		type rowInfo struct{ status string; deleted bool }
-		current := make(map[string]rowInfo, len(req.AuditIDs))
-		for statusRows.Next() {
-			var id, status string
-			var deleted bool
-			if err := statusRows.Scan(&id, &status, &deleted); err != nil {
-				api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
-				return
-			}
-			current[id] = rowInfo{status, deleted}
-		}
-		if statusRows.Err() != nil {
-			api.RespondWithPayload(w, false, statusRows.Err().Error(), nil)
-			return
-		}
-
-		var eligible []string
-		var results []map[string]interface{}
-		for _, id := range req.AuditIDs {
-			info, found := current[id]
-			if !found {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": false, "reason": "not found",
-				})
-				continue
-			}
-			if info.deleted {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": false, "reason": "already deleted",
-				})
-				continue
-			}
-			if !strings.Contains(info.status, "PENDING") {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": false,
-					"reason": fmt.Sprintf("cannot approve — current status is '%s'", info.status),
-				})
-				continue
-			}
-			eligible = append(eligible, id)
-		}
-
-		if len(eligible) == 0 {
-			api.RespondWithPayload(w, false, "no eligible audit rows to approve", results)
-			return
-		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
@@ -909,43 +827,105 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// 1. Stamp all eligible PENDING rows as APPROVED in one shot
-		tag, err := tx.Exec(ctx,
-			`UPDATE notification_svc.audit_template
-			 SET processing_status = 'APPROVED', checker_by = $1, checker_at = now(), checker_comment = $2
-			 WHERE audit_id = ANY($3::uuid[])
-			   AND processing_status LIKE '%PENDING%'
-			   AND COALESCE(is_deleted, false) = false`,
-			userEmail, req.Comment, eligible)
+		rows, err := tx.Query(ctx, `
+			SELECT audit_id::text, template_id, action_type, processing_status
+			FROM notification_svc.audit_template
+			WHERE audit_id = ANY($1::uuid[])
+			FOR UPDATE`,
+			req.AuditIDs,
+		)
 		if err != nil {
-			api.RespondWithPayload(w, false, "approve stamp failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
+			return
+		}
+		defer rows.Close()
+
+		type targetRow struct {
+			AuditID    string
+			TemplateID string
+			ActionType string
+			Status     string
+		}
+
+		var targets []targetRow
+
+		for rows.Next() {
+			var t targetRow
+			if err := rows.Scan(&t.AuditID, &t.TemplateID, &t.ActionType, &t.Status); err != nil {
+				api.RespondWithPayload(w, false, err.Error(), nil)
+				return
+			}
+
+			if !strings.Contains(t.Status, "PENDING") {
+				api.RespondWithPayload(w, false,
+					fmt.Sprintf("audit %s is not in a PENDING state (current: %s)", t.AuditID, t.Status),
+					nil)
+				return
+			}
+
+			targets = append(targets, t)
+		}
+
+		if rows.Err() != nil {
+			api.RespondWithPayload(w, false, rows.Err().Error(), nil)
 			return
 		}
 
-		// 2. For CREATE approvals → activate the parent template
-		_, err = tx.Exec(ctx,
-			`UPDATE notification_svc.template SET is_active = true
-			 WHERE template_id IN (
-				 SELECT DISTINCT template_id FROM notification_svc.audit_template
-				 WHERE audit_id = ANY($1::uuid[]) AND action_type = 'CREATE' AND processing_status = 'APPROVED'
-			 )`,
-			eligible)
-		if err != nil {
-			api.RespondWithPayload(w, false, "activate template failed: "+err.Error(), nil)
+		if len(targets) == 0 {
+			api.RespondWithPayload(w, false, "no eligible rows", nil)
 			return
 		}
 
-		// 3. For DELETE approvals → set is_deleted=true on the audit_template rows
-		//    (template table no longer carries is_deleted; the audit row itself is the soft-delete record)
-		_, err = tx.Exec(ctx,
-			`UPDATE notification_svc.audit_template SET is_deleted = true
-			 WHERE audit_id = ANY($1::uuid[])
-			   AND action_type = 'DELETE'
-			   AND processing_status = 'APPROVED'`,
-			eligible)
-		if err != nil {
-			api.RespondWithPayload(w, false, "delete flag failed: "+err.Error(), nil)
-			return
+		for _, t := range targets {
+
+			isDeleted := false
+			if t.ActionType == "DELETE" {
+				isDeleted = true
+			}
+
+			_, err = tx.Exec(ctx, `
+				UPDATE notification_svc.audit_template
+				SET processing_status = 'APPROVED',
+				    checker_by        = $1,
+				    checker_at        = now(),
+				    checker_comment   = $2,
+				    is_deleted        = $3
+				WHERE audit_id = $4`,
+				userEmail,
+				req.Comment,
+				isDeleted,
+				t.AuditID,
+			)
+
+			if err != nil {
+
+				// Handle unique constraint violation cleanly
+				if strings.Contains(err.Error(), "uniq_one_live_version") {
+					api.RespondWithPayload(w, false,
+						"another approved live version already exists for this template. reject or archive the existing live version before approving this one.",
+						nil)
+					return
+				}
+
+				api.RespondWithPayload(w, false, "approve failed: "+err.Error(), nil)
+				return
+			}
+
+			// Update template active flag
+			newIsActive := t.ActionType != "DELETE"
+
+			_, err = tx.Exec(ctx, `
+				UPDATE notification_svc.template
+				SET is_active = $1
+				WHERE template_id = $2`,
+				newIsActive,
+				t.TemplateID,
+			)
+
+			if err != nil {
+				api.RespondWithPayload(w, false, "template update failed: "+err.Error(), nil)
+				return
+			}
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -953,15 +933,9 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		for _, id := range eligible {
-			results = append(results, map[string]interface{}{
-				"audit_id": id, "success": true, "status": "APPROVED",
-			})
-		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"approved_count": tag.RowsAffected(),
+			"approved_count": len(targets),
 			"checker":        userEmail,
-			"results":        results,
 		})
 	}
 }
@@ -992,99 +966,102 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		// Fetch current status of every supplied audit_id in one round-trip
-		statusRows, err := pgxPool.Query(ctx,
-			`SELECT audit_id::text, processing_status, COALESCE(is_deleted, false)
-			 FROM notification_svc.audit_template
-			 WHERE audit_id = ANY($1::uuid[])`,
-			req.AuditIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
-			return
-		}
-		defer statusRows.Close()
+		// statusRows, err := pgxPool.Query(ctx,
+		// 	`SELECT audit_id::text, processing_status, COALESCE(is_deleted, false)
+		// 	 FROM notification_svc.audit_template
+		// 	 WHERE audit_id = ANY($1::uuid[])`,
+		// 	req.AuditIDs)
+		// if err != nil {
+		// 	api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
+		// 	return
+		// }
+		// defer statusRows.Close()
 
-		type rowInfo struct{ status string; deleted bool }
-		current := make(map[string]rowInfo, len(req.AuditIDs))
-		for statusRows.Next() {
-			var id, status string
-			var deleted bool
-			if err := statusRows.Scan(&id, &status, &deleted); err != nil {
-				api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
-				return
-			}
-			current[id] = rowInfo{status, deleted}
-		}
-		if statusRows.Err() != nil {
-			api.RespondWithPayload(w, false, statusRows.Err().Error(), nil)
-			return
-		}
+		// type rowInfo struct {
+		// 	status  string
+		// 	deleted bool
+		// }
+		// current := make(map[string]rowInfo, len(req.AuditIDs))
+		// for statusRows.Next() {
+		// 	var id, status string
+		// 	var deleted bool
+		// 	if err := statusRows.Scan(&id, &status, &deleted); err != nil {
+		// 		api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
+		// 		return
+		// 	}
+		// 	current[id] = rowInfo{status, deleted}
+		// }
+		// if statusRows.Err() != nil {
+		// 	api.RespondWithPayload(w, false, statusRows.Err().Error(), nil)
+		// 	return
+		// }
 
-		var eligible []string
+		// var eligible []string
 		var results []map[string]interface{}
-		for _, id := range req.AuditIDs {
-			info, found := current[id]
-			if !found {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": false, "reason": "not found",
-				})
-				continue
-			}
-			if info.deleted {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": false, "reason": "already deleted",
-				})
-				continue
-			}
-			if !strings.Contains(info.status, "PENDING") {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": false,
-					"reason": fmt.Sprintf("cannot reject — current status is '%s'", info.status),
-				})
-				continue
-			}
-			eligible = append(eligible, id)
-		}
+		// for _, id := range req.AuditIDs {
+		// 	info, found := current[id]
+		// 	if !found {
+		// 		results = append(results, map[string]interface{}{
+		// 			"audit_id": id, "success": false, "reason": "not found",
+		// 		})
+		// 		continue
+		// 	}
+		// 	if info.deleted {
+		// 		results = append(results, map[string]interface{}{
+		// 			"audit_id": id, "success": false, "reason": "already deleted",
+		// 		})
+		// 		continue
+		// 	}
+		// 	if !strings.Contains(info.status, "PENDING") {
+		// 		results = append(results, map[string]interface{}{
+		// 			"audit_id": id, "success": false,
+		// 			"reason": fmt.Sprintf("cannot reject — current status is '%s'", info.status),
+		// 		})
+		// 		continue
+		// 	}
+		// 	eligible = append(eligible, id)
+		// }
 
-		if len(eligible) > 0 {
-			tag, err := pgxPool.Exec(ctx,
-				`UPDATE notification_svc.audit_template
+		// if len(eligible) > 0 {
+		_, err := pgxPool.Exec(ctx,
+			`UPDATE notification_svc.audit_template
 				 SET processing_status = 'REJECTED', checker_by = $1, checker_at = now(), checker_comment = $2
 				 WHERE audit_id = ANY($3::uuid[])
 				   AND processing_status LIKE '%PENDING%'
 				   AND COALESCE(is_deleted, false) = false`,
-				userEmail, req.Comment, eligible)
-			if err != nil {
-				api.RespondWithPayload(w, false, err.Error(), nil)
-				return
-			}
-			for _, id := range eligible {
-				results = append(results, map[string]interface{}{
-					"audit_id": id, "success": true, "status": "REJECTED",
-				})
-			}
-			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"rejected_count": tag.RowsAffected(),
-				"checker":        userEmail,
-				"results":        results,
-			})
+			userEmail, req.Comment, req.AuditIDs)
+		if err != nil {
+			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
 		}
+		for _, id := range req.AuditIDs {
+			results = append(results, map[string]interface{}{
+				"audit_id": id, "success": true, "status": "REJECTED",
+			})
+		}
+		// api.RespondWithPayload(w, true, "", map[string]interface{}{
+		// 	"rejected_count": tag.RowsAffected(),
+		// 	"checker":        userEmail,
+		// 	"results":        results,
+		// })
+		// return
+		// }
 
 		// All IDs were ineligible — return detailed failures
 		api.RespondWithPayload(w, false, "no eligible audit rows to reject", results)
 	}
 }
 
-// BulkDeleteTemplateVersions raises a PENDING_DELETE_APPROVAL request for each audit_id.
+// DeleteTemplateVersion raises a PENDING_DELETE_APPROVAL request for each audit_id.
 // Accepts { "audit_ids": ["uuid1","uuid2"], "comment": "" }
-// The APPROVED (live) version cannot be queued for deletion — reject it first.
-// Actual soft-delete (is_deleted=true) is applied when a checker calls BulkApproveTemplate.
+// Any status (PENDING, APPROVED, REJECTED) can be queued for deletion — only REJECTED cannot be.
+// Actual soft-delete (is_deleted=true on audit_template + is_active/is_deleted on template) is applied when a checker calls BulkApproveTemplate.
 func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID   string   `json:"user_id"`
 			AuditIDs []string `json:"audit_ids"`
-			Comment  string   `json:"comment"`
+			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithPayload(w, false, "invalid request body", nil)
@@ -1101,86 +1078,75 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		// Verify all supplied audit_ids exist, are not already deleted/APPROVED,
-		// and collect their template_id + version_label for the response.
-		// Single query — fetch all in one round-trip.
-		rows, err := pgxPool.Query(ctx,
-			`SELECT audit_id::text, template_id, COALESCE(version_label,''), processing_status
-			 FROM notification_svc.audit_template
-			 WHERE audit_id = ANY($1::uuid[])
-			   AND COALESCE(is_deleted, false) = false`,
-			req.AuditIDs)
-		if err != nil {
-			api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
-			return
-		}
-		defer rows.Close()
+		// Verify all supplied audit_ids exist and are not already deleted.
+		// Any status (PENDING, APPROVED, REJECTED) is allowed to be queued for deletion.
+		// rows, err := pgxPool.Query(ctx,
+		// 	`SELECT audit_id::text, template_id, COALESCE(version_label,''), processing_status
+		// 	 FROM notification_svc.audit_template
+		// 	 WHERE audit_id = ANY($1::uuid[])
+		// 	   AND COALESCE(is_deleted, false) = false`,
+		// 	req.AuditIDs)
+		// if err != nil {
+		// 	api.RespondWithPayload(w, false, "lookup failed: "+err.Error(), nil)
+		// 	return
+		// }
+		// defer rows.Close()
 
 		type auditRow struct {
 			auditID, templateID, versionLabel, status string
 		}
-		var valid []auditRow
-		var blocked []map[string]interface{}
-		for rows.Next() {
-			var ar auditRow
-			if err := rows.Scan(&ar.auditID, &ar.templateID, &ar.versionLabel, &ar.status); err != nil {
-				api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
-				return
-			}
-			if ar.status == "APPROVED" {
-				blocked = append(blocked, map[string]interface{}{
-					"audit_id":      ar.auditID,
-					"version_label": ar.versionLabel,
-					"error":         "cannot delete live APPROVED version — reject it first",
-				})
-			} else {
-				valid = append(valid, ar)
-			}
-		}
-		if rows.Err() != nil {
-			api.RespondWithPayload(w, false, rows.Err().Error(), nil)
-			return
-		}
-		if len(valid) == 0 {
-			api.RespondWithPayload(w, false, "no eligible audit rows found", blocked)
-			return
-		}
+		// var valid []auditRow
+		// var blocked []map[string]interface{}
+		// for rows.Next() {
+		// 	var ar auditRow
+		// 	if err := rows.Scan(&ar.auditID, &ar.templateID, &ar.versionLabel, &ar.status); err != nil {
+		// 		api.RespondWithPayload(w, false, "scan failed: "+err.Error(), nil)
+		// 		return
+		// 	}
+		// 	// All statuses (PENDING, APPROVED, REJECTED) can be queued for deletion
+		// 	valid = append(valid, ar)
+		// }
+		// if rows.Err() != nil {
+		// 	api.RespondWithPayload(w, false, rows.Err().Error(), nil)
+		// 	return
+		// }
+		// if len(valid) == 0 {
+		// 	api.RespondWithPayload(w, false, "no eligible audit rows found (already deleted?)", blocked)
+		// 	return
+		// }
 
 		// ULTRA FAST: single UPDATE — marks all eligible rows as PENDING_DELETE_APPROVAL in one query
-		validIDs := make([]string, len(valid))
-		for i, v := range valid {
-			validIDs[i] = v.auditID
+		validIDs := make([]string, len(req.AuditIDs))
+		for i, v := range req.AuditIDs {
+			validIDs[i] = v
 		}
 		if _, err := pgxPool.Exec(ctx,
 			`UPDATE notification_svc.audit_template
 			 SET processing_status = 'PENDING_DELETE_APPROVAL',
 			     requested_by      = $1,
 			     requested_at      = now(),
-			     checker_comment   = $2
-			 WHERE audit_id = ANY($3::uuid[])
-			   AND COALESCE(is_deleted, false) = false
-			   AND processing_status != 'APPROVED'`,
-			userEmail, req.Comment, validIDs); err != nil {
+			     reason            = $2,
+				 action_type       = 'DELETE'
+			 WHERE audit_id = ANY($3::uuid[])`,
+			userEmail, req.Reason, validIDs); err != nil {
 			api.RespondWithPayload(w, false, "update failed: "+err.Error(), nil)
 			return
 		}
 
 		var results []map[string]interface{}
-		for _, v := range valid {
+		for _, v := range req.AuditIDs {
 			results = append(results, map[string]interface{}{
-				"audit_id":      v.auditID,
-				"template_id":   v.templateID,
-				"version_label": v.versionLabel,
+				"audit_id":      v,
+				"template_id":   v,
+				"version_label": v,
 				"status":        "PENDING_DELETE_APPROVAL",
 				"requested_by":  userEmail,
 			})
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"queued":  results,
-			"blocked": blocked,
-		})
+		api.RespondWithPayload(w, true, "", results)
 	}
 }
+
 // CreateTemplateRecipient inserts a recipient
 func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
