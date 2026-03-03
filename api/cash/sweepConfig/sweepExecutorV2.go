@@ -5,7 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
-	"CimplrCorpSaas/internal/jobs"
+	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1052,7 +1052,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Execute the sweep with the initiation context
-		params := jobs.SweepExecParams{
+		params := cashjobs.SweepExecParams{
 			SweepID:          req.SweepID,
 			InitiationID:     initiationID,
 			FromAccount:      sourceAccount,
@@ -1087,7 +1087,7 @@ func ManualTriggerSweepV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // executeSweepV2WithInitiation executes a V2 sweep with initiation context
-func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, params jobs.SweepExecParams) (map[string]interface{}, error) {
+func executeSweepV2WithInitiation(ctx context.Context, pgxPool *pgxpool.Pool, params cashjobs.SweepExecParams) (map[string]interface{}, error) {
 
 	sweepID := params.SweepID
 	initiationID := params.InitiationID

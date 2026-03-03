@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"unicode"
 
 	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -41,8 +43,8 @@ func ExtractVariables(tpl string) []string {
 //
 // FLEXIBLE TEMPLATE SYNTAX SUPPORT:
 // This engine now intelligently handles BOTH template formats:
-//   1. WRAPPED (classic):   "Hello {{CONCAT(UserName, '!')}} — {{COUNT_OF(Items)}} items"
-//   2. UNWRAPPED (seed scripts): "Hello CONCAT(UserName, '!') — COUNT_OF(Items) items"
+//  1. WRAPPED (classic):   "Hello {{CONCAT(UserName, '!')}} — {{COUNT_OF(Items)}} items"
+//  2. UNWRAPPED (seed scripts): "Hello CONCAT(UserName, '!') — COUNT_OF(Items) items"
 //
 // Auto-detection logic:
 //   - If template contains {{...}}, processes only wrapped expressions (backward compatible)
@@ -50,17 +52,34 @@ func ExtractVariables(tpl string) []string {
 //     intelligently wraps them and processes (flexible mode for seed scripts)
 //
 // Supported functions (case-insensitive):
-//   SUM, AVERAGE/AVG, SUMPRODUCT, FORMAT_NUMBER, FORMAT_DATE, FORMAT_CURRENCY,
-//   CONCAT, COUNT_OF, SUM_OF_FIELD, FILTER, ORDER_BY, GROUP_BY,
-//   TABLE_HTML, KPI_CARDS_HTML, ROWS_HTML, SUMMARY_TABLE_HTML,
-//   IF, BADGE_HTML, SUBTRACT, and more.
+//
+//	SUM, AVERAGE/AVG, SUMPRODUCT, FORMAT_NUMBER, FORMAT_DATE, FORMAT_CURRENCY,
+//	CONCAT, COUNT_OF, SUM_OF_FIELD, FILTER, ORDER_BY, GROUP_BY,
+//	TABLE_HTML, KPI_CARDS_HTML, ROWS_HTML, SUMMARY_TABLE_HTML,
+//	IF, BADGE_HTML, SUBTRACT, and more.
 func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error) {
 	// Normalize template: auto-wrap if needed
 	normalized := normalizeTemplate(tpl, payload)
 
-	// Evaluate nested function calls by repeatedly locating the innermost function
+	// Evaluate nested function calls by repeatedly locating the innermost function.
+	// RESILIENCE: a single bad function call must NEVER kill the entire render.
+	// If evaluateFunction returns an error we:
+	//   1. Log it with enough context to diagnose the bad template in DB.
+	//   2. Replace the broken {{FUNC(...)}} span with "" so the rest of the
+	//      email body (all other functions + variables) still renders correctly.
+	//   3. Accumulate errors and return them as a joined non-fatal error so
+	//      callers (dispatcher, dry-run validator) can see what went wrong.
 	result := normalized
+	var evalErrors []string
+	const maxIterations = 500 // guard against infinite loops in pathological templates
+	iterations := 0
 	for {
+		if iterations >= maxIterations {
+			evalErrors = append(evalErrors, "template evaluation halted: too many nested function calls (possible loop)")
+			break
+		}
+		iterations++
+
 		start, end, name, argsRaw, found := findInnermostFunction(result)
 		if !found {
 			break
@@ -68,7 +87,12 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 		args := splitArgs(argsRaw)
 		evaluated, err := evaluateFunction(name, args, payload)
 		if err != nil {
-			return "", err
+			// Log with full context so the broken template is easy to find in logs.
+			log.Printf("[TEMPLATE-ENGINE] function %s(%s) failed: %v", name, argsRaw, err)
+			evalErrors = append(evalErrors, fmt.Sprintf("%s: %v", name, err))
+			// Replace the broken call with empty string so rendering continues.
+			result = result[:start] + "" + result[end+1:]
+			continue
 		}
 		// replace start..end (inclusive) with evaluated value
 		result = result[:start] + evaluated + result[end+1:]
@@ -83,13 +107,13 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 			return s
 		}
 		key := strings.TrimSpace(sub[1])
-		
+
 		// Try to look up in payload
 		v, ok := lookupPayload(key, payload)
 		if ok {
 			return toString(v)
 		}
-		
+
 		// If not in payload, treat as a literal value (result of function evaluation)
 		// This handles cases like {{3}} or {{some text}} that resulted from function calls
 		return key
@@ -98,15 +122,45 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 	return result, nil
 }
 
+// EvaluateTemplateStrict is identical to EvaluateTemplate but returns an error
+// if ANY function call failed during rendering — used by the pre-save dry-run
+// validator in templateCatalog.go so broken templates are caught before DB write.
+func EvaluateTemplateStrict(tpl string, payload map[string]interface{}) (string, error) {
+	result, _ := EvaluateTemplate(tpl, payload)
+	// Re-run the function scan on the original template to detect any errors.
+	// We run EvaluateTemplate first (to get the rendered output) then re-validate
+	// by evaluating each function call individually in strict mode.
+	normalized := normalizeTemplate(tpl, payload)
+	tmp := normalized
+	const maxIter = 500
+	iter := 0
+	for {
+		if iter >= maxIter {
+			return result, errors.New("template evaluation halted: too many nested function calls")
+		}
+		iter++
+		start, end, name, argsRaw, found := findInnermostFunction(tmp)
+		if !found {
+			break
+		}
+		args := splitArgs(argsRaw)
+		if _, err := evaluateFunction(name, args, payload); err != nil {
+			return result, fmt.Errorf("%s(%s): %v", name, argsRaw, err)
+		}
+		tmp = tmp[:start] + "ok" + tmp[end+1:]
+	}
+	return result, nil
+}
+
 // normalizeTemplate intelligently wraps unwrapped function calls and variables with {{...}}
 // if the template doesn't already use {{...}} syntax.
 //
 // Strategy:
-//   1. If template already contains {{...}}, return as-is (backward compatible)
-//   2. Otherwise, scan for:
-//      - Known function calls: FUNCTION_NAME(args)
-//      - Payload variable references (standalone words matching payload keys)
-//      - Wrap each occurrence with {{...}}
+//  1. If template already contains {{...}}, return as-is (backward compatible)
+//  2. Otherwise, scan for:
+//     - Known function calls: FUNCTION_NAME(args)
+//     - Payload variable references (standalone words matching payload keys)
+//     - Wrap each occurrence with {{...}}
 func normalizeTemplate(tpl string, payload map[string]interface{}) string {
 	// NOTE: We normalize even if template has SOME {{}} because it might have unwrapped functions too
 	// Only skip if ALL functions are already wrapped (checked later)
@@ -134,18 +188,18 @@ func normalizeTemplate(tpl string, payload map[string]interface{}) string {
 	// Step 1: Wrap function calls — FUNCTION_NAME(...)
 	// Process from INNERMOST to OUTERMOST to handle nesting correctly
 	matches := findAllFunctionCalls(result)
-	
+
 	// Sort by size (ascending) so innermost functions are wrapped first
 	sort.Slice(matches, func(i, j int) bool {
 		sizeI := matches[i].end - matches[i].start
 		sizeJ := matches[j].end - matches[j].start
 		return sizeI < sizeJ
 	})
-	
+
 	// Track cumulative offset changes as we wrap functions
 	// Key: we need to adjust positions AFTER each wrapping
 	wrappedCount := 0
-	
+
 	for idx, m := range matches {
 		// Recalculate positions after each wrapping by searching again
 		// This is necessary because wrapping changes string positions
@@ -163,9 +217,9 @@ func normalizeTemplate(tpl string, payload map[string]interface{}) string {
 			}
 			m = matches[idx]
 		}
-		
+
 		funcName := m.name
-		
+
 		// Check if this is a known function
 		isKnown := false
 		for _, kf := range knownFunctions {
@@ -174,19 +228,19 @@ func normalizeTemplate(tpl string, payload map[string]interface{}) string {
 				break
 			}
 		}
-		
+
 		if isKnown {
 			// Check if already wrapped (has {{ before and }} after)
 			if m.start >= 2 && result[m.start-2:m.start] == "{{" &&
 				m.end+2 <= len(result) && result[m.end:m.end+2] == "}}" {
 				continue
 			}
-			
+
 			// Wrap the entire function call: FUNC(...) → {{FUNC(...)}}
 			fullCall := result[m.start:m.end]
 			wrapped := "{{" + fullCall + "}}"
 			result = result[:m.start] + wrapped + result[m.end:]
-			
+
 			wrappedCount++
 		}
 	}
@@ -195,7 +249,7 @@ func normalizeTemplate(tpl string, payload map[string]interface{}) string {
 	// 1. Variables are referenced by name inside function arguments (e.g., CONCAT(..., UserID))
 	// 2. It's ambiguous which occurrences should be wrapped (labels vs values)
 	// 3. Seed scripts expect variables to be used inside functions, not standalone
-	
+
 	return result
 }
 
@@ -211,7 +265,7 @@ type functionCallMatch struct {
 func findAllFunctionCalls(s string) []functionCallMatch {
 	matches := []functionCallMatch{}
 	runes := []rune(s)
-	
+
 	// Build rune-to-byte position map
 	runeToBytePos := make([]int, len(runes)+1)
 	bytePos := 0
@@ -220,7 +274,7 @@ func findAllFunctionCalls(s string) []functionCallMatch {
 		bytePos += len(string(r))
 	}
 	runeToBytePos[len(runes)] = bytePos // end position
-	
+
 	// Recursively find all function calls
 	var findInRange func(start, end int)
 	findInRange = func(start, end int) {
@@ -231,35 +285,35 @@ func findAllFunctionCalls(s string) []functionCallMatch {
 				i++
 				continue
 			}
-			
+
 			// Extract function name
 			nameStart := i
 			for i < end && (unicode.IsLetter(runes[i]) || unicode.IsDigit(runes[i]) || runes[i] == '_') {
 				i++
 			}
 			nameEnd := i
-			
+
 			// Skip whitespace
 			for i < end && unicode.IsSpace(runes[i]) {
 				i++
 			}
-			
+
 			// Check for opening parenthesis
 			if i >= end || runes[i] != '(' {
 				// Not a function call
 				continue
 			}
-			
+
 			name := string(runes[nameStart:nameEnd])
-			
+
 			// Only match names that start with uppercase (our template functions are all uppercase)
 			// This prevents matching lowercase English words like "delete(s)", "request(s)"
 			if len(name) == 0 || !unicode.IsUpper(runes[nameStart]) {
 				continue
 			}
-			
+
 			openParen := i
-			
+
 			// Find matching closing parenthesis
 			depth := 1
 			i++ // skip opening '('
@@ -271,23 +325,23 @@ func findAllFunctionCalls(s string) []functionCallMatch {
 				}
 				i++
 			}
-			
+
 			if depth == 0 {
 				closeParen := i - 1 // position of ')'
-				
+
 				// Add this function call
 				matches = append(matches, functionCallMatch{
 					start: runeToBytePos[nameStart],
 					end:   runeToBytePos[i],
 					name:  name,
 				})
-				
+
 				// Recursively search INSIDE the function arguments for nested calls
 				findInRange(openParen+1, closeParen)
 			}
 		}
 	}
-	
+
 	findInRange(0, len(runes))
 	return matches
 }
@@ -300,23 +354,23 @@ func wrapStandaloneVariable(text string, varName string, pattern *regexp.Regexp)
 	if len(indices) == 0 {
 		return text
 	}
-	
+
 	// Process from right to left to avoid index shifting
 	for i := len(indices) - 1; i >= 0; i-- {
 		match := indices[i]
 		start := match[0]
 		end := match[1]
-		
+
 		// Check if already wrapped or inside quotes
 		if isAlreadyWrapped(text, start, end) || isInsideQuotes(text, start) {
 			continue
 		}
-		
+
 		// Wrap it
 		wrapped := "{{" + text[start:end] + "}}"
 		text = text[:start] + wrapped + text[end:]
 	}
-	
+
 	return text
 }
 
@@ -333,11 +387,11 @@ func isAlreadyWrapped(text string, start, end int) bool {
 			return false // Found }} before {{
 		}
 	}
-	
+
 	if openPos == -1 {
 		return false
 	}
-	
+
 	// Look forward for }}
 	for i := end; i < len(text)-1; i++ {
 		if text[i:i+2] == "}}" {
@@ -347,7 +401,7 @@ func isAlreadyWrapped(text string, start, end int) bool {
 			return false // Found {{ before }}
 		}
 	}
-	
+
 	return false
 }
 
@@ -355,7 +409,7 @@ func isAlreadyWrapped(text string, start, end int) bool {
 func isInsideQuotes(text string, pos int) bool {
 	inSingle := false
 	inDouble := false
-	
+
 	for i := 0; i < pos && i < len(text); i++ {
 		if text[i] == '\'' && (i == 0 || text[i-1] != '\\') {
 			if !inDouble {
@@ -368,7 +422,7 @@ func isInsideQuotes(text string, pos int) bool {
 			}
 		}
 	}
-	
+
 	return inSingle || inDouble
 }
 
@@ -440,7 +494,7 @@ func findInnermostFunction(s string) (int, int, string, string, bool) {
 	braceDepth := 0 // Track nesting depth of {{...}}
 	var inSingleQuote bool = false
 	var inDoubleQuote bool = false
-	
+
 	// Build rune-to-byte position map
 	runeToBytePos := make([]int, len(runes)+1)
 	bytePos := 0
@@ -449,7 +503,7 @@ func findInnermostFunction(s string) (int, int, string, string, bool) {
 		bytePos += len(string(r))
 	}
 	runeToBytePos[len(runes)] = bytePos
-	
+
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
 		prevR := rune(0)
@@ -519,15 +573,15 @@ func findInnermostFunction(s string) (int, int, string, string, bool) {
 				continue
 			}
 			name := string(runes[nameStart:openIdx])
-			
+
 			// Only treat as function if name starts with an uppercase letter
 			// This prevents matching lowercase words with parens like "delete(s)"
 			if len(name) == 0 || !unicode.IsUpper(runes[nameStart]) {
 				continue
 			}
-			
+
 			argsRaw := string(runes[openIdx+1 : i])
-			
+
 			// Convert rune positions to byte positions for string slicing
 			return runeToBytePos[nameStart], runeToBytePos[i], name, argsRaw, true
 		}
@@ -769,13 +823,13 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		if len(args) != 1 {
 			return "", errors.New("COUNT_OF expects 1 argument: list variable name")
 		}
-		
+
 		// Try to get value from payload
 		v, ok := lookupPayload(args[0], payload)
 		if !ok {
 			return "0", nil
 		}
-		
+
 		// Count elements based on type
 		switch val := v.(type) {
 		case []map[string]interface{}:
@@ -1337,9 +1391,13 @@ func isQuoted(s string) bool {
 
 func unquote(s string) string {
 	s = strings.TrimSpace(s)
-	if isQuoted(s) {
-		return s[1 : len(s)-1]
+
+	for len(s) >= 2 &&
+		((s[0] == '\'' && s[len(s)-1] == '\'') ||
+			(s[0] == '"' && s[len(s)-1] == '"')) {
+		s = strings.TrimSpace(s[1 : len(s)-1])
 	}
+
 	return s
 }
 
@@ -1672,6 +1730,18 @@ func rowFloat(row map[string]interface{}, key string) float64 {
 				if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
 					return f
 				}
+			case pgtype.Numeric:
+				if n.Valid {
+					if fv, err := n.Float64Value(); err == nil {
+						return fv.Float64
+					}
+				}
+			case *pgtype.Numeric:
+				if n != nil && n.Valid {
+					if fv, err := n.Float64Value(); err == nil {
+						return fv.Float64
+					}
+				}
 			}
 		}
 	}
@@ -1697,6 +1767,13 @@ func rowDisplayValue(row map[string]interface{}, key string) string {
 			if pn, ok := v.(pgtype.Numeric); ok {
 				if pn.Valid {
 					f, _ := pn.Float64Value()
+					v = f.Float64
+				} else {
+					v = float64(0)
+				}
+			} else if pnp, ok := v.(*pgtype.Numeric); ok {
+				if pnp != nil && pnp.Valid {
+					f, _ := pnp.Float64Value()
 					v = f.Float64
 				} else {
 					v = float64(0)

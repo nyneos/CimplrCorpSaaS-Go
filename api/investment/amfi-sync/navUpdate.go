@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/internal/config"
-	"CimplrCorpSaas/internal/jobs"
+	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
 
 	"CimplrCorpSaas/api/constants"
@@ -118,8 +118,8 @@ type NAVRecord struct {
 // runOptimizedNAVSync runs the optimized bulk NAV sync
 func runOptimizedNAVSync(pool *pgxpool.Pool, logs *[]LogEntry) (int, error) {
 	// Create circuit breakers
-	httpCircuitBreaker := jobs.NewCircuitBreaker(5, 30*time.Second)
-	dbCircuitBreaker := jobs.NewCircuitBreaker(3, 60*time.Second)
+	httpCircuitBreaker := investmentjobs.NewCircuitBreaker(5, 30*time.Second)
+	dbCircuitBreaker := investmentjobs.NewCircuitBreaker(3, 60*time.Second)
 
 	navURL := config.DefaultNavURL
 	if navURL == "" {
@@ -128,7 +128,7 @@ func runOptimizedNAVSync(pool *pgxpool.Pool, logs *[]LogEntry) (int, error) {
 
 	// Run the optimized NAV processing with circuit breaker and retry logic
 	var recordsProcessed int
-	err := jobs.RetryWithBackoff(3, 2*time.Second, func() error {
+	err := investmentjobs.RetryWithBackoff(3, 2*time.Second, func() error {
 		processed, err := processOptimizedNAVData(navURL, pool, 5000, httpCircuitBreaker, dbCircuitBreaker, logs)
 		recordsProcessed = processed
 		return err
@@ -138,7 +138,7 @@ func runOptimizedNAVSync(pool *pgxpool.Pool, logs *[]LogEntry) (int, error) {
 }
 
 // processOptimizedNAVData processes NAV data with bulk operations for maximum speed
-func processOptimizedNAVData(url string, db *pgxpool.Pool, batchSize int, httpCB, dbCB *jobs.CircuitBreaker, logs *[]LogEntry) (int, error) {
+func processOptimizedNAVData(url string, db *pgxpool.Pool, batchSize int, httpCB, dbCB *investmentjobs.CircuitBreaker, logs *[]LogEntry) (int, error) {
 	var navRecords []NAVRecord
 
 	// HTTP request with circuit breaker protection

@@ -1,9 +1,13 @@
 package jobs
 
 import (
+	"context"
 	"fmt"
 	"log"
 
+	cashjobs "CimplrCorpSaas/internal/jobs/cash"
+	dinojobs "CimplrCorpSaas/internal/jobs/dino"
+	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
 
@@ -27,10 +31,10 @@ func (s *CronService) Name() string {
 }
 
 func (s *CronService) Start() error {
-	log.Println("🚀 Starting cron service...")
+	log.Println("Starting cron service...")
 
 	// Create default AMFI config from config file
-	amfiConfig := NewDefaultConfig()
+	amfiConfig := investmentjobs.NewDefaultConfig()
 
 	// Override batch size from services.yaml if provided
 	if s.config != nil {
@@ -40,7 +44,7 @@ func (s *CronService) Start() error {
 	}
 
 	// Start the AMFI data downloader
-	err := RunAMFIDataDownloader(amfiConfig, s.db)
+	err := investmentjobs.RunAMFIDataDownloader(amfiConfig, s.db)
 	if err != nil {
 		return fmt.Errorf("failed to start AMFI data downloader: %v", err)
 	}
@@ -49,7 +53,7 @@ func (s *CronService) Start() error {
 	log.Println("Cron service started — AMFI Downloader scheduled")
 
 	// Start the Sweep Scheduler
-	sweepConfig := NewDefaultSweepConfig()
+	sweepConfig := cashjobs.NewDefaultSweepConfig()
 
 	// Override sweep config from services.yaml if provided
 	if s.config != nil {
@@ -61,7 +65,7 @@ func (s *CronService) Start() error {
 		}
 	}
 
-	err = RunSweepScheduler(sweepConfig, s.db)
+	err = cashjobs.RunSweepScheduler(sweepConfig, s.db)
 	if err != nil {
 		return fmt.Errorf("failed to start sweep scheduler: %v", err)
 	}
@@ -70,7 +74,7 @@ func (s *CronService) Start() error {
 	log.Println("Cron service started — Sweep Scheduler scheduled")
 
 	// Start the Sweep V2 Scheduler
-	sweepConfigV2 := NewDefaultSweepConfigV2()
+	sweepConfigV2 := cashjobs.NewDefaultSweepConfigV2()
 
 	// Override sweep V2 config from services.yaml if provided
 	if s.config != nil {
@@ -82,7 +86,7 @@ func (s *CronService) Start() error {
 		}
 	}
 
-	err = RunSweepSchedulerV2(sweepConfigV2, s.db)
+	err = cashjobs.RunSweepSchedulerV2(sweepConfigV2, s.db)
 	if err != nil {
 		return fmt.Errorf("failed to start sweep V2 scheduler: %v", err)
 	}
@@ -91,7 +95,7 @@ func (s *CronService) Start() error {
 	log.Println("Cron service started — Sweep V2 Scheduler scheduled")
 
 	// Start the Auto-Categorization Scheduler
-	categorizationConfig := NewDefaultCategorizationConfig()
+	categorizationConfig := cashjobs.NewDefaultCategorizationConfig()
 
 	// Override categorization config from services.yaml if provided
 	if s.config != nil {
@@ -103,13 +107,20 @@ func (s *CronService) Start() error {
 		}
 	}
 
-	err = RunCategorizationScheduler(categorizationConfig, s.db)
+	err = cashjobs.RunCategorizationScheduler(categorizationConfig, s.db)
 	if err != nil {
 		return fmt.Errorf("failed to start categorization scheduler: %v", err)
 	}
 
 	logger.GlobalLogger.LogAudit("Auto-categorization scheduler started")
 	log.Println("Cron service started — Auto-Categorization Scheduler scheduled")
+
+	// Start Outbox Worker — polls notification_svc.outbox and delivers emails
+	// via SEND_ENDPOINT_URL. Controlled by OUTBOX_WORKER_ENABLED env var.
+	ctx := context.Background()
+	go dinojobs.StartOutboxWorker(ctx, s.db)
+	logger.GlobalLogger.LogAudit("Outbox worker goroutine launched")
+	log.Println("Cron service started — Outbox Worker goroutine launched")
 
 	return nil
 }

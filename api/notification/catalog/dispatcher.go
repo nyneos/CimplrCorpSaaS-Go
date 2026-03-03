@@ -296,8 +296,11 @@ func dispatchNotification(
 
 				renderedBody, err := notificationFunctions.EvaluateTemplate(body, localPayload)
 				if err != nil {
-					api.LogError("EvaluateTemplate body err: %v", err)
-					renderedBody = body // fallback: send raw
+					// EvaluateTemplate is resilient — it logs individual function errors
+					// internally and continues rendering. This branch only fires for
+					// catastrophic parse failures (extremely rare). Still deliver the email.
+					api.LogInfo("[NOTIF] EvaluateTemplate partial error for event=%s ch=%s: %v (body still sent)", event.eventID, tw.tpl.channel, err)
+					renderedBody = body // fallback: send raw template
 				}
 
 				renderedSubject, err := notificationFunctions.EvaluateTemplate(tw.tpl.subject, localPayload)
@@ -474,15 +477,31 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 
 	q := `
 		SELECT DISTINCT
-			COALESCE(u.id::text, '')               AS user_id,
-			COALESCE(u.email, '')                  AS email,
-			''                                     AS phone,
-			COALESCE(u.employee_name, '')          AS name,
-			COALESCE(tr.recipient_role, '')        AS role,
-			COALESCE(tr.recipient_priority, 3)    AS recipient_priority
+			COALESCE(u.id::text, '')                    AS user_id,
+			-- If no matching user found but recipient_user_id looks like an email, use it directly
+			COALESCE(u.email,
+				CASE WHEN tr.recipient_type = 'USER'
+				          AND NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), '') IS NOT NULL
+				          AND POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0
+				     THEN tr.recipient_user_id
+				     ELSE ''
+				END, '')                                AS email,
+			''                                          AS phone,
+			COALESCE(u.employee_name, '')               AS name,
+			COALESCE(tr.recipient_role, '')             AS role,
+			COALESCE(tr.recipient_priority, 3)          AS recipient_priority
 		FROM notification_svc.template_recipient tr
 		LEFT JOIN users u
-			ON (tr.recipient_type = 'USER' AND u.id::text = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), ''))
+			ON (tr.recipient_type = 'USER'
+				AND (
+					-- Match by UUID
+					u.id::text = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), '')
+					OR
+					-- Match by email (when caller stored an email in recipient_user_id)
+					(POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0
+					 AND u.email = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), ''))
+				)
+			)
 			OR (tr.recipient_type = 'ROLE' AND u.id IN (
 				SELECT ur2.user_id FROM user_roles ur2
 				JOIN roles ro2 ON ro2.id = ur2.role_id
@@ -490,7 +509,14 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 			))
 		WHERE tr.template_id = $1
 		  AND tr.is_active = true
-		  AND COALESCE(u.email, '') <> ''
+		  AND (
+			-- Has a real user with email
+			COALESCE(u.email, '') <> ''
+			OR
+			-- OR: email stored directly in recipient_user_id (external recipient)
+			(tr.recipient_type = 'USER'
+			 AND POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0)
+		  )
 	`
 	rows, err := pool.Query(ctx, q, templateID)
 	if err != nil {

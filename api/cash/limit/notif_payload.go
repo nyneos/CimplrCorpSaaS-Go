@@ -92,6 +92,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -217,9 +219,10 @@ func BuildLimitNotifPayload(
 	// We filter by limit_id IN (...) to get only the affected records.
 	query := buildGetLimitUtilizationQuery(limitIDs)
 
+	fmt.Printf("[DEBUG] BuildLimitNotifPayload: action=%s limitIDs=%v count=%d\n", action, limitIDs, len(limitIDs))
+
 	rows, err := pool.Query(ctx, query, limitIDs)
 	if err != nil {
-		// Log error but don't fail notification — send with empty Limits list
 		fmt.Printf("[ERROR] BuildLimitNotifPayload query failed: %v\n", err)
 		return p
 	}
@@ -229,6 +232,7 @@ func BuildLimitNotifPayload(
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
+			fmt.Printf("[ERROR] BuildLimitNotifPayload rows.Values() failed: %v\n", err)
 			continue
 		}
 		cols := rows.FieldDescriptions()
@@ -238,6 +242,10 @@ func BuildLimitNotifPayload(
 		}
 		p.Limits = append(p.Limits, row)
 	}
+	if rerr := rows.Err(); rerr != nil {
+		fmt.Printf("[ERROR] BuildLimitNotifPayload rows.Err(): %v\n", rerr)
+	}
+	fmt.Printf("[DEBUG] BuildLimitNotifPayload: fetched %d limit rows for IDs=%v\n", len(p.Limits), limitIDs)
 
 	// Compute KPIs by grouping
 	p.ByEntityKPIs = computeKPIs(p.Limits, "limit_entity_name")
@@ -249,10 +257,9 @@ func BuildLimitNotifPayload(
 
 	// Compute total sanctioned (WARNING: mixed currency — this sums INR+USD+CNY naively)
 	for _, lim := range p.Limits {
-		if amt, ok := lim["limit_sanctioned_amount"].(float64); ok {
-			p.TotalSanctioned += amt
-		}
+		p.TotalSanctioned += anyToFloat64(lim["limit_sanctioned_amount"])
 	}
+
 
 	return p
 }
@@ -272,16 +279,9 @@ func BuildLimitNotifPayload(
 //
 // NOTE: This is a COPY of the query from GetBankLimitUtilizationV2.
 // If that query changes, update this copy to match.
-func buildGetLimitUtilizationQuery(limitIDs []string) string {
-	// Build IN clause placeholders
-	placeholders := "("
-	for i := range limitIDs {
-		if i > 0 {
-			placeholders += ","
-		}
-		placeholders += fmt.Sprintf("$%d", i+1)
-	}
-	placeholders += ")"
+func buildGetLimitUtilizationQuery(_ []string) string {
+	// Use ANY($1) — pgx passes the []string slice as a single PostgreSQL array parameter.
+	// Do NOT build $1,$2,... placeholders: ANY($1,$2) is invalid SQL; ANY($1) is correct.
 
 	return `
 		WITH latest_limit_audit AS (
@@ -294,21 +294,7 @@ func buildGetLimitUtilizationQuery(limitIDs []string) string {
 				TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS') AS limit_requested_at,
 				checker_by AS limit_checker_by,
 				TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS') AS limit_checker_at,
-				checker_comment AS limit_checker_comment,
-				old_entity_name AS limit_old_entity_name,
-				old_bank_name AS limit_old_bank_name,
-				old_core_limit_type AS limit_old_core_limit_type,
-				old_limit_type AS limit_old_limit_type,
-				old_limit_sub_type AS limit_old_limit_sub_type,
-				old_sanction_date AS limit_old_sanction_date,
-				old_effective_date AS limit_old_effective_date,
-				old_currency_code AS limit_old_currency_code,
-				old_sanctioned_amount AS limit_old_sanctioned_amount,
-				old_fungibility_type AS limit_old_fungibility_type,
-				old_fungibility_pct AS limit_old_fungibility_pct,
-				old_security_type AS limit_old_security_type,
-				old_remarks AS limit_old_remarks,
-				old_initial_utilization AS limit_old_initial_utilization
+				checker_comment AS limit_checker_comment
 			FROM cimplrcorpsaas.auditactionbanklimit
 			ORDER BY limit_id, requested_at DESC
 		),
@@ -322,13 +308,8 @@ func buildGetLimitUtilizationQuery(limitIDs []string) string {
 				TO_CHAR(requested_at, 'YYYY-MM-DD HH24:MI:SS') AS requested_at,
 				checker_by,
 				TO_CHAR(checker_at, 'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				checker_comment,
-				old_utilization_date,
-				old_utilized_amount,
-				old_currency_code,
-				old_remarks,
-				old_reference_doc
-			FROM cimplrcorpsaas.auditactionlimitutilization
+				checker_comment
+			FROM cimplrcorpsaas.auditactionbanklimitutilization
 			ORDER BY utilization_id, requested_at DESC
 		)
 		SELECT
@@ -347,8 +328,10 @@ func buildGetLimitUtilizationQuery(limitIDs []string) string {
 			l.security_type AS limit_security_type,
 			COALESCE(l.remarks, '') AS limit_remarks,
 			COALESCE(l.initial_utilization, 0) AS limit_initial_utilization,
-			COALESCE(l.available, 0) AS limit_available,
-			COALESCE(l.utilization_pct, 0) AS limit_utilization_pct,
+			-- limit_available and limit_utilization_pct are computed per-utilization-row in Go;
+			-- here we emit 0 as placeholders (templates should use limit_sanctioned_amount instead)
+			0::float8 AS limit_available,
+			0::float8 AS limit_utilization_pct,
 			COALESCE(la.limit_action_type, '') AS limit_action_type,
 			COALESCE(la.limit_processing_status, '') AS limit_processing_status,
 			COALESCE(la.limit_reason, '') AS limit_reason,
@@ -357,23 +340,9 @@ func buildGetLimitUtilizationQuery(limitIDs []string) string {
 			COALESCE(la.limit_checker_by, '') AS limit_checker_by,
 			COALESCE(la.limit_checker_at, '') AS limit_checker_at,
 			COALESCE(la.limit_checker_comment, '') AS limit_checker_comment,
-			COALESCE(la.limit_old_entity_name, '') AS limit_old_entity_name,
-			COALESCE(la.limit_old_bank_name, '') AS limit_old_bank_name,
-			COALESCE(la.limit_old_core_limit_type, '') AS limit_old_core_limit_type,
-			COALESCE(la.limit_old_limit_type, '') AS limit_old_limit_type,
-			COALESCE(la.limit_old_limit_sub_type, '') AS limit_old_limit_sub_type,
-			COALESCE(la.limit_old_sanction_date, '') AS limit_old_sanction_date,
-			COALESCE(la.limit_old_effective_date, '') AS limit_old_effective_date,
-			COALESCE(la.limit_old_currency_code, '') AS limit_old_currency_code,
-			COALESCE(la.limit_old_sanctioned_amount, 0) AS limit_old_sanctioned_amount,
-			COALESCE(la.limit_old_fungibility_type, '') AS limit_old_fungibility_type,
-			COALESCE(la.limit_old_fungibility_pct, 0) AS limit_old_fungibility_pct,
-			COALESCE(la.limit_old_security_type, '') AS limit_old_security_type,
-			COALESCE(la.limit_old_remarks, '') AS limit_old_remarks,
-			COALESCE(la.limit_old_initial_utilization, 0) AS limit_old_initial_utilization,
 			COALESCE(u.utilization_id, '') AS utilization_id,
 			COALESCE(u.limit_id, '') AS limit_id,
-			COALESCE(TO_CHAR(u.utilization_date, 'YYYY-MM-DD HH24:MI:SS'), '') AS utilization_date,
+			COALESCE(TO_CHAR(u.utilization_date, 'YYYY-MM-DD'), '') AS utilization_date,
 			COALESCE(u.utilized_amount, 0) AS utilized_amount,
 			COALESCE(u.currency_code, '') AS currency_code,
 			COALESCE(u.remarks, '') AS remarks,
@@ -388,18 +357,46 @@ func buildGetLimitUtilizationQuery(limitIDs []string) string {
 			COALESCE(ua.checker_by, '') AS checker_by,
 			COALESCE(ua.checker_at, '') AS checker_at,
 			COALESCE(ua.checker_comment, '') AS checker_comment,
-			COALESCE(ua.old_utilization_date, '') AS old_utilization_date,
-			COALESCE(ua.old_utilized_amount, 0) AS old_utilized_amount,
-			COALESCE(ua.old_currency_code, '') AS old_currency_code,
-			COALESCE(ua.old_remarks, '') AS old_remarks,
-			COALESCE(ua.old_reference_doc, '') AS old_reference_doc
+			COALESCE(TO_CHAR(u.old_utilization_date, 'YYYY-MM-DD'), '') AS old_utilization_date,
+			COALESCE(u.old_utilized_amount, 0) AS old_utilized_amount,
+			COALESCE(u.old_currency_code, '') AS old_currency_code,
+			COALESCE(u.old_remarks, '') AS old_remarks,
+			COALESCE(u.old_reference_doc, '') AS old_reference_doc
 		FROM cimplrcorpsaas.bank_limit l
 		LEFT JOIN latest_limit_audit la ON la.limit_id = l.limit_id
-		LEFT JOIN cimplrcorpsaas.limit_utilization u ON u.limit_id = l.limit_id
+		LEFT JOIN cimplrcorpsaas.bank_limit_utilization u ON u.limit_id = l.limit_id
 		LEFT JOIN latest_utilization_audit ua ON ua.utilization_id = u.utilization_id
-		WHERE l.limit_id = ANY(` + placeholders + `)
+		WHERE l.limit_id = ANY($1)
 		ORDER BY l.entity_name, l.bank_name, l.limit_id, u.utilization_date DESC
 	`
+}
+
+// anyToFloat64 converts common numeric types returned by pgx (including pgtype.Numeric) to float64.
+func anyToFloat64(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+			return f
+		}
+	}
+	// pgtype.Numeric and other types — JSON round-trip fallback
+	if b, err := json.Marshal(v); err == nil {
+		var f float64
+		if err2 := json.Unmarshal(b, &f); err2 == nil {
+			return f
+		}
+	}
+	return 0
 }
 
 // computeKPIs groups LimitRows by a field and computes count + total_sanctioned.
@@ -414,9 +411,7 @@ func computeKPIs(limits []LimitRow, groupField string) []KPIRow {
 			groups[key] = &KPIRow{GroupName: key}
 		}
 		groups[key].Count++
-		if amt, ok := lim["limit_sanctioned_amount"].(float64); ok {
-			groups[key].TotalSanctioned += amt
-		}
+		groups[key].TotalSanctioned += anyToFloat64(lim["limit_sanctioned_amount"])
 	}
 	out := []KPIRow{}
 	for _, kpi := range groups {

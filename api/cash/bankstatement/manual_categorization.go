@@ -3,7 +3,7 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
-	"CimplrCorpSaas/internal/jobs"
+	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	"encoding/json"
 	"net/http"
 
@@ -50,7 +50,7 @@ func ManualCategorizationTriggerHandler(pgxPool *pgxpool.Pool) http.Handler {
 		}
 
 		// Trigger the categorization job
-		err := jobs.ProcessUncategorizedTransactions(pgxPool, batchSize)
+		err := cashjobs.ProcessUncategorizedTransactions(pgxPool, batchSize)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{

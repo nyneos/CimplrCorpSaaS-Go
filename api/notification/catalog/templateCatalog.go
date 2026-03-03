@@ -4,12 +4,15 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	notificationFunctions "CimplrCorpSaas/api/notification/functions"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,6 +32,421 @@ func getRequesterEmailTemplate() string {
 		}
 	}
 	return ""
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Template validation — run before any DB write
+// ─────────────────────────────────────────────────────────────────────────────
+
+// knownTemplateFunctions is the canonical set of functions the template engine
+// supports. ANY other UPPERCASE_NAME() in a template is flagged as unknown.
+var knownTemplateFunctions = map[string]struct{}{
+	"SUM": {}, "AVERAGE": {}, "AVG": {}, "SUMPRODUCT": {},
+	"FORMAT_NUMBER": {}, "FORMAT_DATE": {}, "FORMAT_DATE_TZ": {}, "FORMAT_CURRENCY": {},
+	"ESCAPE_HTML": {}, "CONCAT": {}, "UPPER": {}, "LOWER": {}, "SUBSTRING": {},
+	"ADD": {}, "SUBTRACT": {}, "MULTIPLY": {}, "DIVIDE": {},
+	"COUNT_OF": {}, "SUM_OF_FIELD": {}, "TOTAL_OF": {}, "AVG_OF_FIELD": {},
+	"MAX_OF_FIELD": {}, "MIN_OF_FIELD": {},
+	"FILTER": {}, "ORDER_BY": {}, "GROUP_BY": {},
+	"TABLE_HTML": {}, "KPI_CARDS_HTML": {}, "ROWS_HTML": {}, "SUMMARY_TABLE_HTML": {},
+	"IF": {}, "BADGE_HTML": {},
+}
+
+// functionCallRe matches UPPER_SNAKE_NAME( anywhere in text.
+var functionCallRe = regexp.MustCompile(`\b([A-Z][A-Z0-9_]*)\s*\(`)
+
+// maliciousPatterns are patterns that should never appear in a template body.
+// They catch: script injection, server-side template injection, SQL fragments, etc.
+//
+// IMPORTANT: the event-handler pattern must only match ACTUAL HTML event attributes
+// (onclick=, onload=, onerror=, etc.) — NOT words that happen to contain "on" like
+// "content=", "font=", "action=" etc.  We anchor with a word boundary \b and require
+// the match to start after whitespace or a tag-open < so "content=" is never flagged.
+var maliciousPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)<script`),
+	regexp.MustCompile(`(?i)<iframe`),
+	regexp.MustCompile(`(?i)<object`),
+	regexp.MustCompile(`(?i)<embed`),
+	regexp.MustCompile(`(?i)javascript\s*:`),
+	// Event handler attributes: must be preceded by whitespace or be at start of a tag
+	// attribute list. This prevents "content=", "font=", "action=" false positives.
+	// Matches: onclick=  onload=  onerror=  onmouseover=  onsubmit=  etc.
+	// Does NOT match: content=  font-size  action=  section=
+	regexp.MustCompile(`(?i)(?:^|[\s<])on[a-z]+\s*=`),
+	regexp.MustCompile(`(?i)vbscript\s*:`),
+	regexp.MustCompile(`(?i)data:\s*text/html`),
+	regexp.MustCompile(`(?i)expression\s*\(`),     // CSS expression()
+	regexp.MustCompile(`(?i)\bexec\s*\(`),         // SQL EXEC(
+	regexp.MustCompile(`(?i)\bdrop\s+table\b`),    // SQL DROP TABLE
+	regexp.MustCompile(`(?i)\bdelete\s+from\b`),   // SQL DELETE FROM
+	regexp.MustCompile(`(?i)\binsert\s+into\b`),   // SQL INSERT INTO
+	regexp.MustCompile(`(?i)\bupdate\s+\w+\s+set\b`), // SQL UPDATE SET
+	regexp.MustCompile(`(?i)\bunion\s+select\b`),  // SQL UNION SELECT
+	regexp.MustCompile(`(?i)\bxp_cmdshell\b`),
+	regexp.MustCompile(`\x00`),                    // null bytes
+}
+
+// templateValidation holds a set of errors found during pre-flight validation.
+type templateValidation struct {
+	field  string
+	errors []string
+}
+
+// validateTemplateContent performs a full pre-flight check on a single template field
+// (subject, body_text, or body_html).  It:
+//  1. Rejects malicious injection patterns.
+//  2. Detects unknown FUNCTION() calls that the engine can't handle.
+//  3. Verifies unbalanced {{  }} braces.
+//  4. Runs a dry-run EvaluateTemplate with a synthetic payload to catch
+//     hard arg-count errors (TABLE_HTML with wrong cols, FORMAT_DATE with 1 arg, etc.)
+//     before they hit production recipients.
+func validateTemplateContent(field, content string) []string {
+	if content == "" {
+		return nil
+	}
+	var errs []string
+
+	// 1. UTF-8 safety
+	if !utf8.ValidString(content) {
+		errs = append(errs, field+": contains invalid UTF-8 bytes")
+	}
+
+	// 2. Malicious pattern check
+	for _, pat := range maliciousPatterns {
+		if pat.MatchString(content) {
+			errs = append(errs, field+": contains forbidden pattern: "+pat.String())
+		}
+	}
+
+	// 3. Unknown function check — scan all UPPER_NAME( calls inside {{ }}
+	wrappedRe := regexp.MustCompile(`{{([^}]+)}}`)
+	for _, block := range wrappedRe.FindAllString(content, -1) {
+		for _, m := range functionCallRe.FindAllStringSubmatch(block, -1) {
+			name := m[1]
+			if _, ok := knownTemplateFunctions[name]; !ok {
+				errs = append(errs, fmt.Sprintf("%s: unknown template function %q — will fail at runtime", field, name))
+			}
+		}
+	}
+	// Also check unwrapped function calls (seed-script style — engine auto-wraps them)
+	if !strings.Contains(content, "{{") {
+		for _, m := range functionCallRe.FindAllStringSubmatch(content, -1) {
+			name := m[1]
+			if _, ok := knownTemplateFunctions[name]; !ok {
+				errs = append(errs, fmt.Sprintf("%s: unknown template function %q — will fail at runtime", field, name))
+			}
+		}
+	}
+
+	// 4. Balanced {{ }} check
+	open := strings.Count(content, "{{")
+	close := strings.Count(content, "}}")
+	if open != close {
+		errs = append(errs, fmt.Sprintf("%s: unbalanced template braces — %d {{ but %d }}", field, open, close))
+	}
+
+	// 5. Dry-run EvaluateTemplate with a synthetic payload.
+	// We populate every variable referenced in {{VarName}} with a safe dummy value
+	// so that missing-variable errors don't mask real arg-count errors.
+	syntheticPayload := buildSyntheticPayload(content)
+	if _, err := notificationFunctions.EvaluateTemplateStrict(content, syntheticPayload); err != nil {
+		errs = append(errs, field+": "+humanReadableTemplateError(err.Error()))
+	}
+
+	return errs
+}
+
+// listFunctions is the set of functions whose FIRST argument must be a
+// []map[string]interface{} row-list in the synthetic payload so the dry-run
+// doesn't short-circuit to "No data" before checking column args.
+var listFunctions = map[string]struct{}{
+	"TABLE_HTML": {}, "ROWS_HTML": {}, "SUMMARY_TABLE_HTML": {},
+	"SUM_OF_FIELD": {}, "TOTAL_OF": {}, "AVG_OF_FIELD": {},
+	"MAX_OF_FIELD": {}, "MIN_OF_FIELD": {},
+	"FILTER": {}, "ORDER_BY": {}, "GROUP_BY": {},
+	"COUNT_OF": {}, "SUM": {}, "AVERAGE": {}, "AVG": {}, "SUMPRODUCT": {},
+}
+
+// numericFunctions is the set of functions whose FIRST argument must be a number.
+var numericFunctions = map[string]struct{}{
+	"FORMAT_NUMBER": {}, "FORMAT_CURRENCY": {},
+	"ADD": {}, "SUBTRACT": {}, "MULTIPLY": {}, "DIVIDE": {},
+}
+
+// dateFunctions is the set of functions whose FIRST argument must be a date string.
+var dateFunctions = map[string]struct{}{
+	"FORMAT_DATE": {}, "FORMAT_DATE_TZ": {},
+}
+
+// syntheticRowList is the dummy row injected for all list-function first args.
+var syntheticRowList = []map[string]interface{}{
+	{
+		"name": "Sample Item", "description": "Test row", "category": "DEBIT",
+		"date": "01/01/2026", "amount": float64(1000),
+		"withdrawal_amount": float64(1000), "deposit_amount": float64(500),
+		"debit": float64(1000), "credit": float64(500),
+		"balance": float64(50000), "total": float64(1500),
+		"count": float64(1), "status": "PENDING",
+	},
+}
+
+// buildSyntheticPayload scans a template for all variable references and function
+// first-args and seeds each with a type-appropriate dummy value so the dry-run
+// EvaluateTemplateStrict can catch REAL arg-count / arg-type errors rather than
+// being fooled by missing-variable short-circuits.
+func buildSyntheticPayload(content string) map[string]interface{} {
+	payload := map[string]interface{}{}
+
+	// ── 1. Seed plain {{VarName}} references ────────────────────────────────
+	varRe := regexp.MustCompile(`{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}`)
+	for _, m := range varRe.FindAllStringSubmatch(content, -1) {
+		key := strings.TrimSpace(m[1])
+		if _, exists := payload[key]; exists {
+			continue
+		}
+		lower := strings.ToLower(key)
+		switch {
+		case strings.Contains(lower, "date"):
+			payload[key] = "01/01/2026"
+		case strings.Contains(lower, "amount") || strings.Contains(lower, "total") ||
+			strings.Contains(lower, "balance") || strings.Contains(lower, "count") ||
+			strings.Contains(lower, "number") || strings.Contains(lower, "rate"):
+			payload[key] = float64(1000)
+		default:
+			payload[key] = "DummyValue"
+		}
+	}
+
+	// ── 2. Seed function first-args with type-correct dummies ───────────────
+	// Pattern: {{ FUNCNAME( firstArg , ... ) }} — capture FUNCNAME and firstArg
+	funcArgRe := regexp.MustCompile(`{{\s*([A-Z][A-Z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]`)
+	for _, m := range funcArgRe.FindAllStringSubmatch(content, -1) {
+		funcName := strings.ToUpper(m[1])
+		argKey := strings.TrimSpace(m[2])
+		if argKey == "" {
+			continue
+		}
+		if _, ok := listFunctions[funcName]; ok {
+			// Must be a row-list regardless of key name
+			payload[argKey] = syntheticRowList
+		} else if _, ok := numericFunctions[funcName]; ok {
+			if _, exists := payload[argKey]; !exists {
+				payload[argKey] = float64(1000)
+			}
+		} else if _, ok := dateFunctions[funcName]; ok {
+			if _, exists := payload[argKey]; !exists {
+				payload[argKey] = "01/01/2026"
+			}
+		} else {
+			if _, exists := payload[argKey]; !exists {
+				payload[argKey] = "DummyValue"
+			}
+		}
+	}
+
+	// ── 3. Unwrapped style (no {{ }}) — seed first arg of any known function ─
+	if !strings.Contains(content, "{{") {
+		bareRe := regexp.MustCompile(`\b([A-Z][A-Z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]`)
+		for _, m := range bareRe.FindAllStringSubmatch(content, -1) {
+			funcName := strings.ToUpper(m[1])
+			argKey := strings.TrimSpace(m[2])
+			if argKey == "" {
+				continue
+			}
+			if _, ok := listFunctions[funcName]; ok {
+				payload[argKey] = syntheticRowList
+			} else if _, ok := numericFunctions[funcName]; ok {
+				if _, exists := payload[argKey]; !exists {
+					payload[argKey] = float64(1000)
+				}
+			} else if _, ok := dateFunctions[funcName]; ok {
+				if _, exists := payload[argKey]; !exists {
+					payload[argKey] = "01/01/2026"
+				}
+			} else {
+				if _, exists := payload[argKey]; !exists {
+					payload[argKey] = "DummyValue"
+				}
+			}
+		}
+	}
+
+	return payload
+}
+
+// humanReadableTemplateError converts a raw engine error string into a plain-English
+// message that clearly tells a template author exactly what they did wrong and how to fix it.
+func humanReadableTemplateError(raw string) string {
+	r := strings.ToLower(raw)
+
+	// ── arg-count errors ─────────────────────────────────────────────────────
+	if strings.Contains(r, "table_html expects listvarlist") || strings.Contains(raw, "TABLE_HTML expects listVar + at least 1 column") {
+		return `TABLE_HTML is missing column names. Correct usage: {{TABLE_HTML(YourList, 'column1', 'column2')}} — you must pass the list variable AND at least one column name in quotes.`
+	}
+	if strings.Contains(raw, "ROWS_HTML expects listVar") {
+		return `ROWS_HTML is missing column names. Correct usage: {{ROWS_HTML(YourList, 'column1', 'column2')}}`
+	}
+	if strings.Contains(raw, "SUMMARY_TABLE_HTML expects 1 argument") {
+		return `SUMMARY_TABLE_HTML needs exactly 1 argument (the grouped list variable). Example: {{SUMMARY_TABLE_HTML(GroupedItems)}}`
+	}
+	if strings.Contains(raw, "FORMAT_DATE expects 2 args") {
+		return `FORMAT_DATE needs 2 arguments: the date variable and a format string. Example: {{FORMAT_DATE(TransactionDate, '02 Jan 2006')}}`
+	}
+	if strings.Contains(raw, "FORMAT_DATE_TZ expects 3 args") {
+		return `FORMAT_DATE_TZ needs 3 arguments: date variable, format string, timezone. Example: {{FORMAT_DATE_TZ(TransactionDate, '02 Jan 2006', 'Asia/Kolkata')}}`
+	}
+	if strings.Contains(raw, "FORMAT_NUMBER expects 1 numeric argument") {
+		return `FORMAT_NUMBER needs exactly 1 numeric argument. Example: {{FORMAT_NUMBER(Amount)}}`
+	}
+	if strings.Contains(raw, "FORMAT_CURRENCY expects 1 or 2 arguments") {
+		return `FORMAT_CURRENCY needs 1 or 2 arguments: the value and optionally a currency code. Example: {{FORMAT_CURRENCY(Amount, 'INR')}}`
+	}
+	if strings.Contains(raw, "SUM expects 1 argument") {
+		return `SUM needs exactly 1 argument — the list variable name. Example: {{SUM(AmountList)}}`
+	}
+	if strings.Contains(raw, "AVERAGE expects 1 argument") || strings.Contains(raw, "AVG expects 1 argument") {
+		return `AVERAGE/AVG needs exactly 1 argument — the list variable name. Example: {{AVERAGE(ScoreList)}}`
+	}
+	if strings.Contains(raw, "SUMPRODUCT expects 2 list arguments") {
+		return `SUMPRODUCT needs exactly 2 list arguments. Example: {{SUMPRODUCT(Quantities, Prices)}}`
+	}
+	if strings.Contains(raw, "COUNT_OF expects 1 argument") {
+		return `COUNT_OF needs exactly 1 argument — the list variable name. Example: {{COUNT_OF(Transactions)}}`
+	}
+	if strings.Contains(raw, "SUM_OF_FIELD expects 2 args") {
+		return `SUM_OF_FIELD needs 2 arguments: the list variable and the field name in quotes. Example: {{SUM_OF_FIELD(Transactions, 'amount')}}`
+	}
+	if strings.Contains(raw, "TOTAL_OF expects 2 args") {
+		return `TOTAL_OF needs 2 arguments: the list variable and the field name in quotes. Example: {{TOTAL_OF(Items, 'amount')}}`
+	}
+	if strings.Contains(raw, "AVG_OF_FIELD expects 2 args") {
+		return `AVG_OF_FIELD needs 2 arguments: the list variable and the field name in quotes. Example: {{AVG_OF_FIELD(Transactions, 'amount')}}`
+	}
+	if strings.Contains(raw, "MAX_OF_FIELD expects 2 args") {
+		return `MAX_OF_FIELD needs 2 arguments: the list variable and the field name in quotes. Example: {{MAX_OF_FIELD(Items, 'amount')}}`
+	}
+	if strings.Contains(raw, "MIN_OF_FIELD expects 2 args") {
+		return `MIN_OF_FIELD needs 2 arguments: the list variable and the field name in quotes. Example: {{MIN_OF_FIELD(Items, 'amount')}}`
+	}
+	if strings.Contains(raw, "FILTER expects 3 args") {
+		return `FILTER needs 3 arguments: list variable, field name, and value. Example: {{FILTER(Transactions, 'category', 'DEBIT')}}`
+	}
+	if strings.Contains(raw, "ORDER_BY expects 3 args") {
+		return `ORDER_BY needs 3 arguments: list variable, field name, and direction. Example: {{ORDER_BY(Transactions, 'amount', 'DESC')}}`
+	}
+	if strings.Contains(raw, "GROUP_BY expects 2 args") {
+		return `GROUP_BY needs 2 arguments: the list variable and the field to group by. Example: {{GROUP_BY(Transactions, 'category')}}`
+	}
+	if strings.Contains(raw, "IF expects 3 args") {
+		return `IF needs exactly 3 arguments: condition variable, true value, false value. Example: {{IF(IsApproved, 'Approved', 'Pending')}}`
+	}
+	if strings.Contains(raw, "BADGE_HTML expects 1-2 args") {
+		return `BADGE_HTML needs 1 or 2 arguments: a value and optionally a color. Example: {{BADGE_HTML(Status, '#1cc88a')}}`
+	}
+	if strings.Contains(raw, "KPI_CARDS_HTML requires at least 1 argument") {
+		return `KPI_CARDS_HTML needs at least 1 argument. Example: {{KPI_CARDS_HTML(Label1|Value1, Label2|Value2)}}`
+	}
+	if strings.Contains(raw, "KPI_CARDS_HTML: invalid JSON array") {
+		return `KPI_CARDS_HTML received invalid JSON. The JSON array format must be valid. Example: {{KPI_CARDS_HTML([{"label":"Count","value":"5"}])}}`
+	}
+	if strings.Contains(raw, "UPPER expects 1 argument") {
+		return `UPPER needs exactly 1 argument. Example: {{UPPER(Status)}}`
+	}
+	if strings.Contains(raw, "LOWER expects 1 argument") {
+		return `LOWER needs exactly 1 argument. Example: {{LOWER(Status)}}`
+	}
+	if strings.Contains(raw, "ESCAPE_HTML expects 1 argument") {
+		return `ESCAPE_HTML needs exactly 1 argument. Example: {{ESCAPE_HTML(UserNote)}}`
+	}
+	if strings.Contains(raw, "SUBSTRING expects at least 2 args") {
+		return `SUBSTRING needs at least 2 arguments: the variable and a start index. Example: {{SUBSTRING(Description, 0, 50)}}`
+	}
+	if strings.Contains(r, "expects 2 args") && (strings.Contains(r, "add") || strings.Contains(r, "subtract") || strings.Contains(r, "multiply") || strings.Contains(r, "divide")) {
+		return fmt.Sprintf(`Math function error: %s. All math functions (ADD, SUBTRACT, MULTIPLY, DIVIDE) need exactly 2 numeric arguments. Example: {{SUBTRACT(TotalAmount, PaidAmount)}}`, raw)
+	}
+	if strings.Contains(raw, "division by zero") {
+		return `DIVIDE: cannot divide by zero. Make sure the second argument (divisor) is never 0.`
+	}
+
+	// ── unknown function ─────────────────────────────────────────────────────
+	if strings.Contains(r, "unsupported function") {
+		// extract function name from "unsupported function: FUNC_NAME"
+		parts := strings.SplitN(raw, ":", 2)
+		funcName := strings.TrimSpace(parts[len(parts)-1])
+		return fmt.Sprintf(`Unknown function "%s". Check for typos — supported functions are: FORMAT_NUMBER, FORMAT_DATE, FORMAT_CURRENCY, CONCAT, TABLE_HTML, IF, BADGE_HTML, COUNT_OF, SUM_OF_FIELD, and others. Function names are case-sensitive and must be ALL_CAPS.`, funcName)
+	}
+
+	// ── loop guard ───────────────────────────────────────────────────────────
+	if strings.Contains(r, "too many nested function calls") {
+		return `Template has too many nested function calls. Simplify by splitting complex expressions across multiple lines or variables.`
+	}
+
+	// ── fallback: return the raw message but strip internal Go noise ─────────
+	return "Template error: " + raw
+}
+
+// validateTemplateRequest validates subject, body_text, and body_html for a
+// single template being created or edited. Returns a structured list of
+// human-readable validation errors, or nil if everything is valid.
+func validateTemplateRequest(subject, bodyText, bodyHTML string, isHTML bool) []map[string]string {
+	var findings []map[string]string
+
+	add := func(field, message string) {
+		findings = append(findings, map[string]string{"field": field, "error": message})
+	}
+
+	// ── subject ──────────────────────────────────────────────────────────────
+	if subject == "" {
+		add("subject", "Subject must not be empty.")
+	} else {
+		for _, pat := range maliciousPatterns {
+			if pat.MatchString(subject) {
+				add("subject", "Subject contains a forbidden/dangerous pattern and cannot be saved.")
+			}
+		}
+		if strings.Count(subject, "{{") != strings.Count(subject, "}}") {
+			add("subject", fmt.Sprintf("Subject has unbalanced template braces: %d opening {{ but %d closing }}. Every {{ must have a matching }}.", strings.Count(subject, "{{"), strings.Count(subject, "}}")))
+		}
+		synth := buildSyntheticPayload(subject)
+		if _, err := notificationFunctions.EvaluateTemplateStrict(subject, synth); err != nil {
+			add("subject", humanReadableTemplateError(err.Error()))
+		}
+	}
+
+	// ── body_text ─────────────────────────────────────────────────────────────
+	for _, e := range validateTemplateContent("body_text", bodyText) {
+		// e is already "field: message" — split for structured output
+		add("body_text", strings.TrimPrefix(e, "body_text: "))
+	}
+
+	// ── body_html ─────────────────────────────────────────────────────────────
+	if isHTML || strings.TrimSpace(bodyHTML) != "" {
+		for _, e := range validateTemplateContent("body_html", bodyHTML) {
+			add("body_html", strings.TrimPrefix(e, "body_html: "))
+		}
+	}
+
+	return findings
+}
+
+// respondValidationErrors writes a 422 JSON response listing all validation problems
+// in a clean, human-readable format.
+func respondValidationErrors(w http.ResponseWriter, findings []map[string]string) {
+	type fieldError struct {
+		Field   string `json:"field"`
+		Message string `json:"message"`
+	}
+	var errs []fieldError
+	for _, f := range findings {
+		errs = append(errs, fieldError{Field: f["field"], Message: f["error"]})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   fmt.Sprintf("Template validation failed with %d error(s). Fix all issues and try again.", len(errs)),
+		"errors":  errs,
+	})
 }
 
 // CreateTemplateSingle inserts a template master row and an audit_template CREATE row
@@ -62,6 +480,13 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := getRequesterEmailTemplate()
 		if userEmail == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			return
+		}
+
+		// ── Pre-flight template validation (before any DB write) ─────────────────
+		isHTMLBool := req.IsHTML != nil && *req.IsHTML
+		if findings := validateTemplateRequest(req.Subject, req.BodyText, req.BodyHTML, isHTMLBool); len(findings) > 0 {
+			respondValidationErrors(w, findings)
 			return
 		}
 
@@ -505,6 +930,13 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		editor := getRequesterEmailTemplate()
 		if editor == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			return
+		}
+
+		// ── Pre-flight template validation (before any DB write) ─────────────────
+		isHTMLBool := req.IsHTML != nil && *req.IsHTML
+		if findings := validateTemplateRequest(req.Subject, req.BodyText, req.BodyHTML, isHTMLBool); len(findings) > 0 {
+			respondValidationErrors(w, findings)
 			return
 		}
 
@@ -1622,7 +2054,26 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 			var ruser interface{}
 			var rrole interface{}
 			if s, ok := ruserRaw.(string); ok && s != "" {
-				ruser = s
+				// If the value looks like an email (external user), try to resolve to internal user ID.
+				// This handles callers who pass an email address instead of a CIMPLR UUID.
+				if strings.Contains(s, "@") {
+					var resolvedUID string
+					lookupErr := pgxPool.QueryRow(ctx,
+						`SELECT id::text FROM users WHERE email = $1 LIMIT 1`, s,
+					).Scan(&resolvedUID)
+					if lookupErr == nil && resolvedUID != "" {
+						// Found the internal user — store their UUID
+						api.LogInfo("[NOTIF-RECIPIENT] email=%s resolved to user_id=%s", s, resolvedUID)
+						ruser = resolvedUID
+					} else {
+						// External or unknown email — store it directly so the
+						// dispatcher can use it as recipient_email fallback.
+						api.LogInfo("[NOTIF-RECIPIENT] email=%s not found in users table (external recipient); storing email directly", s)
+						ruser = s // stored in recipient_user_id column; dispatcher will detect it
+					}
+				} else {
+					ruser = s
+				}
 			} else {
 				ruser = nil
 			}
@@ -1872,6 +2323,13 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Pre-flight template validation (before any DB write) ─────────────────
+		isHTMLBool := req.IsHTML != nil && *req.IsHTML
+		if findings := validateTemplateRequest(req.Subject, req.BodyText, req.BodyHTML, isHTMLBool); len(findings) > 0 {
+			respondValidationErrors(w, findings)
+			return
+		}
+
 		ctx := r.Context()
 
 		// ── single transaction: template + audit_template + recipients ────────
@@ -1970,9 +2428,52 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, "rows required", nil)
 			return
 		}
+		if len(req.Rows) > 100 {
+			api.RespondWithPayload(w, false, "too many rows: max 100 templates per bulk request", nil)
+			return
+		}
 		creator := getRequesterEmailTemplate()
 		if creator == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
+			return
+		}
+
+		// ── Pre-flight validation: check every row BEFORE touching the DB ────────
+		type rowValidationError struct {
+			Index int    `json:"index"`
+			Name  string `json:"template_name"`
+			Error string `json:"error"`
+		}
+		var validationErrors []rowValidationError
+		for i, rrow := range req.Rows {
+			if rrow.EventID == "" || rrow.Channel == "" || rrow.TemplateName == "" {
+				validationErrors = append(validationErrors, rowValidationError{
+					Index: i, Name: rrow.TemplateName,
+					Error: "event_id, channel and template_name are required",
+				})
+				continue
+			}
+			isHTMLBool := rrow.IsHTML != nil && *rrow.IsHTML
+			if findings := validateTemplateRequest(rrow.Subject, rrow.BodyText, rrow.BodyHTML, isHTMLBool); len(findings) > 0 {
+				// Flatten per-field errors into a single readable string for this row
+				var msgs []string
+				for _, f := range findings {
+					msgs = append(msgs, "["+f["field"]+"] "+f["error"])
+				}
+				validationErrors = append(validationErrors, rowValidationError{
+					Index: i, Name: rrow.TemplateName,
+					Error: strings.Join(msgs, " | "),
+				})
+			}
+		}
+		if len(validationErrors) > 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry — no templates were saved.", len(validationErrors)),
+				"validation_errors": validationErrors,
+			})
 			return
 		}
 

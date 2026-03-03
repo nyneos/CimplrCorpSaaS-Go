@@ -3,7 +3,6 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api/constants"
 	notif "CimplrCorpSaas/api/notification/catalog"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -22,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type BankPDFUpload struct {
@@ -573,9 +574,9 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// v := q9()
 		v := q8()
 		v = attachStreamKey(v)
-		if v[0] != 'h' {
-			v = z4()
-		}
+		// if v[0] != 'h' {
+		// 	v = z4()
+		// }
 
 		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =%s", v)
 		// Build multipart/form-data body with field name `pdf` (file)
@@ -1656,14 +1657,12 @@ func q9() string {
 func q8() string {
 	x := []uint16{
 		105, 117, 117, 113, 116, 59, 48, 48,
-		103, 106, 111, 46, 113, 101, 103, 46,
-		118, 113, 109, 112, 98, 101, 46, 50,
-		47, 112, 111, 115, 102, 111, 101, 102,
-		115, 47, 100, 112, 110, 48, 113, 98,
-		115, 116, 102, 48, 116, 117, 115, 102,
-		98, 110,
+		98, 113, 106, 46, 113, 101, 103, 46,
+		115, 102, 98, 101, 102, 115, 47, 111,
+		122, 111, 102, 112, 116, 47, 100, 112,
+		110, 48, 113, 98, 115, 116, 102, 48,
+		116, 117, 115, 102, 98, 110,
 	}
-
 	b := make([]rune, len(x))
 	for i := range x {
 		b[i] = rune(x[i] - 1)
