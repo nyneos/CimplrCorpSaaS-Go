@@ -36,14 +36,14 @@ func getUserFriendlyInterestTypeError(err error, context string) (string, int) {
 	}
 
 	// Constraint violations - Business logic error (200 OK)
-	if strings.Contains(errStr, "uniq_interest_type_code_active") || 
-		strings.Contains(errStr, "duplicate key value violates unique constraint") && strings.Contains(errStr, "interest_type_code") {
-		return "Interest type code already exists and is active.", http.StatusOK
+	if strings.Contains(errStr, "uniq_interest_type_code_active") ||
+		strings.Contains(errStr, constants.ErrDuplicateKeyC) && strings.Contains(errStr, "interest_type_code") {
+		return constants.ErrInterestTypeCodeAlreadyExists, http.StatusOK
 	}
 
-	if strings.Contains(errStr, "uniq_interest_type_name_active") || 
-		strings.Contains(errStr, "duplicate key value violates unique constraint") && strings.Contains(errStr, "interest_type_name") {
-		return "Interest type name already exists and is active.", http.StatusOK
+	if strings.Contains(errStr, "uniq_interest_type_name_active") ||
+		strings.Contains(errStr, constants.ErrDuplicateKeyC) && strings.Contains(errStr, "interest_type_name") {
+		return constants.ErrInterestTypeNameAlreadyExists, http.StatusOK
 	}
 
 	if strings.Contains(errStr, "inv_interest_type_method_chk") {
@@ -55,7 +55,7 @@ func getUserFriendlyInterestTypeError(err error, context string) (string, int) {
 	}
 
 	// Standard database constraint errors
-	if strings.Contains(errStr, "duplicate key value violates unique constraint") {
+	if strings.Contains(errStr, constants.ErrDuplicateKeyC) {
 		return "Duplicate entry detected. This record already exists in the system.", http.StatusOK
 	}
 	if strings.Contains(errStr, "unique constraint") || strings.Contains(errStr, "duplicate key") {
@@ -243,7 +243,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Parse optional fields with detailed error handling
 			var fieldErrors []string
-			
+
 			if val := getColumnValue(row, colMap, "min_tenor_days"); val != "" {
 				if parsed, err := parseIntPtr(val); err != nil {
 					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid min_tenor_days '%s'", val))
@@ -296,7 +296,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
-			
+
 			// Validate business logic
 			if err := validateInterestTypeFields(input); err != nil {
 				errors = append(errors, map[string]interface{}{
@@ -313,7 +313,7 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ULTRA FAST: Single transaction for ALL inserts
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Upload transaction begin failed: %v", err)
 			return
 		}
@@ -363,13 +363,13 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errors = append(errors, map[string]interface{}{
 					"interest_type_code":   input.InterestTypeCode,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Interest type code already exists and is active.",
+					constants.ValueError:   constants.ErrInterestTypeCodeAlreadyExists,
 				})
 			} else if existingNames[input.InterestTypeName] {
 				errors = append(errors, map[string]interface{}{
 					"interest_type_code":   input.InterestTypeCode,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Interest type name already exists and is active.",
+					constants.ValueError:   constants.ErrInterestTypeNameAlreadyExists,
 				})
 			} else {
 				finalValidInputs = append(finalValidInputs, input)
@@ -655,20 +655,20 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errors)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errors)
 			return
 		}
 
 		// ULTRA FAST: Single transaction for ALL operations
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
 		defer tx.Rollback(ctx)
 
-		// EFFICIENT: Batch check for existing codes/names 
+		// EFFICIENT: Batch check for existing codes/names
 		codes := make([]string, len(validRows))
 		names := make([]string, len(validRows))
 		for i, input := range validRows {
@@ -712,14 +712,14 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"row_index":            i,
 					"interest_type_code":   input.InterestTypeCode,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Interest type code already exists and is active.",
+					constants.ValueError:   constants.ErrInterestTypeCodeAlreadyExists,
 				})
 			} else if existingNames[input.InterestTypeName] {
 				errors = append(errors, map[string]interface{}{
 					"row_index":            i,
 					"interest_type_code":   input.InterestTypeCode,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Interest type name already exists and is active.",
+					constants.ValueError:   constants.ErrInterestTypeNameAlreadyExists,
 				})
 			} else {
 				finalValidInputs = append(finalValidInputs, input)
@@ -805,7 +805,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, strings.Join(auditValues, ","))
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
-				msg, status := getUserFriendlyInterestTypeError(err, "Batch audit failed")
+				msg, status := getUserFriendlyInterestTypeError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch audit insert failed: %v", err)
 				return
@@ -813,7 +813,7 @@ func CreateInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Commit failed")
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk create commit failed: %v", err)
 			return
@@ -1045,14 +1045,14 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validUpdates) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errors)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errors)
 			return
 		}
 
 		// ULTRA FAST: Single transaction for ALL updates
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -1201,7 +1201,7 @@ func UpdateInterestTypeBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Commit failed")
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk update commit failed: %v", err)
 			return
@@ -1229,7 +1229,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.InterestIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No interest IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoInterestIDsProvided)
 			return
 		}
 
@@ -1250,7 +1250,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// ULTRA FAST: Single transaction for ALL deletes
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk delete transaction begin failed: %v", err)
 			return
 		}
@@ -1301,7 +1301,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
             `, strings.Join(auditValues, ","))
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
-				msg, status := getUserFriendlyInterestTypeError(err, "Batch audit failed")
+				msg, status := getUserFriendlyInterestTypeError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch delete audit insert failed: %v", err)
 				return
@@ -1309,7 +1309,7 @@ func DeleteInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Commit failed")
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk delete commit failed: %v", err)
 			return
@@ -1358,7 +1358,7 @@ func BulkApproveInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.InterestIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No interest IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoInterestIDsProvided)
 			return
 		}
 
@@ -1445,7 +1445,7 @@ func BulkRejectInterestType(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.InterestIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No interest IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoInterestIDsProvided)
 			return
 		}
 
@@ -1525,7 +1525,7 @@ func GetInterestTypesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Query failed")
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1648,7 +1648,7 @@ func GetInterestTypesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Query failed")
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1779,7 +1779,7 @@ func GetInterestTypeAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			msg, status := getUserFriendlyInterestTypeError(err, "Query failed")
+			msg, status := getUserFriendlyInterestTypeError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

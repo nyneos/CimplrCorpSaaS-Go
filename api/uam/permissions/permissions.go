@@ -365,7 +365,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 			RoleName string `json:"roleName,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"error":"invalid request body"}`, http.StatusBadRequest)
+			http.Error(w, `{"success":false,"error":constants.ErrInvalidRequestBody}`, http.StatusBadRequest)
 			return
 		}
 
@@ -484,7 +484,7 @@ func UpdateRolePermissionsStatusByName(db *sql.DB) http.HandlerFunc {
 			Status   string `json:"status"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		// Prefer userID from context if available

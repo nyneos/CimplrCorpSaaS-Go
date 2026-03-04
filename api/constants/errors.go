@@ -249,6 +249,7 @@ const (
 	ErrNoDataFound     = "No data found matching your criteria"
 	ErrInvalidRequest  = "Invalid request. Please check your input"
 	ErrNotImplemented  = "This feature is not yet implemented"
+	ErrDuplicateKeyC   = "Duplicate key value violates unique constraint"
 )
 
 // ============================================================================

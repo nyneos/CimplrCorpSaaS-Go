@@ -75,15 +75,15 @@ var maliciousPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(?:^|[\s<])on[a-z]+\s*=`),
 	regexp.MustCompile(`(?i)vbscript\s*:`),
 	regexp.MustCompile(`(?i)data:\s*text/html`),
-	regexp.MustCompile(`(?i)expression\s*\(`),     // CSS expression()
-	regexp.MustCompile(`(?i)\bexec\s*\(`),         // SQL EXEC(
-	regexp.MustCompile(`(?i)\bdrop\s+table\b`),    // SQL DROP TABLE
-	regexp.MustCompile(`(?i)\bdelete\s+from\b`),   // SQL DELETE FROM
-	regexp.MustCompile(`(?i)\binsert\s+into\b`),   // SQL INSERT INTO
+	regexp.MustCompile(`(?i)expression\s*\(`),        // CSS expression()
+	regexp.MustCompile(`(?i)\bexec\s*\(`),            // SQL EXEC(
+	regexp.MustCompile(`(?i)\bdrop\s+table\b`),       // SQL DROP TABLE
+	regexp.MustCompile(`(?i)\bdelete\s+from\b`),      // SQL DELETE FROM
+	regexp.MustCompile(`(?i)\binsert\s+into\b`),      // SQL INSERT INTO
 	regexp.MustCompile(`(?i)\bupdate\s+\w+\s+set\b`), // SQL UPDATE SET
-	regexp.MustCompile(`(?i)\bunion\s+select\b`),  // SQL UNION SELECT
+	regexp.MustCompile(`(?i)\bunion\s+select\b`),     // SQL UNION SELECT
 	regexp.MustCompile(`(?i)\bxp_cmdshell\b`),
-	regexp.MustCompile(`\x00`),                    // null bytes
+	regexp.MustCompile(`\x00`), // null bytes
 }
 
 // templateValidation holds a set of errors found during pre-flight validation.
@@ -182,7 +182,7 @@ var dateFunctions = map[string]struct{}{
 var syntheticRowList = []map[string]interface{}{
 	{
 		"name": "Sample Item", "description": "Test row", "category": "DEBIT",
-		"date": "01/01/2026", "amount": float64(1000),
+		"date": constants.DateFormat, "amount": float64(1000),
 		"withdrawal_amount": float64(1000), "deposit_amount": float64(500),
 		"debit": float64(1000), "credit": float64(500),
 		"balance": float64(50000), "total": float64(1500),
@@ -207,7 +207,7 @@ func buildSyntheticPayload(content string) map[string]interface{} {
 		lower := strings.ToLower(key)
 		switch {
 		case strings.Contains(lower, "date"):
-			payload[key] = "01/01/2026"
+			payload[key] = constants.DateFormat
 		case strings.Contains(lower, "amount") || strings.Contains(lower, "total") ||
 			strings.Contains(lower, "balance") || strings.Contains(lower, "count") ||
 			strings.Contains(lower, "number") || strings.Contains(lower, "rate"):
@@ -235,7 +235,7 @@ func buildSyntheticPayload(content string) map[string]interface{} {
 			}
 		} else if _, ok := dateFunctions[funcName]; ok {
 			if _, exists := payload[argKey]; !exists {
-				payload[argKey] = "01/01/2026"
+				payload[argKey] = constants.DateFormat
 			}
 		} else {
 			if _, exists := payload[argKey]; !exists {
@@ -261,7 +261,7 @@ func buildSyntheticPayload(content string) map[string]interface{} {
 				}
 			} else if _, ok := dateFunctions[funcName]; ok {
 				if _, exists := payload[argKey]; !exists {
-					payload[argKey] = "01/01/2026"
+					payload[argKey] = constants.DateFormat
 				}
 			} else {
 				if _, exists := payload[argKey]; !exists {
@@ -466,11 +466,11 @@ func CreateTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Formula      any    `json:"formula_steps"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if req.EventID == "" || req.Channel == "" || req.TemplateName == "" {
-			api.RespondWithPayload(w, false, "event_id, channel and template_name are required", nil)
+			api.RespondWithPayload(w, false, constants.ErrEventIDChannelTemplateNameRequired, nil)
 			return
 		}
 		if req.IsHTML == nil {
@@ -551,7 +551,7 @@ func CreateTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if len(req.Rows) == 0 {
@@ -916,7 +916,7 @@ func EditTemplateSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RoleScope    string `json:"role_scope"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if req.TemplateID == "" {
@@ -1056,7 +1056,7 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string `json:"template_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
-			api.RespondWithPayload(w, false, "template_id required", nil)
+			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
 			return
 		}
 		ctx := r.Context()
@@ -1172,7 +1172,7 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string `json:"template_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
-			api.RespondWithPayload(w, false, "template_id required", nil)
+			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
 			return
 		}
 		ctx := r.Context()
@@ -1235,12 +1235,12 @@ func BulkApproveTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 
 		if len(req.AuditIDs) == 0 {
-			api.RespondWithPayload(w, false, "audit_ids required", nil)
+			api.RespondWithPayload(w, false, constants.ErrAuditIDsRequired, nil)
 			return
 		}
 
@@ -1383,11 +1383,11 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if len(req.AuditIDs) == 0 {
-			api.RespondWithPayload(w, false, "audit_ids required", nil)
+			api.RespondWithPayload(w, false, constants.ErrAuditIDsRequired, nil)
 			return
 		}
 		userEmail := getRequesterEmailTemplate()
@@ -1496,11 +1496,11 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if len(req.AuditIDs) == 0 {
-			api.RespondWithPayload(w, false, "audit_ids required", nil)
+			api.RespondWithPayload(w, false, constants.ErrAuditIDsRequired, nil)
 			return
 		}
 		userEmail := getRequesterEmailTemplate()
@@ -1591,7 +1591,7 @@ func CreateTemplateRecipient(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RecipientPriority *int   `json:"recipient_priority"` // 1=highest urgency, default 3
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if req.TemplateID == "" || req.RecipientType == "" {
@@ -1647,7 +1647,7 @@ func GetRecipientsByTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			TemplateID string `json:"template_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
-			api.RespondWithPayload(w, false, "template_id required", nil)
+			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
 			return
 		}
 		ctx := r.Context()
@@ -1786,11 +1786,11 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"recipients"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if req.TemplateID == "" {
-			api.RespondWithPayload(w, false, "template_id required", nil)
+			api.RespondWithPayload(w, false, constants.ErrTemplateIDRequired, nil)
 			return
 		}
 		if len(req.Recipients) == 0 {
@@ -2306,11 +2306,11 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Strategy     map[string]interface{} `json:"recipient_strategy"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if req.EventID == "" || req.Channel == "" || req.TemplateName == "" {
-			api.RespondWithPayload(w, false, "event_id, channel and template_name are required", nil)
+			api.RespondWithPayload(w, false, constants.ErrEventIDChannelTemplateNameRequired, nil)
 			return
 		}
 		if req.IsHTML == nil {
@@ -2421,7 +2421,7 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		if len(req.Rows) == 0 {
@@ -2449,7 +2449,7 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if rrow.EventID == "" || rrow.Channel == "" || rrow.TemplateName == "" {
 				validationErrors = append(validationErrors, rowValidationError{
 					Index: i, Name: rrow.TemplateName,
-					Error: "event_id, channel and template_name are required",
+					Error: constants.ErrEventIDChannelTemplateNameRequired,
 				})
 				continue
 			}
@@ -2470,8 +2470,8 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry — no templates were saved.", len(validationErrors)),
+				"success":           false,
+				"error":             fmt.Sprintf("%d row(s) failed validation. Fix all errors and retry — no templates were saved.", len(validationErrors)),
 				"validation_errors": validationErrors,
 			})
 			return

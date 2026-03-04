@@ -1,18 +1,19 @@
 package sweepconfig
 
 import (
-	"strings"
+	"CimplrCorpSaas/api/constants"
 	"fmt"
+	"strings"
 )
 
 // parseSweepConstraintError converts PostgreSQL constraint violation errors into human-readable messages
 func parseSweepConstraintError(err error) string {
 	errStr := err.Error()
-	
+
 	// Unique constraint violations
-	if strings.Contains(errStr, "duplicate key value violates unique constraint") {
-		if strings.Contains(errStr, "uniq_sweep_entity_bank_account") || 
-		   strings.Contains(errStr, "unique_sweep_configuration") {
+	if strings.Contains(errStr, constants.ErrDuplicateKeyC) {
+		if strings.Contains(errStr, "uniq_sweep_entity_bank_account") ||
+			strings.Contains(errStr, "unique_sweep_configuration") {
 			return "A sweep configuration already exists for this entity and bank account combination. Each entity can have only one sweep configuration per bank account."
 		}
 		if strings.Contains(errStr, "sweep_id") || strings.Contains(errStr, "primary") {
@@ -20,7 +21,7 @@ func parseSweepConstraintError(err error) string {
 		}
 		return "This sweep configuration conflicts with an existing record. Please check for duplicate entity, bank, or account combinations."
 	}
-	
+
 	// Foreign key constraint violations
 	if strings.Contains(errStr, "violates foreign key constraint") {
 		if strings.Contains(errStr, "fk_entity") {
@@ -34,7 +35,7 @@ func parseSweepConstraintError(err error) string {
 		}
 		return "One or more referenced records do not exist. Please verify all bank and account details."
 	}
-	
+
 	// Check constraint violations
 	if strings.Contains(errStr, "violates check constraint") {
 		if strings.Contains(errStr, "chk_sweep_type") {
@@ -54,7 +55,7 @@ func parseSweepConstraintError(err error) string {
 		}
 		return "One or more field values do not meet the required format or range constraints."
 	}
-	
+
 	// NOT NULL constraint violations
 	if strings.Contains(errStr, "null value in column") {
 		if strings.Contains(errStr, "entity_name") {
@@ -74,17 +75,17 @@ func parseSweepConstraintError(err error) string {
 		}
 		return "A required field is missing. Please ensure all mandatory fields are provided."
 	}
-	
+
 	// Permission/access violations
 	if strings.Contains(errStr, "permission denied") {
 		return "You do not have permission to create or modify sweep configurations for this entity."
 	}
-	
+
 	// Connection/timeout errors
 	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
 		return "Database connection issue. Please try again in a moment."
 	}
-	
+
 	// Default case - return a generic but helpful message
 	return fmt.Sprintf("Unable to save sweep configuration due to a data constraint: %v", err)
 }

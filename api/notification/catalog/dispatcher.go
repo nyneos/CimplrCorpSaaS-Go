@@ -731,12 +731,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) err
 func InsertSendHistory(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	outboxID string,
-	row outboxRow,
-	status string, // "SENT", "FAILED", or "QUEUED"
-	providerResp string,
-	providerMessageID string,
-	attemptNumber int,
+	params SendHistoryParams,
 ) error {
 	q := `
 		INSERT INTO notification_svc.send_history (
@@ -766,23 +761,23 @@ func InsertSendHistory(
 	`
 
 	if _, err := pool.Exec(ctx, q,
-		outboxID,
-		row.correlationID,
-		row.eventID,
-		row.auditID,
-		row.channel,
-		nullStr(row.recipientUserID),
-		nullStr(row.recipientEmail),
-		nullStr(row.recipientPhone),
-		status,
-		nullStr(providerResp),
-		nullStr(providerMessageID),
-		attemptNumber,
-		nullStr(row.senderName),
-		nullStr(row.senderEmail),
-		nullStr(row.senderIdentifier),
-		safeUTF8(row.renderedSubject),
-		safeUTF8(row.renderedBody),
+		params.OutboxID,
+		params.Row.correlationID,
+		params.Row.eventID,
+		params.Row.auditID,
+		params.Row.channel,
+		nullStr(params.Row.recipientUserID),
+		nullStr(params.Row.recipientEmail),
+		nullStr(params.Row.recipientPhone),
+		params.Status,
+		nullStr(params.ProviderResp),
+		nullStr(params.ProviderMessageID),
+		params.AttemptNumber,
+		nullStr(params.Row.senderName),
+		nullStr(params.Row.senderEmail),
+		nullStr(params.Row.senderIdentifier),
+		safeUTF8(params.Row.renderedSubject),
+		safeUTF8(params.Row.renderedBody),
 	); err != nil {
 		return fmt.Errorf("InsertSendHistory: %w", err)
 	}
@@ -800,7 +795,7 @@ func InsertSendHistory(
 		WHERE outbox_id = $3
 	`
 
-	if _, err := pool.Exec(ctx, upq, status, nullStr(providerResp), outboxID); err != nil {
+	if _, err := pool.Exec(ctx, upq, params.Status, nullStr(params.ProviderResp), params.OutboxID); err != nil {
 		// Log and return error — caller should know if outbox update failed
 		return fmt.Errorf("InsertSendHistory (update outbox): %w", err)
 	}
@@ -818,6 +813,16 @@ func nullStr(s string) interface{} {
 }
 
 // nameFromEmail derives a human-readable display name from an email address.
+
+// SendHistoryParams groups parameters for InsertSendHistory to keep signatures small.
+type SendHistoryParams struct {
+	OutboxID string
+	Row outboxRow
+	Status string
+	ProviderResp string
+	ProviderMessageID string
+	AttemptNumber int
+}
 // "hardik.mishra@company.com" → "Hardik Mishra"
 // "admin@company.com"        → "Admin"
 // Falls back to the local-part as-is if no dots found.

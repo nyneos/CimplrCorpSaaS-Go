@@ -184,7 +184,7 @@ func GetTdsPlansApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -388,13 +388,13 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validRows = append(validRows, inputMap)
 		}
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
@@ -512,7 +512,7 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (tds_plan_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-				msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed")
+				msg, status := getUserFriendlyTDSPlanError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch audit failed: %v", err)
 				return
@@ -522,7 +522,7 @@ func CreateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			// Log rich DB error details for debugging
 			logDBError(err, "Bulk create commit failed")
-			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -654,7 +654,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			inputs = append(inputs, inputMap)
 		}
 		if len(inputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
 			return
 		}
 
@@ -663,7 +663,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("Starting TDS plan upload transaction with %d input rows", len(inputs))
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
@@ -781,7 +781,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (tds_plan_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-				msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed")
+				msg, status := getUserFriendlyTDSPlanError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch audit failed: %v", err)
 				return
@@ -792,7 +792,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err := tx.Commit(ctx); err != nil {
 			// Log rich DB error details for debugging
 			logDBError(err, "Upload bulk create commit failed")
-			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -822,7 +822,7 @@ func GetTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var applicableTo *string
 		var isActive, isDeleted bool
 		if err := pgxPool.QueryRow(ctx, q, id).Scan(&tid, &code, &name, &section, &rate, &hasPan, &thresholdAmount, &thresholdType, &deductionTiming, &applicableFrom, &applicableTo, &description, &isActive, &isDeleted); err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Query failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -915,7 +915,7 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1047,7 +1047,7 @@ func GetTdsPlanAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1141,7 +1141,7 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.TdsIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No tds plan IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNotdsIDsProvided)
 			return
 		}
 
@@ -1160,7 +1160,7 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk delete transaction begin failed: %v", err)
 			return
 		}
@@ -1207,7 +1207,7 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, strings.Join(auditValues, ","))
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
-				msg, status := getUserFriendlyTDSPlanError(err, "Batch audit failed")
+				msg, status := getUserFriendlyTDSPlanError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch delete audit insert failed: %v", err)
 				return
@@ -1215,7 +1215,7 @@ func DeleteTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk delete commit failed: %v", err)
 			return
@@ -1284,7 +1284,7 @@ func BulkApproveTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.TdsIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No tds plan IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNotdsIDsProvided)
 			return
 		}
 
@@ -1370,7 +1370,7 @@ func BulkRejectTdsPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.TdsIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No tds plan IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNotdsIDsProvided)
 			return
 		}
 
@@ -1436,7 +1436,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		
+
 		api.LogInfo("UpdateTDSPlan request: UserID=%s, TdsID=%s, Fields=%+v, Reason=%s", req.UserID, req.TdsID, req.Fields, req.Reason)
 
 		if req.TdsID == "" {
@@ -1507,7 +1507,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.RespondWithError(w, http.StatusBadRequest, errMsg)
 					return
 				}
-				
+
 				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
 				args = append(args, v)
 				pos++
@@ -1521,7 +1521,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		q := fmt.Sprintf("UPDATE investment.fd_tds_plan_master SET %s WHERE tds_plan_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.TdsID)
-		
+
 		api.LogInfo("Debug update query: %s", q)
 		api.LogInfo("Debug update args: %+v", args)
 
@@ -1623,13 +1623,13 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(validUpdates) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errors)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errors)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -1758,7 +1758,7 @@ func UpdateTDSPlanBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Commit failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk update commit failed: %v", err)
 			return

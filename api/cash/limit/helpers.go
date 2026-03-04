@@ -8,19 +8,30 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// LimitUniqueKey groups parameters for uniqueness checks to keep signatures small
+type LimitUniqueKey struct {
+	EntityName   string
+	BankName     string
+	CoreLimitType string
+	LimitType    string
+	LimitSubType string
+	CurrencyCode string
+	ExcludeLimitID string
+}
+
 // checkLimitUniqueness validates that the limit combination doesn't already exist for active records
-func checkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, entityName, bankName, coreLimitType, limitType, limitSubType, currencyCode string, excludeLimitID string) error {
+func checkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, key LimitUniqueKey) error {
 	var query string
 	var args []interface{}
 
-	if excludeLimitID != "" {
+	if key.ExcludeLimitID != "" {
 		// For updates, exclude the current limit ID
 		query = `SELECT 1 FROM cimplrcorpsaas.bank_limit 
 				WHERE entity_name = $1 AND bank_name = $2 AND core_limit_type = $3 
 				AND COALESCE(limit_type, '') = $4 AND COALESCE(limit_sub_type, '') = $5 
 				AND currency_code = $6 AND limit_id != $7 
 				AND COALESCE(is_deleted, false) = false LIMIT 1`
-		args = []interface{}{entityName, bankName, coreLimitType, limitType, limitSubType, currencyCode, excludeLimitID}
+		args = []interface{}{key.EntityName, key.BankName, key.CoreLimitType, key.LimitType, key.LimitSubType, key.CurrencyCode, key.ExcludeLimitID}
 	} else {
 		// For creates, check if any active record exists
 		query = `SELECT 1 FROM cimplrcorpsaas.bank_limit 
@@ -28,14 +39,14 @@ func checkLimitUniqueness(ctx context.Context, pgxPool *pgxpool.Pool, entityName
 				AND COALESCE(limit_type, '') = $4 AND COALESCE(limit_sub_type, '') = $5 
 				AND currency_code = $6 
 				AND COALESCE(is_deleted, false) = false LIMIT 1`
-		args = []interface{}{entityName, bankName, coreLimitType, limitType, limitSubType, currencyCode}
+		args = []interface{}{key.EntityName, key.BankName, key.CoreLimitType, key.LimitType, key.LimitSubType, key.CurrencyCode}
 	}
 
 	var exists int
 	err := pgxPool.QueryRow(ctx, query, args...).Scan(&exists)
 	if err == nil {
 		return fmt.Errorf("duplicate limit: combination of entity '%s', bank '%s', core limit type '%s', limit type '%s', limit sub type '%s', currency '%s' already exists",
-			entityName, bankName, coreLimitType, limitType, limitSubType, currencyCode)
+			key.EntityName, key.BankName, key.CoreLimitType, key.LimitType, key.LimitSubType, key.CurrencyCode)
 	}
 
 	// If error is 'no rows', that's expected (no duplicate found)

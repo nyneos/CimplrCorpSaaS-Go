@@ -4,17 +4,19 @@
 // and notification_svc.notification_config.
 //
 // Endpoints registered in dash.go:
-//   POST /dash/notification/kpi               → aggregate counts + delivery rates
-//   POST /dash/notification/logs              → paginated outbox log rows
-//   POST /dash/notification/channel-breakdown → sent/failed counts per channel
-//   POST /dash/notification/hourly-trend      → hourly delivery volume
-//   POST /dash/notification/top-events        → most-fired events with success rate
-//   POST /dash/notification/timeline          → full timeline for one correlation_id
-//   POST /dash/notification/retry-stats       → retry-depth distribution + dead-letter
-//   POST /dash/notification/send-history      → provider-level send attempts
+//
+//	POST /dash/notification/kpi               → aggregate counts + delivery rates
+//	POST /dash/notification/logs              → paginated outbox log rows
+//	POST /dash/notification/channel-breakdown → sent/failed counts per channel
+//	POST /dash/notification/hourly-trend      → hourly delivery volume
+//	POST /dash/notification/top-events        → most-fired events with success rate
+//	POST /dash/notification/timeline          → full timeline for one correlation_id
+//	POST /dash/notification/retry-stats       → retry-depth distribution + dead-letter
+//	POST /dash/notification/send-history      → provider-level send attempts
 package notification
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -41,20 +43,20 @@ func errResp(w http.ResponseWriter, code int, msg string) {
 // filterRequest is the common filter body shared by all endpoints.
 // All fields are optional — zero values mean "no filter applied".
 type filterRequest struct {
-	DateRange   string `json:"dateRange"`    // "today" | "24h" | "7d" | "custom"
-	CustomStart string `json:"customStartDate,omitempty"`
-	CustomEnd   string `json:"customEndDate,omitempty"`
-	Channel     string `json:"channel,omitempty"`
-	Status      string `json:"status,omitempty"`
-	EventType   string `json:"eventType,omitempty"`
-	Provider    string `json:"provider,omitempty"`
+	DateRange     string `json:"dateRange"` // "today" | "24h" | "7d" | "custom"
+	CustomStart   string `json:"customStartDate,omitempty"`
+	CustomEnd     string `json:"customEndDate,omitempty"`
+	Channel       string `json:"channel,omitempty"`
+	Status        string `json:"status,omitempty"`
+	EventType     string `json:"eventType,omitempty"`
+	Provider      string `json:"provider,omitempty"`
 	CorrelationID string `json:"correlationId,omitempty"`
-	Recipient   string `json:"recipient,omitempty"`
-	MinRetry    int    `json:"minRetryCount"`
-	MaxRetry    int    `json:"maxRetryCount"`
-	Page        int    `json:"page"`
-	Limit       int    `json:"limit"`
-	HourWindow  int    `json:"hourWindow"` // for hourly-trend; default 24
+	Recipient     string `json:"recipient,omitempty"`
+	MinRetry      int    `json:"minRetryCount"`
+	MaxRetry      int    `json:"maxRetryCount"`
+	Page          int    `json:"page"`
+	Limit         int    `json:"limit"`
+	HourWindow    int    `json:"hourWindow"` // for hourly-trend; default 24
 }
 
 func (f filterRequest) dateWindow() (start, end time.Time) {
@@ -69,14 +71,14 @@ func (f filterRequest) dateWindow() (start, end time.Time) {
 		if f.CustomStart != "" {
 			if t, err := time.Parse(time.RFC3339, f.CustomStart); err == nil {
 				start = t
-			} else if t, err := time.Parse("2006-01-02", f.CustomStart); err == nil {
+			} else if t, err := time.Parse(constants.DateFormat, f.CustomStart); err == nil {
 				start = t
 			}
 		}
 		if f.CustomEnd != "" {
 			if t, err := time.Parse(time.RFC3339, f.CustomEnd); err == nil {
 				end = t
-			} else if t, err := time.Parse("2006-01-02", f.CustomEnd); err == nil {
+			} else if t, err := time.Parse(constants.DateFormat, f.CustomEnd); err == nil {
 				end = t
 			}
 		}
@@ -113,28 +115,28 @@ func decodeFilter(r *http.Request) (filterRequest, error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type KPIResponse struct {
-	Success           bool    `json:"success"`
-	TotalDispatched   int64   `json:"total_dispatched"`
-	TotalSent         int64   `json:"total_sent"`
-	TotalFailed       int64   `json:"total_failed"`
-	TotalDead         int64   `json:"total_dead"`
-	TotalPending      int64   `json:"total_pending"`
-	TotalRetrying     int64   `json:"total_retrying"`
-	DeliveryRate      float64 `json:"delivery_rate_pct"`
-	FailureRate       float64 `json:"failure_rate_pct"`
-	AvgRetryCount     float64 `json:"avg_retry_count"`
-	AvgLatencyMs      float64 `json:"avg_latency_ms"`
-	ChannelEmail      int64   `json:"channel_email"`
-	ChannelSMS        int64   `json:"channel_sms"`
-	ChannelPush       int64   `json:"channel_push"`
-	ChannelWhatsApp   int64   `json:"channel_whatsapp"`
+	Success         bool    `json:"success"`
+	TotalDispatched int64   `json:"total_dispatched"`
+	TotalSent       int64   `json:"total_sent"`
+	TotalFailed     int64   `json:"total_failed"`
+	TotalDead       int64   `json:"total_dead"`
+	TotalPending    int64   `json:"total_pending"`
+	TotalRetrying   int64   `json:"total_retrying"`
+	DeliveryRate    float64 `json:"delivery_rate_pct"`
+	FailureRate     float64 `json:"failure_rate_pct"`
+	AvgRetryCount   float64 `json:"avg_retry_count"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	ChannelEmail    int64   `json:"channel_email"`
+	ChannelSMS      int64   `json:"channel_sms"`
+	ChannelPush     int64   `json:"channel_push"`
+	ChannelWhatsApp int64   `json:"channel_whatsapp"`
 }
 
 func GetKPI(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		start, end := f.dateWindow()
@@ -225,7 +227,7 @@ func GetLogs(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		start, end := f.dateWindow()
@@ -359,7 +361,7 @@ func GetChannelBreakdown(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		start, end := f.dateWindow()
@@ -432,7 +434,7 @@ func GetHourlyTrend(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		windowStart := time.Now().Add(-time.Duration(f.HourWindow) * time.Hour)
@@ -496,7 +498,7 @@ func GetTopEvents(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		start, end := f.dateWindow()
@@ -780,7 +782,7 @@ func GetRetryStats(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		start, end := f.dateWindow()
@@ -966,13 +968,13 @@ LIMIT 200
 // ─────────────────────────────────────────────────────────────────────────────
 
 type ProviderStat struct {
-	Channel       string  `json:"channel"`
-	TotalAttempts int64   `json:"total_attempts"`
-	Succeeded     int64   `json:"succeeded"`
-	Failed        int64   `json:"failed"`
-	UniqueMessages int64  `json:"unique_messages"`
-	AvgAttempts   float64 `json:"avg_attempts_per_message"`
-	SuccessRate   float64 `json:"success_rate_pct"`
+	Channel        string  `json:"channel"`
+	TotalAttempts  int64   `json:"total_attempts"`
+	Succeeded      int64   `json:"succeeded"`
+	Failed         int64   `json:"failed"`
+	UniqueMessages int64   `json:"unique_messages"`
+	AvgAttempts    float64 `json:"avg_attempts_per_message"`
+	SuccessRate    float64 `json:"success_rate_pct"`
 }
 
 type ProviderStatsResponse struct {
@@ -984,7 +986,7 @@ func GetProviderStats(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		start, end := f.dateWindow()
@@ -1511,7 +1513,7 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f, err := decodeFilter(r)
 		if err != nil {
-			errResp(w, http.StatusBadRequest, "invalid filter: "+err.Error())
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
 			return
 		}
 		ctx := r.Context()
@@ -1540,37 +1542,65 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Fan out the remaining 7 fetches concurrently
-			type chBreakRes struct{ v ChannelBreakdownResponse; e error }
-			type hourlyRes  struct{ v HourlyTrendResponse;      e error }
-			type topEvtRes  struct{ v TopEventsResponse;        e error }
-			type retryRes   struct{ v RetryStatsResponse;       e error }
-			type logsRes    struct{ v LogsResponse;             e error }
-			type provRes    struct{ v ProviderStatsResponse;    e error }
-			type cfgRes     struct{ v EventConfigResponse;      e error }
+			type chBreakRes struct {
+				v ChannelBreakdownResponse
+				e error
+			}
+			type hourlyRes struct {
+				v HourlyTrendResponse
+				e error
+			}
+			type topEvtRes struct {
+				v TopEventsResponse
+				e error
+			}
+			type retryRes struct {
+				v RetryStatsResponse
+				e error
+			}
+			type logsRes struct {
+				v LogsResponse
+				e error
+			}
+			type provRes struct {
+				v ProviderStatsResponse
+				e error
+			}
+			type cfgRes struct {
+				v EventConfigResponse
+				e error
+			}
 
 			chBreakC := make(chan chBreakRes, 1)
-			hourlyC  := make(chan hourlyRes,  1)
-			topEvtC  := make(chan topEvtRes,  1)
-			retryC   := make(chan retryRes,   1)
-			logsC    := make(chan logsRes,    1)
-			provC    := make(chan provRes,    1)
-			cfgC     := make(chan cfgRes,     1)
+			hourlyC := make(chan hourlyRes, 1)
+			topEvtC := make(chan topEvtRes, 1)
+			retryC := make(chan retryRes, 1)
+			logsC := make(chan logsRes, 1)
+			provC := make(chan provRes, 1)
+			cfgC := make(chan cfgRes, 1)
 
 			go func() { v, e := fetchChannelBreakdown(ctx, pool, f); chBreakC <- chBreakRes{v, e} }()
-			go func() { v, e := fetchHourlyTrend(ctx, pool, f);     hourlyC  <- hourlyRes{v, e}  }()
-			go func() { v, e := fetchTopEvents(ctx, pool, f);       topEvtC  <- topEvtRes{v, e}  }()
-			go func() { v, e := fetchRetryStats(ctx, pool, f);      retryC   <- retryRes{v, e}   }()
-			go func() { v, e := fetchLogs(ctx, pool, f);            logsC    <- logsRes{v, e}    }()
-			go func() { v, e := fetchProviderStats(ctx, pool, f);   provC    <- provRes{v, e}    }()
-			go func() { v, e := fetchEventConfig(ctx, pool);        cfgC     <- cfgRes{v, e}     }()
+			go func() { v, e := fetchHourlyTrend(ctx, pool, f); hourlyC <- hourlyRes{v, e} }()
+			go func() { v, e := fetchTopEvents(ctx, pool, f); topEvtC <- topEvtRes{v, e} }()
+			go func() { v, e := fetchRetryStats(ctx, pool, f); retryC <- retryRes{v, e} }()
+			go func() { v, e := fetchLogs(ctx, pool, f); logsC <- logsRes{v, e} }()
+			go func() { v, e := fetchProviderStats(ctx, pool, f); provC <- provRes{v, e} }()
+			go func() { v, e := fetchEventConfig(ctx, pool); cfgC <- cfgRes{v, e} }()
 
-			r1 := <-chBreakC; res.chBreak = r1.v
-			r2 := <-hourlyC;  res.hourly  = r2.v
-			r3 := <-topEvtC;  res.topEvt  = r3.v
-			r4 := <-retryC;   res.retry   = r4.v
-			r5 := <-logsC;    res.logs    = r5.v
-			r6 := <-provC;    res.provider = r6.v
-			r7 := <-cfgC;     res.evtConfig = r7.v
+			r1 := <-chBreakC
+			res.chBreak = r1.v
+			r2 := <-hourlyC
+			res.hourly = r2.v
+			r3 := <-topEvtC
+			res.topEvt = r3.v
+			r4 := <-retryC
+			res.retry = r4.v
+			r5 := <-logsC
+			res.logs = r5.v
+			r6 := <-provC
+			res.provider = r6.v
+			r7 := <-cfgC
+			res.evtConfig = r7.v
 
 			ch <- res
 		}()

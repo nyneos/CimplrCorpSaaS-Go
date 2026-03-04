@@ -49,7 +49,7 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			IsActive      *bool  `json:"is_active"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.ModuleCode == "" || req.SubModuleCode == "" || req.EventCode == "" || req.EventName == "" {
@@ -130,7 +130,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.Rows) == 0 {
@@ -235,7 +235,7 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason  string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if req.EventID == "" || len(req.Fields) == 0 {
@@ -321,11 +321,11 @@ func BulkApproveEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.EventIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "event_ids required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrEventIDsRequired)
 			return
 		}
 		userEmail := getRequesterEmail()
@@ -396,11 +396,11 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment  string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.EventIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "event_ids required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrEventIDsRequired)
 			return
 		}
 		userEmail := getRequesterEmail()
@@ -548,11 +548,11 @@ func DeleteEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason   string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.EventIDs) == 0 {
-			respondWithError(w, http.StatusBadRequest, "event_ids required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrEventIDsRequired)
 			return
 		}
 		userEmail := getRequesterEmail()
@@ -628,7 +628,7 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			respondWithError(w, http.StatusBadRequest, "invalid request body")
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidRequestBody)
 			return
 		}
 		if len(req.Rows) == 0 {

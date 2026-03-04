@@ -1237,7 +1237,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			msg, status := getUserFriendlyAMCError(err, "Query failed")
+			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

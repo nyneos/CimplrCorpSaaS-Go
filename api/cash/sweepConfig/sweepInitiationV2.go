@@ -242,15 +242,25 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// Duplicate initiation check (prevent same logical sweep for same entity/accounts/time)
-			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, req.EntityName, finalSource, finalTarget, sweepType, effectiveDate, executionTime, req.BufferAmount, req.SweepAmount)
+			ik := InitiationKey{
+				Entity:        req.EntityName,
+				SourceAccount: finalSource,
+				TargetAccount: finalTarget,
+				Frequency:     sweepType,
+				EffectiveDate: effectiveDate,
+				ExecutionTime: executionTime,
+				BufferAmount:  req.BufferAmount,
+				SweepAmount:   req.SweepAmount,
+			}
+			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, ik)
 			if dErr != nil {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, "failed to validate duplicate initiation: "+dErr.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+dErr.Error())
 				return
 			}
 			if isDup {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, "duplicate initiation/config exists for the same entity+accounts+time; cannot create initiation")
+				api.RespondWithResult(w, false, constants.ErrDuplicateInitiationExists)
 				return
 			}
 
@@ -416,13 +426,23 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Duplicate initiation check (prevent same logical sweep for same entity/accounts/time)
-		isDup, dErr := isDuplicateInitiation(ctx, pgxPool, entityName, finalSource, finalTarget, frequency, cfgEffectiveDate, executionTime, bufPtr, sweepPtr)
+		ik := InitiationKey{
+			Entity:        entityName,
+			SourceAccount: finalSource,
+			TargetAccount: finalTarget,
+			Frequency:     frequency,
+			EffectiveDate: cfgEffectiveDate,
+			ExecutionTime: executionTime,
+			BufferAmount:  bufPtr,
+			SweepAmount:   sweepPtr,
+		}
+		isDup, dErr := isDuplicateInitiation(ctx, pgxPool, ik)
 		if dErr != nil {
-			api.RespondWithResult(w, false, "failed to validate duplicate initiation: "+dErr.Error())
+			api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+dErr.Error())
 			return
 		}
 		if isDup {
-			api.RespondWithResult(w, false, "duplicate initiation/config exists for the same entity+accounts+time; cannot create initiation")
+			api.RespondWithResult(w, false, constants.ErrDuplicateInitiationExists)
 			return
 		}
 
@@ -951,14 +971,26 @@ func nullifyStringPtr(s *string) interface{} {
 // exists for the same logical parameters: entity, source account, target account,
 // frequency, effective_date, execution_time, buffer_amount and sweep_amount.
 // It considers initiation-level overrides (overridden_source/target) when present.
-func isDuplicateInitiation(ctx context.Context, pgxPool *pgxpool.Pool, entity, sourceAccount, targetAccount, frequency, effectiveDate, executionTime string, bufferAmount, sweepAmount *float64) (bool, error) {
+// InitiationKey groups logical parameters for duplicate initiation checks
+type InitiationKey struct {
+	Entity        string
+	SourceAccount string
+	TargetAccount string
+	Frequency     string
+	EffectiveDate string
+	ExecutionTime string
+	BufferAmount  *float64
+	SweepAmount   *float64
+}
+
+func isDuplicateInitiation(ctx context.Context, pgxPool *pgxpool.Pool, key InitiationKey) (bool, error) {
 	// Normalize empty strings to '' for comparison
-	entityNorm := strings.TrimSpace(entity)
-	srcNorm := strings.TrimSpace(sourceAccount)
-	tgtNorm := strings.TrimSpace(targetAccount)
-	freqNorm := strings.ToUpper(strings.TrimSpace(frequency))
-	effNorm := strings.TrimSpace(effectiveDate)
-	execNorm := strings.TrimSpace(executionTime)
+	entityNorm := strings.TrimSpace(key.Entity)
+	srcNorm := strings.TrimSpace(key.SourceAccount)
+	tgtNorm := strings.TrimSpace(key.TargetAccount)
+	freqNorm := strings.ToUpper(strings.TrimSpace(key.Frequency))
+	effNorm := strings.TrimSpace(key.EffectiveDate)
+	execNorm := strings.TrimSpace(key.ExecutionTime)
 
 	// Query looks for any initiation whose resolved source/target (overrides or config)
 	// match the provided values, and where the initiation audit is PENDING_APPROVAL or APPROVED.
@@ -981,7 +1013,7 @@ func isDuplicateInitiation(ctx context.Context, pgxPool *pgxpool.Pool, entity, s
 
 	var count int
 	// Prepare numeric nils as interface{}; leaving nil is acceptable
-	if err := pgxPool.QueryRow(ctx, q, srcNorm, tgtNorm, entityNorm, freqNorm, effNorm, execNorm, bufferAmount, sweepAmount).Scan(&count); err != nil {
+	if err := pgxPool.QueryRow(ctx, q, srcNorm, tgtNorm, entityNorm, freqNorm, effNorm, execNorm, key.BufferAmount, key.SweepAmount).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -1484,15 +1516,25 @@ func BulkCreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// check existing initiations/configs in DB
-			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, init.EntityName, finalSource, finalTarget, checkFreq, checkEffDate, checkExecTime, checkBufPtr, checkSweepPtr)
+			ik := InitiationKey{
+				Entity:        init.EntityName,
+				SourceAccount: finalSource,
+				TargetAccount: finalTarget,
+				Frequency:     checkFreq,
+				EffectiveDate: checkEffDate,
+				ExecutionTime: checkExecTime,
+				BufferAmount:  checkBufPtr,
+				SweepAmount:   checkSweepPtr,
+			}
+			isDup, dErr := isDuplicateInitiation(ctx, pgxPool, ik)
 			if dErr != nil {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, "failed to validate duplicate initiation: "+dErr.Error())
+				api.RespondWithResult(w, false, constants.ErrFailedToValidateDuplicateInitiation+dErr.Error())
 				return
 			}
 			if isDup {
 				tx.Rollback(ctx)
-				api.RespondWithResult(w, false, "duplicate initiation/config exists for the same entity+accounts+time; cannot create initiation")
+				api.RespondWithResult(w, false, constants.ErrDuplicateInitiationExists)
 				return
 			}
 			// mark seen in this batch
@@ -1759,17 +1801,17 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"initiation_checker_by":        checkerBy,
 				"initiation_checker_comment":   checkerComment,
 				// Sweep config fields (base values)
-				"entity_name":                    entityName,
-				"source_bank_name":               sourceBank,
-				"source_bank_account":            sourceAccount,
-				"target_bank_name":               targetBank,
-				"target_bank_account":            targetAccount,
-				"sweep_type":                     sweepType,
-				"frequency":                      frequency,
-				"effective_date":                 effectiveDateStr,
-				"execution_time":                 executionTime,
-				"buffer_amount":                  bufferAmount,
-				"sweep_amount":                   sweepAmount,
+				"entity_name":         entityName,
+				"source_bank_name":    sourceBank,
+				"source_bank_account": sourceAccount,
+				"target_bank_name":    targetBank,
+				"target_bank_account": targetAccount,
+				"sweep_type":          sweepType,
+				"frequency":           frequency,
+				"effective_date":      effectiveDateStr,
+				"execution_time":      executionTime,
+				"buffer_amount":       bufferAmount,
+				"sweep_amount":        sweepAmount,
 				// Sweep config audit fields
 				"sweep_config_processing_status": sweepConfigStatus,
 				"sweep_config_requested_by":      sweepConfigRequestedBy,
@@ -2280,7 +2322,7 @@ func UpdateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				updates = append(updates, fmt.Sprintf("effective_date = $%d", argPos))
 				// Normalize incoming date string to YYYY-MM-DD to avoid passing Go's default time.String()
 				if d, err := parseDate(*req.EffectiveDate); err == nil {
-					args = append(args, d.Format("2006-01-02"))
+					args = append(args, d.Format(constants.DateFormat))
 				} else {
 					args = append(args, nullifyStringPtr(req.EffectiveDate))
 				}

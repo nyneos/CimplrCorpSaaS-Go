@@ -431,7 +431,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// convert val to string and attempt to parse
 			s := fmt.Sprint(val)
 			if t, err := parseDate(s); err == nil {
-				args = append(args, t.Format("2006-01-02"))
+				args = append(args, t.Format(constants.DateFormat))
 			} else {
 				args = append(args, nullifyEmpty(s))
 			}
@@ -444,7 +444,7 @@ func UpdateSweepConfigurationV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if oldVal == "" {
 				args = append(args, "")
 			} else if t2, err2 := parseDate(oldVal); err2 == nil {
-				args = append(args, t2.Format("2006-01-02"))
+				args = append(args, t2.Format(constants.DateFormat))
 			} else {
 				args = append(args, oldVal)
 			}

@@ -1410,20 +1410,20 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// Fire rich notification for the commit event (PDF path).
 		// For CSV/XLS the V2 handler fires its own notification via UploadBankStatementV2Handler.
 		if pool != nil {
-			notifPayload := BuildBankStatementPayload(
-				bankStatementID,
-				accountNumber,
-				&payload.Clean.Metadata,
-				openingBalance,
-				closingBalance,
-				entityIDStr,
-				requestedBy,
-				"", // filename not available from commit payload
-				payload.Clean.Transactions,
-				kpiCats,
-				rules,
-				"PENDING_APPROVAL",
-			)
+			notifPayload := BuildBankStatementPayload(BuildBankStatementParams{
+				BSID: bankStatementID,
+				AccountNumber: accountNumber,
+				Metadata: &payload.Clean.Metadata,
+				OpeningBalance: openingBalance,
+				ClosingBalance: closingBalance,
+				EntityID: entityIDStr,
+				UploadedBy: requestedBy,
+				FileName: "",
+				TXNS: payload.Clean.Transactions,
+				KPICats: kpiCats,
+				CategoryRules: rules,
+				Status: "PENDING_APPROVAL",
+			})
 			go notif.TriggerNotification(
 				context.Background(), pool,
 				"/cash/commit",

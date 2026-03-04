@@ -83,6 +83,7 @@ package bankstatement
 //    COUNT_OF(UncategorizedTransactions) transactions need review
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"fmt"
@@ -91,20 +92,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
+
 // All exported fields map directly to template variable names.
 type TxnRow struct {
-	TranDate          string  `json:"tran_date"`
-	ValueDate         string  `json:"value_date"`
-	Description       string  `json:"description"`
-	WithdrawalAmount  float64 `json:"withdrawal_amount"`
-	DepositAmount     float64 `json:"deposit_amount"`
-	Balance           float64 `json:"balance"`
-	CategoryID        string  `json:"category_id"`
-	CategoryName      string  `json:"category_name"`
-	CategoryType      string  `json:"category_type"`
-	TxnType           string  `json:"type"`     // "DEBIT" | "CREDIT" | "NONE"
-	Amount            float64 `json:"amount"`    // abs(withdrawal or deposit) for sorting
-	Index             int     `json:"index"`
+	TranDate         string  `json:"tran_date"`
+	ValueDate        string  `json:"value_date"`
+	Description      string  `json:"description"`
+	WithdrawalAmount float64 `json:"withdrawal_amount"`
+	DepositAmount    float64 `json:"deposit_amount"`
+	Balance          float64 `json:"balance"`
+	CategoryID       string  `json:"category_id"`
+	CategoryName     string  `json:"category_name"`
+	CategoryType     string  `json:"category_type"`
+	TxnType          string  `json:"type"`   // "DEBIT" | "CREDIT" | "NONE"
+	Amount           float64 `json:"amount"` // abs(withdrawal or deposit) for sorting
+	Index            int     `json:"index"`
 }
 
 // CategoryKPIRow is one category group summary.
@@ -122,37 +124,37 @@ type CategoryKPIRow struct {
 // BuildBankStatementPayload and pass the result of ToMap() to TriggerNotification.
 type BankStatementNotifPayload struct {
 	// ── Scalar metadata ────────────────────────────────────────────────────────
-	BankStatementID      string    `json:"BankStatementID"`
-	AccountNumber        string    `json:"AccountNumber"`
-	AccountName          string    `json:"AccountName"`
-	BankName             string    `json:"BankName"`
-	IFSC                 string    `json:"IFSC"`
-	CurrencyCode         string    `json:"CurrencyCode"`
-	PeriodStart          string    `json:"PeriodStart"`
-	PeriodEnd            string    `json:"PeriodEnd"`
-	OpeningBalance       float64   `json:"OpeningBalance"`
-	ClosingBalance       float64   `json:"ClosingBalance"`
-	TotalTransactions    int       `json:"TotalTransactions"`
-	TotalDebit           float64   `json:"TotalDebit"`
-	TotalCredit          float64   `json:"TotalCredit"`
-	NetFlow              float64   `json:"NetFlow"`           // TotalCredit - TotalDebit
-	CategorizedCount     int       `json:"CategorizedCount"`
-	UncategorizedCount   int       `json:"UncategorizedCount"`
-	CategorizedPercent   float64   `json:"CategorizedPercent"`
-	UncategorizedPercent float64   `json:"UncategorizedPercent"`
-	UploadedBy           string    `json:"UploadedBy"`
-	ApprovedBy           string    `json:"ApprovedBy"`
-	FileName             string    `json:"FileName"`
-	UploadedAt           string    `json:"UploadedAt"`
-	EntityID             string    `json:"EntityID"`
-	Status               string    `json:"Status"` // "PENDING_APPROVAL" | "APPROVED" etc.
+	BankStatementID      string  `json:"BankStatementID"`
+	AccountNumber        string  `json:"AccountNumber"`
+	AccountName          string  `json:"AccountName"`
+	BankName             string  `json:"BankName"`
+	IFSC                 string  `json:"IFSC"`
+	CurrencyCode         string  `json:"CurrencyCode"`
+	PeriodStart          string  `json:"PeriodStart"`
+	PeriodEnd            string  `json:"PeriodEnd"`
+	OpeningBalance       float64 `json:"OpeningBalance"`
+	ClosingBalance       float64 `json:"ClosingBalance"`
+	TotalTransactions    int     `json:"TotalTransactions"`
+	TotalDebit           float64 `json:"TotalDebit"`
+	TotalCredit          float64 `json:"TotalCredit"`
+	NetFlow              float64 `json:"NetFlow"` // TotalCredit - TotalDebit
+	CategorizedCount     int     `json:"CategorizedCount"`
+	UncategorizedCount   int     `json:"UncategorizedCount"`
+	CategorizedPercent   float64 `json:"CategorizedPercent"`
+	UncategorizedPercent float64 `json:"UncategorizedPercent"`
+	UploadedBy           string  `json:"UploadedBy"`
+	ApprovedBy           string  `json:"ApprovedBy"`
+	FileName             string  `json:"FileName"`
+	UploadedAt           string  `json:"UploadedAt"`
+	EntityID             string  `json:"EntityID"`
+	Status               string  `json:"Status"` // "PENDING_APPROVAL" | "APPROVED" etc.
 
 	// ── List fields ────────────────────────────────────────────────────────────
-	Transactions               []TxnRow         `json:"Transactions"`
-	UncategorizedTransactions  []TxnRow         `json:"UncategorizedTransactions"`
-	CreditTransactions         []TxnRow         `json:"CreditTransactions"`
-	DebitTransactions          []TxnRow         `json:"DebitTransactions"`
-	CategoryKPIs               []CategoryKPIRow `json:"CategoryKPIs"`
+	Transactions              []TxnRow         `json:"Transactions"`
+	UncategorizedTransactions []TxnRow         `json:"UncategorizedTransactions"`
+	CreditTransactions        []TxnRow         `json:"CreditTransactions"`
+	DebitTransactions         []TxnRow         `json:"DebitTransactions"`
+	CategoryKPIs              []CategoryKPIRow `json:"CategoryKPIs"`
 }
 
 // ToMap converts BankStatementNotifPayload to map[string]interface{} ready for
@@ -237,15 +239,17 @@ func kpiRowsToMaps(rows []CategoryKPIRow) []map[string]interface{} {
 // This follows the same pattern as BuildLimitNotifPayload, BuildUtilizationNotifPayload, etc.
 //
 // Parameters:
-//   ctx            — request context
-//   pool           — pgx connection pool
-//   bankStatementIDs — slice of bank_statement_id UUIDs to fetch
-//   action         — "APPROVE", "REJECT", "DELETE", etc. (workflow action type)
-//   requestedBy    — user_id / email of the user performing the action
+//
+//	ctx            — request context
+//	pool           — pgx connection pool
+//	bankStatementIDs — slice of bank_statement_id UUIDs to fetch
+//	action         — "APPROVE", "REJECT", "DELETE", etc. (workflow action type)
+//	requestedBy    — user_id / email of the user performing the action
 //
 // Returns:
-//   map[string]interface{} containing all fields needed for template evaluation.
-//   Use this directly with TriggerNotification(ctx, pool, route, correlationID, payload)
+//
+//	map[string]interface{} containing all fields needed for template evaluation.
+//	Use this directly with TriggerNotification(ctx, pool, route, correlationID, payload)
 func BuildBankStatementNotifPayload(
 	ctx context.Context,
 	pool interface{}, // *pgxpool.Pool or *sql.DB
@@ -304,7 +308,7 @@ func BuildBankStatementNotifPayload(
 	`
 
 	statements := []map[string]interface{}{}
-	
+
 	// Try pgxpool first
 	if pgxPool, ok := pool.(*pgxpool.Pool); ok {
 		rows, err := pgxPool.Query(ctx, query, pq.Array(bankStatementIDs))
@@ -316,18 +320,18 @@ func BuildBankStatementNotifPayload(
 				var open, close float64
 				var actionType, processingStatus, reqBy, checkBy, checkComment sql.NullString
 				var bankName, accountNickname sql.NullString
-				
+
 				if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
 					&actionType, &processingStatus, &reqBy, &checkBy, &checkComment, &bankName, &accountNickname, &entityID); err != nil {
 					continue
 				}
-				
+
 				statements = append(statements, map[string]interface{}{
 					"bank_statement_id":      id,
 					"entity_name":            entityName,
 					"account_number":         acc,
-					"statement_period_start": start.Format("2006-01-02"),
-					"statement_period_end":   end.Format("2006-01-02"),
+					"statement_period_start": start.Format(constants.DateFormat),
+					"statement_period_end":   end.Format(constants.DateFormat),
 					"opening_balance":        open,
 					"closing_balance":        close,
 					"uploaded_at":            uploaded.Format(time.RFC3339),
@@ -352,18 +356,18 @@ func BuildBankStatementNotifPayload(
 				var open, close float64
 				var actionType, processingStatus, reqBy, checkBy, checkComment sql.NullString
 				var bankName, accountNickname sql.NullString
-				
+
 				if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
 					&actionType, &processingStatus, &reqBy, &checkBy, &checkComment, &bankName, &accountNickname, &entityID); err != nil {
 					continue
 				}
-				
+
 				statements = append(statements, map[string]interface{}{
 					"bank_statement_id":      id,
 					"entity_name":            entityName,
 					"account_number":         acc,
-					"statement_period_start": start.Format("2006-01-02"),
-					"statement_period_end":   end.Format("2006-01-02"),
+					"statement_period_start": start.Format(constants.DateFormat),
+					"statement_period_end":   end.Format(constants.DateFormat),
 					"opening_balance":        open,
 					"closing_balance":        close,
 					"uploaded_at":            uploaded.Format(time.RFC3339),
@@ -381,7 +385,7 @@ func BuildBankStatementNotifPayload(
 	}
 
 	payload["BankStatements"] = statements
-	
+
 	// Compute aggregate KPIs
 	totalOpening := 0.0
 	totalClosing := 0.0
@@ -393,7 +397,7 @@ func BuildBankStatementNotifPayload(
 			totalClosing += close
 		}
 	}
-	
+
 	payload["TotalOpeningBalance"] = totalOpening
 	payload["TotalClosingBalance"] = totalClosing
 	payload["NetChange"] = totalClosing - totalOpening
@@ -401,82 +405,88 @@ func BuildBankStatementNotifPayload(
 	return payload
 }
 
+// BuildBankStatementParams groups parameters for constructing BankStatementNotifPayload.
+type BuildBankStatementParams struct {
+	BSID string
+	AccountNumber string
+	Metadata *Metadata
+	OpeningBalance float64
+	ClosingBalance float64
+	EntityID string
+	UploadedBy string
+	FileName string
+	TXNS []RecalculateTransaction
+	KPICats []map[string]interface{}
+	CategoryRules []categoryRuleComponent
+	Status string
+}
+
 // BuildBankStatementPayload constructs a BankStatementNotifPayload from the
 // data available at CommitHandler / V2 upload handler completion time.
 //
 // Parameters:
-//   bsID           — bank_statement_id (UUID string)
-//   accountNumber  — account number string
-//   metadata       — pointer to Metadata (from the clean struct; may be nil)
-//   openingBalance — opening balance float
-//   closingBalance — closing balance float
-//   entityID       — entity UUID string
-//   uploadedBy     — user_id / email of the uploader
-//   fileName       — original uploaded filename
-//   txns           — slice of RecalculateTransaction (from the commit payload)
-//   kpiCats        — the category_kpis slice built during categorization
-//   categoryRules  — the loaded category rule components (for name lookup)
-//   status         — workflow status string (e.g. "PENDING_APPROVAL")
+//
+//	bsID           — bank_statement_id (UUID string)
+//	accountNumber  — account number string
+//	metadata       — pointer to Metadata (from the clean struct; may be nil)
+//	openingBalance — opening balance float
+//	closingBalance — closing balance float
+//	entityID       — entity UUID string
+//	uploadedBy     — user_id / email of the uploader
+//	fileName       — original uploaded filename
+//	txns           — slice of RecalculateTransaction (from the commit payload)
+//	kpiCats        — the category_kpis slice built during categorization
+//	categoryRules  — the loaded category rule components (for name lookup)
+//	status         — workflow status string (e.g. "PENDING_APPROVAL")
 func BuildBankStatementPayload(
-	bsID string,
-	accountNumber string,
-	metadata *Metadata,
-	openingBalance float64,
-	closingBalance float64,
-	entityID string,
-	uploadedBy string,
-	fileName string,
-	txns []RecalculateTransaction,
-	kpiCats []map[string]interface{},
-	categoryRules []categoryRuleComponent,
-	status string,
+	params BuildBankStatementParams,
 ) *BankStatementNotifPayload {
 
 	p := &BankStatementNotifPayload{
-		BankStatementID: bsID,
-		AccountNumber:   accountNumber,
-		OpeningBalance:  openingBalance,
-		ClosingBalance:  closingBalance,
-		EntityID:        entityID,
-		UploadedBy:      uploadedBy,
-		FileName:        fileName,
-		Status:          status,
+		BankStatementID: params.BSID,
+		AccountNumber:   params.AccountNumber,
+		OpeningBalance:  params.OpeningBalance,
+		ClosingBalance:  params.ClosingBalance,
+		EntityID:        params.EntityID,
+		UploadedBy:      params.UploadedBy,
+		FileName:        params.FileName,
+		Status:          params.Status,
 		UploadedAt:      time.Now().Format(time.RFC3339),
 		CurrencyCode:    "INR",
 	}
 
 	// Extract metadata fields
-	if metadata != nil {
-		if metadata.AccountName != nil {
-			p.AccountName = *metadata.AccountName
+	if params.Metadata != nil {
+		if params.Metadata.AccountName != nil {
+			p.AccountName = *params.Metadata.AccountName
 		}
-		if metadata.BankName != nil {
-			p.BankName = *metadata.BankName
+		if params.Metadata.BankName != nil {
+			p.BankName = *params.Metadata.BankName
 		}
-		if metadata.IFSC != nil {
-			p.IFSC = *metadata.IFSC
+		if params.Metadata.IFSC != nil {
+			p.IFSC = *params.Metadata.IFSC
 		}
-		if metadata.PeriodStart != nil {
-			p.PeriodStart = *metadata.PeriodStart
+		if params.Metadata.PeriodStart != nil {
+			p.PeriodStart = *params.Metadata.PeriodStart
 		}
-		if metadata.PeriodEnd != nil {
-			p.PeriodEnd = *metadata.PeriodEnd
+		if params.Metadata.PeriodEnd != nil {
+			p.PeriodEnd = *params.Metadata.PeriodEnd
 		}
-		if metadata.ClosingBalance != nil && closingBalance == 0 {
-			p.ClosingBalance = *metadata.ClosingBalance
+		if params.Metadata.ClosingBalance != nil && params.ClosingBalance == 0 {
+			p.ClosingBalance = *params.Metadata.ClosingBalance
 		}
 	}
 
 	// Build a category name lookup from rules
 	catNameLookup := map[string]string{}
 	catTypeLookup := map[string]string{}
-	for _, r := range categoryRules {
+	for _, r := range params.CategoryRules {
 		catNameLookup[r.CategoryID] = r.CategoryName
 		catTypeLookup[r.CategoryID] = r.CategoryType
 	}
 
 	// Build TxnRow list
-	for i, t := range txns {
+	for i, t := range params.TXNS {
 		row := TxnRow{Index: i}
 		if t.TranDate != nil {
 			row.TranDate = *t.TranDate
@@ -518,7 +528,7 @@ func BuildBankStatementPayload(
 	// Overlay category information from kpiCats
 	// Build a map: category_id → (name, type) for the KPI rows
 	kpiMap := map[string]CategoryKPIRow{}
-	for _, kpi := range kpiCats {
+	for _, kpi := range params.KPICats {
 		catID := fmt.Sprintf("%v", kpi["category_id"])
 		catName := fmt.Sprintf("%v", kpi["category_name"])
 		catType := ""
@@ -561,7 +571,7 @@ func BuildBankStatementPayload(
 	// We rely on the kpiCats.transactions field if present to know which txns are categorized.
 	// Build a fast lookup: index → categoryID from kpiCats rows.
 	txnCatLookup := map[int]string{}
-	for _, kpi := range kpiCats {
+	for _, kpi := range params.KPICats {
 		catID := fmt.Sprintf("%v", kpi["category_id"])
 		if txnRows, ok := kpi["transactions"]; ok {
 			if trs, ok2 := txnRows.([]map[string]interface{}); ok2 {
@@ -612,17 +622,19 @@ func BuildBankStatementPayload(
 // CommitHandler / RecomputeHandler) into a fully typed BankStatementNotifPayload.
 //
 // result keys consumed (all optional — missing keys become zero values):
-//   bank_statement_id, account_number, bank_name, opening_balance, closing_balance,
-//   transactions_uploaded_count, grouped_transaction_count, ungrouped_transaction_count,
-//   grouped_transaction_percent, ungrouped_transaction_percent,
-//   category_kpis  []map{category_id,category_name,category_type,count,debit_sum,credit_sum,transactions[]},
-//   uncategorized  []map{description,withdrawal_amount,deposit_amount,balance,tran_date,value_date,...},
-//   statement_date_coverage map{start,end}
+//
+//	bank_statement_id, account_number, bank_name, opening_balance, closing_balance,
+//	transactions_uploaded_count, grouped_transaction_count, ungrouped_transaction_count,
+//	grouped_transaction_percent, ungrouped_transaction_percent,
+//	category_kpis  []map{category_id,category_name,category_type,count,debit_sum,credit_sum,transactions[]},
+//	uncategorized  []map{description,withdrawal_amount,deposit_amount,balance,tran_date,value_date,...},
+//	statement_date_coverage map{start,end}
 //
 // Extra scalar overrides (not in result map):
-//   uploadedBy  — user_id / email of the uploader  (form field user_id)
-//   fileName    — original file name
-//   status      — workflow status ("PENDING_APPROVAL" etc.)
+//
+//	uploadedBy  — user_id / email of the uploader  (form field user_id)
+//	fileName    — original file name
+//	status      — workflow status ("PENDING_APPROVAL" etc.)
 func BuildBankStatementPayloadFromV2Result(
 	result map[string]interface{},
 	uploadedBy string,
@@ -684,14 +696,14 @@ func BuildBankStatementPayloadFromV2Result(
 					if txnMaps, ok4 := toMapSlice(txnRaw); ok4 {
 						for idx, t := range txnMaps {
 							row := TxnRow{
-								Index:             toInt(t["index"]),
-								Description:       fmt.Sprintf("%v", t["description"]),
-								WithdrawalAmount:  toFloat64(t["withdrawal_amount"]),
-								DepositAmount:     toFloat64(t["deposit_amount"]),
-								Balance:           toFloat64(t["balance"]),
-								CategoryID:        kr.CategoryID,
-								CategoryName:      kr.CategoryName,
-								CategoryType:      kr.CategoryType,
+								Index:            toInt(t["index"]),
+								Description:      fmt.Sprintf("%v", t["description"]),
+								WithdrawalAmount: toFloat64(t["withdrawal_amount"]),
+								DepositAmount:    toFloat64(t["deposit_amount"]),
+								Balance:          toFloat64(t["balance"]),
+								CategoryID:       kr.CategoryID,
+								CategoryName:     kr.CategoryName,
+								CategoryType:     kr.CategoryType,
 							}
 							row.TranDate = timeToDateStr(t["tran_date"], t["transaction_date"])
 							row.ValueDate = timeToDateStr(t["value_date"])
@@ -854,7 +866,7 @@ func timeToDateStr(candidates ...interface{}) string {
 		switch t := v.(type) {
 		case time.Time:
 			if !t.IsZero() {
-				return t.Format("2006-01-02")
+				return t.Format(constants.DateFormat)
 			}
 		case string:
 			if t != "" && t != "<nil>" {

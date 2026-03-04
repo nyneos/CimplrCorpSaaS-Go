@@ -547,7 +547,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQ, args...)
 		if err != nil {
-			errMsg, statusCode := getUserFriendlyCounterpartyError(err, "Query failed")
+			errMsg, statusCode := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})

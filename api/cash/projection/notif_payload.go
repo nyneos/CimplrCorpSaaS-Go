@@ -23,6 +23,7 @@ package projection
 //   3. Maintainability — changes to GET endpoint auto-flow to notifications
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"time"
@@ -44,19 +45,19 @@ type KPIRow struct {
 // ProjectionNotifPayload holds ALL projection proposal data for rich template rendering
 type ProjectionNotifPayload struct {
 	// Scalars
-	Action             string  // CREATE | UPDATE | DELETE | APPROVE | REJECT | UPLOAD
-	RequestedBy        string  // user who triggered action
-	Count              int     // number of proposals affected
+	Action              string  // CREATE | UPDATE | DELETE | APPROVE | REJECT | UPLOAD
+	RequestedBy         string  // user who triggered action
+	Count               int     // number of proposals affected
 	TotalExpectedAmount float64 // sum of expected_amount across all items
-	TotalItemCount     int     // total number of items across all proposals
-	ActionAt           string  // ISO timestamp
-	Reason             string  // for UPDATE/DELETE actions
-	CheckerComment     string  // for APPROVE/REJECT actions
-	FileName           string  // for UPLOAD action only
+	TotalItemCount      int     // total number of items across all proposals
+	ActionAt            string  // ISO timestamp
+	Reason              string  // for UPDATE/DELETE actions
+	CheckerComment      string  // for APPROVE/REJECT actions
+	FileName            string  // for UPLOAD action only
 
 	// Lists (for TABLE_HTML, KPI_CARDS_HTML, FILTER, etc.)
 	ProposalIDs        []string                 // simple array of proposal_id strings (for COUNT_OF)
-	Proposals          []ProjectionProposalRow // full proposal headers
+	Proposals          []ProjectionProposalRow  // full proposal headers
 	Items              []map[string]interface{} // all items across proposals
 	ByEntityKPIs       []KPIRow                 // grouped by entity_name
 	ByCategoryKPIs     []KPIRow                 // grouped by category_id
@@ -66,34 +67,34 @@ type ProjectionNotifPayload struct {
 // ToMap converts payload to map[string]interface{} for template engine
 func (p ProjectionNotifPayload) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"Action":               p.Action,
-		"RequestedBy":          p.RequestedBy,
-		"Count":                p.Count,
-		"TotalExpectedAmount":  p.TotalExpectedAmount,
-		"TotalItemCount":       p.TotalItemCount,
-		"ActionAt":             p.ActionAt,
-		"Reason":               p.Reason,
-		"CheckerComment":       p.CheckerComment,
-		"FileName":             p.FileName,
-		"ProposalIDs":          p.ProposalIDs,
-		"Proposals":            p.Proposals,
-		"Items":                p.Items,
-		"ByEntityKPIs":         p.ByEntityKPIs,
-		"ByCategoryKPIs":       p.ByCategoryKPIs,
-		"ByCashflowTypeKPIs":   p.ByCashflowTypeKPIs,
+		"Action":              p.Action,
+		"RequestedBy":         p.RequestedBy,
+		"Count":               p.Count,
+		"TotalExpectedAmount": p.TotalExpectedAmount,
+		"TotalItemCount":      p.TotalItemCount,
+		"ActionAt":            p.ActionAt,
+		"Reason":              p.Reason,
+		"CheckerComment":      p.CheckerComment,
+		"FileName":            p.FileName,
+		"ProposalIDs":         p.ProposalIDs,
+		"Proposals":           p.Proposals,
+		"Items":               p.Items,
+		"ByEntityKPIs":        p.ByEntityKPIs,
+		"ByCategoryKPIs":      p.ByCategoryKPIs,
+		"ByCashflowTypeKPIs":  p.ByCashflowTypeKPIs,
 	}
 }
 
 // BuildProjectionNotifPayload fetches FULL projection proposal records using GetProposalDetailV2 logic
 func BuildProjectionNotifPayload(ctx context.Context, pool *pgxpool.Pool, proposalIDs []string, action, requestedBy string) ProjectionNotifPayload {
 	p := ProjectionNotifPayload{
-		Action:       action,
-		RequestedBy:  requestedBy,
-		Count:        len(proposalIDs),
-		ActionAt:     time.Now().Format(time.RFC3339),
-		ProposalIDs:  proposalIDs,
-		Proposals:    make([]ProjectionProposalRow, 0),
-		Items:        make([]map[string]interface{}, 0),
+		Action:      action,
+		RequestedBy: requestedBy,
+		Count:       len(proposalIDs),
+		ActionAt:    time.Now().Format(time.RFC3339),
+		ProposalIDs: proposalIDs,
+		Proposals:   make([]ProjectionProposalRow, 0),
+		Items:       make([]map[string]interface{}, 0),
 	}
 
 	if len(proposalIDs) == 0 {
@@ -239,7 +240,7 @@ func normalizeVal(v interface{}) interface{} {
 		return nil
 	case pgtype.Date:
 		if t.Valid {
-			return t.Time.Format("2006-01-02")
+			return t.Time.Format(constants.DateFormat)
 		}
 		return nil
 	case pgtype.Timestamptz:

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -70,7 +71,7 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PriorityLevel   *int   `json:"priority_level"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		req.Channel = strings.ToUpper(strings.TrimSpace(req.Channel))
@@ -306,7 +307,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RetryBackoffSec *int   `json:"retry_backoff_secs"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithPayload(w, false, "invalid request body", nil)
+			api.RespondWithPayload(w, false, constants.ErrInvalidRequestBody, nil)
 			return
 		}
 		req.Channel = strings.ToUpper(strings.TrimSpace(req.Channel))

@@ -1054,7 +1054,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok {
-			return "<table><tr><td>No data</td></tr></table>", nil
+			return constants.NoDataTable, nil
 		}
 		// Detect aliased format: second arg starts with '['
 		var cols, labels []string
@@ -1102,7 +1102,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		for idx, row := range rows {
 			bg := "#fff"
 			if idx%2 == 1 {
-				bg = "#f9f9f9"
+				bg = constants.BgcolorF9
 			}
 			sb.WriteString(fmt.Sprintf(`<tr style="background:%s">`, bg))
 			for _, c := range cols {
@@ -1132,7 +1132,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		for idx, row := range rows {
 			bg := "#fff"
 			if idx%2 == 1 {
-				bg = "#f9f9f9"
+				bg = constants.BgcolorF9
 			}
 			sb.WriteString(fmt.Sprintf(`<tr style="background:%s">`, bg))
 			for _, c := range cols {
@@ -1152,11 +1152,11 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		v, ok := lookupPayload(args[0], payload)
 		if !ok {
-			return "<table><tr><td>No data</td></tr></table>", nil
+			return constants.NoDataTable, nil
 		}
 		grouped, ok := toRowList(v)
 		if !ok || len(grouped) == 0 {
-			return "<table><tr><td>No data</td></tr></table>", nil
+			return constants.NoDataTable, nil
 		}
 		var sb strings.Builder
 		sb.WriteString(`<table style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px">`)
@@ -1168,7 +1168,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		for idx, g := range grouped {
 			bg := "#fff"
 			if idx%2 == 1 {
-				bg = "#f9f9f9"
+				bg = constants.BgcolorF9
 			}
 			grpName := rowString(g, "group")
 			count := rowFloat(g, "count")
@@ -1390,14 +1390,15 @@ func isQuoted(s string) bool {
 }
 
 func unquote(s string) string {
+	// Keep interior spacing. Only strip surrounding whitespace first,
+	// then iteratively remove matching surrounding quotes without trimming
+	// the interior so literals like ' hello ' preserve their leading/trailing spaces.
 	s = strings.TrimSpace(s)
-
 	for len(s) >= 2 &&
 		((s[0] == '\'' && s[len(s)-1] == '\'') ||
 			(s[0] == '"' && s[len(s)-1] == '"')) {
-		s = strings.TrimSpace(s[1 : len(s)-1])
+		s = s[1 : len(s)-1]
 	}
-
 	return s
 }
 

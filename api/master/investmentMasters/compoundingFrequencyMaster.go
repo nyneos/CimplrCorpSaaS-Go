@@ -99,7 +99,7 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -139,14 +139,14 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                   string `json:"user_id"`
-			FrequencyCode            string `json:"frequency_code"`
-			FrequencyName            string `json:"frequency_name"`
-			FrequencyType            string `json:"frequency_type"`
+			UserID                    string `json:"user_id"`
+			FrequencyCode             string `json:"frequency_code"`
+			FrequencyName             string `json:"frequency_name"`
+			FrequencyType             string `json:"frequency_type"`
 			CompoundingPeriodsPerYear int    `json:"compounding_periods_per_year"`
-			DaysPerPeriod            *int   `json:"days_per_period"`
-			Description              string `json:"description"`
-			IsActive                 *bool  `json:"is_active"`
+			DaysPerPeriod             *int   `json:"days_per_period"`
+			Description               string `json:"description"`
+			IsActive                  *bool  `json:"is_active"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -222,14 +222,14 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
-			Rows []struct{
-				FrequencyCode string `json:"frequency_code"`
-				FrequencyName string `json:"frequency_name"`
-				FrequencyType string `json:"frequency_type"`
-				CompoundingPeriodsPerYear int `json:"compounding_periods_per_year"`
-				DaysPerPeriod *int `json:"days_per_period"`
-				Description string `json:"description"`
-				IsActive *bool `json:"is_active"`
+			Rows   []struct {
+				FrequencyCode             string `json:"frequency_code"`
+				FrequencyName             string `json:"frequency_name"`
+				FrequencyType             string `json:"frequency_type"`
+				CompoundingPeriodsPerYear int    `json:"compounding_periods_per_year"`
+				DaysPerPeriod             *int   `json:"days_per_period"`
+				Description               string `json:"description"`
+				IsActive                  *bool  `json:"is_active"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -262,32 +262,35 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				errorsList = append(errorsList, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: "Missing required fields"})
 				continue
 			}
-			if row.IsActive == nil { dv := true; row.IsActive = &dv }
+			if row.IsActive == nil {
+				dv := true
+				row.IsActive = &dv
+			}
 			validRows = append(validRows, map[string]interface{}{
-				"frequency_code": row.FrequencyCode,
-				"frequency_name": row.FrequencyName,
-				"frequency_type": strings.ToUpper(row.FrequencyType),
+				"frequency_code":               row.FrequencyCode,
+				"frequency_name":               row.FrequencyName,
+				"frequency_type":               strings.ToUpper(row.FrequencyType),
 				"compounding_periods_per_year": row.CompoundingPeriodsPerYear,
-				"days_per_period": row.DaysPerPeriod,
-				"description": row.Description,
-				"is_active": row.IsActive,
+				"days_per_period":              row.DaysPerPeriod,
+				"description":                  row.Description,
+				"is_active":                    row.IsActive,
 			})
 		}
 
 		if len(validRows) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk create transaction begin failed: %v", err)
 			return
 		}
 		defer tx.Rollback(ctx)
 
-		// EFFICIENT: Batch check for existing codes/names 
+		// EFFICIENT: Batch check for existing codes/names
 		codes := make([]string, len(validRows))
 		names := make([]string, len(validRows))
 		for i, input := range validRows {
@@ -303,7 +306,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND is_active = true AND COALESCE(is_deleted, false) = false
 		`
 		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
-		if err != nil { 
+		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Duplicate check failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -330,17 +333,17 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			name := input["frequency_name"].(string)
 			if existingCodes[code] {
 				errorsList = append(errorsList, map[string]interface{}{
-					"row_index": i,
-					"frequency_code": code,
+					"row_index":            i,
+					"frequency_code":       code,
 					constants.ValueSuccess: false,
-					constants.ValueError: "Frequency code already exists and is active.",
+					constants.ValueError:   "Frequency code already exists and is active.",
 				})
 			} else if existingNames[name] {
 				errorsList = append(errorsList, map[string]interface{}{
-					"row_index": i,
-					"frequency_code": code,
+					"row_index":            i,
+					"frequency_code":       code,
 					constants.ValueSuccess: false,
-					constants.ValueError: "Frequency name already exists and is active.",
+					constants.ValueError:   "Frequency name already exists and is active.",
 				})
 			} else {
 				finalValidInputs = append(finalValidInputs, input)
@@ -396,7 +399,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_compounding_frequency (frequency_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-				msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch audit failed")
+				msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch audit failed: %v", err)
 				return
@@ -404,7 +407,7 @@ func CreateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Commit failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk create commit failed: %v", err)
 			return
@@ -498,28 +501,30 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ftype := getColumnValue(row, colMap, "frequency_type")
 			periodsStr := getColumnValue(row, colMap, "compounding_periods_per_year")
 			if code == "" || name == "" || ftype == "" || periodsStr == "" {
-				errorsList = append(errorsList, map[string]interface{}{"row": ri+2, constants.ValueSuccess: false, constants.ValueError: "Missing required columns"})
+				errorsList = append(errorsList, map[string]interface{}{"row": ri + 2, constants.ValueSuccess: false, constants.ValueError: "Missing required columns"})
 				continue
 			}
 			periods, _ := parseIntPtr(periodsStr)
 			days := (*int)(nil)
 			if v := getColumnValue(row, colMap, "days_per_period"); v != "" {
-				if p, err := parseIntPtr(v); err == nil { days = p }
+				if p, err := parseIntPtr(v); err == nil {
+					days = p
+				}
 			}
 			isActive := func() *bool { b := true; return &b }()
 			inputs = append(inputs, map[string]interface{}{
-				"frequency_code": code,
-				"frequency_name": name,
-				"frequency_type": strings.ToUpper(ftype),
+				"frequency_code":               code,
+				"frequency_name":               name,
+				"frequency_type":               strings.ToUpper(ftype),
 				"compounding_periods_per_year": *periods,
-				"days_per_period": days,
-				"description": getColumnValue(row, colMap, "description"),
-				"is_active": isActive,
+				"days_per_period":              days,
+				"description":                  getColumnValue(row, colMap, "description"),
+				"is_active":                    isActive,
 			})
 		}
 
 		if len(inputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errorsList)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
 			return
 		}
 
@@ -527,12 +532,12 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			return
 		}
 		defer tx.Rollback(ctx)
 
-		// EFFICIENT: Batch check for existing codes/names 
+		// EFFICIENT: Batch check for existing codes/names
 		codes := make([]string, len(inputs))
 		names := make([]string, len(inputs))
 		for i, input := range inputs {
@@ -548,7 +553,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND is_active = true AND COALESCE(is_deleted, false) = false
 		`
 		duplicateRows, err := tx.Query(ctx, duplicateQuery, codes, names)
-		if err != nil { 
+		if err != nil {
 			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Duplicate check failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -575,15 +580,15 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			name := input["frequency_name"].(string)
 			if existingCodes[code] {
 				errorsList = append(errorsList, map[string]interface{}{
-					"frequency_code": code,
+					"frequency_code":       code,
 					constants.ValueSuccess: false,
-					constants.ValueError: "Frequency code already exists and is active.",
+					constants.ValueError:   "Frequency code already exists and is active.",
 				})
 			} else if existingNames[name] {
 				errorsList = append(errorsList, map[string]interface{}{
-					"frequency_code": code,
+					"frequency_code":       code,
 					constants.ValueSuccess: false,
-					constants.ValueError: "Frequency name already exists and is active.",
+					constants.ValueError:   "Frequency name already exists and is active.",
 				})
 			} else {
 				finalValidInputs = append(finalValidInputs, input)
@@ -639,7 +644,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			auditQ := fmt.Sprintf("INSERT INTO investment.fd_audit_compounding_frequency (frequency_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
-				msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch audit failed")
+				msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch audit failed: %v", err)
 				return
@@ -647,7 +652,7 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Commit failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Upload commit failed: %v", err)
 			return
@@ -679,21 +684,21 @@ func GetCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var days *int
 		var isActive, isDeleted bool
 		if err := pgxPool.QueryRow(ctx, q, id).Scan(&fid, &code, &name, &ftype, &periods, &days, &desc, &isActive, &isDeleted); err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Query failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"frequency_id": fid,
-			"frequency_code": code,
-			"frequency_name": name,
-			"frequency_type": ftype,
+			"frequency_id":                 fid,
+			"frequency_code":               code,
+			"frequency_name":               name,
+			"frequency_type":               ftype,
 			"compounding_periods_per_year": periods,
-			"days_per_period": days,
-			"description": desc,
-			"is_active": isActive,
-			"is_deleted": isDeleted,
+			"days_per_period":              days,
+			"description":                  desc,
+			"is_active":                    isActive,
+			"is_deleted":                   isDeleted,
 		})
 	}
 }
@@ -782,7 +787,7 @@ func GetCompoundingFrequenciesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -908,7 +913,7 @@ func GetCompoundingFrequencyAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -996,7 +1001,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.FrequencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No frequency IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
 			return
 		}
 
@@ -1015,7 +1020,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk delete transaction begin failed: %v", err)
 			return
 		}
@@ -1062,7 +1067,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`, strings.Join(auditValues, ","))
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
-				msg, status := getUserFriendlyCompoundingFrequencyError(err, "Batch audit failed")
+				msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrBatchAuditFailed)
 				api.RespondWithError(w, status, msg)
 				api.LogError("Batch delete audit insert failed: %v", err)
 				return
@@ -1070,7 +1075,7 @@ func DeleteCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Commit failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk delete commit failed: %v", err)
 			return
@@ -1114,7 +1119,7 @@ func BulkApproveCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.FrequencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No frequency IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
 			return
 		}
 
@@ -1200,7 +1205,7 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.FrequencyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No frequency IDs provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoFrequencyIDsProvided)
 			return
 		}
 
@@ -1257,10 +1262,10 @@ func BulkRejectCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID     string                 `json:"user_id"`
-			FrequencyID string                `json:"frequency_id"`
-			Fields     map[string]interface{} `json:"fields"`
-			Reason     string                 `json:"reason"`
+			UserID      string                 `json:"user_id"`
+			FrequencyID string                 `json:"frequency_id"`
+			Fields      map[string]interface{} `json:"fields"`
+			Reason      string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1312,13 +1317,13 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		fieldPairs := map[string]int{
-			"frequency_code": 0,
-			"frequency_name": 1,
-			"frequency_type": 2,
+			"frequency_code":               0,
+			"frequency_name":               1,
+			"frequency_type":               2,
 			"compounding_periods_per_year": 3,
-			"days_per_period": 4,
-			"description": 5,
-			"is_active": 6,
+			"days_per_period":              4,
+			"description":                  5,
+			"is_active":                    6,
 		}
 
 		var sets []string
@@ -1379,9 +1384,9 @@ func UpdateCompoundingFrequency(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"frequency_id": req.FrequencyID,
-			"requested": userEmail,
-			"reason": req.Reason,
+			"frequency_id":         req.FrequencyID,
+			"requested":            userEmail,
+			"reason":               req.Reason,
 		}
 		api.RespondWithPayload(w, true, "", response)
 		api.LogInfo("Compounding frequency updated successfully: ID=%s, Reason=%s", req.FrequencyID, req.Reason)
@@ -1393,7 +1398,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID string `json:"user_id"`
-			Rows []struct {
+			Rows   []struct {
 				FrequencyID string                 `json:"frequency_id"`
 				Fields      map[string]interface{} `json:"fields"`
 				Reason      string                 `json:"reason"`
@@ -1422,35 +1427,39 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		var validUpdates []struct{
+		var validUpdates []struct {
 			FrequencyID string
-			Fields map[string]interface{}
-			Reason string
+			Fields      map[string]interface{}
+			Reason      string
 		}
 		var errors []map[string]interface{}
 		allIDs := make([]string, 0, len(req.Rows))
 
 		for i, row := range req.Rows {
 			if row.FrequencyID == "" {
-				errors = append(errors, map[string]interface{}{ "row_index": i, constants.ValueSuccess: false, constants.ValueError: "Missing frequency_id" })
+				errors = append(errors, map[string]interface{}{"row_index": i, constants.ValueSuccess: false, constants.ValueError: "Missing frequency_id"})
 				continue
 			}
 			if len(row.Fields) == 0 {
-				errors = append(errors, map[string]interface{}{ "row_index": i, "frequency_id": row.FrequencyID, constants.ValueSuccess: false, constants.ValueError: "No fields to update" })
+				errors = append(errors, map[string]interface{}{"row_index": i, "frequency_id": row.FrequencyID, constants.ValueSuccess: false, constants.ValueError: "No fields to update"})
 				continue
 			}
-			validUpdates = append(validUpdates, struct{FrequencyID string; Fields map[string]interface{}; Reason string}{row.FrequencyID, row.Fields, row.Reason})
+			validUpdates = append(validUpdates, struct {
+				FrequencyID string
+				Fields      map[string]interface{}
+				Reason      string
+			}{row.FrequencyID, row.Fields, row.Reason})
 			allIDs = append(allIDs, row.FrequencyID)
 		}
 
 		if len(validUpdates) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation", errors)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errors)
 			return
 		}
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
 			api.LogError("Bulk update transaction begin failed: %v", err)
 			return
 		}
@@ -1483,21 +1492,27 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		fieldPairs := map[string]int{
-			"frequency_code": 0,
-			"frequency_name": 1,
-			"frequency_type": 2,
+			"frequency_code":               0,
+			"frequency_name":               1,
+			"frequency_type":               2,
 			"compounding_periods_per_year": 3,
-			"days_per_period": 4,
-			"description": 5,
-			"is_active": 6,
+			"days_per_period":              4,
+			"description":                  5,
+			"is_active":                    6,
 		}
 
-		fieldUpdates := make(map[string][]struct{ID string; Value interface{}})
+		fieldUpdates := make(map[string][]struct {
+			ID    string
+			Value interface{}
+		})
 		for _, up := range validUpdates {
 			for f, v := range up.Fields {
 				f = strings.ToLower(f)
 				if _, ok := fieldPairs[f]; ok {
-					fieldUpdates[f] = append(fieldUpdates[f], struct{ID string; Value interface{}}{up.FrequencyID, v})
+					fieldUpdates[f] = append(fieldUpdates[f], struct {
+						ID    string
+						Value interface{}
+					}{up.FrequencyID, v})
 				}
 			}
 		}
@@ -1538,9 +1553,9 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			auditCols := []string{"frequency_id","action_type","processing_status","reason","requested_by","requested_at"}
+			auditCols := []string{"frequency_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
 			auditVals := []interface{}{up.FrequencyID, "EDIT", "PENDING_EDIT_APPROVAL", up.Reason, userEmail}
-			auditParams := []string{"$1","$2","$3","$4","$5","now()"}
+			auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
 			paramPos := 6
 
 			for field := range up.Fields {
@@ -1564,7 +1579,7 @@ func UpdateCompoundingFrequencyBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyCompoundingFrequencyError(err, "Commit failed")
+			msg, status := getUserFriendlyCompoundingFrequencyError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			api.LogError("Bulk update commit failed: %v", err)
 			return

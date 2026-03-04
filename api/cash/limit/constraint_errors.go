@@ -1,22 +1,23 @@
 package limit
 
 import (
-	"strings"
+	"CimplrCorpSaas/api/constants"
 	"fmt"
+	"strings"
 )
 
 // parseLimitConstraintError converts PostgreSQL constraint violation errors into human-readable messages
 func parseLimitConstraintError(err error) string {
 	errStr := err.Error()
-	
+
 	// Unique constraint violations
-	if strings.Contains(errStr, "duplicate key value violates unique constraint") {
-		if strings.Contains(errStr, "uniq_bank_limit_full") || 
-		   strings.Contains(errStr, "unique_limit_combination") {
+	if strings.Contains(errStr, constants.ErrDuplicateKeyC) {
+		if strings.Contains(errStr, "uniq_bank_limit_full") ||
+			strings.Contains(errStr, "unique_limit_combination") {
 			return "A limit already exists for this entity, bank, and limit type combination. Each combination must be unique."
 		}
-		if strings.Contains(errStr, "uniq_bank_limit_utilization_full") || 
-		   strings.Contains(errStr, "unique_utilization_combination") {
+		if strings.Contains(errStr, "uniq_bank_limit_utilization_full") ||
+			strings.Contains(errStr, "unique_utilization_combination") {
 			return "A utilization record already exists for this limit, date, and currency combination. Each utilization must be unique per day."
 		}
 		if strings.Contains(errStr, "limit_id") || strings.Contains(errStr, "primary") {
@@ -27,7 +28,7 @@ func parseLimitConstraintError(err error) string {
 		}
 		return "This limit or utilization conflicts with an existing record. Please check for duplicate combinations."
 	}
-	
+
 	// Foreign key constraint violations
 	if strings.Contains(errStr, "violates foreign key constraint") {
 		if strings.Contains(errStr, "fk_entity") {
@@ -44,7 +45,7 @@ func parseLimitConstraintError(err error) string {
 		}
 		return "One or more referenced records do not exist. Please verify all entity, bank, and limit details."
 	}
-	
+
 	// Check constraint violations
 	if strings.Contains(errStr, "violates check constraint") {
 		if strings.Contains(errStr, "chk_sanctioned_amount") {
@@ -73,7 +74,7 @@ func parseLimitConstraintError(err error) string {
 		}
 		return "One or more field values do not meet the required format, range, or business rule constraints."
 	}
-	
+
 	// NOT NULL constraint violations
 	if strings.Contains(errStr, "null value in column") {
 		if strings.Contains(errStr, "entity_name") {
@@ -105,26 +106,26 @@ func parseLimitConstraintError(err error) string {
 		}
 		return "A required field is missing. Please ensure all mandatory fields are provided."
 	}
-	
+
 	// Business rule violations (custom checks)
 	if strings.Contains(errStr, "utilization exceeds limit") {
 		return "The utilization amount would exceed the available limit. Please check the remaining headroom before proceeding."
 	}
-	
+
 	if strings.Contains(errStr, "overlapping limit period") {
 		return "This limit period overlaps with an existing limit for the same entity and bank. Please adjust the effective dates."
 	}
-	
+
 	// Permission/access violations
 	if strings.Contains(errStr, "permission denied") {
 		return "You do not have permission to create or modify limits for this entity."
 	}
-	
+
 	// Connection/timeout errors
 	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
 		return "Database connection issue. Please try again in a moment."
 	}
-	
+
 	// Default case - return a generic but helpful message
 	return fmt.Sprintf("Unable to save limit configuration due to a data constraint: %v", err)
 }
