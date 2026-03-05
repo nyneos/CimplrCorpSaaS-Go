@@ -132,20 +132,20 @@ type resolvedRecipient struct {
 }
 
 type outboxRow struct {
-	correlationID    string
-	eventID          string
-	auditID          string // audit_template.audit_id
-	channel          string
-	recipientUserID  string
-	recipientRole    string
-	recipientEmail   string
-	recipientPhone   string
-	recipientName    string
-	renderedSubject  string
-	renderedBody     string
-	variablesJSON    []byte
+	correlationID   string
+	eventID         string
+	auditID         string // audit_template.audit_id
+	channel         string
+	recipientUserID string
+	recipientRole   string
+	recipientEmail  string
+	recipientPhone  string
+	recipientName   string
+	renderedSubject string
+	renderedBody    string
+	variablesJSON   []byte
 	// Priority: config.priority_level * 10 + recipient.recipient_priority
-	priorityLevel    int
+	priorityLevel int
 	// Sender fields (populated from sender master when available)
 	senderID         string
 	senderCode       string
@@ -288,6 +288,13 @@ func dispatchNotification(
 				localPayload["RecipientName"] = recip.name
 				localPayload["RecipientEmail"] = recip.email
 				localPayload["RecipientPhone"] = recip.phone
+
+				// sender details
+				localPayload["SenderName"] = senderName
+				localPayload["SenderEmail"] = senderEmail
+				localPayload["SenderID"] = senderID
+				localPayload["SenderCode"] = senderCode
+				localPayload["SenderIdentifier"] = senderIdentifier
 
 				body := tw.tpl.bodyText
 				if tw.tpl.isHTML {
@@ -816,13 +823,14 @@ func nullStr(s string) interface{} {
 
 // SendHistoryParams groups parameters for InsertSendHistory to keep signatures small.
 type SendHistoryParams struct {
-	OutboxID string
-	Row outboxRow
-	Status string
-	ProviderResp string
+	OutboxID          string
+	Row               outboxRow
+	Status            string
+	ProviderResp      string
 	ProviderMessageID string
-	AttemptNumber int
+	AttemptNumber     int
 }
+
 // "hardik.mishra@company.com" → "Hardik Mishra"
 // "admin@company.com"        → "Admin"
 // Falls back to the local-part as-is if no dots found.

@@ -3,6 +3,8 @@ package redemption
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,8 +12,6 @@ import (
 	"math"
 	"net/http"
 	"strings"
-
-	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -239,6 +239,12 @@ func CreateRedemptionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		correlationID := redemptionID
+		go func() {
+			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{redemptionID}, "CREATE", userEmail)
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create", correlationID, payload.ToMap())
+		}()
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"redemption_id": redemptionID,
 			"requested":     userEmail,
@@ -449,6 +455,20 @@ func CreateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
+		createdIDs := make([]string, 0, len(results))
+		for _, res := range results {
+			if ok, _ := res[constants.ValueSuccess].(bool); ok {
+				if id, _ := res["redemption_id"].(string); id != "" {
+					createdIDs = append(createdIDs, id)
+				}
+			}
+		}
+		if len(createdIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, createdIDs, "CREATE", userEmail)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/create-bulk", createdIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -559,6 +579,11 @@ func UpdateRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func() {
+			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, []string{req.RedemptionID}, "UPDATE", userEmail)
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/update", req.RedemptionID, payload.ToMap())
+		}()
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"redemption_id": req.RedemptionID,
@@ -683,6 +708,20 @@ func UpdateRedemptionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_id": row.RedemptionID, "requested": userEmail})
 		}
 
+		updatedIDs := make([]string, 0, len(results))
+		for _, res := range results {
+			if ok, _ := res[constants.ValueSuccess].(bool); ok {
+				if id, _ := res["redemption_id"].(string); id != "" {
+					updatedIDs = append(updatedIDs, id)
+				}
+			}
+		}
+		if len(updatedIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, updatedIDs, "UPDATE", userEmail)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/update-bulk", updatedIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -741,6 +780,16 @@ func DeleteRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func() {
+			payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, "DELETE_REQUEST", requestedBy)
+			corID := ""
+			if len(req.RedemptionIDs) > 0 {
+				corID = req.RedemptionIDs[0]
+			}
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/delete", corID, payload.ToMap())
+		}()
+
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.RedemptionIDs})
 	}
 }
@@ -962,6 +1011,19 @@ func BulkApproveRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if len(toApprove) > 0 {
+			approvedRedemptionIDs := req.RedemptionIDs
+			go func() {
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, approvedRedemptionIDs, "APPROVE", checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/approve", approvedRedemptionIDs[0], payload.ToMap())
+			}()
+		}
+		if len(deleteMasterIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, deleteMasterIDs, "DELETE", checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/approve", deleteMasterIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_action_ids": toApprove,
 			"deleted_redemptions": deleteMasterIDs,
@@ -1162,6 +1224,12 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		if len(req.RedemptionIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionInitiationNotifPayload(ctx, pgxPool, req.RedemptionIDs, "REJECT", checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/initiation/reject", req.RedemptionIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
 	}
 }
@@ -1173,153 +1241,167 @@ func BulkRejectRedemptionActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetRedemptionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := `
-			WITH latest_audit AS (
-				SELECT DISTINCT ON (a.redemption_id)
-					a.redemption_id,
-					a.actiontype,
-					a.processing_status,
-					a.action_id,
-					a.requested_by,
-					a.requested_at,
-					a.checker_by,
-					a.checker_at,
-					a.checker_comment,
-					a.reason
-				FROM investment.auditactionredemption a
-				ORDER BY a.redemption_id, a.requested_at DESC
-			),
-			history AS (
-				SELECT 
-					redemption_id,
-					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
-					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-				FROM investment.auditactionredemption
-				GROUP BY redemption_id
-			),
-			resolved_folio AS (
-				SELECT DISTINCT ON (m.redemption_id)
-					m.redemption_id,
-					f.folio_number,
-					f.folio_id::text AS folio_id_text
-				FROM investment.redemption_initiation m
-				LEFT JOIN investment.masterfolio f ON (
-					(f.folio_id::text = m.folio_id) OR 
-					(m.folio_id IS NOT NULL AND f.folio_number = m.folio_id)
-				)
-				ORDER BY m.redemption_id, f.folio_id
-			),
-			resolved_demat AS (
-				SELECT DISTINCT ON (m.redemption_id)
-					m.redemption_id,
-					d.demat_account_number,
-					d.demat_id::text AS demat_id_text
-				FROM investment.redemption_initiation m
-				LEFT JOIN investment.masterdemataccount d ON (
-					(d.demat_id::text = m.demat_id) OR 
-					(m.demat_id IS NOT NULL AND d.default_settlement_account = m.demat_id) OR 
-					(m.demat_id IS NOT NULL AND d.demat_account_number = m.demat_id)
-				)
-				ORDER BY m.redemption_id, d.demat_id
-			)
-			SELECT
-				m.redemption_id,
-				m.folio_id,
-				m.old_folio_id,
-				m.demat_id,
-				m.old_demat_id,
-				m.scheme_id,
-				m.old_scheme_id,
-				m.requested_by,
-				COALESCE(m.entity_name,'') AS entity_name,
-				COALESCE(s.scheme_id::text, m.scheme_id::text) AS resolved_scheme_id,
-				COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
-				COALESCE(s.internal_scheme_code,'') AS scheme_code,
-				COALESCE(s.isin,'') AS isin,
-				COALESCE(s.amc_name,'') AS amc_name,
-				COALESCE(rf.folio_number,'') AS folio_number,
-				COALESCE(rf.folio_id_text,'') AS folio_id_text,
-				COALESCE(rd.demat_account_number,'') AS demat_number,
-				COALESCE(rd.demat_id_text,'') AS demat_id_text,
-				m.old_requested_by,
-				TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
-				TO_CHAR(m.old_requested_date, 'YYYY-MM-DD') AS old_requested_date,
-				TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
-				TO_CHAR(m.old_transaction_date, 'YYYY-MM-DD') AS old_transaction_date,
-				m.estimated_proceeds,
-				m.old_estimated_proceeds,
-				m.gain_loss,
-				m.old_gain_loss,
-				DATE_PART('day', now()::timestamp - COALESCE(m.transaction_date, m.requested_date)::timestamp)::int AS age_days,
-				m.by_amount,
-				m.old_by_amount,
-				m.by_units,
-				m.old_by_units,
-				COALESCE(s.method, 'FIFO') AS method,
-				COALESCE(s.method, 'FIFO') AS old_method,
-				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
-				
-				COALESCE(l.actiontype,'') AS action_type,
-				COALESCE(l.processing_status,'') AS processing_status,
-				COALESCE(l.action_id::text,'') AS action_id,
-				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				COALESCE(l.checker_comment,'') AS checker_comment,
-				COALESCE(l.reason,'') AS reason,
-				
-				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at,
-				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at,
-				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
-			FROM investment.redemption_initiation m
-			LEFT JOIN latest_audit l ON l.redemption_id = m.redemption_id
-			LEFT JOIN history h ON h.redemption_id = m.redemption_id
-			LEFT JOIN investment.masterscheme s ON (
-			    s.scheme_id::text = m.scheme_id
-			 OR s.scheme_name = m.scheme_id
-			 OR s.internal_scheme_code = m.scheme_id
-			 OR s.isin = m.scheme_id
-			)
-			LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
-			LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
-			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
-		`
-
-		rows, err := pgxPool.Query(ctx, q)
+		out, err := fetchRedemptionInitiationRows(ctx, pgxPool, nil)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
-		for rows.Next() {
-			vals, _ := rows.Values()
-			rec := make(map[string]interface{}, len(fields))
-			for i, f := range fields {
-				rec[string(f.Name)] = vals[i]
-			}
-			out = append(out, rec)
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
-			return
-		}
-
 		api.RespondWithPayload(w, true, "", out)
 	}
+}
+
+// fetchRedemptionInitiationRows is the single source-of-truth query for redemption initiations.
+// ids=nil → all non-deleted rows (GET behaviour).
+// ids!=nil → WHERE m.redemption_id = ANY($1) (payload builder filter).
+func fetchRedemptionInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	const baseSQL = `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (a.redemption_id)
+				a.redemption_id,
+				a.actiontype,
+				a.processing_status,
+				a.action_id,
+				a.requested_by,
+				a.requested_at,
+				a.checker_by,
+				a.checker_at,
+				a.checker_comment,
+				a.reason
+			FROM investment.auditactionredemption a
+			ORDER BY a.redemption_id, a.requested_at DESC
+		),
+		history AS (
+			SELECT 
+				redemption_id,
+				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.auditactionredemption
+			GROUP BY redemption_id
+		),
+		resolved_folio AS (
+			SELECT DISTINCT ON (m.redemption_id)
+				m.redemption_id,
+				f.folio_number,
+				f.folio_id::text AS folio_id_text
+			FROM investment.redemption_initiation m
+			LEFT JOIN investment.masterfolio f ON (
+				(f.folio_id::text = m.folio_id) OR 
+				(m.folio_id IS NOT NULL AND f.folio_number = m.folio_id)
+			)
+			ORDER BY m.redemption_id, f.folio_id
+		),
+		resolved_demat AS (
+			SELECT DISTINCT ON (m.redemption_id)
+				m.redemption_id,
+				d.demat_account_number,
+				d.demat_id::text AS demat_id_text
+			FROM investment.redemption_initiation m
+			LEFT JOIN investment.masterdemataccount d ON (
+				(d.demat_id::text = m.demat_id) OR 
+				(m.demat_id IS NOT NULL AND d.default_settlement_account = m.demat_id) OR 
+				(m.demat_id IS NOT NULL AND d.demat_account_number = m.demat_id)
+			)
+			ORDER BY m.redemption_id, d.demat_id
+		)
+		SELECT
+			m.redemption_id,
+			m.folio_id,
+			m.old_folio_id,
+			m.demat_id,
+			m.old_demat_id,
+			m.scheme_id,
+			m.old_scheme_id,
+			m.requested_by,
+			COALESCE(m.entity_name,'') AS entity_name,
+			COALESCE(s.scheme_id::text, m.scheme_id::text) AS resolved_scheme_id,
+			COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
+			COALESCE(s.internal_scheme_code,'') AS scheme_code,
+			COALESCE(s.isin,'') AS isin,
+			COALESCE(s.amc_name,'') AS amc_name,
+			COALESCE(rf.folio_number,'') AS folio_number,
+			COALESCE(rf.folio_id_text,'') AS folio_id_text,
+			COALESCE(rd.demat_account_number,'') AS demat_number,
+			COALESCE(rd.demat_id_text,'') AS demat_id_text,
+			m.old_requested_by,
+			TO_CHAR(m.requested_date, 'YYYY-MM-DD') AS requested_date,
+			TO_CHAR(m.old_requested_date, 'YYYY-MM-DD') AS old_requested_date,
+			TO_CHAR(m.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+			TO_CHAR(m.old_transaction_date, 'YYYY-MM-DD') AS old_transaction_date,
+			m.estimated_proceeds,
+			m.old_estimated_proceeds,
+			m.gain_loss,
+			m.old_gain_loss,
+			DATE_PART('day', now()::timestamp - COALESCE(m.transaction_date, m.requested_date)::timestamp)::int AS age_days,
+			m.by_amount,
+			m.old_by_amount,
+			m.by_units,
+			m.old_by_units,
+			COALESCE(s.method, 'FIFO') AS method,
+			COALESCE(s.method, 'FIFO') AS old_method,
+			m.is_deleted,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+			
+			COALESCE(l.actiontype,'') AS action_type,
+			COALESCE(l.processing_status,'') AS processing_status,
+			COALESCE(l.action_id::text,'') AS action_id,
+			COALESCE(l.requested_by,'') AS audit_requested_by,
+			TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			COALESCE(l.checker_by,'') AS checker_by,
+			TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			COALESCE(l.checker_comment,'') AS checker_comment,
+			COALESCE(l.reason,'') AS reason,
+			
+			COALESCE(h.created_by,'') AS created_by,
+			COALESCE(h.created_at,'') AS created_at,
+			COALESCE(h.edited_by,'') AS edited_by,
+			COALESCE(h.edited_at,'') AS edited_at,
+			COALESCE(h.deleted_by,'') AS deleted_by,
+			COALESCE(h.deleted_at,'') AS deleted_at
+		FROM investment.redemption_initiation m
+		LEFT JOIN latest_audit l ON l.redemption_id = m.redemption_id
+		LEFT JOIN history h ON h.redemption_id = m.redemption_id
+		LEFT JOIN investment.masterscheme s ON (
+		    s.scheme_id::text = m.scheme_id
+		 OR s.scheme_name = m.scheme_id
+		 OR s.internal_scheme_code = m.scheme_id
+		 OR s.isin = m.scheme_id
+		)
+		LEFT JOIN resolved_folio rf ON rf.redemption_id = m.redemption_id
+		LEFT JOIN resolved_demat rd ON rd.redemption_id = m.redemption_id
+	`
+
+	var (
+		q    string
+		args []interface{}
+	)
+	if len(ids) > 0 {
+		q = baseSQL + " WHERE m.redemption_id = ANY($1) ORDER BY m.entity_name, m.redemption_id"
+		args = []interface{}{ids}
+	} else {
+		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+	}
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	out := make([]map[string]interface{}, 0, 1000)
+	for rows.Next() {
+		vals, _ := rows.Values()
+		rec := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			rec[string(f.Name)] = vals[i]
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------

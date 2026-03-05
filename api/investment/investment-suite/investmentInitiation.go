@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"bufio"
 	"bytes"
 	"context"
@@ -159,6 +160,16 @@ func CreateInitiationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(iID, uID, uEmail string) {
+			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, "CREATE", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/initiation/create",
+				fmt.Sprintf("INVESTMENT_INITIATION_CREATE/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(initiationID, req.UserID, userEmail)
+
 		response := map[string]any{
 			"initiation_id": initiationID,
 			"entity_name":   req.EntityName,
@@ -307,6 +318,30 @@ func CreateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, result)
 		}
 
+		// Fire bulk-create notification for all successfully created IDs
+		createdIDs := make([]string, 0)
+		for _, r := range results {
+			if ok, _ := r[constants.ValueSuccess].(bool); ok {
+				if id, _ := r["initiation_id"].(string); id != "" {
+					createdIDs = append(createdIDs, id)
+				}
+			}
+		}
+		if len(createdIDs) > 0 {
+			ids := createdIDs
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "CREATE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/initiation/bulk-create",
+					fmt.Sprintf("INVESTMENT_INITIATION_BULK_CREATE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -417,6 +452,16 @@ func UpdateInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(iID, uID, uEmail string) {
+			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, []string{iID}, "UPDATE", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/initiation/update",
+				fmt.Sprintf("INVESTMENT_INITIATION_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(req.InitiationID, req.UserID, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"initiation_id": req.InitiationID,
@@ -537,6 +582,30 @@ func UpdateInitiationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "initiation_id": row.InitiationID, "requested": userEmail})
 		}
 
+		// Fire bulk-update notification for all successful IDs
+		updatedIDs := make([]string, 0)
+		for _, r := range results {
+			if ok, _ := r[constants.ValueSuccess].(bool); ok {
+				if id, _ := r["initiation_id"].(string); id != "" {
+					updatedIDs = append(updatedIDs, id)
+				}
+			}
+		}
+		if len(updatedIDs) > 0 {
+			ids := updatedIDs
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "UPDATE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/initiation/bulk-update",
+					fmt.Sprintf("INVESTMENT_INITIATION_BULK_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -595,6 +664,17 @@ func DeleteInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(ids []string, uID, uEmail string) {
+			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/initiation/delete-request",
+				fmt.Sprintf("INVESTMENT_INITIATION_DELETE_REQUEST/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(append([]string{}, req.InitiationIDs...), req.UserID, requestedBy)
+
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.InitiationIDs})
 	}
 }
@@ -723,6 +803,35 @@ func BulkApproveInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			deleteMasterIDs = []string{}
 		}
 
+		if len(toApproveInitiations) > 0 {
+			ids := append([]string{}, toApproveInitiations...)
+			uID := req.UserID
+			uEmail := checkerBy
+			go func() {
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "APPROVE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/initiation/approve",
+					fmt.Sprintf("INVESTMENT_INITIATION_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+		if len(deleteMasterIDs) > 0 {
+			ids := append([]string{}, deleteMasterIDs...)
+			uID := req.UserID
+			uEmail := checkerBy
+			go func() {
+				pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "DELETE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/initiation/delete",
+					fmt.Sprintf("INVESTMENT_INITIATION_DELETE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"approved_initiation_ids": toApproveInitiations,
 			"deleted_initiations":     deleteMasterIDs,
@@ -825,6 +934,16 @@ func BulkRejectInitiationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(ids []string, uID, uEmail string) {
+			pl := BuildInitiationNotifPayload(context.Background(), pgxPool, ids, "REJECT", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/initiation/reject",
+				fmt.Sprintf("INVESTMENT_INITIATION_REJECT/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(append([]string{}, req.InitiationIDs...), req.UserID, checkerBy)
 
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
 	}
@@ -1041,119 +1160,129 @@ func GetApprovedActiveInitiations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetInitiationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := `
-			WITH latest_audit AS (
-				SELECT DISTINCT ON (a.initiation_id)
-					a.initiation_id, a.actiontype, a.processing_status, a.action_id,
-					a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
-				FROM investment.auditactioninitiation a
-				ORDER BY a.initiation_id, a.requested_at DESC
-			),
-			history AS (
-				SELECT 
-					initiation_id,
-					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
-					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-				FROM investment.auditactioninitiation
-				GROUP BY initiation_id
-			)
-			SELECT
-				m.*, 
-				COALESCE(s.scheme_id::text, m.scheme_id::text) AS scheme_id,
-				COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
-				COALESCE(s.amc_name,'') AS amc_name,
-				COALESCE(f.folio_number,'') AS folio_number,
-				COALESCE(f.folio_id::text,'') AS folio_id,
-				COALESCE(d.default_settlement_account,'') AS demat_number,
-				COALESCE(d.demat_id::text,'') AS demat_id,
-				DATE_PART('day', now()::timestamp - m.transaction_date::timestamp)::int AS age_days,
-				COALESCE(m.amount,0) AS gross_investment_amount,
-				COALESCE(l.actiontype,'') AS action_type,
-				COALESCE(l.processing_status,'') AS processing_status,
-				COALESCE(l.action_id::text,'') AS action_id,
-				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				COALESCE(l.checker_comment,'') AS checker_comment,
-				COALESCE(l.reason,'') AS reason,
-				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at,
-				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at,
-				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at,
-				COALESCE(nav.nav_value,0) AS nav,
-				TO_CHAR(nav.nav_date,'YYYY-MM-DD') AS applicable_nav_date
-			FROM investment.investment_initiation m
-			LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
-			LEFT JOIN history h ON h.initiation_id = m.initiation_id
-			-- allow flexible matching: the initiation column may contain either the id or the human-friendly value
-			LEFT JOIN investment.masterscheme s ON (
-			   s.scheme_id::text = m.scheme_id
-			OR s.scheme_name = m.scheme_id
-			OR s.internal_scheme_code = m.scheme_id
-			OR s.isin = m.scheme_id
-		)
-
-			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = m.folio_id OR f.folio_number = m.folio_id)
-			LEFT JOIN investment.masterdemataccount d ON (
-				d.demat_id::text = m.demat_id OR
-				d.default_settlement_account = m.demat_id OR
-				d.demat_account_number = m.demat_id
-			)
-			LEFT JOIN LATERAL (
-				SELECT ans.nav_value, ans.nav_date
-				FROM investment.amfi_nav_staging ans
-				WHERE (
-					(ans.scheme_code::text = s.internal_scheme_code) OR
-					(ans.isin_div_payout_growth = s.isin) OR
-					(ans.scheme_name = s.scheme_name)
-				)
-				ORDER BY ans.nav_date DESC, ans.file_date DESC
-				LIMIT 1
-			) nav ON true
-			WHERE COALESCE(m.is_deleted, false) = false 
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
-		`
-
-		rows, err := pgxPool.Query(ctx, q)
+		out, err := fetchInitiationRows(ctx, pgxPool, nil)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
-		for rows.Next() {
-			vals, _ := rows.Values()
-			rec := make(map[string]interface{}, len(fields))
-			for i, f := range fields {
-				if vals[i] == nil {
-					rec[string(f.Name)] = ""
-				} else {
-					if t, ok := vals[i].(time.Time); ok {
-						rec[string(f.Name)] = t.Format(constants.DateTimeFormat)
-					} else {
-						rec[string(f.Name)] = vals[i]
-					}
-				}
-			}
-			out = append(out, rec)
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
-			return
-		}
-
 		api.RespondWithPayload(w, true, "", out)
 	}
+}
+
+// fetchInitiationRows is the single source-of-truth query for initiations + audit + history + scheme/folio/demat joins.
+// Pass ids=nil (or empty) to return ALL non-deleted initiations (used by GetInitiationsWithAudit).
+// Pass a non-empty ids slice to filter by initiation_id = ANY(ids) (used by notif payload builder).
+func fetchInitiationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	const baseSQL = `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (a.initiation_id)
+				a.initiation_id, a.actiontype, a.processing_status, a.action_id,
+				a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.checker_comment, a.reason
+			FROM investment.auditactioninitiation a
+			ORDER BY a.initiation_id, a.requested_at DESC
+		),
+		history AS (
+			SELECT 
+				initiation_id,
+				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.auditactioninitiation
+			GROUP BY initiation_id
+		)
+		SELECT
+			m.*, 
+			COALESCE(s.scheme_id::text, m.scheme_id::text) AS scheme_id,
+			COALESCE(s.scheme_name, m.scheme_id) AS scheme_name,
+			COALESCE(s.amc_name,'') AS amc_name,
+			COALESCE(f.folio_number,'') AS folio_number,
+			COALESCE(f.folio_id::text,'') AS folio_id,
+			COALESCE(d.default_settlement_account,'') AS demat_number,
+			COALESCE(d.demat_id::text,'') AS demat_id,
+			DATE_PART('day', now()::timestamp - m.transaction_date::timestamp)::int AS age_days,
+			COALESCE(m.amount,0) AS gross_investment_amount,
+			COALESCE(l.actiontype,'') AS action_type,
+			COALESCE(l.processing_status,'') AS processing_status,
+			COALESCE(l.action_id::text,'') AS action_id,
+			COALESCE(l.requested_by,'') AS requested_by,
+			TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			COALESCE(l.checker_by,'') AS checker_by,
+			TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			COALESCE(l.checker_comment,'') AS checker_comment,
+			COALESCE(l.reason,'') AS reason,
+			COALESCE(h.created_by,'') AS created_by,
+			COALESCE(h.created_at,'') AS created_at,
+			COALESCE(h.edited_by,'') AS edited_by,
+			COALESCE(h.edited_at,'') AS edited_at,
+			COALESCE(h.deleted_by,'') AS deleted_by,
+			COALESCE(h.deleted_at,'') AS deleted_at,
+			COALESCE(nav.nav_value,0) AS nav,
+			TO_CHAR(nav.nav_date,'YYYY-MM-DD') AS applicable_nav_date
+		FROM investment.investment_initiation m
+		LEFT JOIN latest_audit l ON l.initiation_id = m.initiation_id
+		LEFT JOIN history h ON h.initiation_id = m.initiation_id
+		LEFT JOIN investment.masterscheme s ON (
+		   s.scheme_id::text = m.scheme_id
+		OR s.scheme_name = m.scheme_id
+		OR s.internal_scheme_code = m.scheme_id
+		OR s.isin = m.scheme_id
+		)
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = m.folio_id OR f.folio_number = m.folio_id)
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = m.demat_id OR
+			d.default_settlement_account = m.demat_id OR
+			d.demat_account_number = m.demat_id
+		)
+		LEFT JOIN LATERAL (
+			SELECT ans.nav_value, ans.nav_date
+			FROM investment.amfi_nav_staging ans
+			WHERE (
+				(ans.scheme_code::text = s.internal_scheme_code) OR
+				(ans.isin_div_payout_growth = s.isin) OR
+				(ans.scheme_name = s.scheme_name)
+			)
+			ORDER BY ans.nav_date DESC, ans.file_date DESC
+			LIMIT 1
+		) nav ON true
+	`
+
+	var (
+		q    string
+		args []interface{}
+	)
+	if len(ids) > 0 {
+		q = baseSQL + " WHERE m.initiation_id = ANY($1) ORDER BY m.entity_name, m.initiation_id"
+		args = []interface{}{ids}
+	} else {
+		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+	}
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	out := make([]map[string]interface{}, 0, 1000)
+	for rows.Next() {
+		vals, _ := rows.Values()
+		rec := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			if vals[i] == nil {
+				rec[string(f.Name)] = ""
+			} else if t, ok := vals[i].(time.Time); ok {
+				rec[string(f.Name)] = t.Format(constants.DateTimeFormat)
+			} else {
+				rec[string(f.Name)] = vals[i]
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------

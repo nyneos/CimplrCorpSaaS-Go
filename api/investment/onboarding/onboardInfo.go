@@ -1,6 +1,7 @@
 package investment
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -150,6 +151,215 @@ type BatchInfoRequest struct {
 	BatchID string `json:"batch_id"`
 }
 
+// fetchBatchInfo is the shared helper used by GetBatchInfo and notification payload builders.
+func fetchBatchInfo(ctx context.Context, pool *pgxpool.Pool, batchID string) (*BatchInfo, error) {
+	batchInfo := BatchInfo{}
+	var completedAt sql.NullTime
+	var remarks sql.NullString
+
+	err := pool.QueryRow(ctx, `
+	     SELECT batch_id, user_id, user_email, source, total_records, status, approval_status,
+		     created_at, completed_at, remarks
+	     FROM investment.onboard_batch 
+	     WHERE batch_id::text = $1::text`, batchID).Scan(
+		&batchInfo.BatchID, &batchInfo.UserID, &batchInfo.UserEmail,
+		&batchInfo.Source, &batchInfo.TotalRecords, &batchInfo.Status, &batchInfo.ApprovalStatus,
+		&batchInfo.CreatedAt, &completedAt, &remarks)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if completedAt.Valid {
+		batchInfo.CompletedAt = &completedAt.Time
+	}
+	if remarks.Valid {
+		batchInfo.Remarks = remarks.String
+	}
+
+	// Get entities breakdown
+	batchInfo.Entities = EntityBreakdown{}
+
+	// Get AMCs (both new and enriched)
+	amcRows, err := pool.Query(ctx, `
+			SELECT 
+				m.amc_id, m.amc_name, COALESCE(m.internal_amc_code, ''), 
+				m.status, COALESCE(m.is_deleted, false), 
+				COALESCE(om.enriched, false) as enriched
+			FROM investment.onboard_mapping om
+			INNER JOIN investment.masteramc m ON m.amc_id = om.reference_id
+			WHERE om.batch_id::text = $1::text 
+			  AND om.reference_type = 'AMC'
+			ORDER BY m.amc_name`, batchID)
+	if err == nil {
+		for amcRows.Next() {
+			var amc AMCInfo
+			amcRows.Scan(&amc.AmcID, &amc.AmcName, &amc.InternalAmcCode, &amc.Status, &amc.IsDeleted, &amc.Enriched)
+			batchInfo.Entities.AMC = append(batchInfo.Entities.AMC, amc)
+		}
+		amcRows.Close()
+	}
+
+	// Get Schemes
+	schemeRows, err := pool.Query(ctx, `
+		SELECT 
+			m.scheme_id, m.scheme_name, COALESCE(m.isin, ''), 
+			COALESCE(m.internal_scheme_code, ''), m.amc_name, m.status, 
+			COALESCE(m.is_deleted, false), COALESCE(om.enriched, false) as enriched
+		FROM investment.onboard_mapping om
+		INNER JOIN investment.masterscheme m ON m.scheme_id = om.reference_id
+		WHERE om.batch_id::text = $1::text 
+		  AND om.reference_type = 'SCHEME'
+		ORDER BY m.scheme_name`, batchID)
+	if err == nil {
+		for schemeRows.Next() {
+			var scheme SchemeInfo
+			schemeRows.Scan(&scheme.SchemeID, &scheme.SchemeName, &scheme.ISIN,
+				&scheme.InternalSchemeCode, &scheme.AmcName, &scheme.Status, &scheme.IsDeleted, &scheme.Enriched)
+			batchInfo.Entities.Scheme = append(batchInfo.Entities.Scheme, scheme)
+		}
+		schemeRows.Close()
+	}
+
+	// Get DPs
+	dpRows, err := pool.Query(ctx, `
+		SELECT 
+			m.dp_id, m.dp_name, COALESCE(m.dp_code, ''), 
+			m.depository, m.status, COALESCE(m.is_deleted, false),
+			COALESCE(om.enriched, false) as enriched
+		FROM investment.onboard_mapping om
+		INNER JOIN investment.masterdepositoryparticipant m ON m.dp_id = om.reference_id
+		WHERE om.batch_id::text = $1::text 
+		  AND om.reference_type = 'DP'
+		ORDER BY m.dp_name`, batchID)
+	if err == nil {
+		for dpRows.Next() {
+			var dp DPInfo
+			dpRows.Scan(&dp.DPID, &dp.DPName, &dp.DPCode, &dp.Depository, &dp.Status, &dp.IsDeleted, &dp.Enriched)
+			batchInfo.Entities.DP = append(batchInfo.Entities.DP, dp)
+		}
+		dpRows.Close()
+	}
+
+	// Get Demats
+	dematRows, err := pool.Query(ctx, `
+		SELECT 
+			m.demat_id, m.entity_name, COALESCE(m.dp_id, ''), m.depository, 
+			m.demat_account_number, m.default_settlement_account, m.status, 
+			COALESCE(m.is_deleted, false), COALESCE(om.enriched, false) as enriched
+		FROM investment.onboard_mapping om
+		INNER JOIN investment.masterdemataccount m ON m.demat_id = om.reference_id
+		WHERE om.batch_id::text = $1::text 
+		  AND om.reference_type = 'DEMAT'
+		ORDER BY m.entity_name`, batchID)
+	if err == nil {
+		for dematRows.Next() {
+			var demat DematInfo
+			dematRows.Scan(&demat.DematID, &demat.EntityName, &demat.DPID, &demat.Depository,
+				&demat.DematAccountNumber, &demat.DefaultSettlementAcc, &demat.Status, &demat.IsDeleted, &demat.Enriched)
+			batchInfo.Entities.Demat = append(batchInfo.Entities.Demat, demat)
+		}
+		dematRows.Close()
+	}
+
+	// Get Folios
+	folioRows, err := pool.Query(ctx, `
+		SELECT 
+			m.folio_id, m.entity_name, m.amc_name, m.folio_number, 
+			COALESCE(m.first_holder_name, ''), m.default_subscription_account, 
+			m.default_redemption_account, m.status, COALESCE(m.is_deleted, false),
+			COALESCE(om.enriched, false) as enriched
+		FROM investment.onboard_mapping om
+		INNER JOIN investment.masterfolio m ON m.folio_id = om.reference_id
+		WHERE om.batch_id::text = $1::text 
+		  AND om.reference_type = 'FOLIO'
+		ORDER BY m.entity_name, m.folio_number`, batchID)
+	if err == nil {
+		for folioRows.Next() {
+			var folio FolioInfo
+			folioRows.Scan(&folio.FolioID, &folio.EntityName, &folio.AmcName, &folio.FolioNumber,
+				&folio.FirstHolderName, &folio.DefaultSubscriptionAccount,
+				&folio.DefaultRedemptionAccount, &folio.Status, &folio.IsDeleted, &folio.Enriched)
+			batchInfo.Entities.Folio = append(batchInfo.Entities.Folio, folio)
+		}
+		folioRows.Close()
+	}
+
+	// Get Onboard Mappings
+	mappingRows, err := pool.Query(ctx, `
+		SELECT id, reference_id, reference_type, reference_name, enriched, created_at
+		FROM investment.onboard_mapping 
+		WHERE batch_id::text = $1::text
+		ORDER BY reference_type, reference_name`, batchID)
+	if err == nil {
+		for mappingRows.Next() {
+			var mapping OnboardMapping
+			mappingRows.Scan(&mapping.ID, &mapping.ReferenceID, &mapping.ReferenceType,
+				&mapping.ReferenceName, &mapping.Enriched, &mapping.CreatedAt)
+			batchInfo.Mappings = append(batchInfo.Mappings, mapping)
+		}
+		mappingRows.Close()
+	}
+
+	// Get Portfolio Maps
+	portfolioRows, err := pool.Query(ctx, `
+		SELECT id, entity_name, COALESCE(folio_id,''), COALESCE(folio_number,''), 
+		       COALESCE(demat_id,''), COALESCE(amc_id,''), COALESCE(scheme_id,''), 
+		       COALESCE(scheme_name,''), created_at
+		FROM investment.portfolio_onboarding_map 
+		WHERE batch_id::text = $1::text
+		ORDER BY entity_name`, batchID)
+	if err == nil {
+		for portfolioRows.Next() {
+			var portfolio PortfolioMap
+			portfolioRows.Scan(&portfolio.ID, &portfolio.EntityName, &portfolio.FolioID,
+				&portfolio.FolioNumber, &portfolio.DematID, &portfolio.AmcID,
+				&portfolio.SchemeID, &portfolio.SchemeName, &portfolio.CreatedAt)
+			batchInfo.PortfolioMaps = append(batchInfo.PortfolioMaps, portfolio)
+		}
+		portfolioRows.Close()
+	}
+
+	// Get Portfolio Snapshots
+	snapshotRows, err := pool.Query(ctx, `
+		SELECT id, entity_name, folio_number, COALESCE(scheme_id,''), COALESCE(scheme_name,''),
+		       COALESCE(isin,''), total_units, avg_nav, current_nav, current_value, gain_loss, created_at
+		FROM investment.portfolio_snapshot 
+		WHERE batch_id::text = $1::text
+		ORDER BY entity_name, folio_number`, batchID)
+	if err == nil {
+		for snapshotRows.Next() {
+			var snapshot PortfolioSnapshot
+			snapshotRows.Scan(&snapshot.ID, &snapshot.EntityName, &snapshot.FolioNumber,
+				&snapshot.SchemeID, &snapshot.SchemeName, &snapshot.ISIN,
+				&snapshot.TotalUnits, &snapshot.AvgNav, &snapshot.CurrentNav,
+				&snapshot.CurrentValue, &snapshot.GainLoss, &snapshot.CreatedAt)
+			batchInfo.Snapshots = append(batchInfo.Snapshots, snapshot)
+		}
+		snapshotRows.Close()
+	}
+
+	// Get Transactions
+	txRows, err := pool.Query(ctx, `
+		SELECT id, transaction_date, transaction_type, scheme_internal_code, folio_number,
+		       amount, units, nav, created_at
+		FROM investment.onboard_transaction 
+		WHERE batch_id::text = $1::text
+		ORDER BY transaction_date DESC`, batchID)
+	if err == nil {
+		for txRows.Next() {
+			var tx TransactionSummary
+			txRows.Scan(&tx.ID, &tx.TransactionDate, &tx.TransactionType,
+				&tx.SchemeInternalCode, &tx.FolioNumber, &tx.Amount,
+				&tx.Units, &tx.Nav, &tx.CreatedAt)
+			batchInfo.Transactions = append(batchInfo.Transactions, tx)
+		}
+		txRows.Close()
+	}
+
+	return &batchInfo, nil
+}
+
 // GetBatchInfo retrieves comprehensive information about a specific batch
 func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -160,227 +370,23 @@ func GetBatchInfo(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, 400, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
-
 		if req.BatchID == "" {
 			api.RespondWithError(w, 400, "batch_id required")
 			return
 		}
-
 		if req.UserID == "" {
 			api.RespondWithError(w, 400, constants.ErrUserIDRequired)
 			return
 		}
 
-		batchID := req.BatchID
-
-		// Get basic batch info
-		batchInfo := BatchInfo{}
-		var completedAt sql.NullTime
-		var remarks sql.NullString
-
-		err := pgxPool.QueryRow(ctx, `
-	     SELECT batch_id, user_id, user_email, source, total_records, status, approval_status,
-		     created_at, completed_at, remarks
-	     FROM investment.onboard_batch 
-	     WHERE batch_id::text = $1::text`, batchID).Scan(
-			&batchInfo.BatchID, &batchInfo.UserID, &batchInfo.UserEmail,
-			&batchInfo.Source, &batchInfo.TotalRecords, &batchInfo.Status, &batchInfo.ApprovalStatus,
-			&batchInfo.CreatedAt, &completedAt, &remarks)
-
+		batchInfo, err := fetchBatchInfo(ctx, pgxPool, req.BatchID)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if err.Error() == "no rows in result set" {
 				api.RespondWithError(w, 404, "batch not found")
 				return
 			}
 			api.RespondWithError(w, 500, "failed to get batch info: "+err.Error())
 			return
-		}
-
-		if completedAt.Valid {
-			batchInfo.CompletedAt = &completedAt.Time
-		}
-		if remarks.Valid {
-			batchInfo.Remarks = remarks.String
-		}
-
-		// Get entities breakdown
-		batchInfo.Entities = EntityBreakdown{}
-
-		// Get AMCs (both new and enriched)
-		amcRows, err := pgxPool.Query(ctx, `
-			SELECT 
-				m.amc_id, m.amc_name, COALESCE(m.internal_amc_code, ''), 
-				m.status, COALESCE(m.is_deleted, false), 
-				COALESCE(om.enriched, false) as enriched
-			FROM investment.onboard_mapping om
-			INNER JOIN investment.masteramc m ON m.amc_id = om.reference_id
-			WHERE om.batch_id::text = $1::text 
-			  AND om.reference_type = 'AMC'
-			ORDER BY m.amc_name`, batchID)
-		if err == nil {
-			for amcRows.Next() {
-				var amc AMCInfo
-				amcRows.Scan(&amc.AmcID, &amc.AmcName, &amc.InternalAmcCode, &amc.Status, &amc.IsDeleted, &amc.Enriched)
-				batchInfo.Entities.AMC = append(batchInfo.Entities.AMC, amc)
-			}
-			amcRows.Close()
-		}
-
-		// Get Schemes (both new and enriched)
-		schemeRows, err := pgxPool.Query(ctx, `
-			SELECT 
-				m.scheme_id, m.scheme_name, COALESCE(m.isin, ''), 
-				COALESCE(m.internal_scheme_code, ''), m.amc_name, m.status, 
-				COALESCE(m.is_deleted, false), COALESCE(om.enriched, false) as enriched
-			FROM investment.onboard_mapping om
-			INNER JOIN investment.masterscheme m ON m.scheme_id = om.reference_id
-			WHERE om.batch_id::text = $1::text 
-			  AND om.reference_type = 'SCHEME'
-			ORDER BY m.scheme_name`, batchID)
-		if err == nil {
-			for schemeRows.Next() {
-				var scheme SchemeInfo
-				schemeRows.Scan(&scheme.SchemeID, &scheme.SchemeName, &scheme.ISIN,
-					&scheme.InternalSchemeCode, &scheme.AmcName, &scheme.Status, &scheme.IsDeleted, &scheme.Enriched)
-				batchInfo.Entities.Scheme = append(batchInfo.Entities.Scheme, scheme)
-			}
-			schemeRows.Close()
-		}
-
-		// Get DPs (both new and enriched)
-		dpRows, err := pgxPool.Query(ctx, `
-			SELECT 
-				m.dp_id, m.dp_name, COALESCE(m.dp_code, ''), 
-				m.depository, m.status, COALESCE(m.is_deleted, false),
-				COALESCE(om.enriched, false) as enriched
-			FROM investment.onboard_mapping om
-			INNER JOIN investment.masterdepositoryparticipant m ON m.dp_id = om.reference_id
-			WHERE om.batch_id::text = $1::text 
-			  AND om.reference_type = 'DP'
-			ORDER BY m.dp_name`, batchID)
-		if err == nil {
-			for dpRows.Next() {
-				var dp DPInfo
-				dpRows.Scan(&dp.DPID, &dp.DPName, &dp.DPCode, &dp.Depository, &dp.Status, &dp.IsDeleted, &dp.Enriched)
-				batchInfo.Entities.DP = append(batchInfo.Entities.DP, dp)
-			}
-			dpRows.Close()
-		}
-
-		// Get Demats (both new and enriched)
-		dematRows, err := pgxPool.Query(ctx, `
-			SELECT 
-				m.demat_id, m.entity_name, COALESCE(m.dp_id, ''), m.depository, 
-				m.demat_account_number, m.default_settlement_account, m.status, 
-				COALESCE(m.is_deleted, false), COALESCE(om.enriched, false) as enriched
-			FROM investment.onboard_mapping om
-			INNER JOIN investment.masterdemataccount m ON m.demat_id = om.reference_id
-			WHERE om.batch_id::text = $1::text 
-			  AND om.reference_type = 'DEMAT'
-			ORDER BY m.entity_name`, batchID)
-		if err == nil {
-			for dematRows.Next() {
-				var demat DematInfo
-				dematRows.Scan(&demat.DematID, &demat.EntityName, &demat.DPID, &demat.Depository,
-					&demat.DematAccountNumber, &demat.DefaultSettlementAcc, &demat.Status, &demat.IsDeleted, &demat.Enriched)
-				batchInfo.Entities.Demat = append(batchInfo.Entities.Demat, demat)
-			}
-			dematRows.Close()
-		}
-
-		// Get Folios (both new and enriched)
-		folioRows, err := pgxPool.Query(ctx, `
-			SELECT 
-				m.folio_id, m.entity_name, m.amc_name, m.folio_number, 
-				COALESCE(m.first_holder_name, ''), m.default_subscription_account, 
-				m.default_redemption_account, m.status, COALESCE(m.is_deleted, false),
-				COALESCE(om.enriched, false) as enriched
-			FROM investment.onboard_mapping om
-			INNER JOIN investment.masterfolio m ON m.folio_id = om.reference_id
-			WHERE om.batch_id::text = $1::text 
-			  AND om.reference_type = 'FOLIO'
-			ORDER BY m.entity_name, m.folio_number`, batchID)
-		if err == nil {
-			for folioRows.Next() {
-				var folio FolioInfo
-				folioRows.Scan(&folio.FolioID, &folio.EntityName, &folio.AmcName, &folio.FolioNumber,
-					&folio.FirstHolderName, &folio.DefaultSubscriptionAccount,
-					&folio.DefaultRedemptionAccount, &folio.Status, &folio.IsDeleted, &folio.Enriched)
-				batchInfo.Entities.Folio = append(batchInfo.Entities.Folio, folio)
-			}
-			folioRows.Close()
-		}
-
-		// Get Onboard Mappings
-		mappingRows, err := pgxPool.Query(ctx, `
-			SELECT id, reference_id, reference_type, reference_name, enriched, created_at
-			FROM investment.onboard_mapping 
-			WHERE batch_id::text = $1::text
-			ORDER BY reference_type, reference_name`, batchID)
-		if err == nil {
-			for mappingRows.Next() {
-				var mapping OnboardMapping
-				mappingRows.Scan(&mapping.ID, &mapping.ReferenceID, &mapping.ReferenceType,
-					&mapping.ReferenceName, &mapping.Enriched, &mapping.CreatedAt)
-				batchInfo.Mappings = append(batchInfo.Mappings, mapping)
-			}
-			mappingRows.Close()
-		}
-
-		// Get Portfolio Maps
-		portfolioRows, err := pgxPool.Query(ctx, `
-			SELECT id, entity_name, COALESCE(folio_id,''), COALESCE(folio_number,''), 
-			       COALESCE(demat_id,''), COALESCE(amc_id,''), COALESCE(scheme_id,''), 
-			       COALESCE(scheme_name,''), created_at
-			FROM investment.portfolio_onboarding_map 
-			WHERE batch_id::text = $1::text
-			ORDER BY entity_name`, batchID)
-		if err == nil {
-			for portfolioRows.Next() {
-				var portfolio PortfolioMap
-				portfolioRows.Scan(&portfolio.ID, &portfolio.EntityName, &portfolio.FolioID,
-					&portfolio.FolioNumber, &portfolio.DematID, &portfolio.AmcID,
-					&portfolio.SchemeID, &portfolio.SchemeName, &portfolio.CreatedAt)
-				batchInfo.PortfolioMaps = append(batchInfo.PortfolioMaps, portfolio)
-			}
-			portfolioRows.Close()
-		}
-
-		// Get Portfolio Snapshots
-		snapshotRows, err := pgxPool.Query(ctx, `
-			SELECT id, entity_name, folio_number, COALESCE(scheme_id,''), COALESCE(scheme_name,''),
-			       COALESCE(isin,''), total_units, avg_nav, current_nav, current_value, gain_loss, created_at
-			FROM investment.portfolio_snapshot 
-			WHERE batch_id::text = $1::text
-			ORDER BY entity_name, folio_number`, batchID)
-		if err == nil {
-			for snapshotRows.Next() {
-				var snapshot PortfolioSnapshot
-				snapshotRows.Scan(&snapshot.ID, &snapshot.EntityName, &snapshot.FolioNumber,
-					&snapshot.SchemeID, &snapshot.SchemeName, &snapshot.ISIN,
-					&snapshot.TotalUnits, &snapshot.AvgNav, &snapshot.CurrentNav,
-					&snapshot.CurrentValue, &snapshot.GainLoss, &snapshot.CreatedAt)
-				batchInfo.Snapshots = append(batchInfo.Snapshots, snapshot)
-			}
-			snapshotRows.Close()
-		}
-
-		// Get Transactions
-		txRows, err := pgxPool.Query(ctx, `
-			SELECT id, transaction_date, transaction_type, scheme_internal_code, folio_number,
-			       amount, units, nav, created_at
-			FROM investment.onboard_transaction 
-			WHERE batch_id::text = $1::text
-			ORDER BY transaction_date DESC`, batchID)
-		if err == nil {
-			for txRows.Next() {
-				var tx TransactionSummary
-				txRows.Scan(&tx.ID, &tx.TransactionDate, &tx.TransactionType,
-					&tx.SchemeInternalCode, &tx.FolioNumber, &tx.Amount,
-					&tx.Units, &tx.Nav, &tx.CreatedAt)
-				batchInfo.Transactions = append(batchInfo.Transactions, tx)
-			}
-			txRows.Close()
 		}
 
 		api.RespondWithPayload(w, true, "", batchInfo)

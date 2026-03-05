@@ -171,6 +171,17 @@ func BulkApproveBatch(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Fire notifications asynchronously for each approved/rejected batch
+		actionCopy := req.Action
+		userEmailCopy := userEmail
+		batchIDsCopy := append([]string(nil), batchIDs...)
+		poolRef := pgxPool
+		go func() {
+			for _, bid := range batchIDsCopy {
+				BuildOnboardApprovalNotifPayload(context.Background(), poolRef, bid, actionCopy, userEmailCopy)
+			}
+		}()
+
 		message := fmt.Sprintf("%d batches %sd successfully", len(batchIDs), strings.ToLower(req.Action))
 		if len(batchIDs) == 1 {
 			message = fmt.Sprintf("Batch %s %sd successfully", batchIDs[0], strings.ToLower(req.Action))

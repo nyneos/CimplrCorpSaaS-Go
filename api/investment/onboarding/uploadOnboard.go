@@ -4,7 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 
-	// "context"
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	_ "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -1118,6 +1119,13 @@ WHERE ts.total_units > 0;
 		}
 		tx = nil
 		log.Printf("[bulk] committed batch %s", batchID)
+
+		// Fire notification asynchronously
+		batchIDCopy := batchID
+		userEmailCopy := userEmail
+		poolRef := pgxPool
+		go BuildOnboardUploadNotifPayload(context.Background(), poolRef, batchIDCopy, userEmailCopy)
+
 		log.Printf("[bulk] final counts: %+v", counts)
 		log.Printf("[bulk] enriched counts: %+v", enrichedCounts)
 
