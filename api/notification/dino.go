@@ -75,6 +75,8 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/notification/config/all", middlewares.PreValidationMiddleware(pool)(catalog.GetNotifConfig(pool)))
 	mux.Handle("/notification/config/toggle", middlewares.PreValidationMiddleware(pool)(catalog.ToggleNotifConfig(pool)))
 	mux.Handle("/notification/config/upsert", middlewares.PreValidationMiddleware(pool)(catalog.UpsertNotifConfig(pool)))
+	mux.Handle("/notification/config/bulk-approve", middlewares.PreValidationMiddleware(pool)(catalog.BulkApproveNotifConfig(pool)))
+	mux.Handle("/notification/config/bulk-reject", middlewares.PreValidationMiddleware(pool)(catalog.BulkRejectNotifConfig(pool)))
 
 	log.Printf("Notification Service started on :%s", notificationPort)
 	if err := http.ListenAndServe(":"+notificationPort, mux); err != nil {
