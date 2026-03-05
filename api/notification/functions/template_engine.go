@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -58,6 +59,11 @@ func ExtractVariables(tpl string) []string {
 //	TABLE_HTML, KPI_CARDS_HTML, ROWS_HTML, SUMMARY_TABLE_HTML,
 //	IF, BADGE_HTML, SUBTRACT, and more.
 func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error) {
+	// Guard against pathologically large templates
+	if len(tpl) > 200_000 {
+		return "", errors.New("template too large (>200 KB)")
+	}
+
 	// Normalize template: auto-wrap if needed
 	normalized := normalizeTemplate(tpl, payload)
 
@@ -71,7 +77,9 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 	//      callers (dispatcher, dry-run validator) can see what went wrong.
 	result := normalized
 	var evalErrors []string
-	const maxIterations = 500 // guard against infinite loops in pathological templates
+	const maxIterations = 1000 // hard cap: 1000 function evaluations per render
+	const maxDepth = 50        // guard against deeply nested calls (caught via iteration count)
+	_ = maxDepth               // used as documentation; iteration cap handles it in practice
 	iterations := 0
 	for {
 		if iterations >= maxIterations {
@@ -111,7 +119,20 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 		// Try to look up in payload
 		v, ok := lookupPayload(key, payload)
 		if ok {
-			return toString(v)
+			// If the resolved value is a list (e.g. from an implicit wildcard path like
+			// Initiations.initiation_id), auto-join it into a readable comma-separated string
+			// so {{Initiations.initiation_id}} renders as "INI-1, INI-2, INI-3".
+			if sl, isList := toAnySlice(v); isList {
+				parts := make([]string, 0, len(sl))
+				for _, e := range sl {
+					parts = append(parts, html.EscapeString(toString(e)))
+				}
+				return strings.Join(parts, ", ")
+			}
+			// Scalar: escape payload value for XSS safety.
+			// Function outputs (TABLE_HTML, KPI_CARDS_HTML, etc.) are already
+			// substituted as raw strings BEFORE this step, so they are unaffected.
+			return html.EscapeString(toString(v))
 		}
 
 		// If not in payload, treat as a literal value (result of function evaluation)
@@ -126,11 +147,24 @@ func EvaluateTemplate(tpl string, payload map[string]interface{}) (string, error
 // if ANY function call failed during rendering — used by the pre-save dry-run
 // validator in templateCatalog.go so broken templates are caught before DB write.
 func EvaluateTemplateStrict(tpl string, payload map[string]interface{}) (string, error) {
-	result, _ := EvaluateTemplate(tpl, payload)
+	// Shallow-copy payload so the render pass's FILTER/ORDER_BY/GROUP_BY side-effects
+	// (phantom __filter_*/  __ordered_* / __grouped_* keys) don't pollute the
+	// strict validation pass that runs immediately after on the same map.
+	renderPayload := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		renderPayload[k] = v
+	}
+	result, _ := EvaluateTemplate(tpl, renderPayload)
+
 	// Re-run the function scan on the original template to detect any errors.
 	// We run EvaluateTemplate first (to get the rendered output) then re-validate
 	// by evaluating each function call individually in strict mode.
-	normalized := normalizeTemplate(tpl, payload)
+	// Use another fresh copy so this validation pass is also isolated.
+	validatePayload := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		validatePayload[k] = v
+	}
+	normalized := normalizeTemplate(tpl, validatePayload)
 	tmp := normalized
 	const maxIter = 500
 	iter := 0
@@ -144,7 +178,7 @@ func EvaluateTemplateStrict(tpl string, payload map[string]interface{}) (string,
 			break
 		}
 		args := splitArgs(argsRaw)
-		if _, err := evaluateFunction(name, args, payload); err != nil {
+		if _, err := evaluateFunction(name, args, validatePayload); err != nil {
 			return result, fmt.Errorf("%s(%s): %v", name, argsRaw, err)
 		}
 		tmp = tmp[:start] + "ok" + tmp[end+1:]
@@ -177,10 +211,12 @@ func normalizeTemplate(tpl string, payload map[string]interface{}) string {
 		"FILTER", "ORDER_BY", "GROUP_BY",
 		"TABLE_HTML", "KPI_CARDS_HTML", "ROWS_HTML", "SUMMARY_TABLE_HTML",
 		"IF", "BADGE_HTML",
-		// Additional functions that may be added later
+		// Additional math / string helpers
 		"MIN", "MAX", "ROUND", "CEIL", "FLOOR", "ABS",
 		"TRIM", "REPLACE", "SPLIT", "JOIN", "LENGTH",
 		"CONTAINS", "STARTS_WITH", "ENDS_WITH", "INDEX_OF",
+		// List helpers
+		"FIRST_OF", "LAST_OF", "ANY_OF", "COUNT_DISTINCT",
 	}
 
 	result := tpl
@@ -628,7 +664,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		if !oka || !okb {
 			return "0", nil
 		}
-		n := min(len(a), len(b))
+		n := intMin(len(a), len(b))
 		s := 0.0
 		for i := 0; i < n; i++ {
 			s += a[i] * b[i]
@@ -644,9 +680,10 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		return formatCurrency(v), nil
 	case "FORMAT_DATE":
-		// FORMAT_DATE(dateVarOrLiteral, format)
-		if len(args) != 2 {
-			return "", errors.New("FORMAT_DATE expects 2 args: date, format")
+		// FORMAT_DATE(dateVarOrLiteral [, format])
+		// format is optional — defaults to '02 Jan 2006'
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("FORMAT_DATE expects 1 or 2 args: date [, format]")
 		}
 		dateStr := ""
 		if isQuoted(args[0]) {
@@ -658,7 +695,10 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			}
 			dateStr = toString(v)
 		}
-		format := unquote(args[1])
+		format := "02 Jan 2006" // default human-readable layout
+		if len(args) == 2 {
+			format = unquote(args[1])
+		}
 		// try parse common layouts
 		t, err := parseDate(dateStr)
 		if err != nil {
@@ -811,6 +851,277 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			return toStringFloat(a / b), nil
 		}
 
+	// ─── ADDITIONAL MATH & STRING UTIL FUNCTIONS ──────────────────────────────
+	case "MIN":
+		// MIN(listVar) or MIN(a,b,c...)
+		if len(args) == 1 {
+			if list, ok := getNumberList(args[0], payload); ok && len(list) > 0 {
+				mn := list[0]
+				for _, v := range list[1:] {
+					if v < mn {
+						mn = v
+					}
+				}
+				return toStringFloat(mn), nil
+			}
+		}
+		vals := []float64{}
+		for _, a := range args {
+			if v, ok := resolveNumericArg(a, payload); ok {
+				vals = append(vals, v)
+			}
+		}
+		if len(vals) == 0 {
+			return "0", nil
+		}
+		mn := vals[0]
+		for _, v := range vals[1:] {
+			if v < mn {
+				mn = v
+			}
+		}
+		return toStringFloat(mn), nil
+
+	case "MAX":
+		// MAX(listVar) or MAX(a,b,c...)
+		if len(args) == 1 {
+			if list, ok := getNumberList(args[0], payload); ok && len(list) > 0 {
+				mx := list[0]
+				for _, v := range list[1:] {
+					if v > mx {
+						mx = v
+					}
+				}
+				return toStringFloat(mx), nil
+			}
+		}
+		vals := []float64{}
+		for _, a := range args {
+			if v, ok := resolveNumericArg(a, payload); ok {
+				vals = append(vals, v)
+			}
+		}
+		if len(vals) == 0 {
+			return "0", nil
+		}
+		mx := vals[0]
+		for _, v := range vals[1:] {
+			if v > mx {
+				mx = v
+			}
+		}
+		return toStringFloat(mx), nil
+
+	case "ROUND":
+		// ROUND(number [, places])
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("ROUND expects 1 or 2 args")
+		}
+		v, ok := resolveNumericArg(args[0], payload)
+		if !ok {
+			return "", nil
+		}
+		places := 0
+		if len(args) == 2 {
+			p, err := strconv.Atoi(strings.TrimSpace(args[1]))
+			if err == nil {
+				places = p
+			}
+		}
+		pow := math.Pow(10, float64(places))
+		return toStringFloat(math.Round(v*pow) / pow), nil
+
+	case "CEIL":
+		if len(args) != 1 {
+			return "", errors.New("CEIL expects 1 arg")
+		}
+		v, ok := resolveNumericArg(args[0], payload)
+		if !ok {
+			return "", nil
+		}
+		return toStringFloat(math.Ceil(v)), nil
+
+	case "FLOOR":
+		if len(args) != 1 {
+			return "", errors.New("FLOOR expects 1 arg")
+		}
+		v, ok := resolveNumericArg(args[0], payload)
+		if !ok {
+			return "", nil
+		}
+		return toStringFloat(math.Floor(v)), nil
+
+	case "ABS":
+		if len(args) != 1 {
+			return "", errors.New("ABS expects 1 arg")
+		}
+		v, ok := resolveNumericArg(args[0], payload)
+		if !ok {
+			return "", nil
+		}
+		return toStringFloat(math.Abs(v)), nil
+
+	case "TRIM":
+		if len(args) != 1 {
+			return "", errors.New("TRIM expects 1 arg")
+		}
+		var s string
+		if isQuoted(args[0]) {
+			s = unquote(args[0])
+		} else if v, ok := lookupPayload(args[0], payload); ok {
+			s = toString(v)
+		} else {
+			s = args[0]
+		}
+		return strings.TrimSpace(s), nil
+
+	case "REPLACE":
+		// REPLACE(subject, old, new)
+		if len(args) != 3 {
+			return "", errors.New("REPLACE expects 3 args")
+		}
+		subj := args[0]
+		if !isQuoted(subj) {
+			if v, ok := lookupPayload(subj, payload); ok {
+				subj = toString(v)
+			}
+		} else {
+			subj = unquote(subj)
+		}
+		old := unquote(args[1])
+		new := unquote(args[2])
+		return strings.ReplaceAll(subj, old, new), nil
+
+	case "SPLIT":
+		// SPLIT(subject, sep [, idx]) -> returns element at idx if provided else joined by comma
+		if len(args) < 2 || len(args) > 3 {
+			return "", errors.New("SPLIT expects 2 or 3 args")
+		}
+		subj := args[0]
+		if !isQuoted(subj) {
+			if v, ok := lookupPayload(subj, payload); ok {
+				subj = toString(v)
+			}
+		} else {
+			subj = unquote(subj)
+		}
+		sep := unquote(args[1])
+		parts := strings.Split(subj, sep)
+		if len(args) == 3 {
+			idx, err := strconv.Atoi(strings.TrimSpace(args[2]))
+			if err != nil || idx < 0 || idx >= len(parts) {
+				return "", nil
+			}
+			return parts[idx], nil
+		}
+		return strings.Join(parts, ","), nil
+
+	case "JOIN":
+		// JOIN(listVar, sep)
+		if len(args) != 2 {
+			return "", errors.New("JOIN expects 2 args: listVar, sep")
+		}
+		v, ok := lookupPayload(args[0], payload)
+		if !ok {
+			return "", nil
+		}
+		sep := unquote(args[1])
+		switch t := v.(type) {
+		case []string:
+			return strings.Join(t, sep), nil
+		case []interface{}:
+			parts := make([]string, 0, len(t))
+			for _, e := range t {
+				parts = append(parts, toString(e))
+			}
+			return strings.Join(parts, sep), nil
+		default:
+			return toString(v), nil
+		}
+
+	case "LENGTH":
+		if len(args) != 1 {
+			return "", errors.New("LENGTH expects 1 arg")
+		}
+		// string or list
+		if isQuoted(args[0]) {
+			return strconv.Itoa(len(unquote(args[0]))), nil
+		}
+		if v, ok := lookupPayload(args[0], payload); ok {
+			switch t := v.(type) {
+			case string:
+				return strconv.Itoa(len(t)), nil
+			case []interface{}:
+				return strconv.Itoa(len(t)), nil
+			case []string:
+				return strconv.Itoa(len(t)), nil
+			case map[string]interface{}:
+				return strconv.Itoa(len(t)), nil
+			}
+		}
+		return "0", nil
+
+	case "CONTAINS":
+		if len(args) != 2 {
+			return "", errors.New("CONTAINS expects 2 args: subject, substr")
+		}
+		subj := args[0]
+		if !isQuoted(subj) {
+			if v, ok := lookupPayload(subj, payload); ok {
+				subj = toString(v)
+			}
+		} else {
+			subj = unquote(subj)
+		}
+		sub := unquote(args[1])
+		return strconv.FormatBool(strings.Contains(subj, sub)), nil
+
+	case "STARTS_WITH":
+		if len(args) != 2 {
+			return "", errors.New("STARTS_WITH expects 2 args")
+		}
+		subj := args[0]
+		if !isQuoted(subj) {
+			if v, ok := lookupPayload(subj, payload); ok {
+				subj = toString(v)
+			}
+		} else {
+			subj = unquote(subj)
+		}
+		prefix := unquote(args[1])
+		return strconv.FormatBool(strings.HasPrefix(subj, prefix)), nil
+
+	case "ENDS_WITH":
+		if len(args) != 2 {
+			return "", errors.New("ENDS_WITH expects 2 args")
+		}
+		subj := args[0]
+		if !isQuoted(subj) {
+			if v, ok := lookupPayload(subj, payload); ok {
+				subj = toString(v)
+			}
+		} else {
+			subj = unquote(subj)
+		}
+		suffix := unquote(args[1])
+		return strconv.FormatBool(strings.HasSuffix(subj, suffix)), nil
+
+	case "INDEX_OF":
+		if len(args) != 2 {
+			return "", errors.New("INDEX_OF expects 2 args: subject, substr")
+		}
+		subj := args[0]
+		if !isQuoted(subj) {
+			if v, ok := lookupPayload(subj, payload); ok {
+				subj = toString(v)
+			}
+		} else {
+			subj = unquote(subj)
+		}
+		sub := unquote(args[1])
+		idx := strings.Index(subj, sub)
+		return strconv.Itoa(idx), nil
+
 	// ─── LIST / TABLE FUNCTIONS ────────────────────────────────────────────────
 	// All list functions work on a payload key that holds []map[string]interface{}
 	// (i.e. a slice of row-objects). This matches the BankStatementNotifPayload
@@ -848,15 +1159,15 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 
 	case "SUM_OF_FIELD":
-		// SUM_OF_FIELD(listVar, 'field') → sum numeric field across all rows
+		// SUM_OF_FIELD(listVar, field) — field may be quoted or unquoted
 		if len(args) != 2 {
-			return "", errors.New("SUM_OF_FIELD expects 2 args: listVar, 'field'")
+			return "", errors.New("SUM_OF_FIELD expects 2 args: listVar, field")
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok {
 			return "0", nil
 		}
-		field := unquote(args[1])
+		field := resolveFieldArg(args[1])
 		total := 0.0
 		for _, row := range rows {
 			total += rowFloat(row, field)
@@ -864,16 +1175,15 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return toStringFloat(total), nil
 
 	case "TOTAL_OF":
-		// Alias of SUM_OF_FIELD for more natural template language
-		// TOTAL_OF(listVar, 'field')
+		// TOTAL_OF(listVar, field) — alias for SUM_OF_FIELD
 		if len(args) != 2 {
-			return "", errors.New("TOTAL_OF expects 2 args: listVar, 'field'")
+			return "", errors.New("TOTAL_OF expects 2 args: listVar, field")
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok {
 			return "0", nil
 		}
-		field := unquote(args[1])
+		field := resolveFieldArg(args[1])
 		total := 0.0
 		for _, row := range rows {
 			total += rowFloat(row, field)
@@ -881,15 +1191,15 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return toStringFloat(total), nil
 
 	case "AVG_OF_FIELD":
-		// AVG_OF_FIELD(listVar, 'field') → average of numeric field
+		// AVG_OF_FIELD(listVar, field)
 		if len(args) != 2 {
-			return "", errors.New("AVG_OF_FIELD expects 2 args: listVar, 'field'")
+			return "", errors.New("AVG_OF_FIELD expects 2 args: listVar, field")
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok || len(rows) == 0 {
 			return "0", nil
 		}
-		field := unquote(args[1])
+		field := resolveFieldArg(args[1])
 		total := 0.0
 		for _, row := range rows {
 			total += rowFloat(row, field)
@@ -897,15 +1207,15 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return toStringFloat(total / float64(len(rows))), nil
 
 	case "MAX_OF_FIELD":
-		// MAX_OF_FIELD(listVar, 'field')
+		// MAX_OF_FIELD(listVar, field)
 		if len(args) != 2 {
-			return "", errors.New("MAX_OF_FIELD expects 2 args: listVar, 'field'")
+			return "", errors.New("MAX_OF_FIELD expects 2 args: listVar, field")
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok || len(rows) == 0 {
 			return "0", nil
 		}
-		field := unquote(args[1])
+		field := resolveFieldArg(args[1])
 		mx := rowFloat(rows[0], field)
 		for _, row := range rows[1:] {
 			if v := rowFloat(row, field); v > mx {
@@ -915,15 +1225,15 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return toStringFloat(mx), nil
 
 	case "MIN_OF_FIELD":
-		// MIN_OF_FIELD(listVar, 'field')
+		// MIN_OF_FIELD(listVar, field)
 		if len(args) != 2 {
-			return "", errors.New("MIN_OF_FIELD expects 2 args: listVar, 'field'")
+			return "", errors.New("MIN_OF_FIELD expects 2 args: listVar, field")
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok || len(rows) == 0 {
 			return "0", nil
 		}
-		field := unquote(args[1])
+		field := resolveFieldArg(args[1])
 		mn := rowFloat(rows[0], field)
 		for _, row := range rows[1:] {
 			if v := rowFloat(row, field); v < mn {
@@ -954,8 +1264,9 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 				filtered = append(filtered, row)
 			}
 		}
-		// Store back into payload so subsequent functions in the same evaluation chain
-		// can read __filter_result. Also return count.
+		// Expose result under a namespaced key so the caller can chain it into
+		// TABLE_HTML / ROWS_HTML.  The "__filter_" prefix ensures no collision
+		// with any user payload key.
 		resultKey := fmt.Sprintf("__filter_%s_%s", field, value)
 		payload[resultKey] = filtered
 		return strconv.Itoa(len(filtered)), nil
@@ -974,6 +1285,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		field := unquote(args[1])
 		dir := strings.ToUpper(unquote(args[2]))
 
+		// Shallow-copy to avoid mutating the slice referenced by the original payload.
 		sorted := make([]map[string]interface{}, len(rows))
 		copy(sorted, rows)
 		sort.SliceStable(sorted, func(i, j int) bool {
@@ -1076,17 +1388,22 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 				}
 			}
 		} else {
-			// Simple format: each remaining arg is a quoted column name
+			// Simple format: quoted or unquoted column names are both accepted
 			cols = make([]string, len(args)-1)
 			for i, a := range args[1:] {
-				cols[i] = unquote(a)
+				c := strings.TrimSpace(a)
+				if isQuoted(c) {
+					cols[i] = unquote(c)
+				} else {
+					cols[i] = c
+				}
 			}
 		}
 		// Build labels from cols if not provided
 		if len(labels) == 0 {
 			labels = make([]string, len(cols))
 			for i, c := range cols {
-				labels[i] = strings.Title(strings.ReplaceAll(c, "_", " "))
+				labels[i] = titleCase(strings.ReplaceAll(c, "_", " "))
 			}
 		}
 		var sb strings.Builder
@@ -1094,7 +1411,7 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		// header
 		sb.WriteString(`<thead><tr>`)
 		for _, lbl := range labels {
-			label := strings.ReplaceAll(lbl, " ", "&nbsp;")
+			label := strings.ReplaceAll(html.EscapeString(lbl), " ", "&nbsp;")
 			sb.WriteString(fmt.Sprintf(`<th style="border:1px solid #ddd;padding:8px;background:#f2f2f2;text-align:left">%s</th>`, label))
 		}
 		sb.WriteString(`</tr></thead><tbody>`)
@@ -1126,7 +1443,12 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		cols := make([]string, len(args)-1)
 		for i, a := range args[1:] {
-			cols[i] = unquote(a)
+			c := strings.TrimSpace(a)
+			if isQuoted(c) {
+				cols[i] = unquote(c)
+			} else {
+				cols[i] = c
+			}
 		}
 		var sb strings.Builder
 		for idx, row := range rows {
@@ -1372,12 +1694,135 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		return fmt.Sprintf(`<span style="background:%s;color:#fff;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">%s</span>`,
 			color, html.EscapeString(val)), nil
+
+	case "FIRST_OF":
+		// FIRST_OF(listVar, field) → value of field in the first row
+		// FIRST_OF(listVar)        → first scalar element of the list
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("FIRST_OF expects 1 or 2 args: listVar [, field]")
+		}
+		if len(args) == 1 {
+			v, ok := lookupPayload(args[0], payload)
+			if !ok {
+				return "", nil
+			}
+			if sl, ok := toAnySlice(v); ok && len(sl) > 0 {
+				return toString(sl[0]), nil
+			}
+			return toString(v), nil
+		}
+		rows, ok := getRowList(args[0], payload)
+		if !ok || len(rows) == 0 {
+			return "", nil
+		}
+		field := resolveFieldArg(args[1])
+		return rowDisplayValue(rows[0], field), nil
+
+	case "LAST_OF":
+		// LAST_OF(listVar, field) → value of field in the last row
+		// LAST_OF(listVar)        → last scalar element of the list
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("LAST_OF expects 1 or 2 args: listVar [, field]")
+		}
+		if len(args) == 1 {
+			v, ok := lookupPayload(args[0], payload)
+			if !ok {
+				return "", nil
+			}
+			if sl, ok := toAnySlice(v); ok && len(sl) > 0 {
+				return toString(sl[len(sl)-1]), nil
+			}
+			return toString(v), nil
+		}
+		rows, ok := getRowList(args[0], payload)
+		if !ok || len(rows) == 0 {
+			return "", nil
+		}
+		field := resolveFieldArg(args[1])
+		return rowDisplayValue(rows[len(rows)-1], field), nil
+
+	case "ANY_OF":
+		// ANY_OF(listVar, field) → comma-separated list of all values for that field
+		// ANY_OF(listVar)        → comma-separated string of scalar list elements
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("ANY_OF expects 1 or 2 args: listVar [, field]")
+		}
+		if len(args) == 1 {
+			v, ok := lookupPayload(args[0], payload)
+			if !ok {
+				return "", nil
+			}
+			if sl, ok := toAnySlice(v); ok {
+				parts := make([]string, 0, len(sl))
+				for _, e := range sl {
+					parts = append(parts, toString(e))
+				}
+				return strings.Join(parts, ", "), nil
+			}
+			return toString(v), nil
+		}
+		rows, ok := getRowList(args[0], payload)
+		if !ok {
+			return "", nil
+		}
+		field := resolveFieldArg(args[1])
+		parts := make([]string, 0, len(rows))
+		for _, row := range rows {
+			parts = append(parts, rowDisplayValue(row, field))
+		}
+		return strings.Join(parts, ", "), nil
+
+	case "COUNT_DISTINCT":
+		// COUNT_DISTINCT(listVar, field) → number of unique values of field across rows
+		// COUNT_DISTINCT(listVar)        → number of distinct scalar elements
+		if len(args) < 1 || len(args) > 2 {
+			return "", errors.New("COUNT_DISTINCT expects 1 or 2 args: listVar [, field]")
+		}
+		if len(args) == 1 {
+			v, ok := lookupPayload(args[0], payload)
+			if !ok {
+				return "0", nil
+			}
+			if sl, ok := toAnySlice(v); ok {
+				seen := map[string]bool{}
+				for _, e := range sl {
+					seen[toString(e)] = true
+				}
+				return strconv.Itoa(len(seen)), nil
+			}
+			return "1", nil
+		}
+		rows, ok := getRowList(args[0], payload)
+		if !ok {
+			return "0", nil
+		}
+		fieldCD := resolveFieldArg(args[1])
+		seen := map[string]bool{}
+		for _, row := range rows {
+			seen[rowString(row, fieldCD)] = true
+		}
+		return strconv.Itoa(len(seen)), nil
 	}
 
 	return "", fmt.Errorf("unsupported function: %s", name)
 }
 
-func min(a, b int) int {
+// titleCase converts the first letter of every word to upper-case.
+// Replaces the deprecated strings.Title.
+func titleCase(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if len(w) == 0 {
+			continue
+		}
+		runes := []rune(w)
+		runes[0] = unicode.ToUpper(runes[0])
+		words[i] = string(runes)
+	}
+	return strings.Join(words, " ")
+}
+
+func intMin(a, b int) int {
 	if a < b {
 		return a
 	}
@@ -1402,7 +1847,212 @@ func unquote(s string) string {
 	return s
 }
 
-// lookupPayload fetches a key from payload (case-sensitive then case-insensitive)
+// resolveFieldArg returns the field name from a function argument that may be
+// either a quoted string ('amount') or an unquoted identifier (amount).
+func resolveFieldArg(arg string) string {
+	a := strings.TrimSpace(arg)
+	if isQuoted(a) {
+		return unquote(a)
+	}
+	return a
+}
+
+// lookupPayloadPath resolves a dot-notation path like "Initiations.0.initiation_id"
+// or a wildcard path like "Initiations.*.amount" against the payload map.
+//
+// Supported traversal:
+//   - map[string]interface{} — case-insensitive key lookup
+//   - []interface{}          — numeric index ("0", "1" …) OR wildcard ("*")
+//   - []map[string]interface{} — same as above
+//
+// Wildcard "*" at any position collects that segment's value from every element
+// of the current slice and returns them as []interface{}.
+// Subsequent segments after "*" continue traversal into each collected element.
+func lookupPayloadPath(path string, payload map[string]interface{}) (interface{}, bool) {
+	parts := strings.Split(path, ".")
+
+	// resolve first segment from the top-level payload (case-insensitive)
+	var current interface{}
+	first := parts[0]
+	found := false
+	if v, ok := payload[first]; ok {
+		current = v
+		found = true
+	} else {
+		lower := strings.ToLower(first)
+		for k, v := range payload {
+			if strings.ToLower(k) == lower {
+				current = v
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return nil, false
+	}
+
+	// traverse remaining segments
+	for idx, seg := range parts[1:] {
+		if current == nil {
+			return nil, false
+		}
+
+		// Wildcard: collect value from every element of the current slice,
+		// then continue traversal of remaining parts into each collected element.
+		if seg == "*" {
+			slice, ok := toAnySlice(current)
+			if !ok {
+				return nil, false
+			}
+			remainingParts := parts[idx+2:] // segments after "*"
+			var collected []interface{}
+			for _, elem := range slice {
+				if len(remainingParts) == 0 {
+					collected = append(collected, elem)
+				} else if m, ok := elem.(map[string]interface{}); ok {
+					if v, ok2 := lookupInNode(m, remainingParts); ok2 {
+						collected = append(collected, v)
+					}
+				}
+			}
+			return collected, true
+		}
+
+		switch node := current.(type) {
+		case map[string]interface{}:
+			// case-insensitive key lookup
+			matched := false
+			lower := strings.ToLower(seg)
+			for k, v := range node {
+				if strings.ToLower(k) == lower {
+					current = v
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil, false
+			}
+		case []interface{}:
+			// Numeric index → direct access; non-numeric field name → implicit wildcard collect.
+			if i, err := strconv.Atoi(seg); err == nil {
+				if i < 0 || i >= len(node) {
+					return nil, false // out-of-bounds → safe empty string
+				}
+				current = node[i]
+			} else {
+				// Implicit wildcard: collect field `seg` (+ any remaining path) from every element.
+				remaining := append([]string{seg}, parts[idx+2:]...)
+				var collected []interface{}
+				for _, elem := range node {
+					if m, ok := elem.(map[string]interface{}); ok {
+						if v, ok2 := lookupInNode(m, remaining); ok2 {
+							collected = append(collected, v)
+						}
+					}
+				}
+				return collected, true
+			}
+		case []map[string]interface{}:
+			// Numeric index → direct access; non-numeric field name → implicit wildcard.
+			if i, err := strconv.Atoi(seg); err == nil {
+				if i < 0 || i >= len(node) {
+					return nil, false
+				}
+				current = node[i]
+			} else {
+				remaining := append([]string{seg}, parts[idx+2:]...)
+				var collected []interface{}
+				for _, m := range node {
+					if v, ok2 := lookupInNode(m, remaining); ok2 {
+						collected = append(collected, v)
+					}
+				}
+				return collected, true
+			}
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+// toAnySlice coerces []interface{} or []map[string]interface{} to []interface{}.
+func toAnySlice(v interface{}) ([]interface{}, bool) {
+	switch t := v.(type) {
+	case []interface{}:
+		return t, true
+	case []map[string]interface{}:
+		out := make([]interface{}, len(t))
+		for i, m := range t {
+			out[i] = m
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// lookupInNode traverses a row/sub-map using the given path segments.
+// Unlike lookupPayloadPath it does NOT do top-level payload resolution — it starts
+// directly inside the provided node. Used by wildcard/implicit-wildcard branches so
+// they don’t incorrectly re-apply top-level case-insensitive lookup against a row map.
+func lookupInNode(node map[string]interface{}, parts []string) (interface{}, bool) {
+	if len(parts) == 0 {
+		return nil, false
+	}
+	// case-insensitive key lookup at this level
+	var current interface{}
+	var found bool
+	firstLower := strings.ToLower(parts[0])
+	for k, v := range node {
+		if strings.ToLower(k) == firstLower {
+			current = v
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	if len(parts) == 1 {
+		return current, true
+	}
+	// recurse for remaining segments
+	for _, seg := range parts[1:] {
+		if current == nil {
+			return nil, false
+		}
+		switch n := current.(type) {
+		case map[string]interface{}:
+			var next interface{}
+			segLower := strings.ToLower(seg)
+			for k, v := range n {
+				if strings.ToLower(k) == segLower {
+					next = v
+					break
+				}
+			}
+			if next == nil {
+				return nil, false
+			}
+			current = next
+		case []interface{}:
+			if i, err := strconv.Atoi(seg); err == nil && i >= 0 && i < len(n) {
+				current = n[i]
+			} else {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+// lookupPayload fetches a key from payload (case-sensitive then case-insensitive).
+// Supports dot-notation paths like "Initiations.0.initiation_id" and
+// "initiation.initiation_id".
 func lookupPayload(key string, payload map[string]interface{}) (interface{}, bool) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -1411,6 +2061,10 @@ func lookupPayload(key string, payload map[string]interface{}) (interface{}, boo
 	// Unwrap {{...}} — this happens when inner function results are passed as args
 	if strings.HasPrefix(key, "{{") && strings.HasSuffix(key, "}}") {
 		key = strings.TrimSpace(key[2 : len(key)-2])
+	}
+	// Dot-notation path — delegate to traversal helper
+	if strings.Contains(key, ".") {
+		return lookupPayloadPath(key, payload)
 	}
 	if v, ok := payload[key]; ok {
 		return v, true

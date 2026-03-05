@@ -50,6 +50,13 @@ var knownTemplateFunctions = map[string]struct{}{
 	"FILTER": {}, "ORDER_BY": {}, "GROUP_BY": {},
 	"TABLE_HTML": {}, "KPI_CARDS_HTML": {}, "ROWS_HTML": {}, "SUMMARY_TABLE_HTML": {},
 	"IF": {}, "BADGE_HTML": {},
+	// Math helpers
+	"MIN": {}, "MAX": {}, "ROUND": {}, "CEIL": {}, "FLOOR": {}, "ABS": {},
+	// String helpers
+	"TRIM": {}, "REPLACE": {}, "SPLIT": {}, "JOIN": {},
+	"LENGTH": {}, "CONTAINS": {}, "STARTS_WITH": {}, "ENDS_WITH": {}, "INDEX_OF": {},
+	// List helpers
+	"FIRST_OF": {}, "LAST_OF": {}, "ANY_OF": {}, "COUNT_DISTINCT": {},
 }
 
 // functionCallRe matches UPPER_SNAKE_NAME( anywhere in text.
@@ -165,6 +172,8 @@ var listFunctions = map[string]struct{}{
 	"MAX_OF_FIELD": {}, "MIN_OF_FIELD": {},
 	"FILTER": {}, "ORDER_BY": {}, "GROUP_BY": {},
 	"COUNT_OF": {}, "SUM": {}, "AVERAGE": {}, "AVG": {}, "SUMPRODUCT": {},
+	// New list helpers also consume row-lists as first arg
+	"FIRST_OF": {}, "LAST_OF": {}, "ANY_OF": {}, "COUNT_DISTINCT": {},
 }
 
 // numericFunctions is the set of functions whose FIRST argument must be a number.
@@ -368,12 +377,69 @@ func humanReadableTemplateError(raw string) string {
 		return `DIVIDE: cannot divide by zero. Make sure the second argument (divisor) is never 0.`
 	}
 
+	// ── new math helpers ─────────────────────────────────────────────────────
+	if strings.Contains(raw, "ROUND expects") {
+		return "ROUND(number) or ROUND(number, decimalPlaces) — e.g. {{ROUND(Amount, 2)}}"
+	}
+	if strings.Contains(raw, "CEIL expects") {
+		return "CEIL(number) — rounds up to nearest integer — e.g. {{CEIL(Amount)}}"
+	}
+	if strings.Contains(raw, "FLOOR expects") {
+		return "FLOOR(number) — rounds down to nearest integer — e.g. {{FLOOR(Amount)}}"
+	}
+	if strings.Contains(raw, "ABS expects") {
+		return "ABS(number) — absolute value — e.g. {{ABS(Variance)}}"
+	}
+
+	// ── new string helpers ───────────────────────────────────────────────────
+	if strings.Contains(raw, "TRIM expects") {
+		return "TRIM(varOrLiteral) — strips leading/trailing whitespace — e.g. {{TRIM(Name)}}"
+	}
+	if strings.Contains(raw, "REPLACE expects") {
+		return "REPLACE(subject, 'old', 'new') — e.g. {{REPLACE(Status, 'PENDING', 'Pending')}}"
+	}
+	if strings.Contains(raw, "SPLIT expects") {
+		return "SPLIT(subject, 'sep') or SPLIT(subject, 'sep', index) — e.g. {{SPLIT(FullName, ' ', 0)}}"
+	}
+	if strings.Contains(raw, "JOIN expects") {
+		return "JOIN(listVar, 'separator') — e.g. {{JOIN(Tags, ', ')}}"
+	}
+	if strings.Contains(raw, "LENGTH expects") {
+		return "LENGTH(varOrLiteral) — character count or list length — e.g. {{LENGTH(Items)}}"
+	}
+	if strings.Contains(raw, "CONTAINS expects") {
+		return "CONTAINS(subject, 'substring') — returns true/false — e.g. {{CONTAINS(Status, 'APPROVED')}}"
+	}
+	if strings.Contains(raw, "STARTS_WITH expects") {
+		return "STARTS_WITH(subject, 'prefix') — returns true/false — e.g. {{STARTS_WITH(RefID, 'INI-')}}"
+	}
+	if strings.Contains(raw, "ENDS_WITH expects") {
+		return "ENDS_WITH(subject, 'suffix') — returns true/false — e.g. {{ENDS_WITH(FileName, '.csv')}}"
+	}
+	if strings.Contains(raw, "INDEX_OF expects") {
+		return "INDEX_OF(subject, 'substring') — returns position (-1 if not found) — e.g. {{INDEX_OF(Email, '@')}}"
+	}
+
+	// ── new list helpers ─────────────────────────────────────────────────────
+	if strings.Contains(raw, "FIRST_OF expects") {
+		return "FIRST_OF(listVar) or FIRST_OF(listVar, field) — e.g. {{FIRST_OF(Transactions, amount)}}"
+	}
+	if strings.Contains(raw, "LAST_OF expects") {
+		return "LAST_OF(listVar) or LAST_OF(listVar, field) — e.g. {{LAST_OF(Transactions, date)}}"
+	}
+	if strings.Contains(raw, "ANY_OF expects") {
+		return "ANY_OF(listVar) or ANY_OF(listVar, field) — comma-joined values — e.g. {{ANY_OF(Items, status)}}"
+	}
+	if strings.Contains(raw, "COUNT_DISTINCT expects") {
+		return "COUNT_DISTINCT(listVar) or COUNT_DISTINCT(listVar, field) — unique count — e.g. {{COUNT_DISTINCT(Items, category)}}"
+	}
+
 	// ── unknown function ─────────────────────────────────────────────────────
 	if strings.Contains(r, "unsupported function") {
 		// extract function name from "unsupported function: FUNC_NAME"
 		parts := strings.SplitN(raw, ":", 2)
 		funcName := strings.TrimSpace(parts[len(parts)-1])
-		return fmt.Sprintf(`Unknown function "%s". Check for typos — supported functions are: FORMAT_NUMBER, FORMAT_DATE, FORMAT_CURRENCY, CONCAT, TABLE_HTML, IF, BADGE_HTML, COUNT_OF, SUM_OF_FIELD, and others. Function names are case-sensitive and must be ALL_CAPS.`, funcName)
+		return fmt.Sprintf(`Unknown function "%s". Check for typos — supported functions are: FORMAT_NUMBER, FORMAT_DATE, FORMAT_CURRENCY, CONCAT, TABLE_HTML, IF, BADGE_HTML, COUNT_OF, SUM_OF_FIELD, MIN, MAX, TRIM, REPLACE, SPLIT, JOIN, LENGTH, CONTAINS, STARTS_WITH, ENDS_WITH, INDEX_OF, FIRST_OF, LAST_OF, ANY_OF, COUNT_DISTINCT, and others. Function names must be ALL_CAPS.`, funcName)
 	}
 
 	// ── loop guard ───────────────────────────────────────────────────────────
