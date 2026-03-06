@@ -194,27 +194,34 @@ func dispatchNotification(
 	var work []templateWithRecipients
 
 	for _, ch := range channels {
-		tpl, err := lookupTemplate(ctx, pool, event.eventID, ch.channel)
+		// lookupTemplates returns ALL approved templates for this (event, channel) pair.
+		// Each approved template is dispatched independently — different subject/body/recipients.
+		tpls, err := lookupTemplates(ctx, pool, event.eventID, ch.channel)
 		if err != nil {
-			api.LogError("[NOTIF] lookupTemplate event=%s ch=%s: %v", event.eventID, ch.channel, err)
+			api.LogError("[NOTIF] lookupTemplates event=%s ch=%s: %v", event.eventID, ch.channel, err)
 			continue
 		}
-		if tpl == nil {
+		if len(tpls) == 0 {
 			api.LogInfo("[NOTIF] no approved template for event=%s ch=%s", event.eventID, ch.channel)
 			continue
 		}
-		api.LogInfo("[NOTIF] resolved template auditID=%s ch=%s", tpl.auditID, ch.channel)
-		recipients, err := lookupRecipients(ctx, pool, tpl, payload)
-		if err != nil {
-			api.LogError("[NOTIF] lookupRecipients tpl=%s: %v", tpl.auditID, err)
-			continue
+		api.LogInfo("[NOTIF] resolved %d template(s) for event=%s ch=%s", len(tpls), event.eventID, ch.channel)
+		for _, tpl := range tpls {
+			tpl := tpl // capture for goroutine safety
+			api.LogInfo("[NOTIF] processing template auditID=%s ch=%s version=%s", tpl.auditID, ch.channel, tpl.versionLabel)
+			recipients, err := lookupRecipients(ctx, pool, &tpl, payload)
+			if err != nil {
+				api.LogError("[NOTIF] lookupRecipients tpl=%s: %v", tpl.auditID, err)
+				continue
+			}
+			if len(recipients) == 0 {
+				api.LogInfo("[NOTIF] no recipients resolved for event=%s ch=%s auditID=%s", event.eventID, ch.channel, tpl.auditID)
+				continue
+			}
+			api.LogInfo("[NOTIF] resolved %d recipient(s) for event=%s ch=%s auditID=%s priority=%d",
+				len(recipients), event.eventID, ch.channel, tpl.auditID, ch.priorityLevel)
+			work = append(work, templateWithRecipients{tpl: tpl, recipients: recipients, chPriority: ch.priorityLevel})
 		}
-		if len(recipients) == 0 {
-			api.LogInfo("[NOTIF] no recipients resolved for event=%s ch=%s", event.eventID, ch.channel)
-			continue
-		}
-		api.LogInfo("[NOTIF] resolved %d recipient(s) for event=%s ch=%s priority=%d", len(recipients), event.eventID, ch.channel, ch.priorityLevel)
-		work = append(work, templateWithRecipients{tpl: *tpl, recipients: recipients, chPriority: ch.priorityLevel})
 	}
 
 	if len(work) == 0 {
@@ -433,41 +440,49 @@ func lookupEnabledChannels(ctx context.Context, pool *pgxpool.Pool, eventID stri
 	return out, rows.Err()
 }
 
-// lookupTemplate fetches the latest APPROVED audit_template for (event_id, channel).
-// Falls back to the latest non-deleted template if no APPROVED version exists yet.
-func lookupTemplate(ctx context.Context, pool *pgxpool.Pool, eventID, channel string) (*resolvedTemplate, error) {
+// lookupTemplates fetches ALL APPROVED audit_template versions for (event_id, channel).
+// Multiple approved templates for the same event+channel are all returned so that
+// each one produces its own set of outbox rows (different subject/body/recipients).
+// Ordered oldest→newest so the earliest-approved template is dispatched first.
+func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel string) ([]resolvedTemplate, error) {
 	q := `
 		SELECT
 			at.audit_id::text,
 			at.template_id,
-			COALESCE(at.subject,'')    AS subject,
-			COALESCE(at.body_text,'')  AS body_text,
-			COALESCE(at.body_html,'')  AS body_html,
-			COALESCE(at.is_html_enabled, false) AS is_html,
-			COALESCE(at.version_label,'') AS version_label,
-			UPPER(t.channel)           AS channel
+			COALESCE(at.subject,'')              AS subject,
+			COALESCE(at.body_text,'')            AS body_text,
+			COALESCE(at.body_html,'')            AS body_html,
+			COALESCE(at.is_html_enabled, false)  AS is_html,
+			COALESCE(at.version_label,'')        AS version_label,
+			UPPER(t.channel)                     AS channel
 		FROM notification_svc.audit_template at
 		JOIN notification_svc.template t ON t.template_id = at.template_id
 		WHERE t.event_id = $1
 		  AND UPPER(t.channel) = UPPER($2)
 		  AND at.processing_status = 'APPROVED'
 		  AND COALESCE(at.is_deleted, false) = false
-		ORDER BY at.requested_at DESC NULLS LAST
-		LIMIT 1
+		ORDER BY at.requested_at ASC NULLS LAST
 	`
-	var tpl resolvedTemplate
-	err := pool.QueryRow(ctx, q, eventID, channel).Scan(
-		&tpl.auditID, new(string),
-		&tpl.subject, &tpl.bodyText, &tpl.bodyHTML,
-		&tpl.isHTML, &tpl.versionLabel, &tpl.channel,
-	)
+	dbRows, err := pool.Query(ctx, q, eventID, channel)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
-			return nil, nil
-		}
 		return nil, err
 	}
-	return &tpl, nil
+	defer dbRows.Close()
+
+	var out []resolvedTemplate
+	for dbRows.Next() {
+		var tpl resolvedTemplate
+		if err := dbRows.Scan(
+			&tpl.auditID, new(string),
+			&tpl.subject, &tpl.bodyText, &tpl.bodyHTML,
+			&tpl.isHTML, &tpl.versionLabel, &tpl.channel,
+		); err != nil {
+			api.LogError("[NOTIF] lookupTemplates scan: %v", err)
+			continue
+		}
+		out = append(out, tpl)
+	}
+	return out, dbRows.Err()
 }
 
 // lookupRecipients resolves template_recipient rows → actual users + their contact info.
@@ -620,7 +635,10 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) err
 			rendered_subject, rendered_body, variables_payload, scheduled_at,
 			priority_level, sender_id, sender_code, sender_name, sender_email, sender_identifier
 		) VALUES %s
-		ON CONFLICT (correlation_id, channel, recipient_user_id) DO UPDATE SET
+		-- ON CONFLICT now includes audit_id so that two different approved templates
+		-- for the same (correlation, channel, recipient) each get their own outbox row.
+		-- REQUIRED: run the DB migration to create the new unique index (see below).
+		ON CONFLICT (correlation_id, channel, audit_id, recipient_user_id) DO UPDATE SET
 			rendered_subject = CASE
 				WHEN notification_svc.outbox.processing_status = 'PENDING'
 				THEN EXCLUDED.rendered_subject

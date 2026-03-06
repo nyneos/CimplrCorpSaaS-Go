@@ -57,6 +57,7 @@ type filterRequest struct {
 	Page          int    `json:"page"`
 	Limit         int    `json:"limit"`
 	HourWindow    int    `json:"hourWindow"` // for hourly-trend; default 24
+	LogInfo       bool   `json:"logInfo"`    // when true: include variables_payload, template, retry_history in log rows
 }
 
 func (f filterRequest) dateWindow() (start, end time.Time) {
@@ -195,23 +196,49 @@ WHERE created_at BETWEEN $1 AND $2
 // 2. Log rows  —  POST /dash/notification/logs
 // ─────────────────────────────────────────────────────────────────────────────
 
+// RetryAttempt represents a single delivery attempt from send_history,
+// shown in the "Retry History" panel of a log row detail view.
+type RetryAttempt struct {
+	AttemptNumber    int     `json:"attempt_number"`
+	Status           string  `json:"status"`
+	AttemptedAt      string  `json:"attempted_at"`
+	ProviderResponse *string `json:"provider_response,omitempty"`
+	ProviderMsgID    *string `json:"provider_message_id,omitempty"`
+}
+
+// LogRowTemplate carries the template metadata shown in the
+// "Technical Details" panel for a specific log row.
+type LogRowTemplate struct {
+	AuditID      string `json:"audit_id"`
+	VersionLabel string `json:"version_label"`
+	Subject      string `json:"subject"`
+	BodyText     string `json:"body_text"`
+	IsHTML       bool   `json:"is_html"`
+}
+
 type LogRow struct {
-	OutboxID        string   `json:"outbox_id"`
-	CorrelationID   string   `json:"correlation_id"`
-	EventName       string   `json:"event_name"`
-	Channel         string   `json:"channel"`
-	Recipient       string   `json:"recipient"`
-	Status          string   `json:"status"`
-	RetryCount      int      `json:"retry_count"`
-	LatencyMs       *float64 `json:"latency_ms,omitempty"`
-	CreatedAt       string   `json:"created_at"`
-	UpdatedAt       *string  `json:"updated_at,omitempty"`
-	ErrorMessage    *string  `json:"error_message,omitempty"`
-	AuditID         string   `json:"audit_id"`
-	SenderName      *string  `json:"sender_name,omitempty"`
-	SenderEmail     *string  `json:"sender_email,omitempty"`
-	RenderedSubject *string  `json:"rendered_subject,omitempty"`
-	PriorityLevel   int      `json:"priority_level"`
+	OutboxID        string           `json:"outbox_id"`
+	CorrelationID   string           `json:"correlation_id"`
+	EventName       string           `json:"event_name"`
+	Channel         string           `json:"channel"`
+	Recipient       string           `json:"recipient"`
+	Status          string           `json:"status"`
+	RetryCount      int              `json:"retry_count"`
+	LatencyMs       *float64         `json:"latency_ms,omitempty"`
+	CreatedAt       string           `json:"created_at"`
+	UpdatedAt       *string          `json:"updated_at,omitempty"`
+	ErrorMessage    *string          `json:"error_message,omitempty"`
+	AuditID         string           `json:"audit_id"`
+	SenderName      *string          `json:"sender_name,omitempty"`
+	SenderEmail     *string          `json:"sender_email,omitempty"`
+	RenderedSubject *string          `json:"rendered_subject,omitempty"`
+	PriorityLevel   int              `json:"priority_level"`
+	// Technical Details panel
+	VariablesPayload map[string]interface{} `json:"variables_payload"`
+	// Template details panel
+	Template *LogRowTemplate `json:"template,omitempty"`
+	// Retry History panel
+	RetryHistory []RetryAttempt `json:"retry_history"`
 }
 
 type LogsResponse struct {
@@ -233,8 +260,13 @@ func GetLogs(pool *pgxpool.Pool) http.HandlerFunc {
 		start, end := f.dateWindow()
 		offset := (f.Page - 1) * f.Limit
 
-		countQ := `
-SELECT COUNT(*)
+		// Choose variables_payload column based on log_info flag.
+		varCol := "'{}'"
+		if f.LogInfo {
+			varCol = "COALESCE(o.variables_payload::text, '{}')"
+		}
+
+		baseWhere := `
 FROM notification_svc.outbox o
 JOIN notification_svc.event e ON e.event_id = o.event_id
 WHERE o.created_at BETWEEN $1 AND $2
@@ -244,10 +276,10 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($6 = '' OR o.correlation_id ILIKE '%' || $6 || '%')
   AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%'
                OR o.recipient_phone ILIKE '%' || $7 || '%')
-  AND o.retry_count BETWEEN $8 AND $9
-`
+  AND o.retry_count BETWEEN $8 AND $9`
+
 		var total int64
-		if err := pool.QueryRow(context.Background(), countQ,
+		if err := pool.QueryRow(r.Context(), `SELECT COUNT(*) `+baseWhere,
 			start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
 			f.MinRetry, f.MaxRetry,
 		).Scan(&total); err != nil {
@@ -257,38 +289,21 @@ WHERE o.created_at BETWEEN $1 AND $2
 
 		rowQ := `
 SELECT
-    o.outbox_id,
-    o.correlation_id,
+    o.outbox_id, o.correlation_id,
     COALESCE(e.event_display_name, o.event_id)                                        AS event_name,
     o.channel,
     COALESCE(o.recipient_email, o.recipient_phone, o.recipient_user_id, '')           AS recipient,
-    o.processing_status,
-    o.retry_count,
+    o.processing_status, o.retry_count,
     CASE WHEN o.sent_at IS NOT NULL
          THEN EXTRACT(EPOCH FROM (o.sent_at - o.scheduled_at)) * 1000
          ELSE NULL END                                                                AS latency_ms,
-    o.created_at,
-    o.processed_at,
-    o.last_error,
-    o.audit_id::text,
-    o.sender_name,
-    o.sender_email,
-    o.rendered_subject,
-    o.priority_level
-FROM notification_svc.outbox o
-JOIN notification_svc.event e ON e.event_id = o.event_id
-WHERE o.created_at BETWEEN $1 AND $2
-  AND ($3 = '' OR o.channel = $3)
-  AND ($4 = '' OR o.processing_status = $4)
-  AND ($5 = '' OR o.event_id = $5 OR e.event_display_name ILIKE '%' || $5 || '%')
-  AND ($6 = '' OR o.correlation_id ILIKE '%' || $6 || '%')
-  AND ($7 = '' OR o.recipient_email ILIKE '%' || $7 || '%'
-               OR o.recipient_phone ILIKE '%' || $7 || '%')
-  AND o.retry_count BETWEEN $8 AND $9
+    o.created_at, o.processed_at, o.last_error, o.audit_id::text,
+    o.sender_name, o.sender_email, o.rendered_subject, o.priority_level,
+    ` + varCol + ` ` + baseWhere + `
 ORDER BY o.created_at DESC
-LIMIT $10 OFFSET $11
-`
-		rows, err := pool.Query(context.Background(), rowQ,
+LIMIT $10 OFFSET $11`
+
+		rows, err := pool.Query(r.Context(), rowQ,
 			start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
 			f.MinRetry, f.MaxRetry, f.Limit, offset,
 		)
@@ -304,6 +319,7 @@ LIMIT $10 OFFSET $11
 			var createdAt time.Time
 			var processedAt *time.Time
 			var latencyMs *float64
+			var variablesRaw string
 			if err := rows.Scan(
 				&row.OutboxID, &row.CorrelationID, &row.EventName,
 				&row.Channel, &row.Recipient, &row.Status,
@@ -312,6 +328,7 @@ LIMIT $10 OFFSET $11
 				&row.ErrorMessage,
 				&row.AuditID, &row.SenderName, &row.SenderEmail,
 				&row.RenderedSubject, &row.PriorityLevel,
+				&variablesRaw,
 			); err != nil {
 				continue
 			}
@@ -321,7 +338,102 @@ LIMIT $10 OFFSET $11
 				s := processedAt.UTC().Format(time.RFC3339)
 				row.UpdatedAt = &s
 			}
+			if f.LogInfo {
+				row.VariablesPayload = make(map[string]interface{})
+				_ = json.Unmarshal([]byte(variablesRaw), &row.VariablesPayload)
+			} else {
+				row.VariablesPayload = map[string]interface{}{}
+			}
+			row.RetryHistory = []RetryAttempt{}
 			result = append(result, row)
+		}
+		rows.Close() // release connection back to pool before batch queries
+
+		// ── Batch enrich (log_info=true only) ──────────────────────────────────
+		if f.LogInfo && len(result) > 0 {
+			outboxIDs := make([]string, len(result))
+			auditIDs := make([]string, 0, len(result))
+			auditIDSet := make(map[string]bool, len(result))
+			for i, row := range result {
+				outboxIDs[i] = row.OutboxID
+				if row.AuditID != "" && !auditIDSet[row.AuditID] {
+					auditIDs = append(auditIDs, row.AuditID)
+					auditIDSet[row.AuditID] = true
+				}
+			}
+
+			type tplRes struct {
+				m map[string]LogRowTemplate
+				e error
+			}
+			type histRes struct {
+				m map[string][]RetryAttempt
+				e error
+			}
+			tplC := make(chan tplRes, 1)
+			histC := make(chan histRes, 1)
+
+			go func() {
+				m := make(map[string]LogRowTemplate, len(auditIDs))
+				if len(auditIDs) == 0 {
+					tplC <- tplRes{m, nil}
+					return
+				}
+				tplRows, err := pool.Query(r.Context(), `
+SELECT audit_id::text, COALESCE(version_label,''), COALESCE(subject,''),
+       COALESCE(body_text,''), COALESCE(is_html_enabled,false)
+FROM notification_svc.audit_template
+WHERE audit_id = ANY($1)`, auditIDs)
+				if err != nil {
+					tplC <- tplRes{m, err}
+					return
+				}
+				defer tplRows.Close()
+				for tplRows.Next() {
+					var t LogRowTemplate
+					if err := tplRows.Scan(&t.AuditID, &t.VersionLabel, &t.Subject, &t.BodyText, &t.IsHTML); err == nil {
+						m[t.AuditID] = t
+					}
+				}
+				tplC <- tplRes{m, nil}
+			}()
+
+			go func() {
+				m := make(map[string][]RetryAttempt, len(outboxIDs))
+				histRows, err := pool.Query(r.Context(), `
+SELECT outbox_id, attempt_number, processing_status, attempted_at,
+       provider_response, provider_message_id
+FROM notification_svc.send_history
+WHERE outbox_id = ANY($1)
+ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
+				if err != nil {
+					histC <- histRes{m, err}
+					return
+				}
+				defer histRows.Close()
+				for histRows.Next() {
+					var oid string
+					var ra RetryAttempt
+					var at time.Time
+					if err := histRows.Scan(&oid, &ra.AttemptNumber, &ra.Status, &at, &ra.ProviderResponse, &ra.ProviderMsgID); err == nil {
+						ra.AttemptedAt = at.UTC().Format(time.RFC3339)
+						m[oid] = append(m[oid], ra)
+					}
+				}
+				histC <- histRes{m, nil}
+			}()
+
+			tr := <-tplC
+			hr := <-histC
+			for i := range result {
+				if t, ok := tr.m[result[i].AuditID]; ok {
+					tc := t
+					result[i].Template = &tc
+				}
+				if h, ok := hr.m[result[i].OutboxID]; ok {
+					result[i].RetryHistory = h
+				}
+			}
 		}
 
 		totalPages := (total + int64(f.Limit) - 1) / int64(f.Limit)
@@ -967,6 +1079,158 @@ LIMIT 200
 //    Aggregate delivery metrics per provider (from send_history)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. Failure reasons  —  POST /dash/notification/failure-reasons
+//
+// Reads failed rows from outbox.last_error and send_history.provider_response,
+// normalises them into short buckets (TIMEOUT, 500_INTERNAL, …) and returns
+// a ranked list.  The same data is embedded inside OverviewResponse.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type FailureReason struct {
+	Error string `json:"error"`
+	Count int64  `json:"count"`
+}
+
+type FailureReasonsResponse struct {
+	Success bool            `json:"success"`
+	Reasons []FailureReason `json:"failure_reasons"`
+}
+
+// normaliseError maps a raw provider_response / last_error string to a short
+// human-readable bucket that the frontend can display in a chart.
+func normaliseError(raw string) string {
+	if raw == "" {
+		return "UNKNOWN"
+	}
+	switch {
+	case contains(raw, "timeout", "timed out", "deadline"):
+		return "TIMEOUT"
+	case contains(raw, "500", "internal server error", "internal error"):
+		return "500_INTERNAL"
+	case contains(raw, "400", "invalid payload", "bad request", "invalid", "validation"):
+		return "INVALID_PAYLOAD"
+	case contains(raw, "429", "rate limit", "too many requests", "throttle"):
+		return "RATE_LIMIT"
+	case contains(raw, "unknown provider", "no provider", "unsupported channel"):
+		return "UNKNOWN_PROVIDER"
+	case contains(raw, "401", "403", "unauthorized", "forbidden", "auth"):
+		return "AUTH_ERROR"
+	case contains(raw, "connection refused", "dial", "network", "eof"):
+		return "NETWORK_ERROR"
+	case contains(raw, "ses", "sendEmail", "smtp"):
+		return "PROVIDER_REJECTED"
+	default:
+		return "OTHER"
+	}
+}
+
+// contains is a case-insensitive multi-term OR search.
+func contains(s string, terms ...string) bool {
+	for _, t := range terms {
+		if len(t) > 0 && len(s) >= len(t) {
+			si, ti := 0, 0
+			for si <= len(s)-len(t) {
+				match := true
+				for ti = 0; ti < len(t); ti++ {
+					sc, tc := s[si+ti], t[ti]
+					if sc >= 'A' && sc <= 'Z' {
+						sc += 32
+					}
+					if tc >= 'A' && tc <= 'Z' {
+						tc += 32
+					}
+					if sc != tc {
+						match = false
+						break
+					}
+				}
+				if match {
+					return true
+				}
+				si++
+			}
+		}
+	}
+	return false
+}
+
+func fetchFailureReasons(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (FailureReasonsResponse, error) {
+	start, end := f.dateWindow()
+
+	// Pull raw error strings from both outbox.last_error and send_history.provider_response
+	// for all failed/dead rows in the time window.
+	q := `
+SELECT COALESCE(o.last_error, '') AS raw_error
+FROM notification_svc.outbox o
+WHERE o.created_at BETWEEN $1 AND $2
+  AND o.processing_status IN ('FAILED', 'DEAD')
+  AND ($3 = '' OR o.channel = $3)
+UNION ALL
+SELECT COALESCE(sh.provider_response, '') AS raw_error
+FROM notification_svc.send_history sh
+WHERE sh.attempted_at BETWEEN $1 AND $2
+  AND sh.processing_status = 'FAILED'
+  AND ($3 = '' OR sh.channel = $3)
+`
+	rows, err := pool.Query(ctx, q, start, end, f.Channel)
+	if err != nil {
+		return FailureReasonsResponse{Success: true, Reasons: []FailureReason{}}, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		bucket := normaliseError(raw)
+		counts[bucket]++
+	}
+
+	// Sort by count descending
+	type kv struct {
+		k string
+		v int64
+	}
+	pairs := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		pairs = append(pairs, kv{k, v})
+	}
+	for i := 1; i < len(pairs); i++ {
+		for j := i; j > 0 && pairs[j].v > pairs[j-1].v; j-- {
+			pairs[j], pairs[j-1] = pairs[j-1], pairs[j]
+		}
+	}
+
+	reasons := make([]FailureReason, 0, len(pairs))
+	for _, p := range pairs {
+		reasons = append(reasons, FailureReason{Error: p.k, Count: p.v})
+	}
+	if len(reasons) == 0 {
+		reasons = []FailureReason{}
+	}
+	return FailureReasonsResponse{Success: true, Reasons: reasons}, nil
+}
+
+// GetFailureReasons is the standalone handler for POST /dash/notification/failure-reasons.
+func GetFailureReasons(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := decodeFilter(r)
+		if err != nil {
+			errResp(w, http.StatusBadRequest, constants.ErrInvalidFilter+err.Error())
+			return
+		}
+		res, err := fetchFailureReasons(r.Context(), pool, f)
+		if err != nil {
+			errResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	}
+}
+
 type ProviderStat struct {
 	Channel        string  `json:"channel"`
 	TotalAttempts  int64   `json:"total_attempts"`
@@ -1151,6 +1415,7 @@ type OverviewResponse struct {
 	Logs             LogsResponse             `json:"logs"`
 	ProviderStats    ProviderStatsResponse    `json:"provider_stats"`
 	EventConfig      EventConfigResponse      `json:"event_config"`
+	FailureReasons   FailureReasonsResponse   `json:"failure_reasons"`
 }
 
 // fetchKPI, fetchChannelBreakdown, … are thin helpers that run a single
@@ -1361,27 +1626,16 @@ FROM notification_svc.outbox WHERE created_at BETWEEN $1 AND $2 GROUP BY channel
 func fetchLogs(ctx context.Context, pool *pgxpool.Pool, f filterRequest) (LogsResponse, error) {
 	start, end := f.dateWindow()
 	offset := (f.Page - 1) * f.Limit
-	var total int64
-	if err := pool.QueryRow(ctx, `
-SELECT COUNT(*) FROM notification_svc.outbox o
-JOIN notification_svc.event e ON e.event_id = o.event_id
-WHERE o.created_at BETWEEN $1 AND $2
-  AND ($3='' OR o.channel=$3) AND ($4='' OR o.processing_status=$4)
-  AND ($5='' OR o.event_id=$5 OR e.event_display_name ILIKE '%'||$5||'%')
-  AND ($6='' OR o.correlation_id ILIKE '%'||$6||'%')
-  AND ($7='' OR o.recipient_email ILIKE '%'||$7||'%' OR o.recipient_phone ILIKE '%'||$7||'%')
-  AND o.retry_count BETWEEN $8 AND $9
-`, start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry,
-	).Scan(&total); err != nil {
-		return LogsResponse{Success: true}, err
+
+	// Choose the SELECT list based on whether the caller wants the heavy details.
+	// When log_info=false we skip variables_payload, template and retry_history
+	// entirely — saving both the DB column fetch and the two batch sub-queries.
+	varCol := "'{}'"
+	if f.LogInfo {
+		varCol = "COALESCE(o.variables_payload::text, '{}')"
 	}
-	rows, err := pool.Query(ctx, `
-SELECT o.outbox_id, o.correlation_id, COALESCE(e.event_display_name, o.event_id),
-       o.channel, COALESCE(o.recipient_email, o.recipient_phone, o.recipient_user_id, ''),
-       o.processing_status, o.retry_count,
-       CASE WHEN o.sent_at IS NOT NULL THEN EXTRACT(EPOCH FROM (o.sent_at - o.scheduled_at))*1000 ELSE NULL END,
-       o.created_at, o.processed_at, o.last_error, o.audit_id::text,
-       o.sender_name, o.sender_email, o.rendered_subject, o.priority_level
+
+	baseWhere := `
 FROM notification_svc.outbox o
 JOIN notification_svc.event e ON e.event_id = o.event_id
 WHERE o.created_at BETWEEN $1 AND $2
@@ -1389,21 +1643,41 @@ WHERE o.created_at BETWEEN $1 AND $2
   AND ($5='' OR o.event_id=$5 OR e.event_display_name ILIKE '%'||$5||'%')
   AND ($6='' OR o.correlation_id ILIKE '%'||$6||'%')
   AND ($7='' OR o.recipient_email ILIKE '%'||$7||'%' OR o.recipient_phone ILIKE '%'||$7||'%')
-  AND o.retry_count BETWEEN $8 AND $9
-ORDER BY o.created_at DESC LIMIT $10 OFFSET $11
-`, start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
+  AND o.retry_count BETWEEN $8 AND $9`
+
+	var total int64
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) `+baseWhere,
+		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient, f.MinRetry, f.MaxRetry,
+	).Scan(&total); err != nil {
+		return LogsResponse{Success: true}, err
+	}
+
+	rowQ := `
+SELECT o.outbox_id, o.correlation_id, COALESCE(e.event_display_name, o.event_id),
+       o.channel, COALESCE(o.recipient_email, o.recipient_phone, o.recipient_user_id, ''),
+       o.processing_status, o.retry_count,
+       CASE WHEN o.sent_at IS NOT NULL THEN EXTRACT(EPOCH FROM (o.sent_at - o.scheduled_at))*1000 ELSE NULL END,
+       o.created_at, o.processed_at, o.last_error, o.audit_id::text,
+       o.sender_name, o.sender_email, o.rendered_subject, o.priority_level,
+       ` + varCol + ` ` + baseWhere + `
+ORDER BY o.created_at DESC LIMIT $10 OFFSET $11`
+
+	rows, err := pool.Query(ctx, rowQ,
+		start, end, f.Channel, f.Status, f.EventType, f.CorrelationID, f.Recipient,
 		f.MinRetry, f.MaxRetry, f.Limit, offset,
 	)
 	if err != nil {
 		return LogsResponse{Success: true}, err
 	}
 	defer rows.Close()
+
 	result := make([]LogRow, 0, f.Limit)
 	for rows.Next() {
 		var row LogRow
 		var createdAt time.Time
 		var processedAt *time.Time
 		var latencyMs *float64
+		var variablesRaw string
 		if err := rows.Scan(
 			&row.OutboxID, &row.CorrelationID, &row.EventName,
 			&row.Channel, &row.Recipient, &row.Status,
@@ -1411,6 +1685,7 @@ ORDER BY o.created_at DESC LIMIT $10 OFFSET $11
 			&createdAt, &processedAt, &row.ErrorMessage,
 			&row.AuditID, &row.SenderName, &row.SenderEmail,
 			&row.RenderedSubject, &row.PriorityLevel,
+			&variablesRaw,
 		); err != nil {
 			continue
 		}
@@ -1420,8 +1695,113 @@ ORDER BY o.created_at DESC LIMIT $10 OFFSET $11
 			s := processedAt.UTC().Format(time.RFC3339)
 			row.UpdatedAt = &s
 		}
+		// Only unmarshal variables_payload when log_info=true (otherwise it's '{}').
+		if f.LogInfo {
+			row.VariablesPayload = make(map[string]interface{})
+			_ = json.Unmarshal([]byte(variablesRaw), &row.VariablesPayload)
+		} else {
+			row.VariablesPayload = map[string]interface{}{}
+		}
+		// RetryHistory defaults to empty slice (never nil in JSON)
+		row.RetryHistory = []RetryAttempt{}
 		result = append(result, row)
 	}
+	rows.Close() // close early so the connection returns to the pool before batch queries
+
+	// ── Batch enrich: only when log_info=true ────────────────────────────────
+	// Instead of N×2 serial sub-queries we fire exactly 2 parallel queries for
+	// the whole page, then assemble results in Go maps.
+	if f.LogInfo && len(result) > 0 {
+		// Collect outbox_ids and audit_ids for the page.
+		outboxIDs := make([]string, len(result))
+		auditIDs := make([]string, 0, len(result))
+		auditIDSet := make(map[string]bool, len(result))
+		for i, r := range result {
+			outboxIDs[i] = r.OutboxID
+			if r.AuditID != "" && !auditIDSet[r.AuditID] {
+				auditIDs = append(auditIDs, r.AuditID)
+				auditIDSet[r.AuditID] = true
+			}
+		}
+
+		type tplFetchRes struct {
+			m map[string]LogRowTemplate
+			e error
+		}
+		type histFetchRes struct {
+			m map[string][]RetryAttempt
+			e error
+		}
+		tplC := make(chan tplFetchRes, 1)
+		histC := make(chan histFetchRes, 1)
+
+		// Goroutine 1: fetch all templates for this page in one query.
+		go func() {
+			m := make(map[string]LogRowTemplate, len(auditIDs))
+			if len(auditIDs) == 0 {
+				tplC <- tplFetchRes{m, nil}
+				return
+			}
+			tplRows, err := pool.Query(ctx, `
+SELECT audit_id::text, COALESCE(version_label,''), COALESCE(subject,''),
+       COALESCE(body_text,''), COALESCE(is_html_enabled,false)
+FROM notification_svc.audit_template
+WHERE audit_id = ANY($1)`, auditIDs)
+			if err != nil {
+				tplC <- tplFetchRes{m, err}
+				return
+			}
+			defer tplRows.Close()
+			for tplRows.Next() {
+				var t LogRowTemplate
+				if err := tplRows.Scan(&t.AuditID, &t.VersionLabel, &t.Subject, &t.BodyText, &t.IsHTML); err == nil {
+					m[t.AuditID] = t
+				}
+			}
+			tplC <- tplFetchRes{m, nil}
+		}()
+
+		// Goroutine 2: fetch all send_history rows for this page in one query.
+		go func() {
+			m := make(map[string][]RetryAttempt, len(outboxIDs))
+			histRows, err := pool.Query(ctx, `
+SELECT outbox_id, attempt_number, processing_status, attempted_at,
+       provider_response, provider_message_id
+FROM notification_svc.send_history
+WHERE outbox_id = ANY($1)
+ORDER BY outbox_id, attempt_number ASC`, outboxIDs)
+			if err != nil {
+				histC <- histFetchRes{m, err}
+				return
+			}
+			defer histRows.Close()
+			for histRows.Next() {
+				var oid string
+				var ra RetryAttempt
+				var at time.Time
+				if err := histRows.Scan(&oid, &ra.AttemptNumber, &ra.Status, &at, &ra.ProviderResponse, &ra.ProviderMsgID); err == nil {
+					ra.AttemptedAt = at.UTC().Format(time.RFC3339)
+					m[oid] = append(m[oid], ra)
+				}
+			}
+			histC <- histFetchRes{m, nil}
+		}()
+
+		// Wait for both batch queries and assemble.
+		tplRes := <-tplC
+		histRes := <-histC
+
+		for i := range result {
+			if t, ok := tplRes.m[result[i].AuditID]; ok {
+				tc := t // copy
+				result[i].Template = &tc
+			}
+			if h, ok := histRes.m[result[i].OutboxID]; ok {
+				result[i].RetryHistory = h
+			}
+		}
+	}
+
 	totalPages := (total + int64(f.Limit) - 1) / int64(f.Limit)
 	return LogsResponse{Success: true, Rows: result, TotalCount: total, Page: f.Page, Limit: f.Limit, TotalPages: totalPages}, nil
 }
@@ -1527,6 +1907,7 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 			logs      LogsResponse
 			provider  ProviderStatsResponse
 			evtConfig EventConfigResponse
+			failures  FailureReasonsResponse
 			err       error
 		}
 
@@ -1534,14 +1915,11 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 		go func() {
 			var res result
 
-			// 1 — KPI
-			res.kpi, res.err = fetchKPI(ctx, pool, f)
-			if res.err != nil {
-				ch <- res
-				return
+			// Fan out ALL fetches concurrently — KPI included.
+			type kpiRes struct {
+				v KPIResponse
+				e error
 			}
-
-			// Fan out the remaining 7 fetches concurrently
 			type chBreakRes struct {
 				v ChannelBreakdownResponse
 				e error
@@ -1570,7 +1948,12 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 				v EventConfigResponse
 				e error
 			}
+			type failRes struct {
+				v FailureReasonsResponse
+				e error
+			}
 
+			kpiC := make(chan kpiRes, 1)
 			chBreakC := make(chan chBreakRes, 1)
 			hourlyC := make(chan hourlyRes, 1)
 			topEvtC := make(chan topEvtRes, 1)
@@ -1578,7 +1961,9 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 			logsC := make(chan logsRes, 1)
 			provC := make(chan provRes, 1)
 			cfgC := make(chan cfgRes, 1)
+			failC := make(chan failRes, 1)
 
+			go func() { v, e := fetchKPI(ctx, pool, f); kpiC <- kpiRes{v, e} }()
 			go func() { v, e := fetchChannelBreakdown(ctx, pool, f); chBreakC <- chBreakRes{v, e} }()
 			go func() { v, e := fetchHourlyTrend(ctx, pool, f); hourlyC <- hourlyRes{v, e} }()
 			go func() { v, e := fetchTopEvents(ctx, pool, f); topEvtC <- topEvtRes{v, e} }()
@@ -1586,7 +1971,13 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 			go func() { v, e := fetchLogs(ctx, pool, f); logsC <- logsRes{v, e} }()
 			go func() { v, e := fetchProviderStats(ctx, pool, f); provC <- provRes{v, e} }()
 			go func() { v, e := fetchEventConfig(ctx, pool); cfgC <- cfgRes{v, e} }()
+			go func() { v, e := fetchFailureReasons(ctx, pool, f); failC <- failRes{v, e} }()
 
+			r0 := <-kpiC
+			res.kpi = r0.v
+			if r0.e != nil {
+				res.err = r0.e
+			}
 			r1 := <-chBreakC
 			res.chBreak = r1.v
 			r2 := <-hourlyC
@@ -1601,6 +1992,8 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 			res.provider = r6.v
 			r7 := <-cfgC
 			res.evtConfig = r7.v
+			r8 := <-failC
+			res.failures = r8.v
 
 			ch <- res
 		}()
@@ -1621,6 +2014,7 @@ func GetOverview(pool *pgxpool.Pool) http.HandlerFunc {
 			Logs:             res.logs,
 			ProviderStats:    res.provider,
 			EventConfig:      res.evtConfig,
+			FailureReasons:   res.failures,
 		})
 	}
 }
