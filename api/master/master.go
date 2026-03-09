@@ -215,6 +215,20 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/interest-type/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadInterestTypeSimple(pgxPool)))
 	mux.Handle("/master/interest-type/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetInterestType(pgxPool)))
 
+	// Penalty Structure Master routes
+	mux.Handle("/master/penalty-structure/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreatePenaltyStructureSingle(pgxPool)))
+	mux.Handle("/master/penalty-structure/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreatePenaltyStructure(pgxPool)))
+	mux.Handle("/master/penalty-structure/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdatePenaltyStructure(pgxPool)))
+	mux.Handle("/master/penalty-structure/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdatePenaltyStructureBulk(pgxPool)))
+	mux.Handle("/master/penalty-structure/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeletePenaltyStructure(pgxPool)))
+	mux.Handle("/master/penalty-structure/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApprovePenaltyStructure(pgxPool)))
+	mux.Handle("/master/penalty-structure/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectPenaltyStructure(pgxPool)))
+	mux.Handle("/master/penalty-structure/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPenaltyStructuresApprovedActive(pgxPool)))
+	mux.Handle("/master/penalty-structure/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPenaltyStructuresWithAudit(pgxPool)))
+	mux.Handle("/master/penalty-structure/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPenaltyStructureAuditHistory(pgxPool)))
+	mux.Handle("/master/penalty-structure/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadPenaltyStructureSimple(pgxPool)))
+	mux.Handle("/master/penalty-structure/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPenaltyStructure(pgxPool)))
+
 	// Compounding Frequency Master routes
 	mux.Handle("/master/compounding-frequency/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateCompoundingFrequencySingle(pgxPool)))
 	mux.Handle("/master/compounding-frequency/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateCompoundingFrequency(pgxPool)))
@@ -285,6 +299,48 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/calendar/holiday/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateHoliday(pgxPool)))
 	mux.Handle("/master/calendar/update-with-holidays", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateCalendarWithHolidays(pgxPool)))
 	mux.Handle("/master/calendar/years", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetPastYearsHolidays(pgxPool)))
+
+	// Day Count Convention Master routes
+	mux.Handle("/master/day-count-convention/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateDayCountConventionSingle(pgxPool)))
+	mux.Handle("/master/day-count-convention/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateDayCountConvention(pgxPool)))
+	mux.Handle("/master/day-count-convention/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateDayCountConvention(pgxPool)))
+	mux.Handle("/master/day-count-convention/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateDayCountConventionBulk(pgxPool)))
+	mux.Handle("/master/day-count-convention/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeleteDayCountConvention(pgxPool)))
+	mux.Handle("/master/day-count-convention/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApproveDayCountConvention(pgxPool)))
+	mux.Handle("/master/day-count-convention/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectDayCountConvention(pgxPool)))
+	mux.Handle("/master/day-count-convention/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDayCountConventionsApprovedActive(pgxPool)))
+	mux.Handle("/master/day-count-convention/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDayCountConventionsWithAudit(pgxPool)))
+	mux.Handle("/master/day-count-convention/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDayCountConventionAuditHistory(pgxPool)))
+	mux.Handle("/master/day-count-convention/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadDayCountConventionSimple(pgxPool)))
+	mux.Handle("/master/day-count-convention/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetDayCountConvention(pgxPool)))
+
+	// Bank Config Master routes
+	mux.Handle("/master/bank-config/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateBankConfigSingle(pgxPool)))
+	mux.Handle("/master/bank-config/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateBankConfig(pgxPool)))
+	mux.Handle("/master/bank-config/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateBankConfig(pgxPool)))
+	mux.Handle("/master/bank-config/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateBankConfigBulk(pgxPool)))
+	mux.Handle("/master/bank-config/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeleteBankConfig(pgxPool)))
+	mux.Handle("/master/bank-config/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApproveBankConfig(pgxPool)))
+	mux.Handle("/master/bank-config/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectBankConfig(pgxPool)))
+	mux.Handle("/master/bank-config/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankConfigsApprovedActive(pgxPool)))
+	mux.Handle("/master/bank-config/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankConfigsWithAudit(pgxPool)))
+	mux.Handle("/master/bank-config/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankConfigAuditHistory(pgxPool)))
+	mux.Handle("/master/bank-config/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankConfigSimple(pgxPool)))
+	mux.Handle("/master/bank-config/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankConfig(pgxPool)))
+
+	// Bank Rate Card Master routes
+	mux.Handle("/master/bank-rate-card/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateBankRateCardSingle(pgxPool)))
+	mux.Handle("/master/bank-rate-card/bulk-create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateBankRateCard(pgxPool)))
+	mux.Handle("/master/bank-rate-card/update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateBankRateCard(pgxPool)))
+	mux.Handle("/master/bank-rate-card/bulk-update", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UpdateBankRateCardBulk(pgxPool)))
+	mux.Handle("/master/bank-rate-card/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.DeleteBankRateCard(pgxPool)))
+	mux.Handle("/master/bank-rate-card/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkApproveBankRateCard(pgxPool)))
+	mux.Handle("/master/bank-rate-card/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.BulkRejectBankRateCard(pgxPool)))
+	mux.Handle("/master/bank-rate-card/approved-active", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCardsApprovedActive(pgxPool)))
+	mux.Handle("/master/bank-rate-card/all", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCardsWithAudit(pgxPool)))
+	mux.Handle("/master/bank-rate-card/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCardAuditHistory(pgxPool)))
+	mux.Handle("/master/bank-rate-card/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankRateCardSimple(pgxPool)))
+	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
 
 	err = http.ListenAndServe(":2143", mux)
 	if err != nil {
