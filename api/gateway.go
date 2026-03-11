@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/dashboard"
+	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
 	"crypto/aes"
@@ -12,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -22,7 +24,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// gatewayPool is the pgxpool used by the SSE server for in-app notifications.
+// Set before calling StartGateway via SetGatewayPool.
+var gatewayPool *pgxpool.Pool
+
+// SetGatewayPool stores the pgxpool so that StartGateway can pass it to NewSSEServer.
+func SetGatewayPool(pool *pgxpool.Pool) {
+	gatewayPool = pool
+}
 
 // CORS and common header constants
 const (
@@ -519,7 +532,14 @@ func StartGateway() {
 	mux := http.NewServeMux()
 
 	// Initialize and register the SSE server at /events
-	sseServer := dashboard.NewSSEServer()
+	sseServer := dashboard.NewSSEServer(gatewayPool)
+	if gatewayPool != nil {
+		sseServer.OnConnect = func(userID string) {
+			if err := dinojobs.PushUnreadCountToUser(context.Background(), gatewayPool, userID); err != nil {
+				log.Printf("[SSE] PushUnreadCountToUser error for %s: %v", userID, err)
+			}
+		}
+	}
 	mux.HandleFunc("/events", sseServer.HandleSSE)
 
 	// Debug endpoint to force logout a user via SSE (for testing only)

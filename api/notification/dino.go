@@ -10,6 +10,7 @@ import (
 
 	middlewares "CimplrCorpSaas/api/middlewares"
 	catalog "CimplrCorpSaas/api/notification/catalog"
+	push "CimplrCorpSaas/api/notification/push"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -77,6 +78,12 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB) {
 	mux.Handle("/notification/config/upsert", middlewares.PreValidationMiddleware(pool)(catalog.UpsertNotifConfig(pool)))
 	mux.Handle("/notification/config/bulk-approve", middlewares.PreValidationMiddleware(pool)(catalog.BulkApproveNotifConfig(pool)))
 	mux.Handle("/notification/config/bulk-reject", middlewares.PreValidationMiddleware(pool)(catalog.BulkRejectNotifConfig(pool)))
+
+	// Register in-app push inbox routes
+	push.RegisterPushInboxRoutes(mux, pool)
+
+	// Register browser push subscription routes (VAPID public key, register, unregister)
+	push.RegisterSubscriptionRoutes(mux, pool)
 
 	log.Printf("Notification Service started on :%s", notificationPort)
 	if err := http.ListenAndServe(":"+notificationPort, mux); err != nil {

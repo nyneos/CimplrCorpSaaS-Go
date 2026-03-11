@@ -37,6 +37,7 @@ func SetDB(database *sql.DB) {
 
 func SetPgxPool(pool *pgxpool.Pool) {
 	pgxPool = pool
+	api.SetGatewayPool(pool)
 }
 
 // GetDB returns the database connection

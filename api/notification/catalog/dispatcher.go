@@ -364,7 +364,16 @@ func dispatchNotification(
 	}
 
 	// Step 5 — batch insert into outbox (idempotent via unique index)
-	return insertOutbox(ctx, pool, outboxRows)
+	outboxIDMap, err := insertOutbox(ctx, pool, outboxRows)
+	if err != nil {
+		return err
+	}
+
+	// Step 6 — write PUSH rows into the persistent in-app inbox (non-fatal)
+	if err := insertInAppNotification(ctx, pool, outboxRows, outboxIDMap); err != nil {
+		api.LogError("[NOTIF] insertInAppNotification failed (non-fatal): %v", err)
+	}
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -589,9 +598,9 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 // send_history record for each new row (first-time population).
 // The unique index uq_outbox_idempotency (correlation_id, channel, recipient_user_id)
 // guarantees idempotency — conflicts are silently skipped.
-func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) error {
+func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (map[string]string, error) {
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var vals []string
@@ -662,7 +671,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) err
 
 	dbRows, err := pool.Query(ctx, q, args...)
 	if err != nil {
-		return fmt.Errorf("insertOutbox: %w", err)
+		return nil, fmt.Errorf("insertOutbox: %w", err)
 	}
 	defer dbRows.Close()
 
@@ -697,7 +706,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) err
 		inserted = append(inserted, ir)
 	}
 	if dbRows.Err() != nil {
-		return fmt.Errorf("insertOutbox scan: %w", dbRows.Err())
+		return nil, fmt.Errorf("insertOutbox scan: %w", dbRows.Err())
 	}
 	dbRows.Close()
 
@@ -745,7 +754,18 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) err
 			api.LogInfo("Outbox: seeded %d send_history rows as QUEUED (correlation=%s)", len(inserted), rows[0].correlationID)
 		}
 	}
-	return nil
+
+	// Build outboxID lookup map: "correlationID|channel|auditID|recipientUserID" → outboxID
+	outboxIDMap := make(map[string]string, len(inserted))
+	for _, ir := range inserted {
+		recipUID := ""
+		if ir.recipientUserID != nil {
+			recipUID = *ir.recipientUserID
+		}
+		key := ir.correlationID + "|" + ir.channel + "|" + ir.auditID + "|" + recipUID
+		outboxIDMap[key] = ir.outboxID
+	}
+	return outboxIDMap, nil
 }
 
 // InsertSendHistory records a delivery attempt result in send_history.
@@ -923,4 +943,101 @@ func payloadString(payload map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// insertInAppNotification
+// ─────────────────────────────────────────────────────────────────────────────
+
+// insertInAppNotification writes one row into notification_svc.in_app_notification
+// for every outboxRow whose channel is "PUSH" and whose recipient_user_id is non-empty.
+// Failures are non-fatal — callers MUST log the error and continue.
+func insertInAppNotification(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	rows []outboxRow,
+	outboxIDs map[string]string,
+) error {
+	type inAppRow struct {
+		outboxID        string
+		correlationID   string
+		eventID         string
+		auditID         string
+		recipientUserID string
+		recipientName   string
+		renderedSubject string
+		renderedBody    string
+		priorityLevel   int
+	}
+
+	var inAppRows []inAppRow
+	for _, r := range rows {
+		if r.channel != "PUSH" {
+			continue
+		}
+		if r.recipientUserID == "" {
+			continue
+		}
+		key := r.correlationID + "|" + r.channel + "|" + r.auditID + "|" + r.recipientUserID
+		outboxID, ok := outboxIDs[key]
+		if !ok || outboxID == "" {
+			// Outbox row was skipped (ON CONFLICT) and already delivered — skip inbox too.
+			continue
+		}
+		inAppRows = append(inAppRows, inAppRow{
+			outboxID:        outboxID,
+			correlationID:   r.correlationID,
+			eventID:         r.eventID,
+			auditID:         r.auditID,
+			recipientUserID: r.recipientUserID,
+			recipientName:   safeUTF8(r.recipientName),
+			renderedSubject: safeUTF8(r.renderedSubject),
+			renderedBody:    safeUTF8(r.renderedBody),
+			priorityLevel:   r.priorityLevel,
+		})
+	}
+
+	if len(inAppRows) == 0 {
+		return nil
+	}
+
+	var vals []string
+	var args []interface{}
+	pos := 1
+	for _, ir := range inAppRows {
+		vals = append(vals, fmt.Sprintf(
+			"($%d,$%d,$%d,$%d::uuid,$%d,$%d,$%d,$%d,$%d)",
+			pos, pos+1, pos+2, pos+3, pos+4,
+			pos+5, pos+6, pos+7, pos+8,
+		))
+		args = append(args,
+			ir.outboxID,
+			ir.correlationID,
+			ir.eventID,
+			ir.auditID,
+			ir.recipientUserID,
+			nullStr(ir.recipientName),
+			nullStr(ir.renderedSubject), // → subject
+			nullStr(ir.renderedBody),    // → body
+			ir.priorityLevel,
+		)
+		pos += 9
+	}
+
+	q := fmt.Sprintf(`
+		INSERT INTO notification_svc.in_app_notification (
+			outbox_id, correlation_id, event_id, audit_id,
+			recipient_user_id, recipient_name,
+			subject, body, priority_level
+		) VALUES %s
+		ON CONFLICT (outbox_id, recipient_user_id) DO NOTHING
+	`, strings.Join(vals, ","))
+
+	if _, err := pool.Exec(ctx, q, args...); err != nil {
+		return fmt.Errorf("insertInAppNotification: %w", err)
+	}
+
+	api.LogInfo("[NOTIF] in_app_notification: inserted %d PUSH inbox rows (correlation=%s)",
+		len(inAppRows), inAppRows[0].correlationID)
+	return nil
 }

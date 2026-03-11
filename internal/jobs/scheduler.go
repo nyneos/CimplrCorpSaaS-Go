@@ -122,6 +122,14 @@ func (s *CronService) Start() error {
 	logger.GlobalLogger.LogAudit("Outbox worker goroutine launched")
 	log.Println("Cron service started — Outbox Worker goroutine launched")
 
+	go dinojobs.StartInboxWorker(ctx, s.db)
+	logger.GlobalLogger.LogAudit("In-app inbox worker goroutine launched")
+	log.Println("Cron service started — In-App Inbox Worker goroutine launched")
+
+	go dinojobs.StartBrowserPushWorker(ctx, s.db)
+	logger.GlobalLogger.LogAudit("Browser push worker goroutine launched")
+	log.Println("Cron service started — Browser Push Worker goroutine launched")
+
 	return nil
 }
 
