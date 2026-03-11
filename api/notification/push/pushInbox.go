@@ -2,11 +2,13 @@ package push
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
+	"strings"
 
 	"CimplrCorpSaas/internal/dashboard"
 
@@ -91,6 +93,14 @@ type inboxItem struct {
 	IsRead        bool       `json:"is_read"`
 	ReadAt        *time.Time `json:"read_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
+	// Added metadata
+	ModuleCode    string     `json:"module_code"`
+	SubModuleCode string     `json:"sub_module_code"`
+	EventCode     string     `json:"event_code"`
+	EventName     string     `json:"event_name"`
+	SenderID      string     `json:"sender_id"`
+	SenderName    string     `json:"sender_name"`
+	SenderEmail   string     `json:"sender_email"`
 }
 
 // handleGetInbox — POST /notification/inbox/list
@@ -135,16 +145,20 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 			offset = 0
 		}
 
-		q := `
-			SELECT id, outbox_id, correlation_id, event_id,
-			       COALESCE(subject,''), COALESCE(body,''),
-			       COALESCE(priority_level,3), is_read, read_at, created_at
-			FROM notification_svc.in_app_notification
-			WHERE recipient_user_id = $1
-			  AND is_deleted = false
-			ORDER BY created_at DESC
-			LIMIT $2 OFFSET $3
-		`
+				q := `
+						SELECT i.id, i.outbox_id, i.correlation_id, i.event_id,
+									 COALESCE(i.subject,''), COALESCE(i.body,''),
+									 COALESCE(i.priority_level,3), i.is_read, i.read_at, i.created_at,
+									 e.module_code, e.sub_module_code, e.event_code, e.event_display_name,
+									 o.sender_id, o.sender_name, o.sender_email
+						FROM notification_svc.in_app_notification i
+						LEFT JOIN notification_svc.event e ON e.event_id = i.event_id
+						LEFT JOIN notification_svc.outbox o ON o.outbox_id = i.outbox_id
+						WHERE i.recipient_user_id = $1
+							AND i.is_deleted = false
+						ORDER BY i.created_at DESC
+						LIMIT $2 OFFSET $3
+				`
 		rows, err := pool.Query(r.Context(), q, userID, limit, offset)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "db error")
@@ -156,13 +170,39 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 		var items []inboxItem
 		for rows.Next() {
 			var it inboxItem
+
+			// nullable DB columns -> use sql.NullString and convert to empty string
+			var moduleCode, subModuleCode, eventCode, eventName sql.NullString
+			var senderID, senderName, senderEmail sql.NullString
+
 			if err := rows.Scan(
 				&it.ID, &it.OutboxID, &it.CorrelationID, &it.EventID,
 				&it.Subject, &it.Body, &it.PriorityLevel,
 				&it.IsRead, &it.ReadAt, &it.CreatedAt,
+				&moduleCode, &subModuleCode, &eventCode, &eventName,
+				&senderID, &senderName, &senderEmail,
 			); err != nil {
+				fmt.Printf("[PUSH] handleGetInbox scan error: %v\n", err)
 				continue
 			}
+
+			// assign with empty-string fallback and trim padding
+			it.ModuleCode = strings.TrimSpace(moduleCode.String)
+			it.SubModuleCode = strings.TrimSpace(subModuleCode.String)
+			it.EventCode = strings.TrimSpace(eventCode.String)
+			it.EventName = strings.TrimSpace(eventName.String)
+			it.SenderID = strings.TrimSpace(senderID.String)
+			it.SenderName = strings.TrimSpace(senderName.String)
+			it.SenderEmail = strings.TrimSpace(senderEmail.String)
+
+			// trim padding for fixed-width char columns that may include trailing spaces
+			it.ID = strings.TrimSpace(it.ID)
+			it.OutboxID = strings.TrimSpace(it.OutboxID)
+			it.CorrelationID = strings.TrimSpace(it.CorrelationID)
+			it.EventID = strings.TrimSpace(it.EventID)
+			it.Subject = strings.TrimSpace(it.Subject)
+			it.Body = strings.TrimSpace(it.Body)
+
 			items = append(items, it)
 		}
 		if rows.Err() != nil {
