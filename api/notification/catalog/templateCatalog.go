@@ -911,13 +911,20 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.is_deleted, false)     AS version_is_deleted,
 				COALESCE(a.old_recipients, '{}')  AS old_recipients,
 
-				` + recipientSubquery + ` AS recipients
+				` + recipientSubquery + ` AS recipients,
+
+				-- Event fields joined from notification_svc.event
+				COALESCE(e.event_name,'')     AS event_name,
+				COALESCE(e.source_route,'')   AS event_source_route,
+				COALESCE(e.entity_name,'')    AS event_entity_name,
+				COALESCE(e.event_id,'')       AS event_event_id
 
 			FROM notification_svc.audit_template a
 			JOIN notification_svc.template t ON t.template_id = a.template_id
 			LEFT JOIN history h ON h.template_id = a.template_id
-			WHERE a.is_deleted =false AND
-			1=1
+			LEFT JOIN notification_svc.event e ON e.event_id = t.event_id
+			WHERE a.is_deleted = false
+			AND 1=1
 			` + filterClause + `
 			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamptz), COALESCE(a.checker_at, '1970-01-01'::timestamptz)) DESC NULLS LAST
 		`

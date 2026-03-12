@@ -422,6 +422,30 @@ func dispatchForEvent(
 		return nil
 	}
 
+	// Deduplicate within the batch BEFORE inserting.
+	// PostgreSQL raises "ON CONFLICT DO UPDATE command cannot affect row a second time"
+	// (SQLSTATE 21000) when two rows in the SAME VALUES list share the same conflict key.
+	// This can happen when the same recipient appears across multiple templates for the
+	// same (correlation_id, channel, audit_id). We keep the last writer wins (stable order).
+	{
+		type conflictKey struct{ correlationID, channel, auditID, recipientUserID string }
+		seen := make(map[conflictKey]int, len(outboxRows)) // key → index in deduped slice
+		deduped := make([]outboxRow, 0, len(outboxRows))
+		for _, row := range outboxRows {
+			k := conflictKey{row.correlationID, row.channel, row.auditID, row.recipientUserID}
+			if idx, exists := seen[k]; exists {
+				deduped[idx] = row // overwrite with latest
+			} else {
+				seen[k] = len(deduped)
+				deduped = append(deduped, row)
+			}
+		}
+		if len(deduped) < len(outboxRows) {
+			api.LogInfo("[NOTIF] deduped outbox batch from %d → %d rows", len(outboxRows), len(deduped))
+		}
+		outboxRows = deduped
+	}
+
 	// Step 5 — batch insert into outbox (idempotent via unique index)
 	outboxIDMap, err := insertOutbox(ctx, pool, outboxRows)
 	if err != nil {
