@@ -46,6 +46,7 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			EventName     string `json:"event_display_name"`
 			Description   string `json:"description"`
 			SourceRoute   string `json:"source_route"`
+			EntityName    string `json:"entity_name"`
 			IsActive      *bool  `json:"is_active"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -76,18 +77,23 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
+		entityNameVal := nullStr(req.EntityName)
 		insertQ := `
 			INSERT INTO notification_svc.event (
-				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active
-			) VALUES ($1,$2,$3,$4,$5,$6,$7)
+				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active, entity_name
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			RETURNING event_id
 		`
 		var eventID string
 		err = tx.QueryRow(ctx, insertQ,
-			req.ModuleCode, req.SubModuleCode, req.EventCode, req.EventName, req.Description, req.SourceRoute, req.IsActive,
+			req.ModuleCode, req.SubModuleCode, req.EventCode, req.EventName, req.Description, req.SourceRoute, req.IsActive, entityNameVal,
 		).Scan(&eventID)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			if strings.Contains(err.Error(), "uq_event") || strings.Contains(err.Error(), "unique") {
+				respondWithError(w, http.StatusConflict, "duplicate event: the combination of (module_code, sub_module_code, event_code, entity_name) or (event_display_name, entity_name) or (source_route, entity_name) already exists")
+			} else {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+			}
 			return
 		}
 
@@ -126,6 +132,7 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EventName     string `json:"event_display_name"`
 				Description   string `json:"description"`
 				SourceRoute   string `json:"source_route"`
+				EntityName    string `json:"entity_name"`
 				IsActive      *bool  `json:"is_active"`
 			} `json:"rows"`
 		}
@@ -152,21 +159,20 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		valueStrings := make([]string, 0, len(req.Rows))
-		valueArgs := make([]interface{}, 0, len(req.Rows)*7)
+		valueArgs := make([]interface{}, 0, len(req.Rows)*8)
 		for i, rrow := range req.Rows {
 			if rrow.IsActive == nil {
 				def := false
 				rrow.IsActive = &def
 			}
-			pos := i*7 + 1
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4, pos+5, pos+6))
-			valueArgs = append(valueArgs, rrow.ModuleCode, rrow.SubModuleCode, rrow.EventCode, rrow.EventName, rrow.Description, rrow.SourceRoute, rrow.IsActive)
+			pos := i*8 + 1
+			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4, pos+5, pos+6, pos+7))
+			valueArgs = append(valueArgs, rrow.ModuleCode, rrow.SubModuleCode, rrow.EventCode, rrow.EventName, rrow.Description, rrow.SourceRoute, rrow.IsActive, nullStr(rrow.EntityName))
 		}
 		batchQ := fmt.Sprintf(`
 			INSERT INTO notification_svc.event (
-				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active
+				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active, entity_name
 			) VALUES %s
-			
 			RETURNING event_id, event_display_name
 		`, strings.Join(valueStrings, ","))
 
@@ -190,7 +196,11 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Without this check tx.Commit() returns "commit unexpectedly resulted in rollback".
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			respondWithError(w, http.StatusConflict, "event insert failed: "+err.Error())
+			if strings.Contains(err.Error(), "uq_event") || strings.Contains(err.Error(), "unique") {
+				respondWithError(w, http.StatusConflict, "duplicate event: the combination of (module_code, sub_module_code, event_code, entity_name) or (event_display_name, entity_name) or (source_route, entity_name) already exists")
+			} else {
+				respondWithError(w, http.StatusConflict, "event insert failed: "+err.Error())
+			}
 			return
 		}
 		rows.Close()
@@ -258,13 +268,13 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// fetch old values for audit
 		sel := `
-			SELECT event_display_name, description, is_active
+			SELECT event_display_name, description, is_active, COALESCE(entity_name,'')
 			FROM notification_svc.event
 			WHERE event_id = $1 FOR UPDATE
 		`
-		var oldName, oldDesc string
+		var oldName, oldDesc, oldEntityName string
 		var oldActive bool
-		if err := tx.QueryRow(ctx, sel, req.EventID).Scan(&oldName, &oldDesc, &oldActive); err != nil {
+		if err := tx.QueryRow(ctx, sel, req.EventID).Scan(&oldName, &oldDesc, &oldActive, &oldEntityName); err != nil {
 			respondWithError(w, http.StatusBadRequest, "event not found")
 			return
 		}
@@ -273,7 +283,7 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var sets []string
 		var args []interface{}
 		pos := 1
-		allowed := map[string]bool{"event_display_name": true, "description": true, "source_route": true, "is_active": true}
+		allowed := map[string]bool{"event_display_name": true, "description": true, "source_route": true, "is_active": true, "entity_name": true}
 		for k, v := range req.Fields {
 			if !allowed[k] {
 				continue
@@ -295,9 +305,9 @@ func UpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		auditQ := `
 			INSERT INTO notification_svc.audit_event (
 				event_id, action_type, processing_status, reason, requested_by, requested_at,
-				old_event_display_name, old_description, old_is_active
-			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6)`
-		if _, err := tx.Exec(ctx, auditQ, req.EventID, req.Reason, userEmail, oldName, oldDesc, oldActive); err != nil {
+				old_event_display_name, old_description, old_is_active, old_entity_name
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7)`
+		if _, err := tx.Exec(ctx, auditQ, req.EventID, req.Reason, userEmail, oldName, oldDesc, oldActive, nullStr(oldEntityName)); err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -445,12 +455,13 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := `
 			SELECT
 				m.event_id,
-				COALESCE(m.module_code,'')       AS module_code,
-				COALESCE(m.sub_module_code,'')   AS sub_module_code,
-				COALESCE(m.event_code,'')        AS event_code,
+				COALESCE(m.module_code,'')        AS module_code,
+				COALESCE(m.sub_module_code,'')    AS sub_module_code,
+				COALESCE(m.event_code,'')         AS event_code,
 				COALESCE(m.event_display_name,'') AS event_display_name,
-				COALESCE(m.description,'')       AS description,
-				COALESCE(m.source_route,'')      AS source_route
+				COALESCE(m.description,'')        AS description,
+				COALESCE(m.source_route,'')       AS source_route,
+				COALESCE(m.entity_name,'')        AS entity_name
 			FROM notification_svc.event m
 			WHERE m.is_active = true
 			  AND COALESCE(m.is_deleted, false) = false
@@ -469,8 +480,8 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var id, module, sub, code, name, desc, route string
-			if err := rows.Scan(&id, &module, &sub, &code, &name, &desc, &route); err != nil {
+			var id, module, sub, code, name, desc, route, entityName string
+			if err := rows.Scan(&id, &module, &sub, &code, &name, &desc, &route, &entityName); err != nil {
 				api.LogError("GetEventsApprovedActive scan error: %v", err)
 				continue
 			}
@@ -482,6 +493,7 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"event_display_name": name,
 				"description":        desc,
 				"source_route":       route,
+				"entity_name":        entityName,
 			})
 		}
 		if rows.Err() != nil {
@@ -503,7 +515,7 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
-		q := `SELECT audit_id, event_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment, old_event_display_name, old_description, old_is_active FROM notification_svc.audit_event WHERE event_id = $1 ORDER BY requested_at DESC`
+		q := `SELECT audit_id, event_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment, old_event_display_name, old_description, old_is_active, old_entity_name FROM notification_svc.audit_event WHERE event_id = $1 ORDER BY requested_at DESC`
 		rows, err := pgxPool.Query(ctx, q, req.EventID)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -515,9 +527,9 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var auditID, eventID, actionType, procStatus string
 			var reason, requestedBy, checkerBy, checkerComment *string
 			var requestedAt, checkerAt interface{}
-			var oldName, oldDesc *string
+			var oldName, oldDesc, oldEntityName *string
 			var oldActive *bool
-			if err := rows.Scan(&auditID, &eventID, &actionType, &procStatus, &reason, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &oldName, &oldDesc, &oldActive); err == nil {
+			if err := rows.Scan(&auditID, &eventID, &actionType, &procStatus, &reason, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &oldName, &oldDesc, &oldActive, &oldEntityName); err == nil {
 				out = append(out, map[string]interface{}{
 					"audit_id":               auditID,
 					"event_id":               eventID,
@@ -532,6 +544,7 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"old_event_display_name": oldName,
 					"old_description":        oldDesc,
 					"old_is_active":          oldActive,
+					"old_entity_name":        oldEntityName,
 				})
 			}
 		}
@@ -658,16 +671,16 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 			// fetch old values
-			sel := `SELECT event_display_name, description, source_route, is_active FROM notification_svc.event WHERE event_id=$1 FOR UPDATE`
-			var oldName, oldDesc, oldRoute string
+			sel := `SELECT event_display_name, description, source_route, is_active, COALESCE(entity_name,'') FROM notification_svc.event WHERE event_id=$1 FOR UPDATE`
+			var oldName, oldDesc, oldRoute, oldEntityName string
 			var oldActive bool
-			if err := tx.QueryRow(ctx, sel, row.EventID).Scan(&oldName, &oldDesc, &oldRoute, &oldActive); err != nil {
+			if err := tx.QueryRow(ctx, sel, row.EventID).Scan(&oldName, &oldDesc, &oldRoute, &oldActive, &oldEntityName); err != nil {
 				errorsList = append(errorsList, map[string]interface{}{"event_id": row.EventID, "success": false, "error": "not found"})
 				continue
 			}
 
 			// Build update for allowed fields
-			allowed := map[string]bool{"event_display_name": true, "description": true, "source_route": true, "is_active": true}
+			allowed := map[string]bool{"event_display_name": true, "description": true, "source_route": true, "is_active": true, "entity_name": true}
 			var sets []string
 			var args []interface{}
 			pos := 1
@@ -689,8 +702,8 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			// insert audit record with old values
-			auditQ := `INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, reason, requested_by, requested_at, old_event_display_name, old_description, old_is_active) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6)`
-			if _, err := tx.Exec(ctx, auditQ, row.EventID, row.Reason, userEmail, oldName, oldDesc, oldActive); err != nil {
+			auditQ := `INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, reason, requested_by, requested_at, old_event_display_name, old_description, old_is_active, old_entity_name) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),$4,$5,$6,$7)`
+			if _, err := tx.Exec(ctx, auditQ, row.EventID, row.Reason, userEmail, oldName, oldDesc, oldActive, nullStr(oldEntityName)); err != nil {
 				errorsList = append(errorsList, map[string]interface{}{"event_id": row.EventID, "success": false, "error": err.Error()})
 				continue
 			}
@@ -751,6 +764,7 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.event_display_name,'') AS event_display_name,
 				COALESCE(m.description,'') AS description,
 				COALESCE(m.source_route,'') AS source_route,
+				COALESCE(m.entity_name,'') AS entity_name,
 				COALESCE(m.is_active,false) AS is_active,
 				COALESCE(m.is_deleted,false) AS is_deleted,
 
@@ -826,22 +840,23 @@ func GetEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 		q := `
-			SELECT m.event_id, m.module_code, m.sub_module_code, m.event_code, m.event_display_name, m.description, m.source_route, m.is_active, m.is_deleted,
+			SELECT m.event_id, m.module_code, m.sub_module_code, m.event_code, m.event_display_name, m.description, m.source_route, m.is_active, m.is_deleted, COALESCE(m.entity_name,''),
 				   COALESCE((SELECT json_agg(json_build_object(
 					   'audit_id', a.audit_id, 'action_type', a.action_type, 'processing_status', a.processing_status,
 					   'reason', a.reason, 'requested_by', a.requested_by, 'requested_at', a.requested_at,
 					   'checker_by', a.checker_by, 'checker_at', a.checker_at, 'checker_comment', a.checker_comment,
-					   'old_event_display_name', a.old_event_display_name, 'old_description', a.old_description, 'old_is_active', a.old_is_active
+					   'old_event_display_name', a.old_event_display_name, 'old_description', a.old_description, 'old_is_active', a.old_is_active,
+					   'old_entity_name', a.old_entity_name
 				   ) ORDER BY a.requested_at DESC) FROM notification_svc.audit_event a WHERE a.event_id = m.event_id), '[]'::json) AS audits
 			FROM notification_svc.event m
 			WHERE m.event_id = $1
 			LIMIT 1
 		`
 		row := pgxPool.QueryRow(ctx, q, req.EventID)
-		var id, module, sub, code, name, desc, route string
+		var id, module, sub, code, name, desc, route, entityName string
 		var isActive, isDeleted bool
 		var audits json.RawMessage
-		if err := row.Scan(&id, &module, &sub, &code, &name, &desc, &route, &isActive, &isDeleted, &audits); err != nil {
+		if err := row.Scan(&id, &module, &sub, &code, &name, &desc, &route, &isActive, &isDeleted, &entityName, &audits); err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -857,6 +872,7 @@ func GetEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"source_route":       route,
 			"is_active":          isActive,
 			"is_deleted":         isDeleted,
+			"entity_name":        entityName,
 			"audits":             auditsVal,
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -932,7 +948,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Build batch insert
 		valueStrings := make([]string, 0, len(data))
-		valueArgs := make([]interface{}, 0, len(data)*7)
+		valueArgs := make([]interface{}, 0, len(data)*8)
 		for i, row := range data {
 			// safe access using colMap
 			module := safeCol(row, colMap, "module_code")
@@ -941,6 +957,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			name := safeCol(row, colMap, "event_display_name")
 			desc := safeCol(row, colMap, "description")
 			route := safeCol(row, colMap, "source_route")
+			entityName := safeCol(row, colMap, "entity_name")
 			isActiveStr := safeCol(row, colMap, "is_active")
 			isActive := parseBoolDefault(isActiveStr, false)
 
@@ -949,9 +966,9 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				continue
 			}
 
-			pos := i*7 + 1
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4, pos+5, pos+6))
-			valueArgs = append(valueArgs, module, sub, code, name, desc, route, isActive)
+			pos := i*8 + 1
+			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", pos, pos+1, pos+2, pos+3, pos+4, pos+5, pos+6, pos+7))
+			valueArgs = append(valueArgs, module, sub, code, name, desc, route, isActive, nullStr(entityName))
 		}
 		if len(valueStrings) == 0 {
 			api.RespondWithPayload(w, false, "no valid rows to insert", nil)
@@ -959,8 +976,8 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		batchQ := fmt.Sprintf(`
-			INSERT INTO notification_svc.event_master (
-				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active
+			INSERT INTO notification_svc.event (
+				module_code, sub_module_code, event_code, event_display_name, description, source_route, is_active, entity_name
 			) VALUES %s
 			RETURNING event_id, event_display_name
 		`, strings.Join(valueStrings, ","))
@@ -991,7 +1008,7 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				auditArgs = append(auditArgs, id, userEmail)
 				pos += 2
 			}
-			auditQ := fmt.Sprintf("INSERT INTO notification_svc.audit_event_master (event_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
+			auditQ := fmt.Sprintf("INSERT INTO notification_svc.audit_event (event_id, action_type, processing_status, requested_by, requested_at) VALUES %s", strings.Join(auditVals, ","))
 			if _, err := tx.Exec(ctx, auditQ, auditArgs...); err != nil {
 				respondWithError(w, http.StatusInternalServerError, err.Error())
 				return

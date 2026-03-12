@@ -14,14 +14,41 @@ import (
 	// "time"
 	"path/filepath"
 
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// getUserFriendlyPenaltyError converts database errors to user-friendly messages
+// getUserFriendlyPenaltyError converts database errors to user-friendly messages.
+// It unwraps pgconn.PgError for precise constraint/type details.
 func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 	if err == nil {
 		return "", http.StatusOK
 	}
+
+	// Unwrap pgconn.PgError first — most specific handler
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		api.LogError("PgError [%s] constraint=%s table=%s detail=%s", pgErr.Code, pgErr.ConstraintName, pgErr.TableName, pgErr.Detail)
+		switch pgErr.Code {
+		case "23505": // unique_violation
+			if strings.Contains(pgErr.ConstraintName, "penalty_code") {
+				return "Penalty code already exists", http.StatusOK
+			}
+			return "Duplicate entry detected. This record already exists in the system.", http.StatusOK
+		case "23503": // foreign_key_violation
+			return "Referenced record not found or is invalid.", http.StatusOK
+		case "23514": // check_violation
+			return fmt.Sprintf("Invalid value: check constraint '%s' failed", pgErr.ConstraintName), http.StatusBadRequest
+		case "22P02": // invalid_text_representation (enum cast failure)
+			return "Invalid enum value provided for one of the fields", http.StatusBadRequest
+		case "42804": // datatype_mismatch
+			return fmt.Sprintf("Field type mismatch: %s", pgErr.Message), http.StatusBadRequest
+		}
+		// Fall through with the raw Postgres message for any other code
+		return fmt.Sprintf("Database error [%s]: %s", pgErr.Code, pgErr.Message), http.StatusInternalServerError
+	}
+
 	errStr := strings.ToLower(err.Error())
 
 	// Known audit/transaction errors
@@ -31,7 +58,7 @@ func getUserFriendlyPenaltyError(err error, context string) (string, int) {
 		return err.Error(), http.StatusOK
 	}
 
-	// Constraint violations
+	// Constraint violations (string-based fallback)
 	if strings.Contains(errStr, "uniq_penalty_code_active") ||
 		strings.Contains(errStr, constants.ErrDuplicateKeyC) && strings.Contains(errStr, "penalty_code") {
 		return "Penalty code already exists", http.StatusOK
@@ -441,14 +468,16 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		// Fetch existing row for old values
-		sel := `
-            SELECT bank_code, min_amount_range, max_amount_range, min_tenor_days,
-                   max_tenor_days, min_held_days, max_held_days, penalty_type,
-                   penalty_value, calculation_method, no_interest_if_withdrawn_before,
-                   description, effective_from, effective_to, is_active
-            FROM investment.fd_penalty_structure_master
-            WHERE penalty_id=$1
-            FOR UPDATE`
+		 // Cast date columns to text (YYYY-MM-DD) to avoid binary-date scan errors
+		 sel := `
+		     SELECT bank_code, min_amount_range, max_amount_range, min_tenor_days,
+			     max_tenor_days, min_held_days, max_held_days, penalty_type,
+			     penalty_value, calculation_method, no_interest_if_withdrawn_before,
+			     description, TO_CHAR(effective_from, 'YYYY-MM-DD') as effective_from,
+			     TO_CHAR(effective_to, 'YYYY-MM-DD') as effective_to, is_active
+		     FROM investment.fd_penalty_structure_master
+		     WHERE penalty_id=$1
+		     FOR UPDATE`
 
 		var oldBankCode string
 		var oldMinAmount *float64
@@ -472,6 +501,15 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldPenaltyValue, &oldCalcMethod, &oldNoInterest,
 			&oldDescription, &oldEffectiveFrom, &oldEffectiveTo, &oldIsActive,
 		); err != nil {
+			// If no row found, return a 404 Not Found with a clear message.
+			if errors.Is(err, pgx.ErrNoRows) {
+				api.RespondWithError(w, http.StatusNotFound, "Penalty record not found")
+				api.LogError("Penalty fetch: not found penalty_id=%s", req.PenaltyID)
+				return
+			}
+
+			// Log the DB error with context so we can diagnose intermittent failures.
+			api.LogError("Penalty fetch failed: penalty_id=%s err=%v", req.PenaltyID, err)
 			msg, status := getUserFriendlyPenaltyError(err, "Fetch failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -487,6 +525,14 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"is_active": true,
 		}
 
+		// Enum columns: use $N::text so Postgres coerces the text value into the enum type.
+		// This avoids "column is of type X but expression is of type text" when pgx sends
+		// plain strings over the binary protocol.
+		enumColumns := map[string]bool{
+			"penalty_type":       true,
+			"calculation_method": true,
+		}
+
 		var sets []string
 		var args []interface{}
 		pos := 1
@@ -494,7 +540,12 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for k, v := range req.Fields {
 			k = strings.ToLower(k)
 			if _, ok := fieldPairs[k]; ok {
-				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+				if enumColumns[k] {
+					// Cast via text to allow Postgres to coerce into the enum type
+					sets = append(sets, fmt.Sprintf("%s=$%d::text", k, pos))
+				} else {
+					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+				}
 				args = append(args, v)
 				pos++
 			}
@@ -511,6 +562,8 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		args = append(args, req.PenaltyID)
 
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
+			// Log the failing UPDATE with query and sanitized args for diagnostics
+			api.LogError("Penalty update failed: penalty_id=%s query=%s args=%v err=%v", req.PenaltyID, q, args, err)
 			msg, status := getUserFriendlyPenaltyError(err, "Update failed")
 			api.RespondWithError(w, status, msg)
 			return

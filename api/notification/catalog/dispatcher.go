@@ -102,7 +102,8 @@ func TriggerNotification(
 // ─────────────────────────────────────────────────────────────────────────────
 
 type resolvedEvent struct {
-	eventID string
+	eventID    string
+	entityName string // empty = no restriction; non-empty = only send to matching business_unit_name
 }
 
 type enabledChannel struct {
@@ -152,6 +153,8 @@ type outboxRow struct {
 	senderName       string
 	senderEmail      string
 	senderIdentifier string // SMS sender ID / WhatsApp number
+	// Entity scope (copied from event.entity_name; empty = no restriction)
+	entityName string
 }
 
 func dispatchNotification(
@@ -163,18 +166,73 @@ func dispatchNotification(
 ) error {
 	api.LogInfo("[NOTIF] dispatchNotification START correlation=%s route=%s", correlationID, sourceRoute)
 
-	// Step 1 — resolve event by source_route
-	event, err := lookupEvent(ctx, pool, sourceRoute)
-	if err != nil {
-		return fmt.Errorf("lookupEvent: %w", err)
+	// Step 1a — identify the triggering actor from the payload so we can resolve their entity.
+	actorValue := payloadString(payload,
+		"ApprovedBy", "CheckerBy",
+		"RejectedBy",
+		"RequestedBy",
+		"UploadedBy", "CreatedBy", "UpdatedBy",
+		"Approver", "ApproverEmail", "ApprovedByEmail",
+		"UserID",
+	)
+
+	// Step 1b — resolve the actor's entity (business_unit_name) from the users table.
+	// Priority: session cache (free) → DB lookup → empty (no restriction).
+	// This entity is used to select WHICH event fires: we prefer the entity-scoped event
+	// that matches the actor's business_unit_name. If none exists, fall back to the
+	// global event (entity_name IS NULL / empty).
+	var actorEntity string
+	if actorValue != "" {
+		if _, _, _, ok := lookupSenderFromSession(actorValue); ok {
+			// session found — also get entity from DB since session doesn't carry it
+		}
+		// Always try DB for entity — session doesn't store business_unit_name
+		var bu string
+		q := `SELECT COALESCE(business_unit_name,'') FROM users WHERE id::text=$1 OR email=$1 LIMIT 1`
+		if err := pool.QueryRow(ctx, q, actorValue).Scan(&bu); err == nil {
+			actorEntity = bu
+		}
+		api.LogInfo("[NOTIF] actor=%s resolved entity=%q", actorValue, actorEntity)
 	}
-	if event == nil {
-		api.LogInfo("[NOTIF] no active approved event for route=%s — skipping", sourceRoute)
+
+	// Step 1c — resolve events for this route filtered by actor's entity.
+	// Logic:
+	//   - If actor has an entity → prefer that entity's event; fall back to global (entity='') event.
+	//   - If actor has no entity → use only global (entity='') events.
+	//   - External/extra recipients (raw email in template_recipient, no users row) always get notified regardless.
+	events, err := lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
+	if err != nil {
+		return fmt.Errorf("lookupEventsForActor: %w", err)
+	}
+	if len(events) == 0 {
+		api.LogInfo("[NOTIF] no active approved event for route=%s entity=%q — skipping", sourceRoute, actorEntity)
 		return nil
 	}
-	api.LogInfo("[NOTIF] resolved event=%s for route=%s", event.eventID, sourceRoute)
+	api.LogInfo("[NOTIF] resolved %d event(s) for route=%s entity=%q", len(events), sourceRoute, actorEntity)
 
-	// Step 2 — fetch enabled channels from notification_config
+	var firstErr error
+	for _, ev := range events {
+		ev := ev // capture
+		if err := dispatchForEvent(ctx, pool, sourceRoute, correlationID, payload, &ev); err != nil {
+			api.LogError("[NOTIF] dispatchForEvent event=%s entity=%s err=%v", ev.eventID, ev.entityName, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// dispatchForEvent runs the full notification pipeline for one resolved event.
+func dispatchForEvent(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	sourceRoute string,
+	correlationID string,
+	payload map[string]interface{},
+	event *resolvedEvent,
+) error {
+	api.LogInfo("[NOTIF] dispatchForEvent event=%s entity=%q correlation=%s", event.eventID, event.entityName, correlationID)
 	channels, err := lookupEnabledChannels(ctx, pool, event.eventID)
 	if err != nil {
 		return fmt.Errorf("lookupEnabledChannels: %w", err)
@@ -209,7 +267,7 @@ func dispatchNotification(
 		for _, tpl := range tpls {
 			tpl := tpl // capture for goroutine safety
 			api.LogInfo("[NOTIF] processing template auditID=%s ch=%s version=%s", tpl.auditID, ch.channel, tpl.versionLabel)
-			recipients, err := lookupRecipients(ctx, pool, &tpl, payload)
+			recipients, err := lookupRecipients(ctx, pool, &tpl, payload, event.entityName)
 			if err != nil {
 				api.LogError("[NOTIF] lookupRecipients tpl=%s: %v", tpl.auditID, err)
 				continue
@@ -349,6 +407,7 @@ func dispatchNotification(
 					senderName:       senderName,
 					senderEmail:      senderEmail,
 					senderIdentifier: senderIdentifier,
+					entityName:       event.entityName,
 				}
 
 				mu.Lock()
@@ -380,18 +439,13 @@ func dispatchNotification(
 // DB helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// lookupEvent returns the event for the given source_route if it is
-// active, not deleted, and has at least one APPROVED audit row.
-// lookupEvent returns all events for the given source_route that are active,
-// approved, not deleted, have at least one enabled channel config, and have
-// at least one approved template ready. Returns the most-recently-approved
-// event that is fully configured. Falls back to any approved+active event
-// if none has a config yet (so callers can log a useful warning).
-func lookupEvent(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (*resolvedEvent, error) {
-	// Prefer events that have both an enabled config AND an approved template.
-	// Falls back to any approved+active event so the caller can log the gap.
+// lookupEvents returns ALL active+approved events for the given source_route.
+// Since uq_event_source_route_entity makes source_route unique per (route, entity_name),
+// the same route can belong to multiple entity-scoped events. We return all of them
+// so the dispatcher fans out notifications to each entity independently.
+func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) ([]resolvedEvent, error) {
 	q := `
-		SELECT e.event_id
+		SELECT e.event_id, COALESCE(e.entity_name,'')
 		FROM notification_svc.event e
 		WHERE e.source_route = $1
 		  AND e.is_active = true
@@ -401,6 +455,8 @@ func lookupEvent(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (*
 			  WHERE ae.event_id = e.event_id AND ae.processing_status = 'APPROVED'
 		  )
 		ORDER BY
+			-- entity-scoped events first (more specific)
+			(COALESCE(e.entity_name,'') <> '') DESC,
 			-- prefer events with an enabled notification_config
 			(EXISTS (SELECT 1 FROM notification_svc.notification_config nc WHERE nc.event_id = e.event_id AND nc.is_enabled = true)) DESC,
 			-- then prefer events with an approved template
@@ -409,20 +465,106 @@ func lookupEvent(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (*
 				JOIN notification_svc.audit_template at ON at.template_id = t.template_id
 				WHERE t.event_id = e.event_id AND at.processing_status = 'APPROVED'
 			)) DESC,
-			-- finally prefer the most recently approved event
+			-- finally most recently approved
 			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
 			 WHERE ae2.event_id = e.event_id AND ae2.processing_status = 'APPROVED') DESC NULLS LAST
-		LIMIT 1
 	`
-	var eventID string
-	err := pool.QueryRow(ctx, q, sourceRoute).Scan(&eventID)
+	rows, err := pool.Query(ctx, q, sourceRoute)
 	if err != nil {
-		if strings.Contains(err.Error(), "no rows") {
-			return nil, nil
-		}
 		return nil, err
 	}
-	return &resolvedEvent{eventID: eventID}, nil
+	defer rows.Close()
+	var out []resolvedEvent
+	for rows.Next() {
+		var ev resolvedEvent
+		if err := rows.Scan(&ev.eventID, &ev.entityName); err != nil {
+			return nil, err
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+// lookupEventsForActor selects which event(s) to fire based on the triggering actor's entity.
+//
+// Uses a recursive CTE on cashentityrelationships to walk UP the hierarchy (ancestors)
+// so that a child-entity actor matches a parent-entity event.
+//
+// Rules:
+//  1. If actorEntity != "" → build the ancestor chain (entity + all parents).
+//     Return event(s) whose entity_name is IN that ancestor set (most-specific first).
+//     Also include global events (entity_name = '') as final fallback.
+//  2. If actorEntity == "" → return only global events (entity_name = '' or NULL).
+//
+// Example: actor is in "BU-North" (child of "APAC" which is child of "Global").
+//   ancestor set = {"BU-North", "APAC", "Global"}
+//   → fires BU-North event if it exists, else APAC event, else Global event, else entity-less event.
+func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
+	q := `
+		WITH RECURSIVE actor_ancestors AS (
+			-- Anchor: the actor's own entity
+			SELECT entity_name, 0 AS depth
+			FROM masterentitycash
+			WHERE entity_name = $2
+			  AND (is_deleted = false OR is_deleted IS NULL)
+			UNION ALL
+			-- Walk UP: find parents of the current entity
+			SELECT r.parent_entity_name, aa.depth + 1
+			FROM cashentityrelationships r
+			INNER JOIN actor_ancestors aa ON aa.entity_name = r.child_entity_name
+			WHERE aa.depth < 10  -- safety cap
+		)
+		SELECT e.event_id, COALESCE(e.entity_name,'')
+		FROM notification_svc.event e
+		WHERE e.source_route = $1
+		  AND e.is_active = true
+		  AND COALESCE(e.is_deleted, false) = false
+		  AND EXISTS (
+			  SELECT 1 FROM notification_svc.audit_event ae
+			  WHERE ae.event_id = e.event_id AND ae.processing_status = 'APPROVED'
+		  )
+		  AND (
+			CASE
+			  -- Actor has a known entity: match if event entity_name is in the ancestor chain OR is global
+			  WHEN $2 <> ''
+			  THEN COALESCE(e.entity_name,'') IN (SELECT entity_name FROM actor_ancestors)
+			    OR COALESCE(e.entity_name,'') = ''
+			  -- Actor has no entity: only global events
+			  ELSE COALESCE(e.entity_name,'') = ''
+			END
+		  )
+		ORDER BY
+			-- Most-specific match first: prefer the event whose entity is deepest in hierarchy
+			-- (highest depth value = closest ancestor to actor)
+			COALESCE((
+				SELECT aa.depth FROM actor_ancestors aa
+				WHERE aa.entity_name = COALESCE(e.entity_name,'') LIMIT 1
+			), -1) DESC,
+			-- prefer events with an enabled notification_config
+			(EXISTS (SELECT 1 FROM notification_svc.notification_config nc WHERE nc.event_id = e.event_id AND nc.is_enabled = true)) DESC,
+			-- then prefer events with an approved template
+			(EXISTS (
+				SELECT 1 FROM notification_svc.template t
+				JOIN notification_svc.audit_template at ON at.template_id = t.template_id
+				WHERE t.event_id = e.event_id AND at.processing_status = 'APPROVED'
+			)) DESC,
+			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
+			 WHERE ae2.event_id = e.event_id AND ae2.processing_status = 'APPROVED') DESC NULLS LAST
+	`
+	rows, err := pool.Query(ctx, q, sourceRoute, actorEntity)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []resolvedEvent
+	for rows.Next() {
+		var ev resolvedEvent
+		if err := rows.Scan(&ev.eventID, &ev.entityName); err != nil {
+			return nil, err
+		}
+		out = append(out, ev)
+	}
+	return out, rows.Err()
 }
 
 // lookupEnabledChannels returns notification_config rows where is_enabled = true.
@@ -495,10 +637,12 @@ func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel s
 }
 
 // lookupRecipients resolves template_recipient rows → actual users + their contact info.
+// If entityName is non-empty, only users whose business_unit_name matches are included
+// (external recipients stored as raw email in recipient_user_id bypass this filter).
 // If no template_recipients exist, tries to use payload keys:
 //
 //	RecipientEmail / RecipientUserID / RecipientName / RecipientPhone as a fallback.
-func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemplate, payload map[string]interface{}) ([]resolvedRecipient, error) {
+func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemplate, payload map[string]interface{}, entityName string) ([]resolvedRecipient, error) {
 	// Get the template_id from the audit row
 	var templateID string
 	err := pool.QueryRow(ctx, `SELECT template_id FROM notification_svc.audit_template WHERE audit_id = $1`, tpl.auditID).Scan(&templateID)
@@ -506,10 +650,28 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 		return nil, err
 	}
 
+	// $2 = entityName (empty string = no restriction).
+	// Entity filter uses a recursive CTE on cashentityrelationships to expand
+	// the event's entity into itself + ALL descendant entities.
+	// Rules:
+	//   - ROLE/USER recipients: their business_unit_name must be IN the expanded set
+	//   - External emails (u.id IS NULL, raw @ in recipient_user_id): ALWAYS pass through
+	//   - $2 = '' means no restriction — all recipients pass
 	q := `
+		WITH RECURSIVE entity_tree AS (
+			-- Anchor: the event's own entity
+			SELECT entity_name
+			FROM masterentitycash
+			WHERE entity_name = $2
+			  AND (is_deleted = false OR is_deleted IS NULL)
+			UNION ALL
+			-- Recursive: all children of entities already in the set
+			SELECT r.child_entity_name
+			FROM cashentityrelationships r
+			INNER JOIN entity_tree et ON et.entity_name = r.parent_entity_name
+		)
 		SELECT DISTINCT
 			COALESCE(u.id::text, '')                    AS user_id,
-			-- If no matching user found but recipient_user_id looks like an email, use it directly
 			COALESCE(u.email,
 				CASE WHEN tr.recipient_type = 'USER'
 				          AND NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), '') IS NOT NULL
@@ -523,33 +685,46 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 			COALESCE(tr.recipient_priority, 3)          AS recipient_priority
 		FROM notification_svc.template_recipient tr
 		LEFT JOIN users u
-			ON (tr.recipient_type = 'USER'
-				AND (
-					-- Match by UUID
+			ON (
+				-- USER type: match by UUID or by email stored in recipient_user_id
+				(tr.recipient_type = 'USER'
+				 AND (
 					u.id::text = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), '')
 					OR
-					-- Match by email (when caller stored an email in recipient_user_id)
 					(POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0
 					 AND u.email = NULLIF(TRIM(COALESCE(tr.recipient_user_id,'')), ''))
+				 )
+				)
+				OR
+				-- ROLE type: expand role → all users holding that role
+				(tr.recipient_type = 'ROLE'
+				 AND u.id IN (
+					SELECT ur2.user_id FROM user_roles ur2
+					JOIN roles ro2 ON ro2.id = ur2.role_id
+					WHERE ro2.name = tr.recipient_role OR ro2.rolecode = tr.recipient_role
+				 )
 				)
 			)
-			OR (tr.recipient_type = 'ROLE' AND u.id IN (
-				SELECT ur2.user_id FROM user_roles ur2
-				JOIN roles ro2 ON ro2.id = ur2.role_id
-				WHERE ro2.name = tr.recipient_role OR ro2.rolecode = tr.recipient_role
-			))
 		WHERE tr.template_id = $1
 		  AND tr.is_active = true
 		  AND (
-			-- Has a real user with email
 			COALESCE(u.email, '') <> ''
 			OR
-			-- OR: email stored directly in recipient_user_id (external recipient)
 			(tr.recipient_type = 'USER'
 			 AND POSITION('@' IN COALESCE(tr.recipient_user_id,'')) > 0)
 		  )
+		  AND (
+			-- No entity restriction on this event
+			$2 = ''
+			OR
+			-- External email (no users row matched) — always include
+			u.id IS NULL
+			OR
+			-- User's entity must be the event entity OR any of its descendants
+			COALESCE(u.business_unit_name, '') IN (SELECT entity_name FROM entity_tree)
+		  )
 	`
-	rows, err := pool.Query(ctx, q, templateID)
+	rows, err := pool.Query(ctx, q, templateID, entityName)
 	if err != nil {
 		return nil, err
 	}
@@ -568,7 +743,6 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 		}
 		seen[key] = true
 		// If employee_name is empty in users table, derive a friendly name from email
-		// (e.g. "hardik.mishra@company.com" → "Hardik Mishra")
 		if r.name == "" && r.email != "" {
 			r.name = nameFromEmail(r.email)
 		}
@@ -609,10 +783,10 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 
 	for _, r := range rows {
 		vals = append(vals, fmt.Sprintf(
-			"($%d,$%d,$%d::uuid,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d::jsonb,now(),$%d,$%d,$%d,$%d,$%d,$%d)",
+			"($%d,$%d,$%d::uuid,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d::jsonb,now(),$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 			pos, pos+1, pos+2, pos+3, pos+4, pos+5,
 			pos+6, pos+7, pos+8, pos+9, pos+10, pos+11,
-			pos+12, pos+13, pos+14, pos+15, pos+16, pos+17,
+			pos+12, pos+13, pos+14, pos+15, pos+16, pos+17, pos+18,
 		))
 		args = append(args,
 			r.correlationID,
@@ -633,8 +807,9 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 			nullStr(r.senderName),
 			nullStr(r.senderEmail),
 			nullStr(r.senderIdentifier),
+			nullStr(r.entityName),
 		)
-		pos += 18
+		pos += 19
 	}
 
 	q := fmt.Sprintf(`
@@ -642,7 +817,8 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 			correlation_id, event_id, audit_id, channel,
 			recipient_user_id, recipient_role, recipient_email, recipient_phone, recipient_name,
 			rendered_subject, rendered_body, variables_payload, scheduled_at,
-			priority_level, sender_id, sender_code, sender_name, sender_email, sender_identifier
+			priority_level, sender_id, sender_code, sender_name, sender_email, sender_identifier,
+			entity_name
 		) VALUES %s
 		-- ON CONFLICT now includes audit_id so that two different approved templates
 		-- for the same (correlation, channel, recipient) each get their own outbox row.
@@ -666,7 +842,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 		RETURNING outbox_id, correlation_id, event_id, audit_id, channel,
 		          recipient_user_id, recipient_email, recipient_phone,
 		          sender_name, sender_email, sender_identifier,
-		          rendered_subject, rendered_body
+		          rendered_subject, rendered_body, COALESCE(entity_name,'')
 	`, strings.Join(vals, ","))
 
 	dbRows, err := pool.Query(ctx, q, args...)
@@ -690,6 +866,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 		senderIdentifier *string
 		renderedSubject  *string
 		renderedBody     *string
+		entityName       string
 	}
 	var inserted []insertedRow
 	for dbRows.Next() {
@@ -698,7 +875,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 			&ir.outboxID, &ir.correlationID, &ir.eventID, &ir.auditID, &ir.channel,
 			&ir.recipientUserID, &ir.recipientEmail, &ir.recipientPhone,
 			&ir.senderName, &ir.senderEmail, &ir.senderIdentifier,
-			&ir.renderedSubject, &ir.renderedBody,
+			&ir.renderedSubject, &ir.renderedBody, &ir.entityName,
 		); err != nil {
 			api.LogError("insertOutbox: scan row failed: %v", err)
 			continue
@@ -725,18 +902,19 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 		shPos := 1
 		for _, ir := range inserted {
 			shVals = append(shVals, fmt.Sprintf(
-				"($%d,$%d,$%d,$%d::uuid,$%d,$%d,$%d,$%d,'QUEUED',NULL,NULL,1,now(),$%d,$%d,$%d,$%d,$%d)",
+				"($%d,$%d,$%d,$%d::uuid,$%d,$%d,$%d,$%d,'QUEUED',NULL,NULL,1,now(),$%d,$%d,$%d,$%d,$%d,$%d)",
 				shPos, shPos+1, shPos+2, shPos+3, shPos+4,
 				shPos+5, shPos+6, shPos+7,
-				shPos+8, shPos+9, shPos+10, shPos+11, shPos+12,
+				shPos+8, shPos+9, shPos+10, shPos+11, shPos+12, shPos+13,
 			))
 			shArgs = append(shArgs,
 				ir.outboxID, ir.correlationID, ir.eventID, ir.auditID, ir.channel,
 				ir.recipientUserID, ir.recipientEmail, ir.recipientPhone,
 				ir.senderName, ir.senderEmail, ir.senderIdentifier,
 				derefStr(ir.renderedSubject), derefStr(ir.renderedBody),
+				nullStr(ir.entityName),
 			)
-			shPos += 13
+			shPos += 14
 		}
 		shQ := fmt.Sprintf(`
 			INSERT INTO notification_svc.send_history (
@@ -744,7 +922,7 @@ func insertOutbox(ctx context.Context, pool *pgxpool.Pool, rows []outboxRow) (ma
 				recipient_user_id, recipient_email, recipient_phone,
 				processing_status, provider_response, provider_message_id, attempt_number, attempted_at,
 				sender_name, sender_email, sender_identifier,
-				rendered_subject, rendered_body
+				rendered_subject, rendered_body, entity_name
 			) VALUES %s
 			ON CONFLICT DO NOTHING
 		`, strings.Join(shVals, ","))

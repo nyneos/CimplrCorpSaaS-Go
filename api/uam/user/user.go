@@ -238,7 +238,8 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID     string `json:"user_id"`
+			EntityName string `json:"entity_name"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
@@ -253,13 +254,26 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		// Query all approved users
-		rows, err := db.Query(`
-			SELECT * FROM users 
-			WHERE business_unit_name = ANY($1::text[]) 
-			AND LOWER(TRIM(status)) = 'approved'
-			ORDER BY id DESC
-		`, pq.Array(buNames))
+		// Build query — if entity_name is supplied, narrow down to that specific entity
+		// on top of the middleware-provided BU list.
+		var rows *sql.Rows
+		var err error
+		if req.EntityName != "" {
+			rows, err = db.Query(`
+				SELECT * FROM users
+				WHERE business_unit_name = ANY($1::text[])
+				  AND business_unit_name = $2
+				  AND LOWER(TRIM(status)) = 'approved'
+				ORDER BY id DESC
+			`, pq.Array(buNames), req.EntityName)
+		} else {
+			rows, err = db.Query(`
+				SELECT * FROM users
+				WHERE business_unit_name = ANY($1::text[])
+				  AND LOWER(TRIM(status)) = 'approved'
+				ORDER BY id DESC
+			`, pq.Array(buNames))
+		}
 
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())

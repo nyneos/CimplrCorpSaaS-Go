@@ -425,13 +425,32 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 // Handler: Get just role names
 func GetJustRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Optionally, get user_id from body for middleware
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID     string `json:"user_id"`
+			EntityName string `json:"entity_name"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+		// If entity_name supplied: only return roles that have at least one member
+		// (via user_roles) whose users.business_unit_name matches that entity.
+		var rows *sql.Rows
+		var err error
+		if req.EntityName != "" {
+			rows, err = db.Query(`
+				SELECT DISTINCT r.name
+				FROM roles r
+				WHERE (r.status = 'approved' OR r.status = 'Approved')
+				  AND EXISTS (
+					SELECT 1
+					FROM user_roles ur
+					JOIN users u ON u.id = ur.user_id
+					WHERE ur.role_id = r.id
+					  AND u.business_unit_name = $1
+				)
+			`, req.EntityName)
+		} else {
+			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+		}
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return

@@ -342,9 +342,10 @@ func findAllFunctionCalls(s string) []functionCallMatch {
 
 			name := string(runes[nameStart:nameEnd])
 
-			// Only match names that start with uppercase (our template functions are all uppercase)
-			// This prevents matching lowercase English words like "delete(s)", "request(s)"
-			if len(name) == 0 || !unicode.IsUpper(runes[nameStart]) {
+			// Accept function names starting with any letter (case-insensitive).
+			// Previously we restricted to uppercase-leading names which missed
+			// valid function calls authored in lowercase (e.g., "concat(...)").
+			if len(name) == 0 || !unicode.IsLetter(runes[nameStart]) {
 				continue
 			}
 
