@@ -3,19 +3,63 @@ package uam
 import (
 	"CimplrCorpSaas/api"
 	// "CimplrCorpSaas/api/auth"
+	approvalMatrix "CimplrCorpSaas/api/uam/approvalMatrix"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func StartUAMService(db *sql.DB) {
 	mux := http.NewServeMux()
+
+	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
+	pgxPool := func() *pgxpool.Pool {
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+		host := os.Getenv("DB_HOST")
+		port := os.Getenv("DB_PORT")
+		name := os.Getenv("DB_NAME")
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
+		}
+		return pool
+	}()
+	defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
+
+	/*Approval Matrix*/
+	mux.Handle("/uam/approval-matrix/create", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.CreateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.BulkApproveMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.BulkRejectMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/all", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovalMatrixAll(pgxPool)))
+	mux.Handle("/uam/approval-matrix/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovalMatrixDetail(pgxPool)))
+	mux.Handle("/uam/approval-matrix/audit-history", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovalMatrixAuditHistory(pgxPool)))
+	mux.Handle("/uam/approval-matrix/approved-active", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovedActiveMatrices(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/add", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.AddEyeToMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/add", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.AddMemberToEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateMember(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteMember(pgxPool)))
+	/*Approval Engine Instances*/
+	mux.Handle("/uam/instance/action", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.RecordApprovalAction(pgxPool)))
+	mux.Handle("/uam/instance/pending", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetMyPendingApprovals(pgxPool)))
+	mux.Handle("/uam/instance/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
 	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db))))
 	mux.Handle("/uam/users/get-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUsers(db))))
