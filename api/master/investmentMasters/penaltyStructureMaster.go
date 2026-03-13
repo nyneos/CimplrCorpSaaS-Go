@@ -1247,13 +1247,17 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		ctx := r.Context()
 		baseQuery := `
-            SELECT penalty_id, bank_code, min_amount_range, max_amount_range, min_tenor_days,
-                   max_tenor_days, min_held_days, max_held_days, penalty_type,
-                   penalty_value, calculation_method, no_interest_if_withdrawn_before,
-                   description, effective_from, effective_to, is_active
-            FROM investment.fd_penalty_structure_master
-            WHERE is_active = true AND (is_deleted IS NULL OR is_deleted = false)
-              AND effective_from <= now()::date AND (effective_to IS NULL OR effective_to >= now()::date)
+            SELECT m.penalty_id, m.bank_code,
+                   COALESCE(mb.bank_name,'') AS bank_name,
+                   COALESCE(mb.bank_short_name,'') AS bank_short_name,
+                   m.min_amount_range, m.max_amount_range, m.min_tenor_days,
+                   m.max_tenor_days, m.min_held_days, m.max_held_days, m.penalty_type,
+                   m.penalty_value, m.calculation_method, m.no_interest_if_withdrawn_before,
+                   m.description, m.effective_from, m.effective_to, m.is_active
+            FROM investment.fd_penalty_structure_master m
+            LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
+            WHERE m.is_active = true AND (m.is_deleted IS NULL OR m.is_deleted = false)
+              AND m.effective_from <= now()::date AND (m.effective_to IS NULL OR m.effective_to >= now()::date)
         `
 
 		var args []interface{}
@@ -1282,7 +1286,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		var results []map[string]interface{}
 		for rows.Next() {
 			var id string
-			var bank string
+			var bank, bankName, bankShortName string
 			var minAmt *float64
 			var maxAmt *float64
 			var minTenor int
@@ -1298,7 +1302,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			var effTo *string
 			var isActive *bool
 
-			if err := rows.Scan(&id, &bank, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive); err != nil {
+			if err := rows.Scan(&id, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Row scan failed: "+err.Error())
 				api.LogError("Get approved active scan failed: %v", err)
 				return
@@ -1307,6 +1311,8 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			results = append(results, map[string]interface{}{
 				"penalty_id":                      id,
 				"bank_code":                       bank,
+				"bank_name":                       bankName,
+				"bank_short_name":                 bankShortName,
 				"min_amount_range":                minAmt,
 				"max_amount_range":                maxAmt,
 				"min_tenor_days":                  minTenor,
@@ -1379,6 +1385,8 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.penalty_id,
 				COALESCE(m.bank_code,'') AS bank_code,
 				COALESCE(l.old_bank_code,'') AS old_bank_code,
+				COALESCE(mb.bank_name,'') AS bank_name,
+				COALESCE(mb.bank_short_name,'') AS bank_short_name,
 				m.min_amount_range,
 				l.old_min_amount_range,
 				m.max_amount_range,
@@ -1429,6 +1437,7 @@ func GetPenaltyStructuresWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_penalty_structure_master m
 			LEFT JOIN latest_audit l ON l.penalty_id = m.penalty_id
 			LEFT JOIN history h ON h.penalty_id = m.penalty_id
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
 			WHERE COALESCE(m.is_deleted,false) = false
 			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
@@ -1551,6 +1560,8 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 					-- Current values from master
 					COALESCE(m.bank_code,'') AS bank_code,
+					COALESCE(mb.bank_name,'') AS bank_name,
+					COALESCE(mb.bank_short_name,'') AS bank_short_name,
 					m.min_amount_range,
 					m.max_amount_range,
 					COALESCE(m.min_tenor_days,0) AS min_tenor_days,
@@ -1586,6 +1597,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				FROM investment.fd_audit_penalty_structure a
 				LEFT JOIN investment.fd_penalty_structure_master m ON m.penalty_id = a.penalty_id
+				LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
 				ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 				LIMIT 1000
 			`
@@ -1606,7 +1618,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var auditID, penID, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
 
 			// Current values
-			var curBank, curPenaltyType, curCalcMethod, curDesc string
+			var curBank, curBankName, curBankShortName, curPenaltyType, curCalcMethod, curDesc string
 			var curMinAmt, curMaxAmt *float64
 			var curPenaltyValue float64
 			var curMinTenor, curMaxTenor int
@@ -1627,7 +1639,7 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// Audit
 				&auditID, &penID, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
 				// Current values (order must match SELECT)
-				&curBank, &curMinAmt, &curMaxAmt, &curMinTenor, &curMaxTenor, &curMinHeld, &curMaxHeld,
+				&curBank, &curBankName, &curBankShortName, &curMinAmt, &curMaxAmt, &curMinTenor, &curMaxTenor, &curMinHeld, &curMaxHeld,
 				&curPenaltyType, &curPenaltyValue, &curCalcMethod, &curNoInterest, &curDesc, &curEffFrom, &curEffTo, &curIsActive, &curIsDeleted,
 				// Old values
 				&oldBank, &oldMinAmt, &oldMaxAmt, &oldMinTenor, &oldMaxTenor, &oldMinHeld, &oldMaxHeld,
@@ -1653,6 +1665,8 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				// Current/New values
 				"bank_code":                       curBank,
+				"bank_name":                       curBankName,
+				"bank_short_name":                 curBankShortName,
 				"min_amount_range":                curMinAmt,
 				"max_amount_range":                curMaxAmt,
 				"min_tenor_days":                  curMinTenor,
@@ -1990,17 +2004,23 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		row := pgxPool.QueryRow(ctx, `
-            SELECT penalty_id, bank_code, min_amount_range, max_amount_range, min_tenor_days,
-                   max_tenor_days, min_held_days, max_held_days, penalty_type,
-                   penalty_value, calculation_method, no_interest_if_withdrawn_before,
-                   description, effective_from, effective_to, is_active, is_deleted, created_at, updated_at
-            FROM investment.fd_penalty_structure_master
-            WHERE penalty_id = $1
+            SELECT m.penalty_id, m.bank_code,
+                   COALESCE(mb.bank_name,'') AS bank_name,
+                   COALESCE(mb.bank_short_name,'') AS bank_short_name,
+                   m.min_amount_range, m.max_amount_range, m.min_tenor_days,
+                   m.max_tenor_days, m.min_held_days, m.max_held_days, m.penalty_type,
+                   m.penalty_value, m.calculation_method, m.no_interest_if_withdrawn_before,
+                   m.description, m.effective_from, m.effective_to, m.is_active, m.is_deleted, m.created_at, m.updated_at
+            FROM investment.fd_penalty_structure_master m
+            LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
+            WHERE m.penalty_id = $1
         `, req.PenaltyID)
 
 		var (
 			pid        string
 			bank       string
+			bankName   string
+			bankShortName string
 			minAmt     *float64
 			maxAmt     *float64
 			minTenor   int
@@ -2020,7 +2040,7 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			updatedAt  interface{}
 		)
 
-		err := row.Scan(&pid, &bank, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive, &isDeleted, &createdAt, &updatedAt)
+		err := row.Scan(&pid, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive, &isDeleted, &createdAt, &updatedAt)
 		if err != nil {
 			if err.Error() == "no rows in result set" {
 				api.RespondWithError(w, http.StatusNotFound, "Penalty structure not found")
@@ -2035,6 +2055,8 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		result := map[string]interface{}{
 			"penalty_id":                      pid,
 			"bank_code":                       bank,
+			"bank_name":                       bankName,
+			"bank_short_name":                 bankShortName,
 			"min_amount_range":                minAmt,
 			"max_amount_range":                maxAmt,
 			"min_tenor_days":                  minTenor,

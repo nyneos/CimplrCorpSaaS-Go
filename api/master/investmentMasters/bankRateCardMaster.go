@@ -1269,7 +1269,10 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Use TO_CHAR for DATE columns to avoid time.Time scan issues
 		rows, err := pgxPool.Query(ctx, `
 			SELECT DISTINCT ON (m.rate_card_id)
-				m.rate_card_id, m.bank_code, m.deposit_type,
+				m.rate_card_id, m.bank_code,
+				COALESCE(mb.bank_name,'')       AS bank_name,
+				COALESCE(mb.bank_short_name,'') AS bank_short_name,
+				m.deposit_type,
 				m.min_tenor_days, m.max_tenor_days, m.interest_rate,
 				m.min_amount, m.max_amount, m.is_callable,
 				m.premature_withdrawal_allowed, m.penalty_percentage,
@@ -1280,6 +1283,7 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.is_active
 			FROM investment.fd_bank_rate_card_master m
 			INNER JOIN investment.fd_audit_bank_rate_card a ON a.rate_card_id = m.rate_card_id
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
 			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
 			ORDER BY m.rate_card_id, m.bank_code
 		`)
@@ -1292,7 +1296,7 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var id, bankCode, depositType string
+			var id, bankCode, bankName, bankShortName, depositType string
 			var minTenor, maxTenor int
 			var interestRate float64
 			var minAmt, maxAmt, penaltyPct *float64
@@ -1302,7 +1306,7 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var effectiveTo *string
 
 			if err := rows.Scan(
-				&id, &bankCode, &depositType,
+				&id, &bankCode, &bankName, &bankShortName, &depositType,
 				&minTenor, &maxTenor, &interestRate,
 				&minAmt, &maxAmt, &isCallable,
 				&prematureWd, &penaltyPct,
@@ -1316,6 +1320,8 @@ func GetBankRateCardsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, map[string]interface{}{
 				"rate_card_id":                 id,
 				"bank_code":                    bankCode,
+				"bank_name":                    bankName,
+				"bank_short_name":              bankShortName,
 				"deposit_type":                 depositType,
 				"min_tenor_days":               minTenor,
 				"max_tenor_days":               maxTenor,
@@ -1392,6 +1398,8 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.rate_card_id,
 				COALESCE(m.bank_code,'')                      AS bank_code,
 				COALESCE(l.old_bank_code,'')                  AS old_bank_code,
+				COALESCE(mb.bank_name,'')                     AS bank_name,
+				COALESCE(mb.bank_short_name,'')               AS bank_short_name,
 				COALESCE(m.deposit_type,'')                   AS deposit_type,
 				COALESCE(l.old_deposit_type,'')               AS old_deposit_type,
 				COALESCE(m.min_tenor_days,0)                  AS min_tenor_days,
@@ -1444,6 +1452,7 @@ func GetBankRateCardsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_bank_rate_card_master m
 			LEFT JOIN latest_audit l ON l.rate_card_id = m.rate_card_id
 			LEFT JOIN history h      ON h.rate_card_id = m.rate_card_id
+			LEFT JOIN masterbank mb  ON mb.bank_id::text = m.bank_code
 			WHERE COALESCE(m.is_deleted,false) = false
 			ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamp), COALESCE(l.checker_at,'1970-01-01'::timestamp)) DESC
 		`
@@ -1514,6 +1523,8 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				-- Current values from master (DATE → string)
 				COALESCE(m.bank_code,'') AS bank_code,
+				COALESCE(mb.bank_name,'') AS bank_name,
+				COALESCE(mb.bank_short_name,'') AS bank_short_name,
 				COALESCE(m.deposit_type,'') AS deposit_type,
 				COALESCE(m.min_tenor_days,0) AS min_tenor_days,
 				COALESCE(m.max_tenor_days,0) AS max_tenor_days,
@@ -1550,7 +1561,8 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.old_is_active,false) AS old_is_active
 
 			FROM investment.fd_audit_bank_rate_card a
-			LEFT JOIN investment.fd_bank_rate_card_master m ON m.rate_card_id = a.rate_card_id`
+			LEFT JOIN investment.fd_bank_rate_card_master m ON m.rate_card_id = a.rate_card_id
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code`
 
 		if rateCardID != "" {
 			q = baseSelect + `
@@ -1577,7 +1589,7 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var auditID, rcID, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
 
 			// Current values
-			var curBankCode, curDepositType, curEffectiveFrom, curRateSource, curOfferDetails string
+			var curBankCode, curBankName, curBankShortName, curDepositType, curEffectiveFrom, curRateSource, curOfferDetails string
 			var curMinTenor, curMaxTenor int
 			var curInterestRate float64
 			var curMinAmt, curMaxAmt, curPenaltyPct *float64
@@ -1596,7 +1608,7 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			if err := rows.Scan(
 				&auditID, &rcID, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
-				&curBankCode, &curDepositType, &curMinTenor, &curMaxTenor, &curInterestRate,
+				&curBankCode, &curBankName, &curBankShortName, &curDepositType, &curMinTenor, &curMaxTenor, &curInterestRate,
 				&curMinAmt, &curMaxAmt, &curIsCallable, &curPrematureWd, &curPenaltyPct,
 				&curEffectiveFrom, &curEffectiveTo, &curRateSource, &curSpecialOffer, &curOfferDetails, &curIsActive, &curIsDeleted,
 				&oldBankCode, &oldDepositType, &oldMinTenor, &oldMaxTenor, &oldInterestRate,
@@ -1620,6 +1632,8 @@ func GetBankRateCardAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_comment":   checkerComment,
 
 				"bank_code":                    curBankCode,
+				"bank_name":                    curBankName,
+				"bank_short_name":              curBankShortName,
 				"deposit_type":                 curDepositType,
 				"min_tenor_days":               curMinTenor,
 				"max_tenor_days":               curMaxTenor,
@@ -1701,18 +1715,22 @@ func GetBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		// Use TO_CHAR for DATE columns
 		row := pgxPool.QueryRow(ctx, `
-			SELECT rate_card_id, bank_code, deposit_type, min_tenor_days, max_tenor_days, interest_rate,
-			       min_amount, max_amount, is_callable, premature_withdrawal_allowed, penalty_percentage,
-			       TO_CHAR(effective_from,'YYYY-MM-DD') AS effective_from,
-			       TO_CHAR(effective_to,'YYYY-MM-DD') AS effective_to,
-			       COALESCE(rate_source,'') AS rate_source,
-			       special_offer, COALESCE(offer_details,'') AS offer_details,
-			       is_active, COALESCE(is_deleted,false) AS is_deleted
-			FROM investment.fd_bank_rate_card_master
-			WHERE rate_card_id = $1
+			SELECT m.rate_card_id, m.bank_code,
+			       COALESCE(mb.bank_name,'') AS bank_name,
+			       COALESCE(mb.bank_short_name,'') AS bank_short_name,
+			       m.deposit_type, m.min_tenor_days, m.max_tenor_days, m.interest_rate,
+			       m.min_amount, m.max_amount, m.is_callable, m.premature_withdrawal_allowed, m.penalty_percentage,
+			       TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from,
+			       TO_CHAR(m.effective_to,'YYYY-MM-DD') AS effective_to,
+			       COALESCE(m.rate_source,'') AS rate_source,
+			       m.special_offer, COALESCE(m.offer_details,'') AS offer_details,
+			       m.is_active, COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.fd_bank_rate_card_master m
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
+			WHERE m.rate_card_id = $1
 		`, req.RateCardID)
 
-		var id, bankCode, depositType, effectiveFrom, rateSource, offerDetails string
+		var id, bankCode, bankName, bankShortName, depositType, effectiveFrom, rateSource, offerDetails string
 		var minTenor, maxTenor int
 		var interestRate float64
 		var minAmt, maxAmt, penaltyPct *float64
@@ -1721,7 +1739,7 @@ func GetBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var effectiveTo *string
 
 		err := row.Scan(
-			&id, &bankCode, &depositType, &minTenor, &maxTenor, &interestRate,
+			&id, &bankCode, &bankName, &bankShortName, &depositType, &minTenor, &maxTenor, &interestRate,
 			&minAmt, &maxAmt, &isCallable, &prematureWd, &penaltyPct,
 			&effectiveFrom, &effectiveTo, &rateSource, &specialOffer, &offerDetails,
 			&isActive, &isDeleted,
@@ -1739,6 +1757,8 @@ func GetBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"rate_card_id":                 id,
 			"bank_code":                    bankCode,
+			"bank_name":                    bankName,
+			"bank_short_name":              bankShortName,
 			"deposit_type":                 depositType,
 			"min_tenor_days":               minTenor,
 			"max_tenor_days":               maxTenor,

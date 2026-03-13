@@ -1416,7 +1416,10 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, `
 			SELECT DISTINCT ON (m.config_id)
-				m.config_id, m.bank_code, m.product_type,
+				m.config_id, m.bank_code,
+				COALESCE(mb.bank_name,'')       AS bank_name,
+				COALESCE(mb.bank_short_name,'') AS bank_short_name,
+				m.product_type,
 				m.minimum_amount, m.maximum_amount,
 				m.day_count_code,
 				m.capitalization_schedule_type, m.capitalization_date_adjustment,
@@ -1433,6 +1436,7 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.is_active
 			FROM investment.fd_bank_config_master m
 			INNER JOIN investment.fd_audit_bank_config a ON a.config_id = m.config_id
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
 			WHERE a.processing_status='APPROVED'
 			  AND m.is_active=true
 			  AND COALESCE(m.is_deleted,false)=false
@@ -1447,7 +1451,7 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
-			var configID, bankCode, dayCountCode, capSchedType, capDateAdj string
+			var configID, bankCode, bankName, bankShortName, dayCountCode, capSchedType, capDateAdj string
 			var accrualStart, accrualEnd, periodBoundary, holidayCalCode string
 			var brokenMethod, brokenLoc, roundingMethod, roundingFreq, tdsDeduction string
 			var effectiveFrom, configNotes string
@@ -1458,7 +1462,7 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var gracePeriodDays, minCompoundingPeriodDays *int
 
 			if err := rows.Scan(
-				&configID, &bankCode, &productType,
+				&configID, &bankCode, &bankName, &bankShortName, &productType,
 				&minAmt, &maxAmt,
 				&dayCountCode,
 				&capSchedType, &capDateAdj,
@@ -1479,6 +1483,8 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, map[string]interface{}{
 				"config_id":                        configID,
 				"bank_code":                        bankCode,
+				"bank_name":                        bankName,
+				"bank_short_name":                  bankShortName,
 				"product_type":                     productType,
 				"minimum_amount":                   minAmt,
 				"maximum_amount":                   maxAmt,
@@ -1579,6 +1585,8 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.config_id,
 				COALESCE(m.bank_code,'')                               AS bank_code,
 				COALESCE(l.old_bank_code,'')                           AS old_bank_code,
+				COALESCE(mb.bank_name,'')                              AS bank_name,
+				COALESCE(mb.bank_short_name,'')                        AS bank_short_name,
 				COALESCE(m.product_type,'')                            AS product_type,
 				COALESCE(l.old_product_type,'')                        AS old_product_type,
 				m.minimum_amount,
@@ -1653,6 +1661,7 @@ func GetBankConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_bank_config_master m
 			LEFT JOIN latest_audit l ON l.config_id = m.config_id
 			LEFT JOIN history h      ON h.config_id = m.config_id
+			LEFT JOIN masterbank mb  ON mb.bank_id::text = m.bank_code
 			WHERE COALESCE(m.is_deleted,false) = false
 			ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamp), COALESCE(l.checker_at,'1970-01-01'::timestamp)) DESC
 		`
@@ -1723,6 +1732,8 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 				-- Current values from master
 				COALESCE(m.bank_code,'')                             AS bank_code,
+				COALESCE(mb.bank_name,'')                            AS bank_name,
+				COALESCE(mb.bank_short_name,'')                      AS bank_short_name,
 				COALESCE(m.product_type,'')                          AS product_type,
 				m.minimum_amount,
 				m.maximum_amount,
@@ -1781,7 +1792,8 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.old_is_active,false)                          AS old_is_active
 
 			FROM investment.fd_audit_bank_config a
-			LEFT JOIN investment.fd_bank_config_master m ON m.config_id = a.config_id`
+			LEFT JOIN investment.fd_bank_config_master m ON m.config_id = a.config_id
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code`
 
 		var q string
 		var args []interface{}
@@ -1810,7 +1822,7 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var auditID, cfgID, actionType, processStatus, reason, reqBy, reqAt, checkerBy, checkerAt, checkerComment string
 
 			// Current values
-			var curBankCode, curProductType, curDayCountCode, curCapSchedType, curCapDateAdj string
+			var curBankCode, curBankName, curBankShortName, curProductType, curDayCountCode, curCapSchedType, curCapDateAdj string
 			var curAccrualStart, curAccrualEnd, curPeriodBoundary, curHolidayCalCode string
 			var curBrokenMethod, curBrokenLoc, curRoundingMethod, curRoundingFreq string
 			var curGracePeriodRateType, curQuarterDef, curTdsDeduction string
@@ -1836,7 +1848,7 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(
 				&auditID, &cfgID, &actionType, &processStatus, &reason, &reqBy, &reqAt, &checkerBy, &checkerAt, &checkerComment,
 				// current
-				&curBankCode, &curProductType, &curMinAmt, &curMaxAmt, &curDayCountCode,
+				&curBankCode, &curBankName, &curBankShortName, &curProductType, &curMinAmt, &curMaxAmt, &curDayCountCode,
 				&curCapSchedType, &curCapDateAdj,
 				&curAccrualStart, &curAccrualEnd, &curPeriodBoundary,
 				&curWeekendAccrual, &curHolidayAccrual, &curHolidayCalCode,
@@ -1877,6 +1889,8 @@ func GetBankConfigAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_comment":   checkerComment,
 
 				"bank_code":                       curBankCode,
+				"bank_name":                       curBankName,
+				"bank_short_name":                 curBankShortName,
 				"product_type":                    curProductType,
 				"minimum_amount":                  curMinAmt,
 				"maximum_amount":                  curMaxAmt,
@@ -1983,23 +1997,27 @@ func GetBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		row := pgxPool.QueryRow(ctx, `
 			SELECT
-				config_id, bank_code, product_type, minimum_amount, maximum_amount, day_count_code,
-				capitalization_schedule_type, capitalization_date_adjustment,
-				accrual_start_convention, accrual_end_convention, period_boundary_definition,
-				weekend_accrual, holiday_accrual, holiday_calendar_code,
-				broken_period_method, broken_period_location,
-				interest_rounding_decimals, rounding_method, rounding_frequency,
-				grace_period_days, grace_period_rate_type, minimum_compounding_period_days, quarter_definition,
-				tds_deduction_timing,
-				TO_CHAR(effective_from,'YYYY-MM-DD') AS effective_from,
-				TO_CHAR(effective_to,'YYYY-MM-DD')   AS effective_to,
-				COALESCE(config_notes,'') AS config_notes,
-				is_active, COALESCE(is_deleted,false) AS is_deleted
-			FROM investment.fd_bank_config_master
-			WHERE config_id = $1
+				m.config_id, m.bank_code,
+				COALESCE(mb.bank_name,'') AS bank_name,
+				COALESCE(mb.bank_short_name,'') AS bank_short_name,
+				m.product_type, m.minimum_amount, m.maximum_amount, m.day_count_code,
+				m.capitalization_schedule_type, m.capitalization_date_adjustment,
+				m.accrual_start_convention, m.accrual_end_convention, m.period_boundary_definition,
+				m.weekend_accrual, m.holiday_accrual, m.holiday_calendar_code,
+				m.broken_period_method, m.broken_period_location,
+				m.interest_rounding_decimals, m.rounding_method, m.rounding_frequency,
+				m.grace_period_days, m.grace_period_rate_type, m.minimum_compounding_period_days, m.quarter_definition,
+				m.tds_deduction_timing,
+				TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from,
+				TO_CHAR(m.effective_to,'YYYY-MM-DD')   AS effective_to,
+				COALESCE(m.config_notes,'') AS config_notes,
+				m.is_active, COALESCE(m.is_deleted,false) AS is_deleted
+			FROM investment.fd_bank_config_master m
+			LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
+			WHERE m.config_id = $1
 		`, req.ConfigID)
 
-		var configID, bankCode, dayCountCode, capSchedType, capDateAdj string
+		var configID, bankCode, bankName, bankShortName, dayCountCode, capSchedType, capDateAdj string
 		var accrualStart, accrualEnd, periodBoundary, holidayCalCode string
 		var brokenMethod, brokenLoc, roundingMethod, roundingFreq, tdsDeduction string
 		var effectiveFrom, configNotes string
@@ -2010,7 +2028,7 @@ func GetBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var gracePeriodDays, minCompoundingPeriodDays *int
 
 		err := row.Scan(
-			&configID, &bankCode, &productType, &minAmt, &maxAmt, &dayCountCode,
+			&configID, &bankCode, &bankName, &bankShortName, &productType, &minAmt, &maxAmt, &dayCountCode,
 			&capSchedType, &capDateAdj,
 			&accrualStart, &accrualEnd, &periodBoundary,
 			&weekendAccrual, &holidayAccrual, &holidayCalCode,
@@ -2034,6 +2052,8 @@ func GetBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":                       configID,
 			"bank_code":                       bankCode,
+			"bank_name":                       bankName,
+			"bank_short_name":                 bankShortName,
 			"product_type":                    productType,
 			"minimum_amount":                  minAmt,
 			"maximum_amount":                  maxAmt,

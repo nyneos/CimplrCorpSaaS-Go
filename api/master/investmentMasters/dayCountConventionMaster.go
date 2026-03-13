@@ -1293,10 +1293,12 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 			       COALESCE(m.description,'') AS description,
 			       COALESCE(m.formula_example,'') AS formula_example,
 			       m.is_active,
-			       COALESCE(array_agg(bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks
+			       COALESCE(array_agg(bm.bank_code ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks,
+			       COALESCE(array_agg(COALESCE(mb.bank_name,'') ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_bank_names
 			FROM investment.fd_day_count_convention_master m
 			INNER JOIN investment.fd_audit_day_count_convention a ON a.day_count_code = m.day_count_code
 			LEFT JOIN investment.fd_day_count_bank_map bm ON bm.day_count_code = m.day_count_code
+			LEFT JOIN masterbank mb ON mb.bank_id::text = bm.bank_code
 			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
 			GROUP BY m.day_count_code, m.day_count_name, m.convention_type, m.description, m.formula_example, m.is_active
 			ORDER BY m.day_count_name
@@ -1313,22 +1315,27 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 			var code, name, convType, desc, formula string
 			var isActive bool
 			var usedByBanks []string
+			var usedByBankNames []string
 
-			if err := rows.Scan(&code, &name, &convType, &desc, &formula, &isActive, &usedByBanks); err != nil {
+			if err := rows.Scan(&code, &name, &convType, &desc, &formula, &isActive, &usedByBanks, &usedByBankNames); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				return
 			}
 			if usedByBanks == nil {
 				usedByBanks = []string{}
 			}
+			if usedByBankNames == nil {
+				usedByBankNames = []string{}
+			}
 			out = append(out, map[string]interface{}{
-				"day_count_code":  code,
-				"day_count_name":  name,
-				"convention_type": convType,
-				"description":     desc,
-				"formula_example": formula,
-				"is_active":       isActive,
-				"used_by_banks":   usedByBanks,
+				"day_count_code":    code,
+				"day_count_name":    name,
+				"convention_type":   convType,
+				"description":       desc,
+				"formula_example":   formula,
+				"is_active":         isActive,
+				"used_by_banks":     usedByBanks,
+				"used_by_bank_names": usedByBankNames,
 			})
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -1405,12 +1412,14 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.deleted_by,'')             AS deleted_by,
 				COALESCE(h.deleted_at,'')             AS deleted_at,
 
-				COALESCE(array_agg(bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks
+				COALESCE(array_agg(bm.bank_code ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks,
+				COALESCE(array_agg(COALESCE(mb.bank_name,'') ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_bank_names
 
 			FROM investment.fd_day_count_convention_master m
 			LEFT JOIN latest_audit l ON l.day_count_code = m.day_count_code
 			LEFT JOIN history h      ON h.day_count_code = m.day_count_code
 			LEFT JOIN investment.fd_day_count_bank_map bm ON bm.day_count_code = m.day_count_code
+			LEFT JOIN masterbank mb ON mb.bank_id::text = bm.bank_code
 			WHERE COALESCE(m.is_deleted,false) = false
 			GROUP BY
 				m.day_count_code, m.day_count_name, l.old_day_count_name,
@@ -1618,9 +1627,11 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			       COALESCE(m.description,'') AS description,
 			       COALESCE(m.formula_example,'') AS formula_example,
 			       m.is_active, COALESCE(m.is_deleted,false) AS is_deleted,
-			       COALESCE(array_agg(bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks
+			       COALESCE(array_agg(bm.bank_code ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks,
+			       COALESCE(array_agg(COALESCE(mb.bank_name,'') ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_bank_names
 			FROM investment.fd_day_count_convention_master m
 			LEFT JOIN investment.fd_day_count_bank_map bm ON bm.day_count_code = m.day_count_code
+			LEFT JOIN masterbank mb ON mb.bank_id::text = bm.bank_code
 			WHERE m.day_count_code = $1
 			GROUP BY m.day_count_code, m.day_count_name, m.convention_type, m.description, m.formula_example, m.is_active, m.is_deleted
 		`, req.DayCountCode)
@@ -1639,8 +1650,9 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var code, name, convType, desc, formula string
 		var isActive, isDeleted bool
 		var usedByBanks []string
+		var usedByBankNames []string
 
-		if err := rows.Scan(&code, &name, &convType, &desc, &formula, &isActive, &isDeleted, &usedByBanks); err != nil {
+		if err := rows.Scan(&code, &name, &convType, &desc, &formula, &isActive, &isDeleted, &usedByBanks, &usedByBankNames); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Scan failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -1648,16 +1660,20 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if usedByBanks == nil {
 			usedByBanks = []string{}
 		}
+		if usedByBankNames == nil {
+			usedByBankNames = []string{}
+		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"day_count_code":  code,
-			"day_count_name":  name,
-			"convention_type": convType,
-			"description":     desc,
-			"formula_example": formula,
-			"is_active":       isActive,
-			"is_deleted":      isDeleted,
-			"used_by_banks":   usedByBanks,
+			"day_count_code":     code,
+			"day_count_name":     name,
+			"convention_type":    convType,
+			"description":        desc,
+			"formula_example":    formula,
+			"is_active":          isActive,
+			"is_deleted":         isDeleted,
+			"used_by_banks":      usedByBanks,
+			"used_by_bank_names": usedByBankNames,
 		})
 		api.LogInfo("GetDayCountConvention: code=%s by %s", code, userEmail)
 	}
