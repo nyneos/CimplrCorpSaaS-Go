@@ -914,10 +914,11 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				` + recipientSubquery + ` AS recipients,
 
 				-- Event fields joined from notification_svc.event
-				COALESCE(e.event_name,'')     AS event_name,
-				COALESCE(e.source_route,'')   AS event_source_route,
-				COALESCE(e.entity_name,'')    AS event_entity_name,
-				COALESCE(e.event_id,'')       AS event_event_id
+				COALESCE(e.event_display_name,'') AS event_name,
+				COALESCE(e.event_code,'')         AS event_code,
+				COALESCE(e.source_route,'')       AS event_source_route,
+				COALESCE(e.entity_name,'')        AS event_entity_name,
+				COALESCE(e.event_id,'')           AS event_event_id
 
 			FROM notification_svc.audit_template a
 			JOIN notification_svc.template t ON t.template_id = a.template_id
