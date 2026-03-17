@@ -300,10 +300,28 @@ func uploadBankStatementToS3(ctx context.Context, key string, body []byte, conte
 	if err != nil {
 		return "", fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
 	}
-	return bankStmtBaseURL() + key, nil
+
+	// Generate pre-signed URL for public access (valid for 7 days by default)
+	presignClient := s3.NewPresignClient(client)
+	expiryDuration := 7 * 24 * time.Hour // 7 days
+	if envExpiry := strings.TrimSpace(os.Getenv("BANK_STMT_URL_EXPIRY_HOURS")); envExpiry != "" {
+		if hours, parseErr := strconv.Atoi(envExpiry); parseErr == nil && hours > 0 {
+			expiryDuration = time.Duration(hours) * time.Hour
+		}
+	}
+
+	presignedReq, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}, s3.WithPresignExpires(expiryDuration))
+	if err != nil {
+		return "", fmt.Errorf("failed to generate pre-signed URL: %w", err)
+	}
+
+	return presignedReq.URL, nil
 }
 
-// categoryRuleComponent represents a single rule component used for
+// categoryRuleComponent recleents a single rule component used for
 // categorizing transactions. This is shared between the upload and recompute
 // flows so that both use identical matching logic.
 type categoryRuleComponent struct {
@@ -2670,14 +2688,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
 		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_link
+		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		      ON CONFLICT ON CONSTRAINT uniq_stmt
 		      DO UPDATE SET
 			      file_hash = EXCLUDED.file_hash,
-			      closing_balance = EXCLUDED.closing_balance
+			      closing_balance = EXCLUDED.closing_balance,
+			      upload_link = EXCLUDED.upload_link
 		      RETURNING bank_statement_id
-		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
+		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, s3URL).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
@@ -3231,7 +3250,8 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 										SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
 													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
 														COALESCE(mb.bank_name, '') AS bank_name,
-														mba.account_nickname AS account_nickname
+														mba.account_nickname AS account_nickname,
+														s.upload_link
 										FROM cimplrcorpsaas.bank_statements s
 										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 										LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
@@ -3253,9 +3273,10 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
 			var bankName sql.NullString
 			var accountNickname sql.NullString
+			var uploadLink sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname); err != nil {
+				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname, &uploadLink); err != nil {
 				continue
 			}
 			// Add computed field for delete pending approval
@@ -3283,6 +3304,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				"reason":                     reason.String,
 				"bank_name":                  bankName.String,
 				"account_nickname":           accountNickname.String,
+				"upload_link":                uploadLink.String,
 				"is_delete_pending_approval": isDeletePending,
 			})
 		}
@@ -4507,7 +4529,8 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	}
 
 	s3Key := buildBankStatementS3Key(accountNumber, fileHash, fileExt)
-	if _, err := uploadBankStatementToS3(ctx, s3Key, tmpFile, contentType); err != nil {
+	s3URL, err := uploadBankStatementToS3(ctx, s3Key, tmpFile, contentType)
+	if err != nil {
 		return fmt.Errorf("failed to store original file to s3: %w", err)
 	}
 
@@ -4752,14 +4775,15 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
 		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_link
+		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		      ON CONFLICT ON CONSTRAINT uniq_stmt
 		      DO UPDATE SET
 			      file_hash = EXCLUDED.file_hash,
-			      closing_balance = EXCLUDED.closing_balance
+			      closing_balance = EXCLUDED.closing_balance,
+			      upload_link = EXCLUDED.upload_link
 		      RETURNING bank_statement_id
-	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
+	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, s3URL).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
@@ -5158,13 +5182,13 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO cimplrcorpsaas.bank_statements (
 			entity_id, account_number, statement_period_start, statement_period_end,
-			file_hash, opening_balance, closing_balance
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			file_hash, opening_balance, closing_balance, upload_link
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT ON CONSTRAINT uniq_stmt
-		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance
+		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance, upload_link = EXCLUDED.upload_link
 		RETURNING bank_statement_id
 	`, entityID, input.AccountNumber, periodStart, periodEnd, fileHash,
-		input.OpeningBalance, input.ClosingBalance).Scan(&bankStatementID)
+		input.OpeningBalance, input.ClosingBalance, nil).Scan(&bankStatementID)
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
