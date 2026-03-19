@@ -5,12 +5,14 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -72,6 +74,23 @@ func parseMasterDate(s string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("cannot parse date %q — use YYYY-MM-DD or DD/MM/YYYY", s)
+}
+
+func logBankConfigDBError(err error, context string) {
+	if err == nil {
+		return
+	}
+	api.LogError("%s: %v", context, err)
+	api.LogError("Error string: %s", err.Error())
+	api.LogError("Verbose error: %#v", err)
+	for u := errors.Unwrap(err); u != nil; u = errors.Unwrap(u) {
+		api.LogError("Unwrapped: %T -> %v", u, u)
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		api.LogError("Postgres error detail: Code=%s Message=%s Detail=%s Where=%s Constraint=%s Table=%s Column=%s",
+			pgErr.Code, pgErr.Message, pgErr.Detail, pgErr.Where, pgErr.ConstraintName, pgErr.TableName, pgErr.ColumnName)
+	}
 }
 
 // getUserFriendlyBankConfigError converts database errors to user-friendly messages
@@ -589,6 +608,7 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bankConfigInsertCols, bankConfigRowPlaceholder(0),
 		), args...).Scan(&configID)
 		if err != nil {
+			logBankConfigDBError(err, "CreateBankConfigSingle insert failed")
 			msg, status := getUserFriendlyBankConfigError(err, "Insert failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -605,6 +625,7 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
+			logBankConfigDBError(err, "CreateBankConfigSingle commit failed")
 			msg, status := getUserFriendlyBankConfigError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return

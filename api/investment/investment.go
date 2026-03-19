@@ -8,6 +8,9 @@ import (
 	"CimplrCorpSaas/api"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
 	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
+	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
+	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
+	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
@@ -160,6 +163,11 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 
 	// AMFI data retrieval endpoints
 	mux.HandleFunc("/investment/amfi/get-schemes", amfisync.GetSchemeDataHandler(pool))
+
+	// FD Booking Workbench (booking + confirmation)
+	fdBooking.RegisterFDBookingRoutes(mux, pool, db)
+	fdMaster.RegisterFDMasterRoutes(mux, pool, db)
+	fdAccrual.RegisterFDAccrualRoutes(mux, pool, db)
 
 	// Example routes for future implementation:
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)

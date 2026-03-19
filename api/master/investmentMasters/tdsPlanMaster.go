@@ -170,8 +170,8 @@ func GetTdsPlansApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.threshold_amount,
 				m.threshold_type,
 				m.deduction_timing,
-				m.applicable_from,
-				m.applicable_to,
+				TO_CHAR(m.applicable_from, 'YYYY-MM-DD') AS applicable_from,
+				TO_CHAR(m.applicable_to, 'YYYY-MM-DD') AS applicable_to,
 				m.description,
 				m.is_active
 			FROM investment.fd_tds_plan_master m

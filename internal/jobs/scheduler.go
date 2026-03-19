@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	approvalengine "CimplrCorpSaas/api/approvalengine"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
@@ -129,6 +130,10 @@ func (s *CronService) Start() error {
 	go dinojobs.StartBrowserPushWorker(ctx, s.db)
 	logger.GlobalLogger.LogAudit("Browser push worker goroutine launched")
 	log.Println("Cron service started — Browser Push Worker goroutine launched")
+
+	go approvalengine.StartSLAWorker(ctx, s.db)
+	logger.GlobalLogger.LogAudit("Approval engine SLA worker goroutine launched")
+	log.Println("Cron service started — Approval Engine SLA Worker goroutine launched")
 
 	return nil
 }

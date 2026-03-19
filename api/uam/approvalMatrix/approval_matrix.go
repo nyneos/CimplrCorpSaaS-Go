@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -375,6 +375,7 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				VALUES ($1,$2,$3,$4) RETURNING eye_id`,
 				matrixID, eye.EyeCount, eye.Position, eye.SlaHours,
 			).Scan(&eyeID); err != nil {
+				logDBError(err, "Create eye failed")
 				msg, status := getUserFriendlyApprovalMatrixError(err, "Create eye failed")
 				api.RespondWithError(w, status, msg)
 				return

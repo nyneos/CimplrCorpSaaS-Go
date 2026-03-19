@@ -56,10 +56,11 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/approval-matrix/eye/member/add", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.AddMemberToEye(pgxPool)))
 	mux.Handle("/uam/approval-matrix/eye/member/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateMember(pgxPool)))
 	mux.Handle("/uam/approval-matrix/eye/member/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteMember(pgxPool)))
-	// /*Approval Engine Instances*/
-	// mux.Handle("/uam/instance/action", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.RecordApprovalAction(pgxPool)))
-	// mux.Handle("/uam/instance/pending", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetMyPendingApprovals(pgxPool)))
-	// mux.Handle("/uam/instance/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetInstanceDetail(pgxPool)))
+	/*Approval Engine Instances*/
+	mux.Handle("/uam/instance/action",      middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.RecordApprovalAction(pgxPool)))
+	mux.Handle("/uam/instance/pending",     middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetMyPendingApprovals(pgxPool)))
+	mux.Handle("/uam/instance/submissions", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetMySubmissions(pgxPool)))
+	mux.Handle("/uam/instance/detail",      middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
 	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db))))
 	mux.Handle("/uam/users/get-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUsers(db))))

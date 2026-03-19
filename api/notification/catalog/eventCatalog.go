@@ -466,7 +466,7 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE m.is_active = true
 			  AND COALESCE(m.is_deleted, false) = false
 			  AND EXISTS (
-				  SELECT * FROM notification_svc.audit_event a
+				  SELECT 1 FROM notification_svc.audit_event a
 				  WHERE a.event_id = m.event_id
 				    AND a.processing_status = 'APPROVED'
 			  )
