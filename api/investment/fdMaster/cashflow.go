@@ -53,9 +53,10 @@ type BankConfig struct {
 	AccrualStartConvention     string  // INCLUDE | EXCLUDE
 	AccrualEndConvention       string  // INCLUDE | EXCLUDE
 	PeriodBoundaryDefinition   string  // INCL_START_EXCL_END | INCL_BOTH
-	WeekendAccrual             bool
-	HolidayAccrual             bool
-	BrokenPeriodMethod         string  // SIMPLE | NONE
+        WeekendAccrual             bool
+        HolidayAccrual             bool
+        HolidayCalendarCode        string  // e.g. "Q" or "IN" — code from mastercalendar
+        BrokenPeriodMethod         string  // SIMPLE | NONE
 }
 
 type CompoundingFreq struct {
@@ -264,6 +265,7 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 			COALESCE(period_boundary_definition, 'INCL_START_EXCL_END'),
 			COALESCE(weekend_accrual, true),
 			COALESCE(holiday_accrual, true),
+			COALESCE(holiday_calendar_code, ''),
 			COALESCE(broken_period_method, 'SIMPLE')
 		FROM investment.fd_bank_config_master
 		WHERE config_id = $1
@@ -282,6 +284,7 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 		&cfg.PeriodBoundaryDefinition,
 		&cfg.WeekendAccrual,
 		&cfg.HolidayAccrual,
+		&cfg.HolidayCalendarCode,
 		&cfg.BrokenPeriodMethod,
 	)
 	if err != nil {
@@ -436,6 +439,253 @@ func loadInterestType(ctx context.Context, exec queryExecutor, interestTypeRef s
 	return InterestTypeInfo{CalculationMethod: "SIMPLE"}
 }
 
+// ── Holiday Calendar helpers ──────────────────────────────────────────────
+
+// HolidayCalendarInfo holds the resolved calendar + expanded holiday dates.
+type HolidayCalendarInfo struct {
+	CalendarCode    string
+	WeekendPattern  string // e.g. "Sat,Sun"
+	HolidayDates    map[string]bool // keyed "YYYY-MM-DD" for O(1) lookup
+}
+
+// isWeekend returns true if d is a weekend day according to weekendPattern.
+func isWeekend(d time.Time, weekendPattern string) bool {
+	w := strings.ToLower(d.Weekday().String()[:3])
+	patLower := strings.ToLower(weekendPattern)
+	return strings.Contains(patLower, w)
+}
+
+// expandRRule expands a recurrence rule string into dates within [from, to].
+// Supports:
+//   FREQ=YEARLY             — same day/month every year
+//   FREQ=YEARLY;BYMONTH=N;BYDAY=MO/TU/WE/TH/FR/SA/SU — Nth weekday of month, every year
+//   FREQ=MONTHLY;BYDAY=MO  — every month that weekday
+//   FREQ=DAILY             — every day
+//   FREQ=WEEKLY;BYDAY=MO   — every week that weekday
+//   (empty)                — just the seed date itself
+func expandRRule(seed time.Time, rrule string, from, to time.Time) []time.Time {
+	var out []time.Time
+	if seed.IsZero() {
+		return out
+	}
+
+	// Parse rrule parts into a map for easy lookup.
+	parts := map[string]string{}
+	for _, seg := range strings.Split(rrule, ";") {
+		kv := strings.SplitN(seg, "=", 2)
+		if len(kv) == 2 {
+			parts[strings.ToUpper(strings.TrimSpace(kv[0]))] = strings.ToUpper(strings.TrimSpace(kv[1]))
+		}
+	}
+
+	weekdayMap := map[string]time.Weekday{
+		"MO": time.Monday, "TU": time.Tuesday, "WE": time.Wednesday,
+		"TH": time.Thursday, "FR": time.Friday, "SA": time.Saturday, "SU": time.Sunday,
+	}
+
+	freq := parts["FREQ"]
+	byMonth := parts["BYMONTH"]
+	byDay := parts["BYDAY"]
+
+	switch freq {
+	case "YEARLY":
+		if byMonth != "" && byDay != "" {
+			// e.g. FREQ=YEARLY;BYMONTH=1;BYDAY=WED => first Wednesday in January each year
+			wdTarget, ok := weekdayMap[byDay]
+			if !ok {
+				// try 3-letter
+				for k, v := range weekdayMap {
+					if strings.HasPrefix(byDay, k) {
+						wdTarget = v
+						ok = true
+						break
+					}
+				}
+			}
+			// parse month number
+			var monthNum time.Month
+			fmt.Sscanf(byMonth, "%d", &monthNum)
+			if monthNum < 1 || monthNum > 12 {
+				monthNum = seed.Month()
+			}
+			for y := from.Year(); y <= to.Year(); y++ {
+				// Find first occurrence of weekday in month
+				d := time.Date(y, monthNum, 1, 0, 0, 0, 0, time.UTC)
+				for d.Weekday() != wdTarget {
+					d = d.AddDate(0, 0, 1)
+				}
+				if !d.Before(from) && !d.After(to) {
+					out = append(out, d)
+				}
+			}
+		} else {
+			// Simple FREQ=YEARLY — repeat seed date each year
+			for y := from.Year(); y <= to.Year(); y++ {
+				d := time.Date(y, seed.Month(), seed.Day(), 0, 0, 0, 0, time.UTC)
+				if !d.Before(from) && !d.After(to) {
+					out = append(out, d)
+				}
+			}
+		}
+	case "MONTHLY":
+		if byDay != "" {
+			wdTarget, ok := weekdayMap[byDay]
+			if !ok {
+				for k, v := range weekdayMap {
+					if strings.HasPrefix(byDay, k) {
+						wdTarget = v
+						ok = true
+						break
+					}
+				}
+			}
+			for cur := from; !cur.After(to); cur = cur.AddDate(0, 1, 0) {
+				d := time.Date(cur.Year(), cur.Month(), 1, 0, 0, 0, 0, time.UTC)
+				for d.Weekday() != wdTarget {
+					d = d.AddDate(0, 0, 1)
+				}
+				if !d.Before(from) && !d.After(to) {
+					out = append(out, d)
+				}
+			}
+		} else {
+			// Same day each month
+			for cur := from; !cur.After(to); cur = cur.AddDate(0, 1, 0) {
+				d := time.Date(cur.Year(), cur.Month(), seed.Day(), 0, 0, 0, 0, time.UTC)
+				if !d.Before(from) && !d.After(to) {
+					out = append(out, d)
+				}
+			}
+		}
+	case "WEEKLY":
+		wdTarget := seed.Weekday()
+		if byDay != "" {
+			if wd, ok := weekdayMap[byDay]; ok {
+				wdTarget = wd
+			}
+		}
+		for cur := from; !cur.After(to); cur = cur.AddDate(0, 0, 1) {
+			if cur.Weekday() == wdTarget {
+				out = append(out, cur)
+			}
+		}
+	case "DAILY":
+		for cur := from; !cur.After(to); cur = cur.AddDate(0, 0, 1) {
+			out = append(out, cur)
+		}
+	default:
+		// No rrule or unknown — just the seed date itself
+		if !seed.Before(from) && !seed.After(to) {
+			out = append(out, seed)
+		}
+	}
+	return out
+}
+
+// loadHolidayCalendar fetches calendar + holidays from mastercalendar/masterholiday
+// and expands recurrence_rule entries for the range [from-2yr, to+2yr].
+// Returns an empty HolidayCalendarInfo if calCode is empty or calendar not found.
+func loadHolidayCalendar(ctx context.Context, exec queryExecutor, calCode string, from, to time.Time) HolidayCalendarInfo {
+	info := HolidayCalendarInfo{HolidayDates: make(map[string]bool)}
+	if strings.TrimSpace(calCode) == "" {
+		return info
+	}
+
+	var calendarID, weekendPattern string
+	err := exec.QueryRow(ctx, `
+		SELECT calendar_id, COALESCE(weekend_pattern, 'Sat,Sun')
+		FROM investment.mastercalendar
+		WHERE calendar_code = $1
+		  AND COALESCE(is_deleted, false) = false
+		  AND UPPER(status) = 'ACTIVE'
+		LIMIT 1
+	`, calCode).Scan(&calendarID, &weekendPattern)
+	if err != nil {
+		// Try matching by calendar_id directly
+		err = exec.QueryRow(ctx, `
+			SELECT calendar_id, COALESCE(weekend_pattern, 'Sat,Sun')
+			FROM investment.mastercalendar
+			WHERE calendar_id = $1
+			  AND COALESCE(is_deleted, false) = false
+			LIMIT 1
+		`, calCode).Scan(&calendarID, &weekendPattern)
+		if err != nil {
+			return info
+		}
+	}
+
+	info.CalendarCode = calCode
+	info.WeekendPattern = weekendPattern
+
+	// Load holidays — include a 2-year buffer around the FD period to cover recurring ones.
+	windowFrom := from.AddDate(-1, 0, 0)
+	windowTo := to.AddDate(1, 0, 0)
+
+	rows, err := exec.Query(ctx, `
+		SELECT holiday_date, COALESCE(recurrence_rule, '')
+		FROM investment.masterholiday
+		WHERE calendar_id = $1
+		  AND COALESCE(is_deleted, false) = false
+		  AND UPPER(status) = 'ACTIVE'
+	`, calendarID)
+	if err != nil {
+		return info
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var seed time.Time
+		var rrule string
+		if err := rows.Scan(&seed, &rrule); err != nil {
+			continue
+		}
+		expanded := expandRRule(seed, rrule, windowFrom, windowTo)
+		for _, d := range expanded {
+			info.HolidayDates[d.Format("2006-01-02")] = true
+		}
+	}
+	return info
+}
+
+// isNonAccrualDay returns true if the date should be excluded from accrual
+// (i.e. it is a holiday or weekend and the config says not to accrue on those days).
+func isNonAccrualDay(d time.Time, cfg *BankConfig, cal HolidayCalendarInfo) bool {
+	if !cfg.WeekendAccrual && cal.WeekendPattern != "" && isWeekend(d, cal.WeekendPattern) {
+		return true
+	}
+	if !cfg.HolidayAccrual && len(cal.HolidayDates) > 0 {
+		if cal.HolidayDates[d.Format("2006-01-02")] {
+			return true
+		}
+	}
+	return false
+}
+
+// countAccrualDays counts actual working days between periodStart and periodEnd
+// honoring the bank config's weekend_accrual and holiday_accrual flags.
+// For conventions that use raw calendar days (ACT_365, ACT_360, ACT_ACT) this
+// replaces simple date-subtraction when the bank excludes non-working days.
+func countAccrualDays(conventionType string, periodStart, periodEnd time.Time, cfg *BankConfig, cal HolidayCalendarInfo) int {
+	// If both flags are true (accrue on all days), just use calendar days.
+	if cfg.WeekendAccrual && cfg.HolidayAccrual {
+		return int(periodEnd.Sub(periodStart).Hours() / 24)
+	}
+	// 30/360 convention: never use calendar-day counting; always use 30/360 formula.
+	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(conventionType)))
+	norm = strings.TrimPrefix(norm, "DC_")
+	if norm == "30_360" {
+		return int(periodEnd.Sub(periodStart).Hours() / 24) // 30_360 handled separately
+	}
+	// Count working days only.
+	count := 0
+	for cur := periodStart; cur.Before(periodEnd); cur = cur.AddDate(0, 0, 1) {
+		if !isNonAccrualDay(cur, cfg, cal) {
+			count++
+		}
+	}
+	return count
+}
+
 // getDivisorAndDays computes (divisor, accrualDays) for a period.
 // conventionType must be the canonical value from fd_day_count_convention_master:
 // ACT_365 | ACT_360 | ACT_ACT | 30_360
@@ -493,6 +743,37 @@ func roundAmount(value float64, decimals int) float64 {
 	}
 	pow := math.Pow(10, float64(decimals))
 	return math.Round(value*pow) / pow
+}
+
+// getDivisorAndDaysWithCal is like getDivisorAndDays but uses countAccrualDays
+// to exclude non-working days when the bank config says so.
+func getDivisorAndDaysWithCal(conventionType string, periodStart, periodEnd time.Time, cfg *BankConfig, cal HolidayCalendarInfo) (divisor int, days int) {
+	// For 30/360, use formula-based day count regardless of holidays.
+	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(conventionType)))
+	norm = strings.TrimPrefix(norm, "DC_")
+	if norm == "30_360" {
+		return 360, countDays30_360(periodStart, periodEnd)
+	}
+	// For all other conventions count working days if needed.
+	effectiveDays := countAccrualDays(conventionType, periodStart, periodEnd, cfg, cal)
+	switch norm {
+	case "ACT_360":
+		return 360, effectiveDays
+	case "ACT_ACT":
+		divisorVal := 365
+		for y := periodStart.Year(); y <= periodEnd.Year(); y++ {
+			if isLeapYear(y) {
+				feb29 := time.Date(y, 2, 29, 0, 0, 0, 0, time.UTC)
+				if !feb29.Before(periodStart) && feb29.Before(periodEnd) {
+					divisorVal = 366
+					break
+				}
+			}
+		}
+		return divisorVal, effectiveDays
+	default: // ACT_365
+		return 365, effectiveDays
+	}
 }
 
 // ── Period schedule builders ───────────────────────────────────────────────
@@ -600,7 +881,7 @@ func deduplicateDates(in []time.Time) []time.Time {
 
 // ── Core schedule generator ────────────────────────────────────────────────
 
-func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, tdsCfg *TDSConfig, dcInfo DayCountInfo, itInfo InterestTypeInfo) []CashflowRow {
+func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, tdsCfg *TDSConfig, dcInfo DayCountInfo, itInfo InterestTypeInfo, calInfo HolidayCalendarInfo) []CashflowRow {
 	if fd == nil || fd.ValueDate.IsZero() || fd.MaturityDate.IsZero() {
 		return nil
 	}
@@ -663,7 +944,7 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 			continue
 		}
 
-		divisor, days := getDivisorAndDays(effectiveConvention, periodStart, periodEnd)
+		divisor, days := getDivisorAndDaysWithCal(effectiveConvention, periodStart, periodEnd, cfg, calInfo)
 		if days <= 0 {
 			days = 1
 		}
@@ -810,7 +1091,10 @@ func GenerateCashflowForFD(ctx context.Context, exec queryExecutor, fdID string,
 	// Resolve interest type calculation method from master.
 	itInfo := loadInterestType(ctx, exec, fd.InterestTypeCode)
 
-	return generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo), fd, nil
+	// Load holiday calendar from bank config's holiday_calendar_code.
+	calInfo := loadHolidayCalendar(ctx, exec, cfg.HolidayCalendarCode, fd.ValueDate, fd.MaturityDate)
+
+	return generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo, calInfo), fd, nil
 }
 
 func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow) error {

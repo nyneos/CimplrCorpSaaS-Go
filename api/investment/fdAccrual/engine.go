@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,12 @@ type AccrualInput struct {
 	DayCountCode     string  // ACT_365 / ACT_360 / 30_360
 	FdStartDate      time.Time
 	FdMaturityDate   time.Time
+	// Bank config fields for holiday-aware accrual day counting
+	BankConfigID        string
+	HolidayCalendarCode string
+	WeekendAccrual      bool // if false, exclude weekends from day count
+	HolidayAccrual      bool // if false, exclude holidays from day count
+	WeekendPattern      string // e.g. "Sat,Sun"
 }
 
 // AccrualRunParams controls what the engine calculates.
@@ -178,41 +186,48 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 
 	query := `
 		SELECT
-			fd_id,
-			COALESCE(bank_fd_ref_no, '')           AS fd_ref_no,
-			COALESCE(bank_id, '')                   AS bank_id,
-			COALESCE(bank_name, '')                 AS bank_name,
-			COALESCE(entity_id, '')                 AS entity_id,
-			COALESCE(entity_name, '')               AS entity_name,
-			COALESCE(interest_type_code, 'SIMPLE')  AS interest_type_code,
-			COALESCE(principal_amount, 0)           AS principal_amount,
-			COALESCE(interest_rate, 0)              AS interest_rate,
-			COALESCE(day_count_code, 'ACT_365')     AS day_count_code,
-			start_date,
-			maturity_date
-		FROM investment.fd_master
-		WHERE entity_id = $1
-		  AND fd_status = $2
-		  AND cashflow_generated = true
-		  AND is_deleted = false
-		  AND is_active = true
-		  AND start_date <= $3
-		  AND maturity_date >= $4`
+			f.fd_id,
+			COALESCE(f.bank_fd_ref_no, '')                   AS fd_ref_no,
+			COALESCE(f.bank_id, '')                           AS bank_id,
+			COALESCE(f.bank_name, '')                         AS bank_name,
+			COALESCE(f.entity_id, '')                         AS entity_id,
+			COALESCE(f.entity_name, '')                       AS entity_name,
+			COALESCE(f.interest_type_code, 'SIMPLE')          AS interest_type_code,
+			COALESCE(f.principal_amount, 0)                   AS principal_amount,
+			COALESCE(f.interest_rate, 0)                      AS interest_rate,
+			COALESCE(f.day_count_code, 'ACT_365')             AS day_count_code,
+			f.start_date,
+			f.maturity_date,
+			COALESCE(f.bank_config_id, '')                    AS bank_config_id,
+			COALESCE(bc.holiday_calendar_code, '')            AS holiday_calendar_code,
+			COALESCE(bc.weekend_accrual, true)                AS weekend_accrual,
+			COALESCE(bc.holiday_accrual, true)                AS holiday_accrual,
+			COALESCE(bc.weekend_pattern, 'Sat,Sun')           AS weekend_pattern
+		FROM investment.fd_master f
+		LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = f.bank_config_id
+			AND COALESCE(bc.is_deleted, false) = false
+		WHERE f.entity_id = $1
+		  AND f.fd_status = $2
+		  AND f.cashflow_generated = true
+		  AND f.is_deleted = false
+		  AND f.is_active = true
+		  AND f.start_date <= $3
+		  AND f.maturity_date >= $4`
 
 	args := []interface{}{params.EntityID, fdStatus, params.PeriodEnd, params.PeriodStart}
 	argIdx := 5
 
 	if params.BankIDFilter != "" {
-		query += fmt.Sprintf(" AND bank_id = $%d", argIdx)
+		query += fmt.Sprintf(" AND f.bank_id = $%d", argIdx)
 		args = append(args, params.BankIDFilter)
 		argIdx++
 	}
 	if params.FDInclusionMethod == "SELECT_LIST" && len(params.FDInclusionList) > 0 {
-		query += fmt.Sprintf(" AND fd_id = ANY($%d)", argIdx)
+		query += fmt.Sprintf(" AND f.fd_id = ANY($%d)", argIdx)
 		args = append(args, params.FDInclusionList)
 		argIdx++
 	}
-	query += " ORDER BY bank_name, start_date"
+	query += " ORDER BY f.bank_name, f.start_date"
 
 	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
@@ -228,6 +243,8 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			&fd.EntityID, &fd.EntityName, &fd.InterestTypeCode,
 			&fd.PrincipalAmount, &fd.InterestRate, &fd.DayCountCode,
 			&fd.FdStartDate, &fd.FdMaturityDate,
+			&fd.BankConfigID, &fd.HolidayCalendarCode,
+			&fd.WeekendAccrual, &fd.HolidayAccrual, &fd.WeekendPattern,
 		); err != nil {
 			return nil, fmt.Errorf("getFDsInScope scan: %w", err)
 		}
@@ -237,6 +254,271 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 		return nil, fmt.Errorf("getFDsInScope rows.Err: %w", err)
 	}
 	return results, nil
+}
+
+// ─── Holiday calendar helpers ────────────────────────────────────────────────
+
+// accrualHolidayCalendar holds expanded holiday dates for accrual engine use.
+type accrualHolidayCalendar struct {
+	CalendarCode   string
+	WeekendPattern string         // e.g. "Sat,Sun"
+	HolidayDates   map[string]bool // keyed "YYYY-MM-DD"
+}
+
+// accrualIsWeekend checks whether d falls on a weekend day listed in weekendPattern.
+func accrualIsWeekend(d time.Time, weekendPattern string) bool {
+	if weekendPattern == "" {
+		return false
+	}
+	dow := strings.ToLower(d.Weekday().String()[:3]) // "mon","tue",...
+	for _, part := range strings.Split(weekendPattern, ",") {
+		if strings.ToLower(strings.TrimSpace(part))[:3] == dow {
+			return true
+		}
+	}
+	return false
+}
+
+// reByDay matches BYDAY values like "MO", "2MO", "-1FR"
+var reByDay = regexp.MustCompile(`^(-?\d*)([A-Z]{2})$`)
+
+// accrualExpandRRule expands a recurrence rule string into concrete dates in [from, to].
+// Supported: FREQ=YEARLY/MONTHLY/WEEKLY/DAILY with optional BYMONTH and BYDAY.
+// Empty rrule returns just the seed date (if in range).
+func accrualExpandRRule(seed time.Time, rrule string, from, to time.Time) []time.Time {
+	var out []time.Time
+	if rrule == "" {
+		if !seed.Before(from) && !seed.After(to) {
+			out = append(out, seed.Truncate(24*time.Hour))
+		}
+		return out
+	}
+
+	params := map[string]string{}
+	for _, tok := range strings.Split(rrule, ";") {
+		kv := strings.SplitN(tok, "=", 2)
+		if len(kv) == 2 {
+			params[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+		}
+	}
+	freq := params["FREQ"]
+	byMonth := 0
+	if bm := params["BYMONTH"]; bm != "" {
+		byMonth, _ = strconv.Atoi(bm)
+	}
+	byDay := params["BYDAY"] // e.g. "MO" or "2MO" or "-1FR"
+
+	addIfInRange := func(d time.Time) {
+		d = d.Truncate(24 * time.Hour)
+		if !d.Before(from) && !d.After(to) {
+			out = append(out, d)
+		}
+	}
+
+	// Helper: nth weekday of a month (n=1 → first, n=-1 → last)
+	nthWeekdayOfMonth := func(year, month int, wd time.Weekday, n int) time.Time {
+		m := time.Month(month)
+		if n > 0 {
+			first := time.Date(year, m, 1, 0, 0, 0, 0, time.UTC)
+			diff := int(wd) - int(first.Weekday())
+			if diff < 0 {
+				diff += 7
+			}
+			return first.AddDate(0, 0, diff+(n-1)*7)
+		}
+		// negative: count from end
+		last := time.Date(year, m+1, 0, 0, 0, 0, 0, time.UTC)
+		diff := int(last.Weekday()) - int(wd)
+		if diff < 0 {
+			diff += 7
+		}
+		return last.AddDate(0, 0, -diff+(n+1)*7)
+	}
+
+	weekdayFromCode := func(code string) time.Weekday {
+		switch strings.ToUpper(code) {
+		case "MO":
+			return time.Monday
+		case "TU":
+			return time.Tuesday
+		case "WE":
+			return time.Wednesday
+		case "TH":
+			return time.Thursday
+		case "FR":
+			return time.Friday
+		case "SA":
+			return time.Saturday
+		default:
+			return time.Sunday
+		}
+	}
+
+	switch strings.ToUpper(freq) {
+	case "YEARLY":
+		for yr := from.Year() - 1; yr <= to.Year()+1; yr++ {
+			if byDay != "" && byMonth != 0 {
+				// e.g. FREQ=YEARLY;BYMONTH=1;BYDAY=3MO → 3rd Monday of January each year
+				m := reByDay.FindStringSubmatch(byDay)
+				if len(m) == 3 {
+					n := 1
+					if m[1] != "" {
+						n, _ = strconv.Atoi(m[1])
+					}
+					wd := weekdayFromCode(m[2])
+					addIfInRange(nthWeekdayOfMonth(yr, byMonth, wd, n))
+				}
+			} else if byMonth != 0 {
+				// FREQ=YEARLY;BYMONTH=8 → anniversary in that month
+				addIfInRange(time.Date(yr, time.Month(byMonth), seed.Day(), 0, 0, 0, 0, time.UTC))
+			} else if byDay != "" {
+				// FREQ=YEARLY;BYDAY=MO → first Monday of year
+				m := reByDay.FindStringSubmatch(byDay)
+				if len(m) == 3 {
+					n := 1
+					if m[1] != "" {
+						n, _ = strconv.Atoi(m[1])
+					}
+					wd := weekdayFromCode(m[2])
+					addIfInRange(nthWeekdayOfMonth(yr, int(seed.Month()), wd, n))
+				}
+			} else {
+				// plain FREQ=YEARLY → same date every year
+				addIfInRange(time.Date(yr, seed.Month(), seed.Day(), 0, 0, 0, 0, time.UTC))
+			}
+		}
+	case "MONTHLY":
+		cur := time.Date(from.Year(), from.Month()-1, 1, 0, 0, 0, 0, time.UTC)
+		for !cur.After(to.AddDate(0, 1, 0)) {
+			yr, mo := cur.Year(), int(cur.Month())
+			if byDay != "" {
+				m := reByDay.FindStringSubmatch(byDay)
+				if len(m) == 3 {
+					n := 1
+					if m[1] != "" {
+						n, _ = strconv.Atoi(m[1])
+					}
+					wd := weekdayFromCode(m[2])
+					addIfInRange(nthWeekdayOfMonth(yr, mo, wd, n))
+				}
+			} else {
+				addIfInRange(time.Date(yr, time.Month(mo), seed.Day(), 0, 0, 0, 0, time.UTC))
+			}
+			cur = cur.AddDate(0, 1, 0)
+		}
+	case "WEEKLY":
+		var targetWD time.Weekday
+		if byDay != "" {
+			m := reByDay.FindStringSubmatch(byDay)
+			if len(m) == 3 {
+				targetWD = weekdayFromCode(m[2])
+			}
+		} else {
+			targetWD = seed.Weekday()
+		}
+		cur := from.AddDate(-1, 0, 0)
+		for !cur.After(to) {
+			if cur.Weekday() == targetWD {
+				addIfInRange(cur)
+			}
+			cur = cur.AddDate(0, 0, 1)
+		}
+	case "DAILY":
+		cur := from
+		for !cur.After(to) {
+			addIfInRange(cur)
+			cur = cur.AddDate(0, 0, 1)
+		}
+	}
+	return out
+}
+
+// loadHolidayCalendarForAccrual fetches and expands a named calendar for accrual use.
+// calCode="" → returns empty calendar (all days count).
+func loadHolidayCalendarForAccrual(ctx context.Context, pool *pgxpool.Pool,
+	calCode string, from, to time.Time) accrualHolidayCalendar {
+
+	cal := accrualHolidayCalendar{
+		CalendarCode: calCode,
+		HolidayDates: map[string]bool{},
+	}
+	if calCode == "" {
+		return cal
+	}
+
+	var calendarID string
+	err := pool.QueryRow(ctx, `
+		SELECT calendar_id, COALESCE(weekend_pattern, 'Sat,Sun')
+		FROM investment.mastercalendar
+		WHERE calendar_code = $1
+		  AND COALESCE(status, 'ACTIVE') = 'ACTIVE'
+		  AND COALESCE(is_deleted, false) = false
+		LIMIT 1`, calCode,
+	).Scan(&calendarID, &cal.WeekendPattern)
+	if err != nil {
+		return cal
+	}
+
+	// expand window slightly so YEARLY rrules near boundaries are caught
+	expandFrom := from.AddDate(-1, 0, 0)
+	expandTo := to.AddDate(1, 0, 0)
+
+	rows, err := pool.Query(ctx, `
+		SELECT COALESCE(holiday_date::text, ''), COALESCE(recurrence_rule, '')
+		FROM investment.masterholiday
+		WHERE calendar_id = $1
+		  AND COALESCE(status, 'ACTIVE') = 'ACTIVE'
+		  AND COALESCE(is_deleted, false) = false`, calendarID,
+	)
+	if err != nil {
+		return cal
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var dateStr, rrule string
+		if err := rows.Scan(&dateStr, &rrule); err != nil {
+			continue
+		}
+		seed, err := time.Parse("2006-01-02", dateStr[:10])
+		if err != nil {
+			continue
+		}
+		for _, d := range accrualExpandRRule(seed, rrule, expandFrom, expandTo) {
+			cal.HolidayDates[d.Format("2006-01-02")] = true
+		}
+	}
+	return cal
+}
+
+// accrualIsNonAccrualDay returns true if d should be excluded from day-count
+// based on bank config flags and the expanded calendar.
+func accrualIsNonAccrualDay(d time.Time, fd AccrualInput, cal accrualHolidayCalendar) bool {
+	if !fd.WeekendAccrual && accrualIsWeekend(d, fd.WeekendPattern) {
+		return true
+	}
+	if !fd.HolidayAccrual && cal.HolidayDates[d.Format("2006-01-02")] {
+		return true
+	}
+	return false
+}
+
+// accrualCountWorkingDays counts days in [start, end) excluding non-accrual days.
+func accrualCountWorkingDays(start, end time.Time, fd AccrualInput, cal accrualHolidayCalendar) int {
+	// If both accrual flags are true (default), all calendar days count
+	if fd.WeekendAccrual && fd.HolidayAccrual {
+		return int(end.Sub(start).Hours() / 24)
+	}
+	days := 0
+	cur := start.Truncate(24 * time.Hour)
+	e := end.Truncate(24 * time.Hour)
+	for cur.Before(e) {
+		if !accrualIsNonAccrualDay(cur, fd, cal) {
+			days++
+		}
+		cur = cur.AddDate(0, 0, 1)
+	}
+	return days
 }
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -415,17 +697,21 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		return excluded
 	}
 
-	accrualDays := int(effectiveEnd.Sub(effectiveStart).Hours() / 24)
-	if accrualDays <= 0 {
-		excluded.CalculationError = "accrual days <= 0"
-		return excluded
-	}
+	// Load holiday calendar (empty if no calendar code configured)
+	cal := loadHolidayCalendarForAccrual(ctx, pool, fd.HolidayCalendarCode, fd.FdStartDate, fd.FdMaturityDate)
 
 	dayCountCode := fd.DayCountCode
 	if params.DayCountConvention != "" {
 		dayCountCode = params.DayCountConvention
 	}
 	divisor := getDivisorForAccrual(dayCountCode, effectiveStart)
+
+	// Use holiday-aware working day count (skips non-accrual days per bank config)
+	accrualDays := accrualCountWorkingDays(effectiveStart, effectiveEnd, fd, cal)
+	if accrualDays <= 0 {
+		excluded.CalculationError = "accrual days <= 0"
+		return excluded
+	}
 
 	openingPrincipal := fd.PrincipalAmount
 	if strings.EqualFold(fd.InterestTypeCode, "COMPOUND") {

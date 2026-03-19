@@ -1183,3 +1183,175 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", payload)
 	}
 }
+
+// ─── EditCashflowLineItem ─────────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/edit
+// Maker-checker edit of individual cashflow schedule line items.
+// Editable: interest_accrued, tds_amount, net_cash_flow, period_days,
+//           event_date, formula_used, accrual_rate_per_day, notes.
+func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string                 `json:"user_id"`
+			FDID       string                 `json:"fd_id"`
+			CashflowID string                 `json:"cashflow_id"`
+			Fields     map[string]interface{} `json:"fields"`
+			Reason     string                 `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.FDID == "" || req.CashflowID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "fd_id and cashflow_id are required")
+			return
+		}
+		if len(req.Fields) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "fields map is required")
+			return
+		}
+
+		var userEmail string
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == req.UserID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			"investment.fd_cashflow_schedule",
+			"investment.fd_cashflow",
+			"investment.fd_master_cashflow_schedule",
+		})
+		if table == "" {
+			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			return
+		}
+
+		schemaName, tableName := splitQualifiedTable(table)
+		cols, err := loadTableColumns(ctx, pgxPool, schemaName, tableName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to load table columns: "+err.Error())
+			return
+		}
+
+		fdCol := pickFirstExistingColumn(cols, "fd_id", "master_id")
+		cashflowIDCol := pickFirstExistingColumn(cols, "cashflow_id", "id")
+		if fdCol == "" || cashflowIDCol == "" {
+			api.RespondWithError(w, http.StatusInternalServerError, "required columns not found in cashflow table")
+			return
+		}
+
+		// Map incoming field names to actual column names.
+		allowedFields := map[string]string{
+			"interest_accrued":     "interest_accrued",
+			"interest_amount":      "interest_accrued",
+			"tds_amount":           "tds_amount",
+			"net_cash_flow":        "net_cash_flow",
+			"net_cashflow":         "net_cash_flow",
+			"period_days":          "period_days",
+			"event_date":           "event_date",
+			"cashflow_date":        "event_date",
+			"formula_used":         "formula_used",
+			"accrual_rate_per_day": "accrual_rate_per_day",
+			"notes":                "notes",
+			"override_reason":      "notes",
+		}
+
+		var sets []string
+		var args []interface{}
+		pos := 1
+
+		for inputKey, inputVal := range req.Fields {
+			colName, ok := allowedFields[strings.ToLower(inputKey)]
+			if !ok {
+				continue
+			}
+			if !cols[colName] {
+				continue
+			}
+			sets = append(sets, fmt.Sprintf("%s = $%d", colName, pos))
+			args = append(args, inputVal)
+			pos++
+		}
+
+		if len(sets) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "no valid editable fields found")
+			return
+		}
+
+		if cols["updated_at"] {
+			sets = append(sets, fmt.Sprintf("updated_at = $%d", pos))
+			args = append(args, time.Now())
+			pos++
+		}
+		if cols["updated_by"] {
+			sets = append(sets, fmt.Sprintf("updated_by = $%d", pos))
+			args = append(args, userEmail)
+			pos++
+		}
+		if cols["edit_reason"] {
+			sets = append(sets, fmt.Sprintf("edit_reason = $%d", pos))
+			args = append(args, req.Reason)
+			pos++
+		}
+
+		updateSQL := fmt.Sprintf(
+			"UPDATE %s SET %s WHERE %s = $%d AND %s = $%d",
+			table, strings.Join(sets, ", "),
+			cashflowIDCol, pos,
+			fdCol, pos+1,
+		)
+		args = append(args, req.CashflowID, req.FDID)
+
+		tag, err := pgxPool.Exec(ctx, updateSQL, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "cashflow update failed: "+err.Error())
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "cashflow line item not found")
+			return
+		}
+
+		// Try writing audit entry.
+		auditTable := resolveFirstExistingTable(ctx, pgxPool, []string{
+			"investment.fd_cashflow_audit",
+			"investment.fd_cashflow_schedule_audit",
+		})
+		if auditTable != "" {
+			auditSName, auditTName := splitQualifiedTable(auditTable)
+			auditCols, _ := loadTableColumns(ctx, pgxPool, auditSName, auditTName)
+			if auditCols["cashflow_id"] && auditCols["fd_id"] {
+				auditData := map[string]interface{}{
+					"cashflow_id":   req.CashflowID,
+					"fd_id":         req.FDID,
+					"action_type":   "EDIT",
+					"changed_by":    userEmail,
+					"change_reason": req.Reason,
+					"changed_at":    time.Now(),
+				}
+				pref := []string{"cashflow_id", "fd_id", "action_type", "changed_by", "change_reason", "changed_at"}
+				insertSQL, auditArgs, _, ok := buildDynamicInsert(auditTable, auditCols, pref, auditData, nil)
+				if ok {
+					_, _ = pgxPool.Exec(ctx, insertSQL, auditArgs...)
+				}
+			}
+		}
+
+		api.LogInfo("[FDMaster] EditCashflowLineItem: fd=%s cashflow=%s by=%s", req.FDID, req.CashflowID, userEmail)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"fd_id":       req.FDID,
+			"cashflow_id": req.CashflowID,
+			"updated_by":  userEmail,
+			"fields":      req.Fields,
+		})
+	}
+}

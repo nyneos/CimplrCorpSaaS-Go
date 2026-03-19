@@ -18,5 +18,6 @@ func RegisterFDMasterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) 
 	mux.Handle("/investment/fd/master/all", mid(http.HandlerFunc(GetFDMasterWithAudit(pool))))
 	mux.Handle("/investment/fd/master/audit", mid(http.HandlerFunc(GetFDMasterAuditHistory(pool))))
 	mux.Handle("/investment/fd/master/cashflows", mid(http.HandlerFunc(GetCashflowSchedule(pool))))
+	mux.Handle("/investment/fd/master/cashflow/edit", mid(http.HandlerFunc(EditCashflowLineItem(pool))))
 	mux.Handle("/investment/fd/master/journals", mid(http.HandlerFunc(GetFDJournalEntries(pool))))
 }
