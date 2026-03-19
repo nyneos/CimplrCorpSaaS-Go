@@ -354,33 +354,105 @@ func loadTDSConfig(ctx context.Context, exec queryExecutor, planID string) (*TDS
 
 // ── Day-count helpers ──────────────────────────────────────────────────────
 
-// normDayCount normalises any variant of a day count code to a canonical form.
-func normDayCount(s string) string {
+// DayCountInfo holds the canonical fields resolved from fd_day_count_convention_master.
+type DayCountInfo struct {
+	DayCountCode    string // e.g. "DC-ACT-365"
+	ConventionType  string // e.g. "ACT_365" — the canonical enum value
+}
+
+// loadDayCountConvention resolves a day_count_code (e.g. "DC-ACT-365") or a raw
+// convention string (e.g. "ACT_365", "ACT/365") against investment.fd_day_count_convention_master
+// and returns the canonical convention_type.
+// Falls back to static normalisation when the DB lookup fails.
+func loadDayCountConvention(ctx context.Context, exec queryExecutor, dayCountRef string) DayCountInfo {
+	ref := strings.TrimSpace(dayCountRef)
+	if ref == "" {
+		return DayCountInfo{ConventionType: "ACT_365"}
+	}
+	var code, conv string
+	err := exec.QueryRow(ctx, `
+		SELECT day_count_code, COALESCE(convention_type, '')
+		FROM investment.fd_day_count_convention_master
+		WHERE COALESCE(is_deleted, false) = false
+		  AND (day_count_code = $1
+		    OR UPPER(convention_type) = UPPER($1)
+		    OR UPPER(day_count_name) = UPPER($1))
+		LIMIT 1
+	`, ref).Scan(&code, &conv)
+	if err == nil && conv != "" {
+		return DayCountInfo{DayCountCode: code, ConventionType: strings.ToUpper(conv)}
+	}
+	// Static fallback for values like "ACT/365", "30/360" that may not be stored.
+	return DayCountInfo{DayCountCode: ref, ConventionType: normConventionStatic(ref)}
+}
+
+// normConventionStatic maps any freeform string to ACT_365 | ACT_360 | ACT_ACT | 30_360.
+func normConventionStatic(s string) string {
 	s = strings.ToUpper(strings.TrimSpace(s))
 	switch s {
 	case "DC-ACT-360", "ACT/360", "ACT_360", "ACTUAL/360", "ACTUAL_360":
-		return "ACT/360"
+		return "ACT_360"
 	case "DC-30-360", "30/360", "30_360":
-		return "30/360"
+		return "30_360"
 	case "DC-ACT-ACT", "ACT/ACT", "ACT_ACT", "ACTUAL/ACTUAL":
-		return "ACT/ACT"
-	default: // DC-ACT-365, ACT/365, ACTUAL_365, ACTUAL/365 — all → 365 basis
-		return "ACT/365"
+		return "ACT_ACT"
+	default: // DC-ACT-365, ACTUAL_365, ACT/365 etc.
+		return "ACT_365"
 	}
 }
 
-// getDivisorAndDays computes (divisor, accrualDays) for a period according to the day count convention.
-func getDivisorAndDays(dayCount string, periodStart, periodEnd time.Time) (divisor int, days int) {
-	norm := normDayCount(dayCount)
+// InterestTypeInfo holds fields resolved from fd_interest_type_master.
+type InterestTypeInfo struct {
+	InterestID        string
+	InterestTypeCode  string
+	CalculationMethod string // SIMPLE | COMPOUND | STEPPED
+}
+
+// loadInterestType looks up interest_type_code (or interest_id) in fd_interest_type_master
+// and returns the canonical calculation_method.
+func loadInterestType(ctx context.Context, exec queryExecutor, interestTypeRef string) InterestTypeInfo {
+	ref := strings.TrimSpace(interestTypeRef)
+	if ref == "" {
+		return InterestTypeInfo{CalculationMethod: "SIMPLE"}
+	}
+	var id, code, method string
+	err := exec.QueryRow(ctx, `
+		SELECT interest_id, interest_type_code, COALESCE(calculation_method, 'SIMPLE')
+		FROM investment.fd_interest_type_master
+		WHERE COALESCE(is_deleted, false) = false
+		  AND (interest_id = $1
+		    OR UPPER(interest_type_code) = UPPER($1)
+		    OR UPPER(interest_type_name) = UPPER($1))
+		LIMIT 1
+	`, ref).Scan(&id, &code, &method)
+	if err == nil && method != "" {
+		return InterestTypeInfo{InterestID: id, InterestTypeCode: code, CalculationMethod: strings.ToUpper(method)}
+	}
+	// Static fallback: raw value may already be SIMPLE/COMPOUND/STEPPED.
+	upper := strings.ToUpper(ref)
+	if upper == "COMPOUND" || upper == "STEPPED" {
+		return InterestTypeInfo{CalculationMethod: upper}
+	}
+	return InterestTypeInfo{CalculationMethod: "SIMPLE"}
+}
+
+// getDivisorAndDays computes (divisor, accrualDays) for a period.
+// conventionType must be the canonical value from fd_day_count_convention_master:
+// ACT_365 | ACT_360 | ACT_ACT | 30_360
+func getDivisorAndDays(conventionType string, periodStart, periodEnd time.Time) (divisor int, days int) {
+	// Accept both normalised forms from the master (ACT_360) and legacy slash forms (ACT/360).
+	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(conventionType)))
+	// Strip DC_ prefix if someone passes raw day_count_code.
+	norm = strings.TrimPrefix(norm, "DC_")
 	rawDays := int(periodEnd.Sub(periodStart).Hours() / 24)
 
 	switch norm {
-	case "30/360":
+	case "30_360":
 		days = countDays30_360(periodStart, periodEnd)
 		return 360, days
-	case "ACT/360":
+	case "ACT_360":
 		return 360, rawDays
-	case "ACT/ACT":
+	case "ACT_ACT":
 		// Determine if any leap day falls in the period.
 		divisorVal := 365
 		for y := periodStart.Year(); y <= periodEnd.Year(); y++ {
@@ -394,7 +466,7 @@ func getDivisorAndDays(dayCount string, periodStart, periodEnd time.Time) (divis
 			}
 		}
 		return divisorVal, rawDays
-	default: // ACT/365
+	default: // ACT_365 — fixed 365 even in leap years
 		return 365, rawDays
 	}
 }
@@ -528,21 +600,25 @@ func deduplicateDates(in []time.Time) []time.Time {
 
 // ── Core schedule generator ────────────────────────────────────────────────
 
-func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, tdsCfg *TDSConfig) []CashflowRow {
+func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, tdsCfg *TDSConfig, dcInfo DayCountInfo, itInfo InterestTypeInfo) []CashflowRow {
 	if fd == nil || fd.ValueDate.IsZero() || fd.MaturityDate.IsZero() {
 		return nil
 	}
 
-	// Effective day count: fd_master.day_count_code → booking.day_count_code → bank_config.day_count_code → default ACT/365
-	effectiveDayCount := firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode, "DC-ACT-365")
+	// Effective day count: use convention_type from master (e.g. ACT_365) — this is what drives getDivisorAndDays.
+	// dcInfo is pre-resolved from fd_day_count_convention_master.
+	effectiveConvention := firstNonEmpty(dcInfo.ConventionType, normConventionStatic(cfg.DayCountCode), "ACT_365")
+	// Keep the original code string for display in formula_used / storing in cashflow rows.
+	effectiveDayCountCode := firstNonEmpty(dcInfo.DayCountCode, fd.DayCountConvention, cfg.DayCountCode, "DC-ACT-365")
 	decimals := cfg.InterestRoundingDecimals
 	if decimals <= 0 {
 		decimals = 2
 	}
 
-	// Determine if this is a compounding (capitalization) FD.
+	// Determine if this is a compounding (capitalization) FD using master-resolved calculation_method.
+	calcMethod := firstNonEmpty(itInfo.CalculationMethod, strings.ToUpper(fd.InterestTypeCode), "SIMPLE")
 	freqCode := strings.ToUpper(strings.TrimSpace(firstNonEmpty(fd.InterestPayoutFrequency, freq.FrequencyCode, freq.FrequencyType, fd.FrequencyID)))
-	isCompound := strings.Contains(strings.ToUpper(fd.InterestTypeCode), "COMPOUND")
+	isCompound := calcMethod == "COMPOUND"
 	isAtMaturity := freqCode == "AT_MATURITY" || freqCode == ""
 
 	// Determine TDS timing.
@@ -587,7 +663,7 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 			continue
 		}
 
-		divisor, days := getDivisorAndDays(effectiveDayCount, periodStart, periodEnd)
+		divisor, days := getDivisorAndDays(effectiveConvention, periodStart, periodEnd)
 		if days <= 0 {
 			days = 1
 		}
@@ -629,7 +705,7 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 						TDSAmount:       tdsOnPeriod,
 						NetCashFlow:     -tdsOnPeriod,
 						ClosingPrincipal: openingPrincipal,
-						DayCountCode:    effectiveDayCount,
+						DayCountCode:    effectiveDayCountCode,
 						Divisor:         divisor,
 						FormulaUsed:     fmt.Sprintf("TDS = CumulativeInterest(%.2f) × %.4f%%", cumulativeInterest, tdsCfg.TDSRate),
 					})
@@ -683,9 +759,9 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 			ClosingPrincipal:  closingPrincipal,
 			TDSAmount:         tdsThisPeriod,
 			NetCashFlow:       netCashflow,
-			DayCountCode:      effectiveDayCount,
+			DayCountCode:      effectiveDayCountCode,
 			Divisor:           divisor,
-			FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d)", openingPrincipal, fd.InterestRate, days, divisor),
+			FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d) [%s]", openingPrincipal, fd.InterestRate, days, divisor, effectiveConvention),
 			AccrualRatePerDay: ratePerDay,
 		})
 
@@ -727,7 +803,14 @@ func GenerateCashflowForFD(ctx context.Context, exec queryExecutor, fdID string,
 	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID))
 	tds, _ := loadTDSConfig(ctx, exec, fd.TDSPlanID)
 
-	return generateCashflowSchedule(fd, cfg, freq, tds), fd, nil
+	// Resolve day count convention from master — prefer fd's day_count_code, fall back to bank config's.
+	dcRef := firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode)
+	dcInfo := loadDayCountConvention(ctx, exec, dcRef)
+
+	// Resolve interest type calculation method from master.
+	itInfo := loadInterestType(ctx, exec, fd.InterestTypeCode)
+
+	return generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo), fd, nil
 }
 
 func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow) error {
