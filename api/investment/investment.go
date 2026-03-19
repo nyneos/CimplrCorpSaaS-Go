@@ -11,6 +11,8 @@ import (
 	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
 	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
 	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
+	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
+	fdInterestWorkbench "CimplrCorpSaas/api/investment/fdInterestAndTdsWorkbench"
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
@@ -168,6 +170,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	fdBooking.RegisterFDBookingRoutes(mux, pool, db)
 	fdMaster.RegisterFDMasterRoutes(mux, pool, db)
 	fdAccrual.RegisterFDAccrualRoutes(mux, pool, db)
+	fdReceipt.RegisterFDReceiptRoutes(mux, pool, db)
+	fdInterestWorkbench.RegisterFDInterestWorkbenchRoutes(mux, pool, db)
 
 	// Example routes for future implementation:
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)

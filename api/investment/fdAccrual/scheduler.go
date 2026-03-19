@@ -1,44 +1,52 @@
 package fdAccrual
 
 import (
-	"CimplrCorpSaas/api"
-	"CimplrCorpSaas/api/constants"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime/debug"
+	"time"
+
+	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ─── 1. CreateScheduleConfig ─────────────────────────────────────────────────
+// ─── 1. CreateScheduleConfig ──────────────────────────────────────────────────
 
 func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID         string `json:"user_id"`
-			ScheduleName   string `json:"schedule_name"`
-			FrequencyCode  string `json:"frequency_code"`  // MONTHLY / QUARTERLY / YEARLY
-			RunDayOfMonth  int    `json:"run_day_of_month"` // 1-28
-			RunMode        string `json:"run_mode"`         // FULL or SIMULATION
-			ScopeEntityIDs string `json:"scope_entity_ids"` // comma-separated or empty
-			ScopeBankIDs   string `json:"scope_bank_ids"`
-			AutoSubmit     bool   `json:"auto_submit"` // auto-submit for approval after compute
-			Description    string `json:"description"`
+			UserID                string `json:"user_id"`
+			EntityID              string `json:"entity_id"`
+			EntityName            string `json:"entity_name"`
+			ScheduleFrequency     string `json:"schedule_frequency"`  // MONTHLY / QUARTERLY / YEARLY
+			RunDayOfMonth         int    `json:"run_day_of_month"`
+			DefaultBankIDFilter   string `json:"default_bank_id_filter"`
+			DefaultFDStatusFilter string `json:"default_fd_status_filter"`
+			DefaultRunMode        string `json:"default_run_mode"`
+			AutoSubmitForApproval bool   `json:"auto_submit_for_approval"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.ScheduleName == "" || req.FrequencyCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "schedule_name and frequency_code are required")
+		if req.EntityID == "" || req.ScheduleFrequency == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_id and schedule_frequency are required")
 			return
 		}
 		if req.RunDayOfMonth < 1 || req.RunDayOfMonth > 28 {
 			api.RespondWithError(w, http.StatusBadRequest, "run_day_of_month must be between 1 and 28")
 			return
 		}
-		if req.RunMode == "" {
-			req.RunMode = "FULL"
+		if req.DefaultRunMode == "" {
+			req.DefaultRunMode = "SIMULATION"
+		}
+		if req.DefaultFDStatusFilter == "" {
+			req.DefaultFDStatusFilter = "ACTIVE"
 		}
 
 		userEmail := getUserEmail(req.UserID)
@@ -48,19 +56,26 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// compute initial next_run_at
+		nextRun := computeNextRunForConfig(req.ScheduleFrequency, req.RunDayOfMonth, time.Now())
+
 		var configID string
 		err := pgxPool.QueryRow(ctx, `
 			INSERT INTO investment.fd_accrual_schedule_config (
-				schedule_name, frequency_code, run_day_of_month, run_mode,
-				scope_entity_ids, scope_bank_ids,
-				auto_submit, description, is_enabled,
+				entity_id, entity_name,
+				schedule_frequency, run_day_of_month,
+				default_bank_id_filter, default_fd_status_filter,
+				default_run_mode, auto_submit_for_approval,
+				is_active, next_run_at,
 				created_by, created_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,now())
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,now())
 			RETURNING config_id`,
-			req.ScheduleName, req.FrequencyCode, req.RunDayOfMonth, req.RunMode,
-			nullIfEmpty(req.ScopeEntityIDs), nullIfEmpty(req.ScopeBankIDs),
-			req.AutoSubmit, nullIfEmpty(req.Description),
-			userEmail,
+			req.EntityID, nullIfEmpty(req.EntityName),
+			req.ScheduleFrequency, req.RunDayOfMonth,
+			nullIfEmpty(req.DefaultBankIDFilter), req.DefaultFDStatusFilter,
+			req.DefaultRunMode, req.AutoSubmitForApproval,
+			nextRun, userEmail,
 		).Scan(&configID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Create schedule config failed: "+err.Error())
@@ -68,22 +83,24 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"config_id":     configID,
-			"schedule_name": req.ScheduleName,
-			"is_enabled":    true,
+			"config_id":          configID,
+			"entity_id":          req.EntityID,
+			"schedule_frequency": req.ScheduleFrequency,
+			"next_run_at":        nextRun,
+			"is_active":          true,
 		})
-		api.LogInfo("[FDAccrual] CreateScheduleConfig: config_id=%s name=%s freq=%s", configID, req.ScheduleName, req.FrequencyCode)
+		api.LogInfo("[FDAccrual] CreateScheduleConfig: config_id=%s entity=%s freq=%s", configID, req.EntityID, req.ScheduleFrequency)
 	}
 }
 
-// ─── 2. UpdateScheduleConfig ─────────────────────────────────────────────────
+// ─── 2. UpdateScheduleConfig ──────────────────────────────────────────────────
 
 func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID         string                 `json:"user_id"`
-			ConfigID       string                 `json:"config_id"`
-			Fields         map[string]interface{} `json:"fields"`
+			UserID   string                 `json:"user_id"`
+			ConfigID string                 `json:"config_id"`
+			Fields   map[string]interface{} `json:"fields"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -106,43 +123,47 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Allowed update columns
+		// Allowlist of updatable columns
 		allowed := map[string]bool{
-			"schedule_name": true, "frequency_code": true, "run_day_of_month": true,
-			"run_mode": true, "scope_entity_ids": true, "scope_bank_ids": true,
-			"auto_submit": true, "description": true,
+			"schedule_frequency":      true,
+			"run_day_of_month":        true,
+			"run_time":                true,
+			"default_bank_id_filter":  true,
+			"default_fd_status_filter": true,
+			"default_run_mode":        true,
+			"auto_submit_for_approval": true,
+			"notification_recipients": true,
 		}
 
-		setClauses := make([]string, 0)
-		args := make([]interface{}, 0)
-		argIdx := 1
-		for k, v := range req.Fields {
-			if !allowed[k] {
+		setParts := []string{"updated_by = $1", "updated_at = now()"}
+		args := []interface{}{userEmail}
+
+		for col, val := range req.Fields {
+			if !allowed[col] {
 				continue
 			}
-			setClauses = append(setClauses, k+"=$"+intToStr(argIdx))
-			args = append(args, v)
-			argIdx++
+			args = append(args, val)
+			setParts = append(setParts, fmt.Sprintf("%s = $%d", col, len(args)))
 		}
-		if len(setClauses) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No valid fields to update")
+
+		if len(setParts) <= 2 {
+			api.RespondWithError(w, http.StatusBadRequest, "no valid updatable fields provided")
 			return
 		}
 
-		// Add updated_by, updated_at
-		setClauses = append(setClauses, "updated_by=$"+intToStr(argIdx))
-		args = append(args, userEmail)
-		argIdx++
-		setClauses = append(setClauses, "updated_at=now()")
-
 		args = append(args, req.ConfigID)
-		query := "UPDATE investment.fd_accrual_schedule_config SET " +
-			joinStrings(setClauses, ", ") +
-			" WHERE config_id=$" + intToStr(argIdx)
-
-		_, err := pgxPool.Exec(ctx, query, args...)
+		query := fmt.Sprintf(
+			"UPDATE investment.fd_accrual_schedule_config SET %s WHERE config_id = $%d AND is_active = true",
+			joinStrings(setParts, ", "),
+			len(args),
+		)
+		ct, err := pgxPool.Exec(ctx, query, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Update schedule config failed: "+err.Error())
+			return
+		}
+		if ct.RowsAffected() == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "schedule config not found or already disabled")
 			return
 		}
 
@@ -150,33 +171,44 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id": req.ConfigID,
 			"updated":   true,
 		})
-		api.LogInfo("[FDAccrual] UpdateScheduleConfig: config_id=%s", req.ConfigID)
+		api.LogInfo("[FDAccrual] UpdateScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
 
-// ─── 3. GetScheduleConfigs ───────────────────────────────────────────────────
+// ─── 3. GetScheduleConfigs ────────────────────────────────────────────────────
 
 func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID   string `json:"user_id"`
+			EntityID string `json:"entity_id"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		ctx := r.Context()
-		rows, err := pgxPool.Query(ctx, `
+		query := `
 			SELECT
-				config_id, schedule_name, frequency_code, run_day_of_month, run_mode,
-				COALESCE(scope_entity_ids,'') AS scope_entity_ids,
-				COALESCE(scope_bank_ids,'') AS scope_bank_ids,
-				auto_submit, COALESCE(description,'') AS description,
-				is_enabled,
-				COALESCE(created_by,'') AS created_by, created_at,
-				COALESCE(updated_by,'') AS updated_by, updated_at,
-				last_run_at, COALESCE(last_run_id,'') AS last_run_id
+				config_id,
+				COALESCE(entity_id,''), COALESCE(entity_name,''),
+				schedule_frequency,
+				COALESCE(run_day_of_month,1),
+				COALESCE(default_bank_id_filter,''),
+				COALESCE(default_fd_status_filter,'ACTIVE'),
+				default_run_mode,
+				auto_submit_for_approval,
+				COALESCE(last_run_status,''),
+				last_run_at, next_run_at,
+				is_active, created_at
 			FROM investment.fd_accrual_schedule_config
-			WHERE COALESCE(is_deleted, false) = false
-			ORDER BY created_at DESC`)
+			WHERE is_active = true`
+		args := []interface{}{}
+		if req.EntityID != "" {
+			query += " AND entity_id = $1"
+			args = append(args, req.EntityID)
+		}
+		query += " ORDER BY created_at DESC"
+
+		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
 			return
@@ -197,6 +229,10 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			configs = append(configs, row)
 		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			return
+		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"count":   len(configs),
@@ -205,7 +241,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─── 4. DisableSchedule ──────────────────────────────────────────────────────
+// ─── 4. DisableSchedule ───────────────────────────────────────────────────────
 
 func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -229,24 +265,28 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		_, err := pgxPool.Exec(ctx, `
+		ct, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
-			SET is_enabled = false, updated_by = $1, updated_at = now()
-			WHERE config_id = $2`, userEmail, req.ConfigID)
+			SET is_active=false, updated_by=$1, updated_at=now()
+			WHERE config_id=$2`, userEmail, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Disable schedule failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Disable failed: "+err.Error())
+			return
+		}
+		if ct.RowsAffected() == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
 			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"config_id":  req.ConfigID,
-			"is_enabled": false,
+			"config_id": req.ConfigID,
+			"is_active": false,
 		})
-		api.LogInfo("[FDAccrual] DisableSchedule: config_id=%s", req.ConfigID)
+		api.LogInfo("[FDAccrual] DisableSchedule: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
 
-// ─── 5. EnableSchedule ───────────────────────────────────────────────────────
+// ─── 5. EnableSchedule ────────────────────────────────────────────────────────
 
 func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -270,36 +310,429 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		_, err := pgxPool.Exec(ctx, `
+		ct, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
-			SET is_enabled = true, updated_by = $1, updated_at = now()
-			WHERE config_id = $2`, userEmail, req.ConfigID)
+			SET is_active=true, updated_by=$1, updated_at=now()
+			WHERE config_id=$2`, userEmail, req.ConfigID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Enable schedule failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Enable failed: "+err.Error())
+			return
+		}
+		if ct.RowsAffected() == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
 			return
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"config_id":  req.ConfigID,
-			"is_enabled": true,
+			"config_id": req.ConfigID,
+			"is_active": true,
 		})
-		api.LogInfo("[FDAccrual] EnableSchedule: config_id=%s", req.ConfigID)
+		api.LogInfo("[FDAccrual] EnableSchedule: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
 
-// ─── String helpers (avoid import cycle with strings package used in run.go) ─
+// ─── 6. ApproveAccrualSchedule ────────────────────────────────────────────────
 
-func intToStr(i int) string {
-	return fmt.Sprintf("%d", i)
+func ApproveAccrualSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			RoleID   string `json:"role_id"`
+			RunID    string `json:"run_id"`
+			Comment  string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.RunID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			return
+		}
+
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		var instanceEyeID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT ie.instance_eye_id
+			FROM uam.approval_instance_eye ie
+			JOIN uam.approval_instance i ON i.instance_id = ie.instance_id
+			WHERE i.record_id = $1
+			  AND i.module_code = 'FIXED_DEPOSIT'
+			  AND i.status = 'PENDING'
+			  AND ie.status = 'ACTIVE'
+			ORDER BY ie.position LIMIT 1`, req.RunID,
+		).Scan(&instanceEyeID)
+
+		if instanceEyeID == "" {
+			_, _ = pgxPool.Exec(ctx, `
+				UPDATE investment.fd_accrual_run
+				SET run_status='APPROVED', updated_at=now()
+				WHERE run_id=$1 AND run_status='PENDING_APPROVAL'`, req.RunID)
+		} else {
+			err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+				InstanceEyeID: instanceEyeID,
+				ActorUserID:   req.UserID,
+				ActorEmail:    userEmail,
+				ActorRoleID:   req.RoleID,
+				ActionType:    approvalengine.ActionApproved,
+				Comment:       req.Comment,
+			})
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Approval engine error: "+err.Error())
+				return
+			}
+		}
+
+		var instStatus string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run WHERE run_id=$1`, req.RunID,
+		).Scan(&instStatus)
+
+		if instStatus == "APPROVED" {
+			if jErr := postAccrualJournals(ctx, pgxPool, req.RunID, userEmail); jErr != nil {
+				api.LogError("[FDAccrual] ApproveAccrualSchedule journal error run %s: %v", req.RunID, jErr)
+			}
+			_, _ = pgxPool.Exec(ctx,
+				`UPDATE investment.fd_accrual_run SET run_status='POSTED', posting_status='POSTED', posting_completed_at=now() WHERE run_id=$1`,
+				req.RunID)
+			instStatus = "POSTED"
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"run_id": req.RunID,
+			"status": instStatus,
+		})
+		api.LogInfo("[FDAccrual] ApproveAccrualSchedule: run_id=%s by=%s result=%s", req.RunID, userEmail, instStatus)
+	}
 }
 
-func joinStrings(parts []string, sep string) string {
-	result := ""
-	for i, p := range parts {
-		if i > 0 {
-			result += sep
+// ─── 7. RejectAccrualSchedule ─────────────────────────────────────────────────
+
+func RejectAccrualSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			RoleID  string `json:"role_id"`
+			RunID   string `json:"run_id"`
+			Comment string `json:"comment"`
 		}
-		result += p
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.RunID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			return
+		}
+
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		var instanceEyeID string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT ie.instance_eye_id
+			FROM uam.approval_instance_eye ie
+			JOIN uam.approval_instance i ON i.instance_id = ie.instance_id
+			WHERE i.record_id = $1
+			  AND i.module_code = 'FIXED_DEPOSIT'
+			  AND i.status = 'PENDING'
+			  AND ie.status = 'ACTIVE'
+			ORDER BY ie.position LIMIT 1`, req.RunID,
+		).Scan(&instanceEyeID)
+
+		if instanceEyeID != "" {
+			_ = approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+				InstanceEyeID: instanceEyeID,
+				ActorUserID:   req.UserID,
+				ActorEmail:    userEmail,
+				ActorRoleID:   req.RoleID,
+				ActionType:    approvalengine.ActionRejected,
+				Comment:       req.Comment,
+			})
+		}
+
+		_, _ = pgxPool.Exec(ctx,
+			`UPDATE investment.fd_accrual_run SET run_status='REJECTED', updated_at=now()
+			 WHERE run_id=$1 AND run_status='PENDING_APPROVAL'`, req.RunID)
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"run_id": req.RunID,
+			"status": "REJECTED",
+		})
+		api.LogInfo("[FDAccrual] RejectAccrualSchedule: run_id=%s by=%s", req.RunID, userEmail)
+	}
+}
+
+// ─── 8. DeleteScheduleConfig ──────────────────────────────────────────────────
+
+func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			ConfigID string `json:"config_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.ConfigID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			return
+		}
+
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		ct, err := pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_schedule_config
+			SET is_active=false, updated_by=$1, updated_at=now()
+			WHERE config_id=$2`, userEmail, req.ConfigID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Delete failed: "+err.Error())
+			return
+		}
+		if ct.RowsAffected() == 0 {
+			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"config_id": req.ConfigID,
+			"deleted":   true,
+		})
+		api.LogInfo("[FDAccrual] DeleteScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
+	}
+}
+
+// ─── Background Worker ────────────────────────────────────────────────────────
+
+// StartAccrualSchedulerWorker runs continuously, checking every minute whether
+// any schedule configs are due and firing accrual runs for them.
+func StartAccrualSchedulerWorker(pool *pgxpool.Pool) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	api.LogInfo("[FDAccrual] Scheduler worker started")
+
+	for range ticker.C {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] Scheduler panic: %v\n%s", rec, debug.Stack())
+				}
+			}()
+			checkAndFireDueSchedules(context.Background(), pool)
+		}()
+	}
+}
+
+// checkAndFireDueSchedules queries all active configs where next_run_at <= now
+// and fires an accrual run for each.
+func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
+	rows, err := pool.Query(ctx, `
+		SELECT config_id, entity_id, entity_name,
+		       schedule_frequency, run_day_of_month,
+		       COALESCE(default_bank_id_filter,''),
+		       COALESCE(default_fd_status_filter,'ACTIVE'),
+		       default_run_mode,
+		       auto_submit_for_approval
+		FROM investment.fd_accrual_schedule_config
+		WHERE is_active = true
+		  AND next_run_at <= now()
+		ORDER BY next_run_at`)
+	if err != nil {
+		api.LogError("[FDAccrual] checkAndFireDueSchedules query: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type dueConfig struct {
+		ConfigID, EntityID, EntityName           string
+		ScheduleFrequency, BankFilter, FDStatus  string
+		DefaultRunMode                           string
+		RunDayOfMonth                            int
+		AutoSubmit                               bool
+	}
+	var due []dueConfig
+	for rows.Next() {
+		var c dueConfig
+		if err := rows.Scan(
+			&c.ConfigID, &c.EntityID, &c.EntityName,
+			&c.ScheduleFrequency, &c.RunDayOfMonth,
+			&c.BankFilter, &c.FDStatus,
+			&c.DefaultRunMode, &c.AutoSubmit,
+		); err != nil {
+			api.LogError("[FDAccrual] checkAndFireDueSchedules scan: %v", err)
+			continue
+		}
+		due = append(due, c)
+	}
+	rows.Close()
+
+	for _, c := range due {
+		fireScheduledRun(ctx, pool, c.ConfigID, c.EntityID, c.EntityName,
+			c.ScheduleFrequency, c.BankFilter, c.FDStatus,
+			c.DefaultRunMode, c.RunDayOfMonth, c.AutoSubmit)
+	}
+}
+
+// fireScheduledRun creates a run, validates, executes, and optionally submits.
+func fireScheduledRun(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	configID, entityID, entityName string,
+	scheduleFreq, bankFilter, fdStatus string,
+	runMode string,
+	runDay int,
+	autoSubmit bool,
+) {
+	now := time.Now()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := periodStart.AddDate(0, 1, -1) // last day of month
+	financialPeriod := buildAccrualPeriod(periodStart)
+
+	input := CreateAccrualRunInput{
+		RunType:            "SCHEDULED",
+		RunMode:            runMode,
+		EntityID:           entityID,
+		EntityName:         entityName,
+		BankIDFilter:       bankFilter,
+		FDStatusFilter:     fdStatus,
+		AccrualPeriodStart: periodStart,
+		AccrualPeriodEnd:   periodEnd,
+		FinancialPeriod:    financialPeriod,
+		DayCountConvention: "ACT_365",
+		RoundingRule:       "ROUND",
+		PrecisionDecimals:  2,
+		CreatedBy:          "SCHEDULER",
+	}
+
+	runID, err := createAccrualRunInternal(ctx, pool, input)
+	if err != nil {
+		api.LogError("[FDAccrual] Scheduler createRun failed entity=%s: %v", entityID, err)
+		updateLastRunStatus(ctx, pool, configID, "", "CREATE_FAILED")
+		return
+	}
+	api.LogInfo("[FDAccrual] Scheduler created run_id=%s entity=%s period=%s→%s",
+		runID, entityID, periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02"))
+
+	// Validate
+	eligible, blockers, vErr := validateAndPersistFindings(ctx, pool, runID)
+	if vErr != nil {
+		api.LogError("[FDAccrual] Scheduler validate run=%s: %v", runID, vErr)
+		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATE_FAILED")
+		return
+	}
+	newStatus := "VALIDATED"
+	if blockers > 0 {
+		newStatus = "VALIDATION_FAILED"
+	}
+	_, _ = pool.Exec(ctx,
+		`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
+		newStatus, eligible, runID)
+
+	if blockers > 0 {
+		api.LogInfo("[FDAccrual] Scheduler run=%s has %d blockers — skipping execution", runID, blockers)
+		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATION_FAILED")
+		return
+	}
+
+	// Execute
+	calculated, failed, exErr := executeAccrualRun(ctx, pool, runID, "SCHEDULER")
+	if exErr != nil {
+		api.LogError("[FDAccrual] Scheduler execute run=%s: %v", runID, exErr)
+		updateLastRunStatus(ctx, pool, configID, runID, "EXECUTE_FAILED")
+		return
+	}
+	api.LogInfo("[FDAccrual] Scheduler run=%s calculated=%d failed=%d", runID, calculated, failed)
+
+	// Submit for approval if configured
+	finalStatus := "COMPUTED"
+	if autoSubmit && runMode != "SIMULATION" {
+		if sErr := submitAccrualRunForApproval(ctx, pool, runID, "SCHEDULER"); sErr != nil {
+			api.LogError("[FDAccrual] Scheduler submit run=%s: %v", runID, sErr)
+		} else {
+			finalStatus = "PENDING_APPROVAL"
+		}
+	}
+
+	// Advance next_run_at
+	nextRun := computeNextRunForConfig(scheduleFreq, runDay, now)
+	_, _ = pool.Exec(ctx, `
+		UPDATE investment.fd_accrual_schedule_config
+		SET last_run_at=$1, last_run_id=$2, last_run_status=$3, next_run_at=$4,
+		    updated_at=now()
+		WHERE config_id=$5`,
+		now, runID, finalStatus, nextRun, configID)
+}
+
+// updateLastRunStatus bumps last_run_status on the config (for error cases).
+func updateLastRunStatus(ctx context.Context, pool *pgxpool.Pool, configID, runID, status string) {
+	var runIDArg interface{} = nil
+	if runID != "" {
+		runIDArg = runID
+	}
+	_, _ = pool.Exec(ctx, `
+		UPDATE investment.fd_accrual_schedule_config
+		SET last_run_at=now(), last_run_id=$1, last_run_status=$2, updated_at=now()
+		WHERE config_id=$3`,
+		runIDArg, status, configID)
+}
+
+// computeNextRunForConfig calculates the next fire time from the current time.
+func computeNextRunForConfig(frequency string, runDay int, from time.Time) time.Time {
+	if runDay < 1 {
+		runDay = 1
+	}
+	if runDay > 28 {
+		runDay = 28
+	}
+	var next time.Time
+	switch frequency {
+	case "QUARTERLY":
+		next = from.AddDate(0, 3, 0)
+	case "YEARLY":
+		next = from.AddDate(1, 0, 0)
+	default: // MONTHLY
+		next = from.AddDate(0, 1, 0)
+	}
+	// clamp day
+	maxDay := daysInMonth(next.Year(), next.Month())
+	day := runDay
+	if day > maxDay {
+		day = maxDay
+	}
+	return time.Date(next.Year(), next.Month(), day, 0, 0, 0, 0, time.UTC)
+}
+
+// daysInMonth returns the number of days in a given month.
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+// joinStrings joins a slice with sep (to avoid importing strings twice).
+func joinStrings(parts []string, sep string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	result := parts[0]
+	for _, p := range parts[1:] {
+		result += sep + p
 	}
 	return result
 }

@@ -94,7 +94,19 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		mid(http.HandlerFunc(DisableSchedule(pool))),
 	)
 	mux.Handle(
-		"/investment/fd/accrual/schedule/enable",
-		mid(http.HandlerFunc(EnableSchedule(pool))),
-	)
+			"/investment/fd/accrual/schedule/enable",
+			mid(http.HandlerFunc(EnableSchedule(pool))),
+		)
+		mux.Handle(
+			"/investment/fd/accrual/schedule/approve",
+			mid(http.HandlerFunc(ApproveAccrualSchedule(pool))),
+		)
+		mux.Handle(
+			"/investment/fd/accrual/schedule/reject",
+			mid(http.HandlerFunc(RejectAccrualSchedule(pool))),
+		)
+		mux.Handle(
+			"/investment/fd/accrual/schedule/delete",
+			mid(http.HandlerFunc(DeleteScheduleConfig(pool))),
+		)
 }

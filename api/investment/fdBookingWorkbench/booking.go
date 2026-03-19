@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -227,6 +228,16 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogInfo("[FDBooking] No matrix for booking %s — stays DRAFT", bID)
 			}
 		}(bookingID, req.UserID, userEmail, req.EntityID, req.PrincipalAmount)
+
+		go func(bID, eID, uEmail string, amount float64) {
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create", bID, map[string]interface{}{
+				"entity_id":   eID,
+				"record_id":   bID,
+				"event":       "FD_BOOKING_SUBMITTED",
+				"actor_email": uEmail,
+				"amount":      amount,
+			})
+		}(bookingID, req.EntityID, userEmail, req.PrincipalAmount)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"booking_id": bookingID,
@@ -481,6 +492,16 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.LogInfo("[FDBooking] No matrix for booking %s — stays DRAFT", bID)
 				}
 			}(bookingID, req.UserID, userEmail, row.EntityID, row.PrincipalAmount)
+
+			go func(bID, eID, uEmail string, amount float64) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create-bulk", bID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   bID,
+					"event":       "FD_BOOKING_SUBMITTED",
+					"actor_email": uEmail,
+					"amount":      amount,
+				})
+			}(bookingID, row.EntityID, userEmail, row.PrincipalAmount)
 		}
 
 		success := false
@@ -671,6 +692,16 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(req.BookingID, req.UserID, userEmail, entityID, oldPrincipal)
 
+		go func(bID, eID, uEmail string, amount float64) {
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/update", bID, map[string]interface{}{
+				"entity_id":   eID,
+				"record_id":   bID,
+				"event":       "FD_BOOKING_EDIT_SUBMITTED",
+				"actor_email": uEmail,
+				"amount":      amount,
+			})
+		}(req.BookingID, entityID, userEmail, oldPrincipal)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"booking_id": req.BookingID, "requested": userEmail,
 		})
@@ -816,6 +847,15 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}(bm.id, req.UserID, userEmail, bm.entity, bm.amount)
+
+			go func(bID, eID, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/delete", bID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   bID,
+					"event":       "FD_BOOKING_DELETE_SUBMITTED",
+					"actor_email": uEmail,
+				})
+			}(bm.id, bm.entity, userEmail)
 		}
 
 		validSet := make(map[string]bool)
@@ -969,6 +1009,15 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
+		for _, bID := range req.BookingIDs {
+			go func(id, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
+					"record_id":    id,
+					"event":        "FD_BOOKING_APPROVED",
+					"actor_email":  uEmail,
+				})
+			}(bID, userEmail)
+		}
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -1074,6 +1123,15 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
+		for _, bID := range req.BookingIDs {
+			go func(id, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/reject", id, map[string]interface{}{
+					"record_id":   id,
+					"event":       "FD_BOOKING_REJECTED",
+					"actor_email": uEmail,
+				})
+			}(bID, userEmail)
+		}
 		api.LogInfo("[FDBooking] BulkRejectBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -1694,6 +1752,12 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(uEmail string) {
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/mark-sent-to-bank", "", map[string]interface{}{
+				"event":       "FD_BOOKING_SENT_TO_BANK",
+				"actor_email": uEmail,
+			})
+		}(userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"updated_count": tag.RowsAffected(), "marked_by": userEmail,
 		})

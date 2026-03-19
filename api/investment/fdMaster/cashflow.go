@@ -14,16 +14,19 @@ type FDRecord struct {
 	ConfirmationID          string
 	BookingID               string
 	EntityID                string
+	EntityName              string
 	BankID                  string
-	BankAccountID           string
+	BankName                string
+	BankAccountID           string // maps to source_account_id
 	BankConfigID            string
+	FrequencyID             string
 	PrincipalAmount         float64
 	InterestRate            float64
+	InterestTypeCode        string // SIMPLE / COMPOUND / STEPPED
 	TenorDays               int
-	ValueDate               time.Time
+	ValueDate               time.Time // maps to start_date
 	MaturityDate            time.Time
 	MaturityAmount          float64
-	InterestType            string
 	InterestPayoutFrequency string
 	CompoundingFrequency    string
 	DayCountConvention      string
@@ -33,6 +36,9 @@ type FDRecord struct {
 	ReceiptDate             time.Time
 	ConfirmationStatus      string
 }
+
+// InterestType is an alias kept for backward compat inside cashflow calculations.
+func (r *FDRecord) InterestType() string { return r.InterestTypeCode }
 
 type BankConfig struct {
 	ConfigID                   string
@@ -73,26 +79,55 @@ type CashflowRow struct {
 }
 
 func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string) (*FDRecord, error) {
+	// Dynamically resolve which bank_account column exists to avoid parse-time
+	// "column does not exist" errors when the live schema differs from expectations.
+	bookingCols, err := loadTableColumns(ctx, exec, "investment", "fd_booking_request")
+	if err != nil {
+		return nil, fmt.Errorf("load FD record: %w", err)
+	}
+	bankAccCol := pickFirstExistingColumn(bookingCols, "source_account_id", "bank_account_id", "account_id", "bank_account")
+	bankAccExpr := "''::text"
+	if bankAccCol != "" {
+		bankAccExpr = "COALESCE(b." + bankAccCol + ", '')"
+	}
+
+	// Dynamically resolve currency — may live on fd_confirmation or fd_booking_request.
+	confCols, err := loadTableColumns(ctx, exec, "investment", "fd_confirmation")
+	if err != nil {
+		return nil, fmt.Errorf("load FD record: %w", err)
+	}
+	currencyExpr := "''::text"
+	if confCols["currency"] {
+		currencyExpr = "COALESCE(c.currency, '')"
+	} else if confCols["currency_code"] {
+		currencyExpr = "COALESCE(c.currency_code, '')"
+	} else if bookingCols["currency"] {
+		currencyExpr = "COALESCE(b.currency, '')"
+	} else if bookingCols["currency_code"] {
+		currencyExpr = "COALESCE(b.currency_code, '')"
+	}
+
 	rec := &FDRecord{}
-	err := exec.QueryRow(ctx, `
+	q := fmt.Sprintf(`
 		SELECT
 			c.confirmation_id,
 			COALESCE(c.booking_id, '') AS booking_id,
 			COALESCE(b.entity_id, '') AS entity_id,
 			COALESCE(b.bank_id, '') AS bank_id,
-			COALESCE(b.source_account_id, b.bank_account_id, b.account_id, '') AS bank_account_id,
+			%s AS bank_account_id,
 			COALESCE(b.bank_config_id, '') AS bank_config_id,
+			COALESCE(b.frequency_id, '') AS frequency_id,
 			COALESCE(c.actual_principal, 0),
 			COALESCE(c.confirmed_rate, 0),
+			COALESCE(b.interest_type_code, 'SIMPLE') AS interest_type_code,
 			COALESCE(b.tenure_days, 0),
 			COALESCE(c.actual_start_date, b.expected_start_date),
 			COALESCE(c.actual_maturity_date, b.expected_maturity_date),
 			0,
-			COALESCE(b.interest_type_code, ''),
 			COALESCE(b.frequency_id, '') AS interest_payout_frequency,
 			'' AS compounding_frequency,
 			COALESCE(b.day_count_code, '') AS day_count_convention,
-			COALESCE(c.currency, '') AS currency,
+			%s AS currency,
 			COALESCE(b.tds_plan_id, ''),
 			COALESCE(c.bank_fd_ref_no, c.bank_reference_number, ''),
 			COALESCE(c.confirmation_received_date, c.actual_start_date),
@@ -102,20 +137,22 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		WHERE c.confirmation_id = $1
 		  AND COALESCE(c.is_deleted, false) = false
 		  AND COALESCE(b.is_deleted, false) = false
-	`, confirmationID).Scan(
+	`, bankAccExpr, currencyExpr)
+	err = exec.QueryRow(ctx, q, confirmationID).Scan(
 		&rec.ConfirmationID,
 		&rec.BookingID,
 		&rec.EntityID,
 		&rec.BankID,
 		&rec.BankAccountID,
 		&rec.BankConfigID,
+		&rec.FrequencyID,
 		&rec.PrincipalAmount,
 		&rec.InterestRate,
+		&rec.InterestTypeCode,
 		&rec.TenorDays,
 		&rec.ValueDate,
 		&rec.MaturityDate,
 		&rec.MaturityAmount,
-		&rec.InterestType,
 		&rec.InterestPayoutFrequency,
 		&rec.CompoundingFrequency,
 		&rec.DayCountConvention,
@@ -368,7 +405,7 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 	rows := make([]CashflowRow, 0, len(periodEnds))
 	openingPrincipal := fd.PrincipalAmount
 	periodStart := fd.ValueDate
-	compound := strings.Contains(strings.ToUpper(fd.InterestType), "COMPOUND") || strings.ToUpper(fd.InterestPayoutFrequency) == "AT_MATURITY"
+	compound := strings.Contains(strings.ToUpper(fd.InterestTypeCode), "COMPOUND") || strings.ToUpper(fd.InterestPayoutFrequency) == "AT_MATURITY"
 
 	for index, periodEnd := range periodEnds {
 		days := int(periodEnd.Sub(periodStart).Hours() / 24)
@@ -386,12 +423,13 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 		}
 		netCashflow := roundAmount(interest-tdsAmount, decimals)
 		closingPrincipal := openingPrincipal
-		eventType := "INTEREST"
+		// Use CHECK-constraint-compliant event types: ACCRUAL, CAPITALIZATION, MATURITY
+		eventType := "ACCRUAL"
 
 		if compound && periodEnd.Before(fd.MaturityDate) {
 			closingPrincipal = roundAmount(openingPrincipal+netCashflow, decimals)
 			netCashflow = 0
-			eventType = "COMPOUNDING"
+			eventType = "CAPITALIZATION"
 		}
 		if periodEnd.Equal(fd.MaturityDate) {
 			eventType = "MATURITY"
@@ -436,8 +474,15 @@ func GenerateCashflowForFD(ctx context.Context, exec queryExecutor, fdID string,
 }
 
 func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow) error {
+	return SaveCashflowScheduleWithCreator(ctx, exec, fdID, rows, "system")
+}
+
+func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
 	if strings.TrimSpace(fdID) == "" || len(rows) == 0 {
 		return nil
+	}
+	if createdBy == "" {
+		createdBy = "system"
 	}
 
 	table := resolveFirstExistingTable(ctx, exec, []string{
@@ -459,25 +504,55 @@ func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, 
 		return nil
 	}
 
-	if pickFirstExistingColumn(cols, "period_number") != "" {
+	// Delete existing rows keyed by the sequence column (whichever name it has).
+	seqCol := pickFirstExistingColumn(cols, "sequence_number", "period_number")
+	if seqCol != "" {
 		_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
 	}
 
 	for _, row := range rows {
+		// Map CashflowRow fields to all possible column names the table may have.
 		valueMap := map[string]interface{}{
-			fdCol:               fdID,
-			"period_number":     row.PeriodNumber,
-			"cashflow_date":     row.CashflowDate,
-			"event_type":        row.EventType,
-			"opening_principal": row.OpeningPrincipal,
-			"interest_amount":   row.InterestAmount,
-			"tds_amount":        row.TDSAmount,
-			"net_cashflow":      row.NetCashflow,
-			"net_amount":        row.NetCashflow,
-			"closing_principal": row.ClosingPrincipal,
-			"created_at":        time.Now(),
+			fdCol:                    fdID,
+			// sequence / order columns
+			"sequence_number":        row.PeriodNumber,
+			"period_number":          row.PeriodNumber,
+			// date columns
+			"event_date":             row.CashflowDate,
+			"cashflow_date":          row.CashflowDate,
+			"period_end_date":        row.CashflowDate,
+			// event type
+			"event_type":             row.EventType,
+			// principal
+			"opening_principal":      row.OpeningPrincipal,
+			// interest
+			"interest_accrued":       row.InterestAmount,
+			"interest_amount":        row.InterestAmount,
+			// capitalized / closing principal
+			"capitalized_amount":     row.ClosingPrincipal,
+			"closing_principal":      row.ClosingPrincipal,
+			// tds
+			"tds_amount":             row.TDSAmount,
+			// net
+			"net_cash_flow":          row.NetCashflow,
+			"net_cashflow":           row.NetCashflow,
+			"net_amount":             row.NetCashflow,
+			// audit
+			"created_by":             createdBy,
+			"created_at":             time.Now(),
 		}
-		preferredCols := []string{fdCol, "period_number", "cashflow_date", "event_type", "opening_principal", "interest_amount", "tds_amount", "net_cashflow", "net_amount", "closing_principal", "created_at"}
+		preferredCols := []string{
+			fdCol,
+			"sequence_number", "period_number",
+			"event_date", "cashflow_date", "period_end_date",
+			"event_type",
+			"opening_principal",
+			"interest_accrued", "interest_amount",
+			"capitalized_amount", "closing_principal",
+			"tds_amount",
+			"net_cash_flow", "net_cashflow", "net_amount",
+			"created_by", "created_at",
+		}
 		insertSQL, args, _, ok := buildDynamicInsert(table, cols, preferredCols, valueMap, nil)
 		if !ok {
 			continue

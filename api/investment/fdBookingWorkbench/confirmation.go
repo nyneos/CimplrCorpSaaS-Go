@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -231,6 +232,18 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount)
 
+		go func(cID, bID, eID, uEmail string, amount float64, hasVar bool) {
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/capture", cID, map[string]interface{}{
+				"entity_id":    eID,
+				"record_id":    cID,
+				"booking_id":   bID,
+				"event":        "FD_CONFIRMATION_CAPTURED",
+				"actor_email":  uEmail,
+				"amount":       amount,
+				"has_variance": hasVar,
+			})
+		}(confirmationID, req.BookingID, entityID, userEmail, req.ConfirmedPrincipalAmount, variance.HasVariance)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation_id":      confirmationID,
 			"booking_id":           req.BookingID,
@@ -422,6 +435,17 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, oldConfPrincipal, thresholdBreached)
 
+		go func(cID, eID, uEmail, action string, breached bool) {
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/resolve-variance", cID, map[string]interface{}{
+				"entity_id":         eID,
+				"record_id":         cID,
+				"event":             "FD_CONFIRMATION_VARIANCE_RESOLVED",
+				"actor_email":       uEmail,
+				"variance_action":   action,
+				"threshold_breached": breached,
+			})
+		}(req.ConfirmationID, entityID, userEmail, req.VarianceAction, thresholdBreached)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation_id":     req.ConfirmationID,
 			"variance_action":     req.VarianceAction,
@@ -562,6 +586,15 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
+		for _, cID := range req.ConfirmationIDs {
+			go func(id, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/approve", id, map[string]interface{}{
+					"record_id":   id,
+					"event":       "FD_CONFIRMATION_APPROVED",
+					"actor_email": uEmail,
+				})
+			}(cID, userEmail)
+		}
 		api.LogInfo("[FDConfirmation] BulkApproveConfirmation: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -674,6 +707,15 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
+		for _, cID := range req.ConfirmationIDs {
+			go func(id, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/reject", id, map[string]interface{}{
+					"record_id":   id,
+					"event":       "FD_CONFIRMATION_REJECTED",
+					"actor_email": uEmail,
+				})
+			}(cID, userEmail)
+		}
 		api.LogInfo("[FDConfirmation] BulkRejectConfirmation: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -944,6 +986,31 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Dynamically resolve which currency column exists to avoid parse-time errors.
+		bookingCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_booking_request")
+		if err != nil {
+			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		confCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_confirmation")
+		if err != nil {
+			msg, status := getUserFriendlyFDError(err, "Load confirmation schema failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		currencyExpr := "''::text"
+		switch {
+		case confCols["currency"]:
+			currencyExpr = "COALESCE(c.currency, '')"
+		case confCols["currency_code"]:
+			currencyExpr = "COALESCE(c.currency_code, '')"
+		case bookingCols["currency"]:
+			currencyExpr = "COALESCE(b.currency, '')"
+		case bookingCols["currency_code"]:
+			currencyExpr = "COALESCE(b.currency_code, '')"
+		}
+
 		baseQ := fmt.Sprintf(`
 			SELECT
 				c.confirmation_id,
@@ -958,7 +1025,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.bank_fd_ref_no,'') AS bank_fd_reference,
 				COALESCE(c.bank_reference_number,'') AS bank_reference_number,
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'') AS receipt_date,
-				COALESCE(b.currency,'') AS currency,
+				%s AS currency,
 				COALESCE(c.confirmation_status,'') AS confirmation_status
 			FROM investment.fd_confirmation c
 			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
@@ -968,14 +1035,14 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				SELECT 1 FROM investment.fd_master fm
 				WHERE fm.confirmation_id = c.confirmation_id
 				  AND COALESCE(fm.is_deleted,false) = false
-			  )`, bookingAccountExpr)
+			  )`, bookingAccountExpr, currencyExpr)
 
 		var args []interface{}
 		if entityID != "" {
 			baseQ += ` AND b.entity_id = $1`
 			args = append(args, entityID)
 		}
-		baseQ += ` ORDER BY c.confirmed_maturity_date ASC`
+		baseQ += ` ORDER BY c.actual_maturity_date ASC`
 
 		rows, err := pgxPool.Query(ctx, baseQ, args...)
 		if err != nil {
@@ -1346,6 +1413,15 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 				}
 			}(cm.id, req.UserID, userEmail, cm.entity, cm.amount)
+
+			go func(cID, eID, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/delete", cID, map[string]interface{}{
+					"entity_id":   eID,
+					"record_id":   cID,
+					"event":       "FD_CONFIRMATION_DELETE_SUBMITTED",
+					"actor_email": uEmail,
+				})
+			}(cm.id, cm.entity, userEmail)
 		}
 
 		validSet := make(map[string]bool)

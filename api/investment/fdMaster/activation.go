@@ -12,6 +12,7 @@ import (
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -281,38 +282,130 @@ func updateFDAuditStatus(ctx context.Context, exec queryExecutor, auditTable str
 	return err
 }
 
-func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNumber string, receiptDate time.Time, notes string) (string, string, error) {
+func lookupEntityName(ctx context.Context, exec queryExecutor, entityID string) string {
+	if entityID == "" {
+		return ""
+	}
+	candidates := []string{
+		"SELECT entity_name FROM masterentitycash WHERE entity_id = $1 LIMIT 1",
+		"SELECT entity_name FROM masterentity WHERE entity_id = $1 LIMIT 1",
+		"SELECT entity_short_name FROM masterentitycash WHERE entity_id = $1 LIMIT 1",
+	}
+	for _, q := range candidates {
+		var name string
+		if err := exec.QueryRow(ctx, q, entityID).Scan(&name); err == nil && name != "" {
+			return name
+		}
+	}
+	return entityID // fallback: use entityID as display name rather than send NULL
+}
+
+func lookupBankName(ctx context.Context, exec queryExecutor, bankID string) string {
+	if bankID == "" {
+		return ""
+	}
+	candidates := []string{
+		"SELECT bank_name FROM masterbank WHERE bank_id = $1 LIMIT 1",
+		"SELECT bank_name FROM master_bank WHERE bank_id = $1 LIMIT 1",
+		"SELECT bank_name FROM investment.fd_bank_config_master WHERE bank_id = $1 LIMIT 1",
+	}
+	for _, q := range candidates {
+		var name string
+		if err := exec.QueryRow(ctx, q, bankID).Scan(&name); err == nil && name != "" {
+			return name
+		}
+	}
+	return bankID // fallback: use bankID rather than send NULL
+}
+
+func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNumber string, receiptDate time.Time, notes string, createdBy string) (string, string, error) {
 	masterCols, err := loadTableColumns(ctx, exec, "investment", "fd_master")
 	if err != nil {
 		return "", "", err
 	}
 
 	refCol := pickFirstExistingColumn(masterCols, "fd_id", "master_id", "confirmation_id")
-	statusValue := "PENDING_APPROVAL"
+
+	// fd_status CHECK constraint: PENDING_ACTIVATION | ACTIVE | MATURED | PREMATURELY_CLOSED | ROLLED_OVER | CANCELLED
+	statusValue := "PENDING_ACTIVATION"
+
+	fdRef := firstNonEmpty(fdNumber, rec.BankFDReference)
+	if fdRef == "" {
+		fdRef = firstNonEmpty(rec.ConfirmationID, "REF-PENDING")
+	}
+
+	// Resolve NOT NULL name fields that must be populated.
+	entityName := rec.EntityName
+	if entityName == "" {
+		entityName = lookupEntityName(ctx, exec, rec.EntityID)
+	}
+	bankName := rec.BankName
+	if bankName == "" {
+		bankName = lookupBankName(ctx, exec, rec.BankID)
+	}
+	if createdBy == "" {
+		createdBy = "system"
+	}
+
+	interestTypeCode := firstNonEmpty(rec.InterestTypeCode, "SIMPLE")
+
 	valueMap := map[string]interface{}{
+		// identity
 		"confirmation_id":    rec.ConfirmationID,
 		"booking_id":         rec.BookingID,
+		// entity
 		"entity_id":          rec.EntityID,
+		"entity_name":        entityName,
+		// bank
 		"bank_id":            rec.BankID,
-		"bank_account_id":    rec.BankAccountID,
+		"bank_name":          bankName,
+		// account — actual column is source_account_id
+		"source_account_id":  rec.BankAccountID,
+		"bank_account_id":    rec.BankAccountID, // fallback if schema uses old name
+		// financials
 		"principal_amount":   rec.PrincipalAmount,
 		"interest_rate":      rec.InterestRate,
-		"tenor_days":         rec.TenorDays,
-		"value_date":         rec.ValueDate,
+		"interest_type_code": interestTypeCode,
+		// dates — actual column is start_date
+		"start_date":         rec.ValueDate,
+		"value_date":         rec.ValueDate, // fallback
 		"maturity_date":      rec.MaturityDate,
-		"maturity_amount":    rec.MaturityAmount,
-		"currency":           rec.Currency,
-		"receipt_date":       receiptDate,
-		"notes":              notes,
-		"bank_fd_reference":  firstNonEmpty(fdNumber, rec.BankFDReference),
-		"fd_number":          firstNonEmpty(fdNumber, rec.BankFDReference),
-		"fd_no":              firstNonEmpty(fdNumber, rec.BankFDReference),
-		"certificate_number": firstNonEmpty(fdNumber, rec.BankFDReference),
+		// tenor — actual column is tenure_days
+		"tenure_days":        rec.TenorDays,
+		"tenor_days":         rec.TenorDays, // fallback
+		// optional
+		"frequency_id":       rec.FrequencyID,
+		"bank_config_id":     rec.BankConfigID,
+		"tds_plan_id":        rec.TDSPlanID,
+		"day_count_code":     rec.DayCountConvention,
+		// fd reference — NOT NULL in schema
+		"bank_fd_ref_no":     fdRef,
+		"bank_fd_reference":  fdRef,
+		"fd_number":          fdRef,
+		"fd_no":              fdRef,
+		"certificate_number": fdRef,
+		// status
 		"status":             statusValue,
 		"fd_status":          statusValue,
+		// audit
+		"created_by":         createdBy,
+		"notes":              notes,
 		"is_deleted":         false,
 	}
-	preferred := []string{"confirmation_id", "booking_id", "entity_id", "bank_id", "bank_account_id", "principal_amount", "interest_rate", "tenor_days", "value_date", "maturity_date", "maturity_amount", "currency", "receipt_date", "fd_number", "fd_no", "certificate_number", "bank_fd_reference", "status", "fd_status", "notes", "is_deleted"}
+	preferred := []string{
+		"confirmation_id", "booking_id",
+		"entity_id", "entity_name",
+		"bank_id", "bank_name",
+		"source_account_id", "bank_account_id",
+		"principal_amount", "interest_rate", "interest_type_code",
+		"start_date", "value_date",
+		"maturity_date",
+		"tenure_days", "tenor_days",
+		"frequency_id", "bank_config_id", "tds_plan_id", "day_count_code",
+		"bank_fd_ref_no", "fd_number", "fd_no", "certificate_number", "bank_fd_reference",
+		"status", "fd_status",
+		"created_by", "notes", "is_deleted",
+	}
 	insertSQL, args, returningCol, ok := buildDynamicInsert("investment.fd_master", masterCols, preferred, valueMap, []string{"fd_id", "master_id", "confirmation_id"})
 	if !ok {
 		return "", "", fmt.Errorf("unable to build fd_master insert")
@@ -383,7 +476,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
-		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes)
+		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes, userEmail)
 		if err != nil {
 			msg, status := getFDMasterError(err, "FD activation failed")
 			api.RespondWithError(w, status, msg)
@@ -403,7 +496,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		if err := SaveCashflowSchedule(ctx, tx, fdID, cashflows); err != nil {
+		if err := SaveCashflowScheduleWithCreator(ctx, tx, fdID, cashflows, userEmail); err != nil {
 			msg, status := getFDMasterError(err, "Cashflow save failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -461,6 +554,16 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogInfo("[FDMaster] No matrix for fd %s — stays PENDING_APPROVAL", fdRecordID)
 			}
 		}(fdID, req.ConfirmationID, userEmail, rec.EntityID, rec.PrincipalAmount, req)
+
+		go func(fdRecordID, eID, uEmail string, amount float64) {
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/master/activate", fdRecordID, map[string]interface{}{
+				"entity_id":   eID,
+				"record_id":   fdRecordID,
+				"event":       "FD_ACTIVATION_SUBMITTED",
+				"actor_email": uEmail,
+				"amount":      amount,
+			})
+		}(fdID, rec.EntityID, userEmail, rec.PrincipalAmount)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"fd_id": fdID, "confirmation_id": req.ConfirmationID, "cashflow_count": len(cashflows), "requested_by": userEmail})
 	}
@@ -601,6 +704,15 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
+		for _, fdID := range req.FDIDs {
+			go func(id, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/master/bulk-approve", id, map[string]interface{}{
+					"record_id":   id,
+					"event":       "FD_ACTIVATION_APPROVED",
+					"actor_email": uEmail,
+				})
+			}(fdID, userEmail)
+		}
 		api.LogInfo("[FDMaster] BulkApproveActivation: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -694,6 +806,15 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
+		for _, fdID := range req.FDIDs {
+			go func(id, uEmail string) {
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/master/bulk-reject", id, map[string]interface{}{
+					"record_id":   id,
+					"event":       "FD_ACTIVATION_REJECTED",
+					"actor_email": uEmail,
+				})
+			}(fdID, userEmail)
+		}
 		api.LogInfo("[FDMaster] BulkRejectActivation: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}

@@ -6,6 +6,7 @@ import (
 	"log"
 
 	approvalengine "CimplrCorpSaas/api/approvalengine"
+	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
@@ -134,6 +135,14 @@ func (s *CronService) Start() error {
 	go approvalengine.StartSLAWorker(ctx, s.db)
 	logger.GlobalLogger.LogAudit("Approval engine SLA worker goroutine launched")
 	log.Println("Cron service started — Approval Engine SLA Worker goroutine launched")
+
+	go fdAccrual.StartAccrualSchedulerWorker(s.db)
+	logger.GlobalLogger.LogAudit("FD Accrual scheduler worker goroutine launched")
+	log.Println("Cron service started — FD Accrual Scheduler Worker goroutine launched")
+
+	go investmentjobs.StartReceiptReconcileWorker(s.db)
+	logger.GlobalLogger.LogAudit("FD Receipt reconcile worker goroutine launched")
+	log.Println("Cron service started — FD Receipt Reconcile Worker goroutine launched")
 
 	return nil
 }

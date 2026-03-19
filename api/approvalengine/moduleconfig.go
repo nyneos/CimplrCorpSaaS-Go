@@ -15,15 +15,25 @@ type txTableConfig struct {
 var txTypeRegistry = map[string]txTableConfig{
 	// ── FD Booking Workbench ──────────────────────────────────────────────
 	"FD_BOOKING":        {AuditTable: "investment.fd_audit_booking_request", AuditIDColumn: "booking_id"},
+	"FD_BOOKING_CREATE": {AuditTable: "investment.fd_audit_booking_request", AuditIDColumn: "booking_id"},
 	"FD_BOOKING_EDIT":   {AuditTable: "investment.fd_audit_booking_request", AuditIDColumn: "booking_id"},
 	"FD_BOOKING_DELETE": {AuditTable: "investment.fd_audit_booking_request", AuditIDColumn: "booking_id"},
 
 	// ── FD Confirmation ───────────────────────────────────────────────────
-	"FD_CONFIRMATION_CREATE":            {AuditTable: "investment.fd_audit_confirmation", AuditIDColumn: "confirmation_id"},
-	"FD_CONFIRMATION_VARIANCE_RESOLVE":  {AuditTable: "investment.fd_audit_confirmation", AuditIDColumn: "confirmation_id"},
+	"FD_CONFIRMATION_CREATE":           {AuditTable: "investment.fd_audit_confirmation", AuditIDColumn: "confirmation_id"},
+	"FD_CONFIRMATION_VARIANCE_RESOLVE": {AuditTable: "investment.fd_audit_confirmation", AuditIDColumn: "confirmation_id"},
 
 	// ── FD Master / Activation ────────────────────────────────────────────
 	"FD_MASTER_CREATE": {AuditTable: "investment.fd_audit_master", AuditIDColumn: "fd_id"},
+	"FD_ACTIVATE":      {AuditTable: "investment.fd_audit_master", AuditIDColumn: "fd_id"},
+
+	// ── FD Accrual ────────────────────────────────────────────────────────
+	"FD_ACCRUAL_APPROVE": {AuditTable: "investment.fd_accrual_run_audit", AuditIDColumn: "run_id"},
+
+	// ── FD Receipt ───────────────────────────────────────────────────────
+	"FD_RECEIPT_APPROVE": {AuditTable: "investment.fd_interest_receipt_audit", AuditIDColumn: "receipt_id"},
+	"FD_RECEIPT_EDIT":    {AuditTable: "investment.fd_interest_receipt_audit", AuditIDColumn: "receipt_id"},
+	"FD_RECEIPT_DELETE":  {AuditTable: "investment.fd_interest_receipt_audit", AuditIDColumn: "receipt_id"},
 
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up)
