@@ -40,14 +40,22 @@ type FDRecord struct {
 // InterestType is an alias kept for backward compat inside cashflow calculations.
 func (r *FDRecord) InterestType() string { return r.InterestTypeCode }
 
+// BankConfig holds ALL relevant fields from investment.fd_bank_config_master.
 type BankConfig struct {
 	ConfigID                   string
-	DayCountCode               string
-	CapitalizationScheduleType string
-	QuarterDefinition          string
-	TDSDeductionTiming         string
-	RoundingMethod             string
+	DayCountCode               string  // DC-ACT-365 | DC-ACT-360 | DC-ACT-ACT | DC-30-360
+	CapitalizationScheduleType string  // ANNIVERSARY | CALENDAR_QTR_END
+	QuarterDefinition          string  // CALENDAR_QUARTER | 90_DAYS
+	TDSDeductionTiming         string  // ACCRUAL_ANNUAL | MATURITY | NONE
+	RoundingMethod             string  // ROUND | TRUNCATE | ROUND_UP | ROUND_DOWN
+	RoundingFrequency          string  // EACH_PERIOD | AT_MATURITY
 	InterestRoundingDecimals   int
+	AccrualStartConvention     string  // INCLUDE | EXCLUDE
+	AccrualEndConvention       string  // INCLUDE | EXCLUDE
+	PeriodBoundaryDefinition   string  // INCL_START_EXCL_END | INCL_BOTH
+	WeekendAccrual             bool
+	HolidayAccrual             bool
+	BrokenPeriodMethod         string  // SIMPLE | NONE
 }
 
 type CompoundingFreq struct {
@@ -64,23 +72,41 @@ type TDSConfig struct {
 	TDSRate         float64
 	ThresholdAmount float64
 	ThresholdType   string
-	DeductionTiming string
+	DeductionTiming string // ACCRUAL_ANNUAL | MATURITY | NONE
 }
 
+// CashflowRow maps 1:1 to the fd_cashflow_schedule table columns.
 type CashflowRow struct {
-	PeriodNumber     int       `json:"period_number"`
-	CashflowDate     time.Time `json:"cashflow_date"`
-	EventType        string    `json:"event_type"`
-	OpeningPrincipal float64   `json:"opening_principal"`
-	InterestAmount   float64   `json:"interest_amount"`
-	TDSAmount        float64   `json:"tds_amount"`
-	NetCashflow      float64   `json:"net_cashflow"`
-	ClosingPrincipal float64   `json:"closing_principal"`
+	// identity / sequence
+	PeriodNumber    int
+	EventType       string
+	EventDate       time.Time
+	// period window
+	PeriodStartDate time.Time
+	PeriodEndDate   time.Time
+	PeriodDays      int
+	// amounts
+	OpeningPrincipal float64
+	InterestAccrued  float64
+	CapitalizedAmount float64
+	ClosingPrincipal float64
+	TDSAmount        float64
+	NetCashFlow      float64
+	// calculation metadata
+	DayCountCode      string
+	Divisor           int
+	FormulaUsed       string
+	AccrualRatePerDay float64
+	// GL accounts (populated when known)
+	DrAccountCode string
+	DrAccountName string
+	CrAccountCode string
+	CrAccountName string
 }
+
+// ── DB loaders ─────────────────────────────────────────────────────────────
 
 func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string) (*FDRecord, error) {
-	// Dynamically resolve which bank_account column exists to avoid parse-time
-	// "column does not exist" errors when the live schema differs from expectations.
 	bookingCols, err := loadTableColumns(ctx, exec, "investment", "fd_booking_request")
 	if err != nil {
 		return nil, fmt.Errorf("load FD record: %w", err)
@@ -91,19 +117,19 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		bankAccExpr = "COALESCE(b." + bankAccCol + ", '')"
 	}
 
-	// Dynamically resolve currency — may live on fd_confirmation or fd_booking_request.
 	confCols, err := loadTableColumns(ctx, exec, "investment", "fd_confirmation")
 	if err != nil {
 		return nil, fmt.Errorf("load FD record: %w", err)
 	}
 	currencyExpr := "''::text"
-	if confCols["currency"] {
+	switch {
+	case confCols["currency"]:
 		currencyExpr = "COALESCE(c.currency, '')"
-	} else if confCols["currency_code"] {
+	case confCols["currency_code"]:
 		currencyExpr = "COALESCE(c.currency_code, '')"
-	} else if bookingCols["currency"] {
+	case bookingCols["currency"]:
 		currencyExpr = "COALESCE(b.currency, '')"
-	} else if bookingCols["currency_code"] {
+	case bookingCols["currency_code"]:
 		currencyExpr = "COALESCE(b.currency_code, '')"
 	}
 
@@ -184,24 +210,18 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 		"SELECT %s FROM investment.fd_master WHERE %s = $1 AND COALESCE(is_deleted,false)=false",
 		confirmationCol, keyCol,
 	), fdID).Scan(&confirmationID); err != nil {
-		// Fallback: caller may have passed a confirmation_id directly — try to look up the fd_master row by it.
+		// Fallback: caller may have passed a confirmation_id — try reverse lookup.
 		var fallbackFDID string
-		fallbackErr := exec.QueryRow(ctx, fmt.Sprintf(
+		if ferr := exec.QueryRow(ctx, fmt.Sprintf(
 			"SELECT %s FROM investment.fd_master WHERE %s = $1 AND COALESCE(is_deleted,false)=false",
 			keyCol, confirmationCol,
-		), fdID).Scan(&fallbackFDID)
-		if fallbackErr != nil {
-			// No fd_master row at all — try loading the FD record directly from the confirmation.
-			rec, recErr := loadFDRecord(ctx, exec, fdID)
-			if recErr != nil {
-				return nil, fmt.Errorf("load fd_master confirmation: %w", err)
-			}
-			return rec, nil
+		), fdID).Scan(&fallbackFDID); ferr == nil {
+			return loadFDRecordByFDID(ctx, exec, fallbackFDID)
 		}
-		// Found via confirmation_id — now load using the real fd_id.
-		rec, recErr := loadFDRecordByFDID(ctx, exec, fallbackFDID)
+		// No fd_master row — load directly from confirmation.
+		rec, recErr := loadFDRecord(ctx, exec, fdID)
 		if recErr != nil {
-			return nil, recErr
+			return nil, fmt.Errorf("load fd_master confirmation: %w", err)
 		}
 		return rec, nil
 	}
@@ -211,12 +231,21 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 		return nil, err
 	}
 	rec.FDID = fdID
+	// Prefer day_count_code stored on fd_master over booking if available.
+	if masterCols["day_count_code"] && rec.DayCountConvention == "" {
+		var dc string
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COALESCE(day_count_code,'') FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&dc)
+		if dc != "" {
+			rec.DayCountConvention = dc
+		}
+	}
 	return rec, nil
 }
 
 func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string) (*BankConfig, error) {
 	if strings.TrimSpace(bankConfigID) == "" {
-		return &BankConfig{}, nil
+		return &BankConfig{InterestRoundingDecimals: 2}, nil
 	}
 
 	cfg := &BankConfig{}
@@ -227,8 +256,15 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 			COALESCE(capitalization_schedule_type, ''),
 			COALESCE(quarter_definition, ''),
 			COALESCE(tds_deduction_timing, ''),
-			COALESCE(rounding_method, ''),
-			COALESCE(interest_rounding_decimals, 2)
+			COALESCE(rounding_method, 'ROUND'),
+			COALESCE(rounding_frequency, 'EACH_PERIOD'),
+			COALESCE(interest_rounding_decimals, 2),
+			COALESCE(accrual_start_convention, 'INCLUDE'),
+			COALESCE(accrual_end_convention, 'EXCLUDE'),
+			COALESCE(period_boundary_definition, 'INCL_START_EXCL_END'),
+			COALESCE(weekend_accrual, true),
+			COALESCE(holiday_accrual, true),
+			COALESCE(broken_period_method, 'SIMPLE')
 		FROM investment.fd_bank_config_master
 		WHERE config_id = $1
 		  AND COALESCE(is_deleted, false) = false
@@ -239,10 +275,20 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 		&cfg.QuarterDefinition,
 		&cfg.TDSDeductionTiming,
 		&cfg.RoundingMethod,
+		&cfg.RoundingFrequency,
 		&cfg.InterestRoundingDecimals,
+		&cfg.AccrualStartConvention,
+		&cfg.AccrualEndConvention,
+		&cfg.PeriodBoundaryDefinition,
+		&cfg.WeekendAccrual,
+		&cfg.HolidayAccrual,
+		&cfg.BrokenPeriodMethod,
 	)
 	if err != nil {
-		return &BankConfig{}, nil
+		return &BankConfig{InterestRoundingDecimals: 2}, nil
+	}
+	if cfg.InterestRoundingDecimals == 0 {
+		cfg.InterestRoundingDecimals = 2
 	}
 	return cfg, nil
 }
@@ -251,7 +297,6 @@ func loadCompoundingFreq(ctx context.Context, exec queryExecutor, frequencyRef s
 	if strings.TrimSpace(frequencyRef) == "" {
 		return &CompoundingFreq{}, nil
 	}
-
 	freq := &CompoundingFreq{}
 	err := exec.QueryRow(ctx, `
 		SELECT
@@ -283,7 +328,6 @@ func loadTDSConfig(ctx context.Context, exec queryExecutor, planID string) (*TDS
 	if strings.TrimSpace(planID) == "" {
 		return &TDSConfig{}, nil
 	}
-
 	tds := &TDSConfig{}
 	err := exec.QueryRow(ctx, `
 		SELECT
@@ -308,13 +352,55 @@ func loadTDSConfig(ctx context.Context, exec queryExecutor, planID string) (*TDS
 	return tds, nil
 }
 
-func getDivisor(dayCount string) float64 {
-	switch strings.ToUpper(strings.TrimSpace(dayCount)) {
-	case "ACT_360", "ACT/360", "30_360", "30/360":
-		return 360
-	default:
-		return 365
+// ── Day-count helpers ──────────────────────────────────────────────────────
+
+// normDayCount normalises any variant of a day count code to a canonical form.
+func normDayCount(s string) string {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	switch s {
+	case "DC-ACT-360", "ACT/360", "ACT_360", "ACTUAL/360", "ACTUAL_360":
+		return "ACT/360"
+	case "DC-30-360", "30/360", "30_360":
+		return "30/360"
+	case "DC-ACT-ACT", "ACT/ACT", "ACT_ACT", "ACTUAL/ACTUAL":
+		return "ACT/ACT"
+	default: // DC-ACT-365, ACT/365, ACTUAL_365, ACTUAL/365 — all → 365 basis
+		return "ACT/365"
 	}
+}
+
+// getDivisorAndDays computes (divisor, accrualDays) for a period according to the day count convention.
+func getDivisorAndDays(dayCount string, periodStart, periodEnd time.Time) (divisor int, days int) {
+	norm := normDayCount(dayCount)
+	rawDays := int(periodEnd.Sub(periodStart).Hours() / 24)
+
+	switch norm {
+	case "30/360":
+		days = countDays30_360(periodStart, periodEnd)
+		return 360, days
+	case "ACT/360":
+		return 360, rawDays
+	case "ACT/ACT":
+		// Determine if any leap day falls in the period.
+		divisorVal := 365
+		for y := periodStart.Year(); y <= periodEnd.Year(); y++ {
+			if isLeapYear(y) {
+				// Check if Feb 29 of this year is within the period.
+				feb29 := time.Date(y, 2, 29, 0, 0, 0, 0, time.UTC)
+				if !feb29.Before(periodStart) && feb29.Before(periodEnd) {
+					divisorVal = 366
+					break
+				}
+			}
+		}
+		return divisorVal, rawDays
+	default: // ACT/365
+		return 365, rawDays
+	}
+}
+
+func isLeapYear(y int) bool {
+	return (y%4 == 0 && y%100 != 0) || y%400 == 0
 }
 
 func countDays30_360(start, end time.Time) int {
@@ -337,55 +423,51 @@ func roundAmount(value float64, decimals int) float64 {
 	return math.Round(value*pow) / pow
 }
 
-func nextQuarterEnd(date time.Time) time.Time {
-	month := date.Month()
-	year := date.Year()
+// ── Period schedule builders ───────────────────────────────────────────────
+
+func nextCalendarQuarterEnd(date time.Time) time.Time {
+	y := date.Year()
+	m := date.Month()
 	switch {
-	case month <= 3:
-		return time.Date(year, 3, 31, 0, 0, 0, 0, date.Location())
-	case month <= 6:
-		return time.Date(year, 6, 30, 0, 0, 0, 0, date.Location())
-	case month <= 9:
-		return time.Date(year, 9, 30, 0, 0, 0, 0, date.Location())
+	case m <= 3:
+		return time.Date(y, 3, 31, 0, 0, 0, 0, time.UTC)
+	case m <= 6:
+		return time.Date(y, 6, 30, 0, 0, 0, 0, time.UTC)
+	case m <= 9:
+		return time.Date(y, 9, 30, 0, 0, 0, 0, time.UTC)
 	default:
-		return time.Date(year, 12, 31, 0, 0, 0, 0, date.Location())
+		return time.Date(y, 12, 31, 0, 0, 0, 0, time.UTC)
 	}
 }
 
-func buildPeriodEndDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq) []time.Time {
-	if fd == nil {
-		return nil
-	}
-
-	payout := strings.ToUpper(strings.TrimSpace(fd.InterestPayoutFrequency))
-	if payout == "" {
-		payout = strings.ToUpper(strings.TrimSpace(freq.FrequencyType))
-	}
+// buildCapitalizationDates returns the period-end dates for compound/capitalized FDs.
+// These determine CAPITALIZATION event boundaries.
+func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig) []time.Time {
+	capType := strings.ToUpper(strings.TrimSpace(cfg.CapitalizationScheduleType))
+	qDef := strings.ToUpper(strings.TrimSpace(cfg.QuarterDefinition))
 
 	var dates []time.Time
 	current := fd.ValueDate
+
 	for current.Before(fd.MaturityDate) {
 		var next time.Time
-		switch payout {
-		case "MONTHLY":
-			next = current.AddDate(0, 1, 0)
-		case "QUARTERLY":
-			if strings.EqualFold(cfg.QuarterDefinition, "CALENDAR_QUARTER") {
-				next = nextQuarterEnd(current)
-				if !next.After(current) {
-					next = nextQuarterEnd(current.AddDate(0, 1, 0))
-				}
-			} else {
-				next = current.AddDate(0, 3, 0)
+
+		switch capType {
+		case "CALENDAR_QTR_END":
+			next = nextCalendarQuarterEnd(current)
+			if !next.After(current) {
+				next = nextCalendarQuarterEnd(current.AddDate(0, 1, 0))
 			}
-		case "HALF_YEARLY", "SEMI_ANNUAL":
-			next = current.AddDate(0, 6, 0)
-		case "ANNUAL", "YEARLY":
-			next = current.AddDate(1, 0, 0)
-		case "DAILY":
-			next = current.AddDate(0, 0, 1)
+		case "ANNIVERSARY":
+			// Use 90-day anniversary or the configured days_per_period.
+			offsetDays := 91
+			if qDef == "90_DAYS" {
+				offsetDays = 90
+			}
+			next = current.AddDate(0, 0, offsetDays)
 		default:
-			next = fd.MaturityDate
+			// Fallback: quarterly anniversary.
+			next = current.AddDate(0, 3, 0)
 		}
 
 		if !next.Before(fd.MaturityDate) {
@@ -396,11 +478,46 @@ func buildPeriodEndDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq) [
 	}
 
 	dates = append(dates, fd.MaturityDate)
-	sort.SliceStable(dates, func(i, j int) bool { return dates[i].Before(dates[j]) })
+	return deduplicateDates(dates)
+}
 
-	out := make([]time.Time, 0, len(dates))
+// buildMonthlyAccrualDates returns calendar month-end dates between start and maturity,
+// used for ACCRUAL (non-cash) events which run for every FD regardless of payout frequency.
+func buildMonthlyAccrualDates(fd *FDRecord) []time.Time {
+	var dates []time.Time
+
+	// First accrual boundary = end of the start month.
+	y, m, _ := fd.ValueDate.Date()
+	current := lastDayOfMonth(y, m)
+
+	for current.Before(fd.MaturityDate) {
+		if current.After(fd.ValueDate) {
+			dates = append(dates, current)
+		}
+		y, m, _ = current.Date()
+		m++
+		if m > 12 {
+			m = 1
+			y++
+		}
+		current = lastDayOfMonth(y, m)
+	}
+
+	dates = append(dates, fd.MaturityDate)
+	return deduplicateDates(dates)
+}
+
+func lastDayOfMonth(year int, month time.Month) time.Time {
+	// First day of next month minus one day.
+	first := time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+	return first.AddDate(0, 0, -1)
+}
+
+func deduplicateDates(in []time.Time) []time.Time {
+	sort.SliceStable(in, func(i, j int) bool { return in[i].Before(in[j]) })
+	out := make([]time.Time, 0, len(in))
 	var last time.Time
-	for _, d := range dates {
+	for _, d := range in {
 		if last.IsZero() || !d.Equal(last) {
 			out = append(out, d)
 			last = d
@@ -409,67 +526,188 @@ func buildPeriodEndDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq) [
 	return out
 }
 
+// ── Core schedule generator ────────────────────────────────────────────────
+
 func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, tdsCfg *TDSConfig) []CashflowRow {
-	if fd == nil {
+	if fd == nil || fd.ValueDate.IsZero() || fd.MaturityDate.IsZero() {
 		return nil
 	}
 
-	divisor := getDivisor(firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode))
+	// Effective day count: fd_master.day_count_code → booking.day_count_code → bank_config.day_count_code → default ACT/365
+	effectiveDayCount := firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode, "DC-ACT-365")
 	decimals := cfg.InterestRoundingDecimals
-	if decimals == 0 {
+	if decimals <= 0 {
 		decimals = 2
 	}
 
-	periodEnds := buildPeriodEndDates(fd, cfg, freq)
-	rows := make([]CashflowRow, 0, len(periodEnds))
+	// Determine if this is a compounding (capitalization) FD.
+	freqCode := strings.ToUpper(strings.TrimSpace(firstNonEmpty(fd.InterestPayoutFrequency, freq.FrequencyCode, freq.FrequencyType, fd.FrequencyID)))
+	isCompound := strings.Contains(strings.ToUpper(fd.InterestTypeCode), "COMPOUND")
+	isAtMaturity := freqCode == "AT_MATURITY" || freqCode == ""
+
+	// Determine TDS timing.
+	tdsDeductionTiming := strings.ToUpper(strings.TrimSpace(firstNonEmpty(
+		func() string {
+			if tdsCfg != nil { return tdsCfg.DeductionTiming }
+			return ""
+		}(),
+		cfg.TDSDeductionTiming,
+	)))
+	hasTDS := tdsCfg != nil && tdsCfg.TDSRate > 0
+
+	var periodEnds []time.Time
+	if isCompound || (isAtMaturity && cfg.CapitalizationScheduleType != "") {
+		// Compound: use capitalization schedule for CAPITALIZATION events,
+		// but we still generate monthly ACCRUALs within each cap period.
+		periodEnds = buildCapitalizationDates(fd, cfg)
+	} else {
+		// Simple interest, monthly accruals.
+		periodEnds = buildMonthlyAccrualDates(fd)
+	}
+
+	type rawEvent struct {
+		date      time.Time
+		eventType string
+	}
+	var events []rawEvent
+
+	// --- Generate ACCRUAL / CAPITALIZATION events ---
 	openingPrincipal := fd.PrincipalAmount
 	periodStart := fd.ValueDate
-	compound := strings.Contains(strings.ToUpper(fd.InterestTypeCode), "COMPOUND") || strings.ToUpper(fd.InterestPayoutFrequency) == "AT_MATURITY"
+	seq := 0
+	var rows []CashflowRow
 
-	for index, periodEnd := range periodEnds {
-		days := int(periodEnd.Sub(periodStart).Hours() / 24)
-		if strings.EqualFold(firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode), "30_360") {
-			days = countDays30_360(periodStart, periodEnd)
+	// Track cumulative interest for TDS calculation.
+	var cumulativeInterest float64
+	// Track last TDS deduction year to deduct annually.
+	lastTDSYear := fd.ValueDate.Year()
+
+	for _, periodEnd := range periodEnds {
+		if !periodEnd.After(periodStart) {
+			continue
 		}
+
+		divisor, days := getDivisorAndDays(effectiveDayCount, periodStart, periodEnd)
 		if days <= 0 {
 			days = 1
 		}
-
-		interest := roundAmount(openingPrincipal*fd.InterestRate*float64(days)/(divisor*100), decimals)
-		tdsAmount := 0.0
-		if tdsCfg != nil && tdsCfg.TDSRate > 0 {
-			tdsAmount = roundAmount(interest*tdsCfg.TDSRate/100, decimals)
+		// INCL_BOTH: add 1 day.
+		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") {
+			days++
 		}
-		netCashflow := roundAmount(interest-tdsAmount, decimals)
-		closingPrincipal := openingPrincipal
-		// Use CHECK-constraint-compliant event types: ACCRUAL, CAPITALIZATION, MATURITY
+
+		ratePerDay := fd.InterestRate / (float64(divisor) * 100)
+		interest := roundAmount(openingPrincipal*fd.InterestRate*float64(days)/float64(divisor)/100, decimals)
+		cumulativeInterest += interest
+
+		// Is this a cap boundary?
+		isCapBoundary := isCompound && periodEnd.Before(fd.MaturityDate)
+		isMaturity := periodEnd.Equal(fd.MaturityDate)
+
+		// Determine event type.
 		eventType := "ACCRUAL"
-
-		if compound && periodEnd.Before(fd.MaturityDate) {
-			closingPrincipal = roundAmount(openingPrincipal+netCashflow, decimals)
-			netCashflow = 0
+		if isCapBoundary {
 			eventType = "CAPITALIZATION"
-		}
-		if periodEnd.Equal(fd.MaturityDate) {
+		} else if isMaturity {
 			eventType = "MATURITY"
-			netCashflow = roundAmount(netCashflow+closingPrincipal, decimals)
 		}
 
+		// TDS: inject a TDS_DEDUCTION event before maturity if annual timing.
+		if hasTDS && tdsDeductionTiming == "ACCRUAL_ANNUAL" {
+			if periodEnd.Year() > lastTDSYear || isMaturity {
+				tdsOnPeriod := roundAmount(cumulativeInterest*tdsCfg.TDSRate/100, decimals)
+				if tdsOnPeriod > 0 {
+					seq++
+					rows = append(rows, CashflowRow{
+						PeriodNumber:    seq,
+						EventType:       "TDS_DEDUCTION",
+						EventDate:       time.Date(lastTDSYear, 3, 31, 0, 0, 0, 0, time.UTC), // fiscal year end
+						PeriodStartDate: time.Date(lastTDSYear-1, 4, 1, 0, 0, 0, 0, time.UTC),
+						PeriodEndDate:   time.Date(lastTDSYear, 3, 31, 0, 0, 0, 0, time.UTC),
+						PeriodDays:      365,
+						OpeningPrincipal: openingPrincipal,
+						TDSAmount:       tdsOnPeriod,
+						NetCashFlow:     -tdsOnPeriod,
+						ClosingPrincipal: openingPrincipal,
+						DayCountCode:    effectiveDayCount,
+						Divisor:         divisor,
+						FormulaUsed:     fmt.Sprintf("TDS = CumulativeInterest(%.2f) × %.4f%%", cumulativeInterest, tdsCfg.TDSRate),
+					})
+					cumulativeInterest = 0
+					lastTDSYear = periodEnd.Year()
+				}
+			}
+		}
+
+		var tdsThisPeriod float64
+		var capitalized float64
+		netCashflow := 0.0
+		closingPrincipal := openingPrincipal
+
+		if isCapBoundary {
+			// Net interest after TDS added to principal.
+			if hasTDS && tdsDeductionTiming == "MATURITY" {
+				tdsThisPeriod = 0 // deferred to maturity
+			} else if hasTDS && tdsDeductionTiming != "ACCRUAL_ANNUAL" {
+				tdsThisPeriod = roundAmount(interest*tdsCfg.TDSRate/100, decimals)
+			}
+			capitalized = roundAmount(interest-tdsThisPeriod, decimals)
+			closingPrincipal = roundAmount(openingPrincipal+capitalized, decimals)
+			netCashflow = 0 // no cash out for capitalization
+		} else if isMaturity {
+			if hasTDS && tdsDeductionTiming == "MATURITY" {
+				tdsThisPeriod = roundAmount(cumulativeInterest*tdsCfg.TDSRate/100, decimals)
+			} else if hasTDS && tdsDeductionTiming != "ACCRUAL_ANNUAL" {
+				tdsThisPeriod = roundAmount(interest*tdsCfg.TDSRate/100, decimals)
+			}
+			netCashflow = roundAmount(openingPrincipal+interest-tdsThisPeriod, decimals)
+			closingPrincipal = 0
+		} else {
+			// ACCRUAL — non-cash, no money moves.
+			tdsThisPeriod = 0
+			netCashflow = 0
+			closingPrincipal = openingPrincipal
+		}
+
+		seq++
 		rows = append(rows, CashflowRow{
-			PeriodNumber:     index + 1,
-			CashflowDate:     periodEnd,
-			EventType:        eventType,
-			OpeningPrincipal: openingPrincipal,
-			InterestAmount:   interest,
-			TDSAmount:        tdsAmount,
-			NetCashflow:      netCashflow,
-			ClosingPrincipal: closingPrincipal,
+			PeriodNumber:      seq,
+			EventType:         eventType,
+			EventDate:         periodEnd,
+			PeriodStartDate:   periodStart,
+			PeriodEndDate:     periodEnd,
+			PeriodDays:        days,
+			OpeningPrincipal:  openingPrincipal,
+			InterestAccrued:   interest,
+			CapitalizedAmount: capitalized,
+			ClosingPrincipal:  closingPrincipal,
+			TDSAmount:         tdsThisPeriod,
+			NetCashFlow:       netCashflow,
+			DayCountCode:      effectiveDayCount,
+			Divisor:           divisor,
+			FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d)", openingPrincipal, fd.InterestRate, days, divisor),
+			AccrualRatePerDay: ratePerDay,
 		})
 
-		openingPrincipal = closingPrincipal
+		if isCapBoundary {
+			openingPrincipal = closingPrincipal
+		}
 		periodStart = periodEnd
 	}
 
+	// Sort by event date, then sequence to preserve insert order.
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].EventDate.Equal(rows[j].EventDate) {
+			return rows[i].PeriodNumber < rows[j].PeriodNumber
+		}
+		return rows[i].EventDate.Before(rows[j].EventDate)
+	})
+	// Re-sequence after sort.
+	for i := range rows {
+		rows[i].PeriodNumber = i + 1
+	}
+
+	_ = events // suppress unused warning
 	return rows
 }
 
@@ -486,7 +724,7 @@ func GenerateCashflowForFD(ctx context.Context, exec queryExecutor, fdID string,
 	}
 
 	cfg, _ := loadBankConfig(ctx, exec, fd.BankConfigID)
-	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency))
+	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID))
 	tds, _ := loadTDSConfig(ctx, exec, fd.TDSPlanID)
 
 	return generateCashflowSchedule(fd, cfg, freq, tds), fd, nil
@@ -523,53 +761,54 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 		return nil
 	}
 
-	// Delete existing rows keyed by the sequence column (whichever name it has).
-	seqCol := pickFirstExistingColumn(cols, "sequence_number", "period_number")
-	if seqCol != "" {
-		_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
-	}
+	// Delete existing rows first (clean regeneration).
+	_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
 
 	for _, row := range rows {
-		// Map CashflowRow fields to all possible column names the table may have.
 		valueMap := map[string]interface{}{
-			fdCol:                    fdID,
-			// sequence / order columns
-			"sequence_number":        row.PeriodNumber,
-			"period_number":          row.PeriodNumber,
-			// date columns
-			"event_date":             row.CashflowDate,
-			"cashflow_date":          row.CashflowDate,
-			"period_end_date":        row.CashflowDate,
-			// event type
-			"event_type":             row.EventType,
-			// principal
-			"opening_principal":      row.OpeningPrincipal,
-			// interest
-			"interest_accrued":       row.InterestAmount,
-			"interest_amount":        row.InterestAmount,
-			// capitalized / closing principal
-			"capitalized_amount":     row.ClosingPrincipal,
-			"closing_principal":      row.ClosingPrincipal,
-			// tds
-			"tds_amount":             row.TDSAmount,
-			// net
-			"net_cash_flow":          row.NetCashflow,
-			"net_cashflow":           row.NetCashflow,
-			"net_amount":             row.NetCashflow,
-			// audit
-			"created_by":             createdBy,
-			"created_at":             time.Now(),
+			fdCol:                     fdID,
+			"sequence_number":         row.PeriodNumber,
+			"period_number":           row.PeriodNumber,
+			"event_type":              row.EventType,
+			"event_date":              row.EventDate,
+			"cashflow_date":           row.EventDate,
+			"period_start_date":       nilIfZero(row.PeriodStartDate),
+			"period_end_date":         nilIfZero(row.PeriodEndDate),
+			"period_days":             nilIfZero(row.PeriodDays),
+			"opening_principal":       row.OpeningPrincipal,
+			"interest_accrued":        row.InterestAccrued,
+			"interest_amount":         row.InterestAccrued,
+			"capitalized_amount":      row.CapitalizedAmount,
+			"closing_principal":       row.ClosingPrincipal,
+			"tds_amount":              row.TDSAmount,
+			"net_cash_flow":           row.NetCashFlow,
+			"net_cashflow":            row.NetCashFlow,
+			"net_amount":              row.NetCashFlow,
+			"day_count_code":          nilIfEmpty(row.DayCountCode),
+			"divisor":                 nilIfZero(row.Divisor),
+			"formula_used":            nilIfEmpty(row.FormulaUsed),
+			"accrual_rate_per_day":    row.AccrualRatePerDay,
+			"dr_account_code":         nilIfEmpty(row.DrAccountCode),
+			"dr_account_name":         nilIfEmpty(row.DrAccountName),
+			"cr_account_code":         nilIfEmpty(row.CrAccountCode),
+			"cr_account_name":         nilIfEmpty(row.CrAccountName),
+			"created_by":              createdBy,
+			"created_at":              time.Now(),
 		}
 		preferredCols := []string{
 			fdCol,
 			"sequence_number", "period_number",
-			"event_date", "cashflow_date", "period_end_date",
 			"event_type",
+			"event_date", "cashflow_date",
+			"period_start_date", "period_end_date", "period_days",
 			"opening_principal",
 			"interest_accrued", "interest_amount",
 			"capitalized_amount", "closing_principal",
 			"tds_amount",
 			"net_cash_flow", "net_cashflow", "net_amount",
+			"day_count_code", "divisor", "formula_used", "accrual_rate_per_day",
+			"dr_account_code", "dr_account_name",
+			"cr_account_code", "cr_account_name",
 			"created_by", "created_at",
 		}
 		insertSQL, args, _, ok := buildDynamicInsert(table, cols, preferredCols, valueMap, nil)
@@ -582,4 +821,29 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 	}
 
 	return nil
+}
+
+// nilIfZero returns nil for time.Time zero values (so DB stores NULL not 0001-01-01).
+func nilIfZero(v interface{}) interface{} {
+	switch t := v.(type) {
+	case time.Time:
+		if t.IsZero() {
+			return nil
+		}
+		return t
+	case int:
+		if t == 0 {
+			return nil
+		}
+		return t
+	}
+	return v
+}
+
+// nilIfEmpty returns nil for empty strings.
+func nilIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
