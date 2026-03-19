@@ -746,7 +746,14 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_at,
 					a.checker_comment,
 					a.reason,
-					a.old_confirmation_status
+					a.old_confirmation_status,
+					a.old_actual_principal,
+					a.old_confirmed_rate,
+					a.old_actual_start_date,
+					a.old_actual_maturity_date,
+					a.old_variance_flag,
+					a.old_variance_action,
+					a.old_bank_fd_ref_no
 				FROM investment.fd_audit_confirmation a
 				ORDER BY a.confirmation_id,
 				         GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp),

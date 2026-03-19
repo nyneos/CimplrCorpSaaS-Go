@@ -1097,7 +1097,16 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		// Accept fd_id from query param (GET-style) or from JSON body (POST-style)
 		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
+		if fdID == "" {
+			var body struct {
+				FDID string `json:"fd_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				fdID = strings.TrimSpace(body.FDID)
+			}
+		}
 		if fdID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
 			return

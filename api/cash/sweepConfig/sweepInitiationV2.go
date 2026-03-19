@@ -69,7 +69,9 @@ func parseDate(s string) (time.Time, error) {
 		"01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
 		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
 		// ISO-ish layouts to catch Excel exports that already render as 2026-01-15 or RFC3339 strings
-		constants.DateFormat, constants.DateTimeFormat, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
+		constants.DateFormat, constants.DateTimeFormat,
+		"2006-01-02 15:04:05 -0700 MST", // Go time.String() format from DB scan
+		time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
 	}
 	// Try all layouts
 	for _, layout := range layouts {

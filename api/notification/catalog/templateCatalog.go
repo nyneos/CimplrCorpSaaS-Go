@@ -1545,16 +1545,10 @@ func BulkRejectTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"audit_id": id, "success": true, "status": "REJECTED",
 			})
 		}
-		// api.RespondWithPayload(w, true, "", map[string]interface{}{
-		// 	"rejected_count": tag.RowsAffected(),
-		// 	"checker":        userEmail,
-		// 	"results":        results,
-		// })
-		// return
-		// }
-
-		// All IDs were ineligible — return detailed failures
-		api.RespondWithPayload(w, false, "no eligible audit rows to reject", results)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"checker": userEmail,
+			"results": results,
+		})
 	}
 }
 
