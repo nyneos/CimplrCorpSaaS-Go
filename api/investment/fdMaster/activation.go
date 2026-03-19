@@ -592,7 +592,23 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		directActed := 0
 		var errors []string
 
-		for _, fdID := range req.FDIDs {
+		for _, rawID := range req.FDIDs {
+			// Resolve the real fd_id — caller may pass either an fd_id or a confirmation_id.
+			fdID := rawID
+			var resolvedFDID string
+			if lookupErr := pgxPool.QueryRow(ctx,
+				`SELECT fd_id FROM investment.fd_master WHERE fd_id = $1 AND COALESCE(is_deleted,false)=false`,
+				rawID,
+			).Scan(&resolvedFDID); lookupErr != nil {
+				// Try as confirmation_id.
+				if lookupErr2 := pgxPool.QueryRow(ctx,
+					`SELECT fd_id FROM investment.fd_master WHERE confirmation_id = $1 AND COALESCE(is_deleted,false)=false`,
+					rawID,
+				).Scan(&resolvedFDID); lookupErr2 == nil {
+					fdID = resolvedFDID
+				}
+			}
+
 			// Try engine path first.
 			var instanceEyeID string
 			engineErr := pgxPool.QueryRow(ctx, `
@@ -741,7 +757,22 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		directActed := 0
 		var errors []string
 
-		for _, fdID := range req.FDIDs {
+		for _, rawID := range req.FDIDs {
+			// Resolve the real fd_id — caller may pass either an fd_id or a confirmation_id.
+			fdID := rawID
+			var resolvedFDID string
+			if lookupErr := pgxPool.QueryRow(ctx,
+				`SELECT fd_id FROM investment.fd_master WHERE fd_id = $1 AND COALESCE(is_deleted,false)=false`,
+				rawID,
+			).Scan(&resolvedFDID); lookupErr != nil {
+				if lookupErr2 := pgxPool.QueryRow(ctx,
+					`SELECT fd_id FROM investment.fd_master WHERE confirmation_id = $1 AND COALESCE(is_deleted,false)=false`,
+					rawID,
+				).Scan(&resolvedFDID); lookupErr2 == nil {
+					fdID = resolvedFDID
+				}
+			}
+
 			var instanceEyeID string
 			engineErr := pgxPool.QueryRow(ctx, `
 				SELECT ie.instance_eye_id

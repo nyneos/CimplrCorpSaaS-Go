@@ -184,7 +184,26 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 		"SELECT %s FROM investment.fd_master WHERE %s = $1 AND COALESCE(is_deleted,false)=false",
 		confirmationCol, keyCol,
 	), fdID).Scan(&confirmationID); err != nil {
-		return nil, fmt.Errorf("load fd_master confirmation: %w", err)
+		// Fallback: caller may have passed a confirmation_id directly — try to look up the fd_master row by it.
+		var fallbackFDID string
+		fallbackErr := exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT %s FROM investment.fd_master WHERE %s = $1 AND COALESCE(is_deleted,false)=false",
+			keyCol, confirmationCol,
+		), fdID).Scan(&fallbackFDID)
+		if fallbackErr != nil {
+			// No fd_master row at all — try loading the FD record directly from the confirmation.
+			rec, recErr := loadFDRecord(ctx, exec, fdID)
+			if recErr != nil {
+				return nil, fmt.Errorf("load fd_master confirmation: %w", err)
+			}
+			return rec, nil
+		}
+		// Found via confirmation_id — now load using the real fd_id.
+		rec, recErr := loadFDRecordByFDID(ctx, exec, fallbackFDID)
+		if recErr != nil {
+			return nil, recErr
+		}
+		return rec, nil
 	}
 
 	rec, err := loadFDRecord(ctx, exec, confirmationID)

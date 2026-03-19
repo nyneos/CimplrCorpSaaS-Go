@@ -884,7 +884,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if confirmationID != "" {
 			q = `
 				SELECT
-					a.audit_id, a.confirmation_id, a.action_type, a.processing_status,
+					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
 					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
@@ -916,7 +916,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			q = `
 				SELECT
-					a.audit_id, a.confirmation_id, a.action_type, a.processing_status,
+					a.audit_id::text, a.confirmation_id, a.action_type, a.processing_status,
 					COALESCE(a.requested_by,'') AS requested_by,
 					COALESCE(TO_CHAR(a.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
 					COALESCE(a.checker_by,'') AS checker_by,
@@ -1033,16 +1033,16 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(c.bank_reference_number,'') AS bank_reference_number,
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'') AS receipt_date,
 				%s AS currency,
-				COALESCE(c.confirmation_status,'') AS confirmation_status
+				COALESCE(c.confirmation_status,'') AS confirmation_status,
+				EXISTS (
+					SELECT 1 FROM investment.fd_master fm
+					WHERE fm.confirmation_id = c.confirmation_id
+					  AND COALESCE(fm.is_deleted,false) = false
+				) AS fd_activated
 			FROM investment.fd_confirmation c
 			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_status = 'CONFIRMED'
-			  AND COALESCE(c.is_deleted,false) = false
-			  AND NOT EXISTS (
-				SELECT 1 FROM investment.fd_master fm
-				WHERE fm.confirmation_id = c.confirmation_id
-				  AND COALESCE(fm.is_deleted,false) = false
-			  )`, bookingAccountExpr, currencyExpr)
+			  AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, currencyExpr)
 
 		var args []interface{}
 		if entityID != "" {
@@ -1153,6 +1153,16 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		confRows.Close()
+
+		// Parse variance_details from stored JSON string to object so callers get a proper object.
+		if vd, ok := conf["variance_details"]; ok {
+			if vdStr, ok := vd.(string); ok && vdStr != "" {
+				var parsed interface{}
+				if err := json.Unmarshal([]byte(vdStr), &parsed); err == nil {
+					conf["variance_details"] = parsed
+				}
+			}
+		}
 
 		// ── Audit history ────────────────────────────────────────────────────
 		auditRows, err := pgxPool.Query(ctx, `
