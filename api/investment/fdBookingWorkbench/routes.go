@@ -62,6 +62,10 @@ func RegisterFDBookingRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 
 	// ── Confirmation ─────────────────────────────────────────────────────────
 	mux.Handle(
+		"/investment/fd/confirmation/preflight",
+		mid(http.HandlerFunc(GetConfirmationPreflight(pool))),
+	)
+	mux.Handle(
 		"/investment/fd/confirmation/capture",
 		mid(http.HandlerFunc(CaptureConfirmation(pool))),
 	)

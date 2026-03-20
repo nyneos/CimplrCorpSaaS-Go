@@ -1477,3 +1477,137 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // _ prevents unused import lint if strings is used only in nullIfEmpty (defined in booking.go)
 var _ = strings.TrimSpace
+
+// ─── GetConfirmationPreflight ─────────────────────────────────────────────────
+// GET /investment/fd/confirmation/preflight?user_id=X[&booking_id=Y][&entity_id=Z]
+//
+// Returns everything the UI needs before calling /confirmation/capture:
+//   - bookings that are SENT_TO_BANK (ready to confirm) with full booked detail
+//   - bank master + rate-card data for auto-populating defaults
+//   - variance thresholds configured for the entity
+//   - any existing partial confirmations for the booking
+
+func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		bookingID := r.URL.Query().Get("booking_id")
+		entityID := r.URL.Query().Get("entity_id")
+
+		// ── 1. SENT_TO_BANK bookings waiting for confirmation ─────────────────
+		bookingSQL := `
+			SELECT
+				br.booking_id,
+				COALESCE(br.entity_id,'')                                    AS entity_id,
+				COALESCE(br.entity_name,'')                                  AS entity_name,
+				COALESCE(br.bank_id,'')                                      AS bank_id,
+				COALESCE(br.bank_name,'')                                    AS bank_name,
+				COALESCE(br.source_account_id,'')                            AS bank_account_id,
+				COALESCE(br.source_account_number,'')                        AS bank_account_number,
+				COALESCE(br.principal_amount,0)                              AS principal_amount,
+				COALESCE(br.interest_rate,0)                                 AS interest_rate,
+				COALESCE(br.interest_type_code,'')                           AS interest_type,
+				COALESCE(br.tenure_days,0)                                   AS tenure_days,
+				COALESCE(br.tenure_months,0)                                 AS tenure_months,
+				TO_CHAR(br.expected_start_date,'YYYY-MM-DD')                 AS expected_start_date,
+				TO_CHAR(br.value_date,'YYYY-MM-DD')                          AS value_date,
+				TO_CHAR(br.expected_maturity_date,'YYYY-MM-DD')              AS expected_maturity_date,
+				COALESCE(br.tds_plan_id,'')                                  AS tds_plan_id,
+				COALESCE(br.bank_config_id,'')                               AS bank_config_id,
+				COALESCE(br.day_count_code,'')                               AS day_count_code,
+				COALESCE(br.auto_renewal,false)                              AS auto_renewal,
+				COALESCE(br.booking_status,'')                               AS booking_status,
+				COALESCE(br.booking_remarks,'')                              AS booking_remarks,
+				-- bank config / rate card defaults
+				COALESCE(bc.min_amount,0)                                    AS bank_min_amount,
+				COALESCE(bc.max_amount,0)                                    AS bank_max_amount,
+				COALESCE(rc.interest_rate,0)                                 AS rate_card_rate,
+				-- existing confirmation if any
+				COALESCE(cf.confirmation_id,'')                              AS existing_confirmation_id,
+				COALESCE(cf.confirmation_status,'')                          AS existing_confirmation_status,
+				-- who sent to bank + when
+				COALESCE(aud.requested_by,'')                                AS sent_to_bank_by,
+				COALESCE(TO_CHAR(aud.requested_at,'YYYY-MM-DD HH24:MI'),'') AS sent_to_bank_at
+			FROM investment.fd_booking_request br
+			LEFT JOIN investment.fd_bank_config_master bc ON bc.bank_config_id = br.bank_config_id
+			LEFT JOIN investment.fd_bank_rate_card_master rc
+				ON rc.bank_id = br.bank_id AND rc.is_active = true
+				AND br.tenure_days BETWEEN rc.min_tenure_days AND rc.max_tenure_days
+			LEFT JOIN investment.fd_confirmation cf
+				ON cf.booking_id = br.booking_id AND COALESCE(cf.is_deleted,false) = false
+			LEFT JOIN LATERAL (
+				SELECT requested_by, requested_at
+				FROM investment.fd_audit_booking_request
+				WHERE booking_id = br.booking_id AND old_booking_status = 'APPROVED'
+				ORDER BY requested_at DESC LIMIT 1
+			) aud ON true
+			WHERE br.booking_status = 'SENT_TO_BANK'
+			  AND COALESCE(br.is_deleted,false) = false`
+
+		bookingArgs := []interface{}{}
+		argIdx := 1
+		if bookingID != "" {
+			bookingSQL += fmt.Sprintf(" AND br.booking_id = $%d", argIdx)
+			bookingArgs = append(bookingArgs, bookingID)
+			argIdx++
+		}
+		if entityID != "" {
+			bookingSQL += fmt.Sprintf(" AND br.entity_id = $%d", argIdx)
+			bookingArgs = append(bookingArgs, entityID)
+			argIdx++
+		}
+		bookingSQL += " ORDER BY br.expected_maturity_date ASC"
+
+		bookingRows, err := pgxPool.Query(ctx, bookingSQL, bookingArgs...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Booking query failed: "+err.Error())
+			return
+		}
+		defer bookingRows.Close()
+		bookings := make([]map[string]interface{}, 0)
+		bFlds := bookingRows.FieldDescriptions()
+		for bookingRows.Next() {
+			vals, _ := bookingRows.Values()
+			row := make(map[string]interface{}, len(bFlds))
+			for i, f := range bFlds {
+				if vals[i] == nil {
+					row[string(f.Name)] = ""
+				} else {
+					row[string(f.Name)] = vals[i]
+				}
+			}
+			bookings = append(bookings, row)
+		}
+
+		// ── 2. Variance thresholds for the entity ─────────────────────────────
+		// For now return a standard config set (entity-specific config can be added later)
+		varianceConfig := map[string]interface{}{
+			"rate_variance_threshold_pct":   0.25,
+			"amount_variance_threshold_pct": 0.10,
+			"maturity_date_tolerance_days":  3,
+			"auto_approve_below_threshold":  false,
+			"description":                   "Standard variance thresholds. Rate diff > 0.25%, amount diff > 0.10%, or maturity diff > 3 days triggers VARIANCE_REVIEW.",
+		}
+
+		// ── 3. Required fields guide for capture payload ───────────────────────
+		captureGuide := map[string]interface{}{
+			"endpoint":      "POST /investment/fd/confirmation/capture",
+			"required_fields": []string{
+				"user_id", "booking_id",
+				"confirmed_principal_amount", "confirmed_interest_rate",
+				"confirmed_tenor_days", "confirmed_value_date", "confirmed_maturity_date",
+			},
+			"optional_fields": []string{
+				"confirmed_maturity_amount", "bank_fd_reference", "receipt_date", "notes",
+			},
+			"notes": "If confirmed values match booked values within thresholds, booking moves to CONFIRMED immediately. If variance detected, status becomes VARIANCE_REVIEW and requires /confirmation/resolve-variance before approval.",
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"bookings_pending_confirmation": bookings,
+			"count":                         len(bookings),
+			"variance_config":               varianceConfig,
+			"capture_guide":                 captureGuide,
+		})
+		api.LogInfo("[FDBooking] GetConfirmationPreflight: %d bookings pending confirmation (entity=%s)", len(bookings), entityID)
+	}
+}

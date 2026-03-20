@@ -82,6 +82,13 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Audit trail
+		_, _ = pgxPool.Exec(r.Context(), `
+			INSERT INTO investment.fd_accrual_schedule_config_audit
+				(config_id, action_type, processing_status, requested_by, requested_at)
+			VALUES ($1,'CREATE','ACTIVE',$2,now())`,
+			configID, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id":          configID,
 			"entity_id":          req.EntityID,
@@ -151,6 +158,26 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Snapshot old values before update
+		var oldFreq, oldRunMode, oldBankFilter, oldFDFilter string
+		var oldRunDay int
+		var oldAutoSubmit bool
+		var oldNotifRecipients []byte
+		var oldRunTime interface{}
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT
+				COALESCE(schedule_frequency,''),
+				COALESCE(run_day_of_month,1),
+				run_time,
+				COALESCE(default_run_mode,''),
+				COALESCE(default_bank_id_filter,''),
+				COALESCE(default_fd_status_filter,''),
+				auto_submit_for_approval,
+				COALESCE(notification_recipients,'[]'::jsonb)::text
+			FROM investment.fd_accrual_schedule_config
+			WHERE config_id=$1`, req.ConfigID,
+		).Scan(&oldFreq, &oldRunDay, &oldRunTime, &oldRunMode, &oldBankFilter, &oldFDFilter, &oldAutoSubmit, &oldNotifRecipients)
+
 		args = append(args, req.ConfigID)
 		query := fmt.Sprintf(
 			"UPDATE investment.fd_accrual_schedule_config SET %s WHERE config_id = $%d AND is_active = true",
@@ -166,6 +193,18 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "schedule config not found or already disabled")
 			return
 		}
+
+		// Audit trail with full old-value snapshot
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_schedule_config_audit (
+				config_id, action_type, processing_status, requested_by, requested_at,
+				old_schedule_frequency, old_run_day_of_month, old_run_time,
+				old_default_run_mode, old_default_bank_id_filter, old_default_fd_status_filter,
+				old_auto_submit_for_approval, old_notification_recipients, old_is_active
+			) VALUES ($1,'EDIT','ACTIVE',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true)`,
+			req.ConfigID, userEmail,
+			oldFreq, oldRunDay, oldRunTime, oldRunMode, oldBankFilter, oldFDFilter,
+			oldAutoSubmit, string(oldNotifRecipients))
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id": req.ConfigID,
@@ -499,6 +538,27 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// Snapshot old values before delete
+		var dOldFreq, dOldRunMode, dOldBankFilter, dOldFDFilter string
+		var dOldRunDay int
+		var dOldAutoSubmit bool
+		var dOldNotif []byte
+		var dOldRunTime interface{}
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT
+				COALESCE(schedule_frequency,''),
+				COALESCE(run_day_of_month,1),
+				run_time,
+				COALESCE(default_run_mode,''),
+				COALESCE(default_bank_id_filter,''),
+				COALESCE(default_fd_status_filter,''),
+				auto_submit_for_approval,
+				COALESCE(notification_recipients,'[]'::jsonb)::text
+			FROM investment.fd_accrual_schedule_config
+			WHERE config_id=$1`, req.ConfigID,
+		).Scan(&dOldFreq, &dOldRunDay, &dOldRunTime, &dOldRunMode, &dOldBankFilter, &dOldFDFilter, &dOldAutoSubmit, &dOldNotif)
+
 		ct, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_schedule_config
 			SET is_active=false, updated_by=$1, updated_at=now()
@@ -511,6 +571,18 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
 			return
 		}
+
+		// Audit trail with full old-value snapshot
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_schedule_config_audit (
+				config_id, action_type, processing_status, requested_by, requested_at,
+				old_schedule_frequency, old_run_day_of_month, old_run_time,
+				old_default_run_mode, old_default_bank_id_filter, old_default_fd_status_filter,
+				old_auto_submit_for_approval, old_notification_recipients, old_is_active
+			) VALUES ($1,'DELETE','INACTIVE',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true)`,
+			req.ConfigID, userEmail,
+			dOldFreq, dOldRunDay, dOldRunTime, dOldRunMode, dOldBankFilter, dOldFDFilter,
+			dOldAutoSubmit, string(dOldNotif))
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"config_id": req.ConfigID,

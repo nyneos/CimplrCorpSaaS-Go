@@ -212,8 +212,12 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		entityData, _ := rowsToMapSlice(entityRows)
 
 		exRows, err := pool.Query(ctx, `
-			SELECT exception_id, fd_id, exception_type, severity, variance_amount, variance_pct,
-			       exception_status, TO_CHAR(raised_at,'YYYY-MM-DD HH24:MI:SS') AS raised_at
+			SELECT exception_id, fd_id,
+			       COALESCE(exception_type,'') AS exception_type,
+			       COALESCE(severity,'') AS severity,
+			       COALESCE(variance_amount,0) AS variance_amount,
+			       COALESCE(exception_status,'') AS exception_status,
+			       TO_CHAR(raised_at,'YYYY-MM-DD HH24:MI:SS') AS raised_at
 			FROM investment.fd_receipt_exception
 			WHERE is_deleted=false ORDER BY raised_at DESC LIMIT 10`)
 		if err != nil {
@@ -327,19 +331,28 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 
 		analysisSQL := `
 			SELECT r.fd_id, r.fd_ref_no, r.entity_id, r.entity_name,
-			       TO_CHAR(r.receipt_date,'YYYY-MM-DD') AS receipt_date,
-			       r.gross_interest_received            AS received_amount,
-			       COALESCE(al.total_accrued,0)         AS accrued_amount,
-			       r.gross_interest_received - COALESCE(al.total_accrued,0) AS variance,
-			       r.receipt_status, r.reconcile_status
+			       TO_CHAR(r.receipt_date,'YYYY-MM-DD')            AS receipt_date,
+			       COALESCE(r.gross_interest_received,0)           AS received_amount,
+			       COALESCE(r.tds_amount_deducted,0)               AS tds_deducted,
+			       COALESCE(r.net_amount_received,0)               AS net_received,
+			       COALESCE(al.total_accrued,0)                    AS total_accrued,
+			       COALESCE(al.total_tds,0)                        AS total_tds_accrued,
+			       COALESCE(al.total_net,0)                        AS total_net_accrued,
+			       COALESCE(r.gross_interest_received,0) - COALESCE(al.total_accrued,0) AS gross_variance,
+			       COALESCE(r.net_amount_received,0) - COALESCE(al.total_net,0)       AS net_variance,
+			       COALESCE(r.receipt_status,'')                   AS receipt_status,
+			       COALESCE(r.reconcile_status,'')                 AS reconcile_status
 			FROM investment.fd_interest_receipt r
 			LEFT JOIN (
-			    SELECT fd_id, SUM(accrual_amount) AS total_accrued
+			    SELECT fd_id,
+			           SUM(period_interest_accrued) AS total_accrued,
+			           SUM(tds_deducted_in_period)  AS total_tds,
+			           SUM(net_interest_in_period)  AS total_net
 			    FROM investment.fd_accrual_ledger
-			    WHERE ledger_row_status='CALCULATED' AND is_deleted=false
+			    WHERE ledger_row_status='CALCULATED' AND COALESCE(is_deleted,false)=false
 			    GROUP BY fd_id
 			) al ON al.fd_id = r.fd_id
-			WHERE r.is_deleted=false`
+			WHERE COALESCE(r.is_deleted,false)=false`
 		args := []interface{}{}
 		idx := 1
 		if req.EntityID != "" {

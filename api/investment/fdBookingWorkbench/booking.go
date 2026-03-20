@@ -1610,46 +1610,95 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ─── GetApprovedActiveBookings ───────────────────────────────────────────────
+// Returns all bookings in the post-approval lifecycle:
+//   APPROVED      → internally approved, pending physical dispatch to bank
+//   SENT_TO_BANK  → dispatched to bank, awaiting bank confirmation
+//   CONFIRMED     → bank has confirmed, FD is live (fd_master may exist)
+//
+// Optional query params:
+//   entity_id   – filter by entity
+//   status      – filter by specific booking_status (comma-separated or single)
 
 func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		entityID := r.URL.Query().Get("entity_id")
+		statusFilter := r.URL.Query().Get("status") // optional single-status override
+
+		baseSelect := `
+			SELECT
+				m.booking_id,
+				COALESCE(m.entity_id,'')                                       AS entity_id,
+				COALESCE(m.entity_name,'')                                     AS entity_name,
+				COALESCE(m.bank_id,'')                                         AS bank_id,
+				COALESCE(m.bank_name,'')                                       AS bank_name,
+				COALESCE(m.source_account_id,'')                               AS bank_account_id,
+				COALESCE(m.source_account_number,'')                           AS bank_account_number,
+				COALESCE(m.principal_amount,0)                                 AS principal_amount,
+				COALESCE(m.interest_rate,0)                                    AS interest_rate,
+				COALESCE(m.interest_type_code,'')                              AS interest_type,
+				COALESCE(m.tenure_days,0)                                      AS tenor_days,
+				COALESCE(m.tenure_months,0)                                    AS tenor_months,
+				COALESCE(TO_CHAR(m.expected_start_date,'YYYY-MM-DD'),'')       AS expected_start_date,
+				COALESCE(TO_CHAR(m.value_date,'YYYY-MM-DD'),'')                AS value_date,
+				COALESCE(TO_CHAR(m.expected_maturity_date,'YYYY-MM-DD'),'')    AS expected_maturity_date,
+				COALESCE(m.tds_plan_id,'')                                     AS tds_plan_id,
+				COALESCE(m.auto_renewal,false)                                 AS auto_renewal,
+				COALESCE(m.booking_status,'')                                  AS booking_status,
+				-- confirmation data (NULL until CONFIRMED)
+				COALESCE(c.confirmation_id,'')                                 AS confirmation_id,
+				COALESCE(c.bank_fd_ref_no,'')                                  AS bank_fd_ref_no,
+				COALESCE(c.bank_reference_number,'')                           AS bank_reference_number,
+				COALESCE(c.actual_principal,0)                                 AS actual_principal,
+				COALESCE(c.confirmed_rate,0)                                   AS confirmed_rate,
+				COALESCE(c.confirmed_interest_type_code,'')                    AS confirmed_interest_type,
+				COALESCE(TO_CHAR(c.actual_start_date,'YYYY-MM-DD'),'')         AS actual_start_date,
+				COALESCE(TO_CHAR(c.actual_maturity_date,'YYYY-MM-DD'),'')      AS actual_maturity_date,
+				COALESCE(c.confirmation_status,'')                             AS confirmation_status,
+				COALESCE(c.variance_flag,false)                                AS variance_flag,
+				COALESCE(c.variance_type,'')                                   AS variance_type,
+				-- fd_master data (NULL until ACTIVE)
+				COALESCE(fm.fd_id,'')                                          AS fd_id,
+				COALESCE(fm.fd_status,'')                                      AS fd_status,
+				COALESCE(fm.bank_fd_ref_no,'')                                 AS fd_ref_no,
+				-- latest audit: who approved and when
+				COALESCE(aud.requested_by,'')                                  AS approved_by,
+				COALESCE(TO_CHAR(aud.requested_at,'YYYY-MM-DD HH24:MI'),'')   AS approved_at
+			FROM investment.fd_booking_request m
+			LEFT JOIN investment.fd_confirmation c
+				ON c.booking_id = m.booking_id AND COALESCE(c.is_deleted,false) = false
+			LEFT JOIN investment.fd_master fm
+				ON fm.booking_id = m.booking_id AND COALESCE(fm.is_deleted,false) = false
+			LEFT JOIN LATERAL (
+				SELECT requested_by, requested_at
+				FROM investment.fd_audit_booking_request
+				WHERE booking_id = m.booking_id AND processing_status = 'APPROVED'
+				ORDER BY requested_at DESC LIMIT 1
+			) aud ON true
+			WHERE COALESCE(m.is_deleted,false) = false`
 
 		var q string
 		var args []interface{}
-		approvedSelect := `
-				SELECT
-					m.booking_id,
-					COALESCE(m.entity_id,'')                                      AS entity_id,
-					COALESCE(m.entity_name,'')                                     AS entity_name,
-					COALESCE(m.bank_id,'')                                         AS bank_id,
-					COALESCE(m.bank_name,'')                                       AS bank_name,
-					COALESCE(m.source_account_id,'')                               AS bank_account_id,
-					COALESCE(m.principal_amount,0)                                 AS principal_amount,
-					COALESCE(m.interest_rate,0)                                    AS interest_rate,
-					COALESCE(m.interest_type_code,'')                              AS interest_type,
-					COALESCE(m.tenure_days,0)                                      AS tenor_days,
-					COALESCE(TO_CHAR(m.expected_start_date,'YYYY-MM-DD'),'')       AS expected_start_date,
-					COALESCE(TO_CHAR(m.value_date,'YYYY-MM-DD'),'')                AS value_date,
-					COALESCE(TO_CHAR(m.expected_maturity_date,'YYYY-MM-DD'),'')    AS maturity_date,
-					COALESCE(m.tds_plan_id,'')                                     AS tds_plan_id,
-					COALESCE(m.auto_renewal,false)                                 AS auto_renewal,
-					COALESCE(m.booking_status,'')                                  AS booking_status
-				FROM investment.fd_booking_request m
-				INNER JOIN investment.fd_audit_booking_request a ON a.booking_id = m.booking_id
-				WHERE m.booking_status IN ('APPROVED','SENT_TO_BANK')
-				  AND a.processing_status = 'APPROVED'
-				  AND COALESCE(m.is_deleted,false) = false`
-		if entityID != "" {
-			q = approvedSelect + `
-				  AND m.entity_id = $1
-				ORDER BY m.expected_maturity_date ASC`
-			args = append(args, entityID)
+		argIdx := 1
+
+		// determine which statuses to show
+		if statusFilter != "" {
+			// caller wants a specific status
+			q = baseSelect + ` AND m.booking_status = $` + fmt.Sprintf("%d", argIdx)
+			args = append(args, statusFilter)
+			argIdx++
 		} else {
-			q = approvedSelect + `
-				ORDER BY m.expected_maturity_date ASC`
+			// default: everything past internal approval — APPROVED, SENT_TO_BANK, CONFIRMED
+			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK','CONFIRMED')`
 		}
+
+		if entityID != "" {
+			q += fmt.Sprintf(` AND m.entity_id = $%d`, argIdx)
+			args = append(args, entityID)
+			argIdx++
+		}
+
+		q += ` ORDER BY m.expected_maturity_date ASC`
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
@@ -1678,7 +1727,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", out)
-		api.LogInfo("[FDBooking] GetApprovedActiveBookings: %d records", len(out))
+		api.LogInfo("[FDBooking] GetApprovedActiveBookings: %d records (entity=%s status=%s)", len(out), entityID, statusFilter)
 	}
 }
 

@@ -185,12 +185,100 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
 			newStatus, eligible, req.RunID)
 
+		// ── Enrich: return full run header + all validation findings ──────────
+		var runRow struct {
+			RunType, RunMode, RunStatus, EntityID, EntityName     string
+			FinancialPeriod, DayCountConvention, FDStatusFilter   string
+			AccrualPeriodStart, AccrualPeriodEnd                  interface{}
+			FdsInScope, FdsCalculated, FdsFailed                  int
+			TotalInterestAccrued, TotalTDSDeducted                float64
+		}
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(run_type,''), COALESCE(run_mode,''), COALESCE(run_status,''),
+			       COALESCE(entity_id,''), COALESCE(entity_name,''),
+			       COALESCE(financial_period,''), COALESCE(day_count_convention,''),
+			       COALESCE(fd_status_filter,''),
+			       accrual_period_start, accrual_period_end,
+			       COALESCE(fds_in_scope,0), COALESCE(fds_calculated,0), COALESCE(fds_failed,0),
+			       COALESCE(total_interest_accrued,0), COALESCE(total_tds_deducted,0)
+			FROM investment.fd_accrual_run WHERE run_id=$1`, req.RunID,
+		).Scan(
+			&runRow.RunType, &runRow.RunMode, &runRow.RunStatus,
+			&runRow.EntityID, &runRow.EntityName,
+			&runRow.FinancialPeriod, &runRow.DayCountConvention, &runRow.FDStatusFilter,
+			&runRow.AccrualPeriodStart, &runRow.AccrualPeriodEnd,
+			&runRow.FdsInScope, &runRow.FdsCalculated, &runRow.FdsFailed,
+			&runRow.TotalInterestAccrued, &runRow.TotalTDSDeducted)
+
+		// Fetch all findings for UI table
+		findingRows, _ := pgxPool.Query(ctx, `
+			SELECT finding_id, fd_id,
+			       COALESCE(fd_ref_no,'') AS fd_ref_no,
+			       COALESCE(bank_name,'') AS bank_name,
+			       COALESCE(issue_type,'') AS issue_type,
+			       COALESCE(severity,'') AS severity,
+			       COALESCE(issue_description,'') AS issue_description,
+			       COALESCE(suggested_action,'') AS suggested_action,
+			       COALESCE(is_resolved,false) AS is_resolved,
+			       TO_CHAR(created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at
+			FROM investment.fd_accrual_validation_finding
+			WHERE run_id=$1 ORDER BY severity DESC, fd_id`, req.RunID)
+		findings := make([]map[string]interface{}, 0)
+		if findingRows != nil {
+			flds := findingRows.FieldDescriptions()
+			for findingRows.Next() {
+				vals, _ := findingRows.Values()
+				row := make(map[string]interface{}, len(flds))
+				for i, f := range flds {
+					if vals[i] == nil {
+						row[string(f.Name)] = ""
+					} else {
+						row[string(f.Name)] = vals[i]
+					}
+				}
+				findings = append(findings, row)
+			}
+			findingRows.Close()
+		}
+
+		// Severity summary
+		blockerFindings, warningFindings, infoFindings := 0, 0, 0
+		for _, f := range findings {
+			switch f["severity"] {
+			case "BLOCKER":
+				blockerFindings++
+			case "WARNING":
+				warningFindings++
+			default:
+				infoFindings++
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"run_id":        req.RunID,
-			"eligible_fds":  eligible,
-			"blocker_count": blockers,
-			"has_blockers":  blockers > 0,
-			"status":        newStatus,
+			"run_id":       req.RunID,
+			"run_header": map[string]interface{}{
+				"run_type":             runRow.RunType,
+				"run_mode":             runRow.RunMode,
+				"run_status":           newStatus,
+				"entity_id":            runRow.EntityID,
+				"entity_name":          runRow.EntityName,
+				"financial_period":     runRow.FinancialPeriod,
+				"day_count_convention": runRow.DayCountConvention,
+				"fd_status_filter":     runRow.FDStatusFilter,
+				"accrual_period_start": runRow.AccrualPeriodStart,
+				"accrual_period_end":   runRow.AccrualPeriodEnd,
+				"fds_in_scope":         eligible,
+			},
+			"validation_summary": map[string]interface{}{
+				"eligible_fds":      eligible,
+				"blocker_count":     blockers,
+				"warning_count":     warningFindings,
+				"info_count":        infoFindings,
+				"has_blockers":      blockers > 0,
+				"status":            newStatus,
+			},
+			"findings": findings,
+			"finding_count": len(findings),
 		})
 		api.LogInfo("[FDAccrual] ValidateScope: run_id=%s eligible=%d blockers=%d status=%s",
 			req.RunID, eligible, blockers, newStatus)
@@ -227,11 +315,108 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Enrich: return full ledger table for immediate UI rendering ───────
+		ledgerRows, _ := pgxPool.Query(ctx, `
+			SELECT
+				l.ledger_id, l.fd_id,
+				COALESCE(l.fd_ref_no,'')                             AS fd_ref_no,
+				COALESCE(l.bank_id,'')                               AS bank_id,
+				COALESCE(l.bank_name,'')                             AS bank_name,
+				COALESCE(l.entity_id,'')                             AS entity_id,
+				COALESCE(l.entity_name,'')                           AS entity_name,
+				COALESCE(l.interest_type_code,'')                    AS interest_type_code,
+				COALESCE(l.principal_amount,0)                       AS principal_amount,
+				COALESCE(l.interest_rate,0)                          AS interest_rate,
+				COALESCE(l.day_count_code,'')                        AS day_count_code,
+				TO_CHAR(l.accrual_period_start,'YYYY-MM-DD')         AS accrual_period_start,
+				TO_CHAR(l.accrual_period_end,'YYYY-MM-DD')           AS accrual_period_end,
+				COALESCE(l.accrual_days,0)                           AS accrual_days,
+				COALESCE(l.opening_principal,0)                      AS opening_principal,
+				COALESCE(l.daily_accrual_rate,0)                     AS daily_accrual_rate,
+				COALESCE(l.divisor,0)                                AS divisor,
+				COALESCE(l.period_interest_accrued,0)                AS period_interest_accrued,
+				COALESCE(l.opening_accrued_balance,0)                AS opening_accrued_balance,
+				COALESCE(l.interest_received_in_period,0)            AS interest_received_in_period,
+				COALESCE(l.closing_accrued_balance,0)                AS closing_accrued_balance,
+				COALESCE(l.tds_applicable_amount,0)                  AS tds_applicable_amount,
+				COALESCE(l.tds_deducted_in_period,0)                 AS tds_deducted_in_period,
+				COALESCE(l.net_interest_in_period,0)                 AS net_interest_in_period,
+				COALESCE(l.formula_used,'')                          AS formula_used,
+				COALESCE(l.ledger_row_status,'')                     AS ledger_row_status,
+				COALESCE(l.calculation_error,'')                     AS calculation_error,
+				COALESCE(l.is_overridden,false)                      AS is_overridden,
+				COALESCE(l.override_status,'')                       AS override_status,
+				COALESCE(l.journal_entry_id,'')                      AS journal_entry_id,
+				TO_CHAR(l.fd_start_date,'YYYY-MM-DD')                AS fd_start_date,
+				TO_CHAR(l.fd_maturity_date,'YYYY-MM-DD')             AS fd_maturity_date
+			FROM investment.fd_accrual_ledger l
+			WHERE l.run_id = $1 AND COALESCE(l.is_deleted,false)=false
+			ORDER BY l.entity_id, l.bank_name, l.fd_id`, req.RunID)
+
+		ledger := make([]map[string]interface{}, 0)
+		if ledgerRows != nil {
+			flds := ledgerRows.FieldDescriptions()
+			for ledgerRows.Next() {
+				vals, _ := ledgerRows.Values()
+				row := make(map[string]interface{}, len(flds))
+				for i, f := range flds {
+					if vals[i] == nil {
+						row[string(f.Name)] = ""
+					} else {
+						row[string(f.Name)] = vals[i]
+					}
+				}
+				ledger = append(ledger, row)
+			}
+			ledgerRows.Close()
+		}
+
+		// Run header summary
+		var totalInterest, totalTDS, totalNet float64
+		var runStatus string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT COALESCE(run_status,''), COALESCE(total_interest_accrued,0),
+			       COALESCE(total_tds_deducted,0), COALESCE(total_accrued_closing_balance,0)
+			FROM investment.fd_accrual_run WHERE run_id=$1`, req.RunID,
+		).Scan(&runStatus, &totalInterest, &totalTDS, &totalNet)
+
+		// Execution logs
+		execLogs, _ := pgxPool.Query(ctx, `
+			SELECT log_level, event_type, COALESCE(fd_id,'') AS fd_id, message,
+			       TO_CHAR(logged_at,'YYYY-MM-DD HH24:MI:SS') AS logged_at
+			FROM investment.fd_accrual_run_execution_log
+			WHERE run_id=$1 ORDER BY logged_at DESC LIMIT 50`, req.RunID)
+		logEntries := make([]map[string]interface{}, 0)
+		if execLogs != nil {
+			flds := execLogs.FieldDescriptions()
+			for execLogs.Next() {
+				vals, _ := execLogs.Values()
+				row := make(map[string]interface{}, len(flds))
+				for i, f := range flds {
+					if vals[i] == nil {
+						row[string(f.Name)] = ""
+					} else {
+						row[string(f.Name)] = vals[i]
+					}
+				}
+				logEntries = append(logEntries, row)
+			}
+			execLogs.Close()
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":     req.RunID,
-			"status":     "COMPUTED",
+			"status":     runStatus,
 			"calculated": calculated,
 			"failed":     failed,
+			"summary": map[string]interface{}{
+				"total_interest_accrued": totalInterest,
+				"total_tds_deducted":     totalTDS,
+				"total_net_accrued":      totalNet,
+				"ledger_rows":            len(ledger),
+			},
+			"ledger":          ledger,
+			"execution_log":   logEntries,
 		})
 		api.LogInfo("[FDAccrual] RunAccrual: run_id=%s calculated=%d failed=%d", req.RunID, calculated, failed)
 	}
@@ -513,6 +698,32 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&instanceEyeID)
 
 			if err != nil || instanceEyeID == "" {
+				// Capture old values for audit before direct approve
+				var oldStatus, oldMode, oldDcc, oldRound, oldPeriod, oldFinPeriod, oldFdFilter, oldInclusion string
+				var oldPrec int
+				var oldPeriodStart, oldPeriodEnd interface{}
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT run_status, run_mode, day_count_convention, rounding_rule, precision_decimals,
+					       accrual_period_start, accrual_period_end, financial_period,
+					       fd_status_filter, fd_inclusion_method
+					FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+				).Scan(&oldStatus, &oldMode, &oldDcc, &oldRound, &oldPrec,
+					&oldPeriodStart, &oldPeriodEnd, &oldFinPeriod, &oldFdFilter, &oldInclusion)
+				_ = oldPeriod
+				_, _ = pgxPool.Exec(ctx, `
+					INSERT INTO investment.fd_accrual_run_audit (
+						run_id, action_type, processing_status, reason,
+						requested_by, requested_at,
+						checker_by, checker_at, checker_comment,
+						old_run_status, old_run_mode, old_day_count_convention,
+						old_rounding_rule, old_precision_decimals,
+						old_accrual_period_start, old_accrual_period_end,
+						old_financial_period, old_fd_status_filter, old_fd_inclusion_method
+					) VALUES ($1,'APPROVE','APPROVED',$2,$3,now(),$3,now(),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+					runID, req.Comment, userEmail, req.Comment,
+					oldStatus, oldMode, oldDcc, oldRound, oldPrec,
+					oldPeriodStart, oldPeriodEnd, oldFinPeriod, oldFdFilter, oldInclusion)
+
 				// Direct approve
 				_, dbErr := pgxPool.Exec(ctx, `
 					UPDATE investment.fd_accrual_run
@@ -671,6 +882,31 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&instanceEyeID)
 
 			if instanceEyeID == "" {
+				// Capture old values for audit before direct reject
+				var oldStatus, oldMode, oldDcc, oldRound, oldFinPeriod, oldFdFilter, oldInclusion string
+				var oldPrec int
+				var oldPeriodStart, oldPeriodEnd interface{}
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT run_status, run_mode, day_count_convention, rounding_rule, precision_decimals,
+					       accrual_period_start, accrual_period_end, financial_period,
+					       fd_status_filter, fd_inclusion_method
+					FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+				).Scan(&oldStatus, &oldMode, &oldDcc, &oldRound, &oldPrec,
+					&oldPeriodStart, &oldPeriodEnd, &oldFinPeriod, &oldFdFilter, &oldInclusion)
+				_, _ = pgxPool.Exec(ctx, `
+					INSERT INTO investment.fd_accrual_run_audit (
+						run_id, action_type, processing_status, reason,
+						requested_by, requested_at,
+						checker_by, checker_at, checker_comment,
+						old_run_status, old_run_mode, old_day_count_convention,
+						old_rounding_rule, old_precision_decimals,
+						old_accrual_period_start, old_accrual_period_end,
+						old_financial_period, old_fd_status_filter, old_fd_inclusion_method
+					) VALUES ($1,'REJECT','REJECTED',$2,$3,now(),$3,now(),$2,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+					runID, req.Comment, userEmail,
+					oldStatus, oldMode, oldDcc, oldRound, oldPrec,
+					oldPeriodStart, oldPeriodEnd, oldFinPeriod, oldFdFilter, oldInclusion)
+
 				_, _ = pgxPool.Exec(ctx,
 					`UPDATE investment.fd_accrual_run SET run_status='REJECTED', updated_at=now()
 					 WHERE run_id=$1 AND run_status='PENDING_APPROVAL'`, runID)
@@ -1296,6 +1532,79 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			continue
 		}
 
+		// Audit ledger row: first read PREVIOUS values (if row existed), then write audit
+		var ledgerID string
+		var prevPeriodInterest, prevClosingBal, prevTDS, prevNetInterest float64
+		var prevStatus, prevFormula string
+		var prevIsOverridden bool
+		var prevOverrideAmt, prevOverrideAdj float64
+		var prevOverrideCode, prevOverrideText, prevOverrideStatus string
+		var prevOpeningBal, prevInterestReceived, prevTDSApplicable float64
+		existingRow := pool.QueryRow(ctx, `
+			SELECT
+				ledger_id,
+				COALESCE(period_interest_accrued,0),
+				COALESCE(closing_accrued_balance,0),
+				COALESCE(tds_deducted_in_period,0),
+				COALESCE(net_interest_in_period,0),
+				COALESCE(ledger_row_status,''),
+				COALESCE(formula_used,''),
+				COALESCE(is_overridden,false),
+				COALESCE(override_amount,0),
+				COALESCE(override_adjustment,0),
+				COALESCE(override_reason_code,''),
+				COALESCE(override_reason_text,''),
+				COALESCE(override_status,''),
+				COALESCE(opening_accrued_balance,0),
+				COALESCE(interest_received_in_period,0),
+				COALESCE(tds_applicable_amount,0)
+			FROM investment.fd_accrual_ledger WHERE run_id=$1 AND fd_id=$2`,
+			runID, fd.FDID)
+		existingRow.Scan(&ledgerID,
+			&prevPeriodInterest, &prevClosingBal, &prevTDS, &prevNetInterest,
+			&prevStatus, &prevFormula,
+			&prevIsOverridden, &prevOverrideAmt, &prevOverrideAdj,
+			&prevOverrideCode, &prevOverrideText, &prevOverrideStatus,
+			&prevOpeningBal, &prevInterestReceived, &prevTDSApplicable)
+
+		// After upsert, get the ledger_id if this was a new insert
+		if ledgerID == "" {
+			_ = pool.QueryRow(ctx,
+				`SELECT ledger_id FROM investment.fd_accrual_ledger WHERE run_id=$1 AND fd_id=$2`,
+				runID, fd.FDID,
+			).Scan(&ledgerID)
+		}
+		if ledgerID != "" {
+			_, _ = pool.Exec(ctx, `
+				INSERT INTO investment.fd_accrual_ledger_audit (
+					ledger_id, run_id, fd_id,
+					fd_ref_no, bank_id, bank_name, entity_id,
+					principal_amount, interest_rate, accrual_days,
+					action_type, processing_status, requested_by, requested_at,
+					old_period_interest_accrued, old_closing_accrued_balance,
+					old_tds_deducted_in_period, old_net_interest_in_period,
+					old_ledger_row_status, old_formula_used,
+					old_is_overridden, old_override_amount, old_override_adjustment,
+					old_override_reason_code, old_override_reason_text, old_override_status,
+					old_opening_accrued_balance, old_interest_received_in_period, old_tds_applicable_amount
+				) VALUES (
+					$1,$2,$3,
+					$4,$5,$6,$7,
+					$8,$9,$10,
+					'CALCULATE','CALCULATED',$11,now(),
+					$12,$13,$14,$15,$16,$17,
+					$18,$19,$20,$21,$22,$23,
+					$24,$25,$26
+				)`,
+				ledgerID, runID, fd.FDID,
+				result.FdRefNo, result.BankID, result.BankName, result.EntityID,
+				result.PrincipalAmount, result.InterestRate, result.AccrualDays,
+				executedBy,
+				prevPeriodInterest, prevClosingBal, prevTDS, prevNetInterest, prevStatus, prevFormula,
+				prevIsOverridden, prevOverrideAmt, prevOverrideAdj, prevOverrideCode, prevOverrideText, prevOverrideStatus,
+				prevOpeningBal, prevInterestReceived, prevTDSApplicable)
+		}
+
 		calculated++
 		totalInterest += result.PeriodInterestAccrued
 		totalTDS += result.TDSDeductedInPeriod
@@ -1400,7 +1709,11 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			COALESCE(l.net_interest_in_period,0),
 			l.accrual_period_start, l.accrual_period_end,
 			COALESCE(l.entity_id,'') AS entity_id,
-			COALESCE(l.entity_name,'') AS entity_name
+			COALESCE(l.entity_name,'') AS entity_name,
+			COALESCE(l.period_interest_accrued,0),
+			COALESCE(l.closing_accrued_balance,0),
+			COALESCE(l.tds_deducted_in_period,0),
+			COALESCE(l.formula_used,'') AS formula_used
 		FROM investment.fd_accrual_ledger l
 		WHERE l.run_id = $1
 		  AND COALESCE(l.is_deleted,false) = false
@@ -1411,15 +1724,16 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 	defer rows.Close()
 
 	type ledgerRow struct {
-		LedgerID, FDID, EntityID, EntityName string
-		NetInterest                          float64
-		PeriodStart, PeriodEnd               time.Time
+		LedgerID, FDID, EntityID, EntityName, FormulaUsed string
+		NetInterest, PeriodInterest, ClosingBalance, TDS   float64
+		PeriodStart, PeriodEnd                             time.Time
 	}
 	var ledgerRows []ledgerRow
 	for rows.Next() {
 		var lr ledgerRow
 		if err := rows.Scan(&lr.LedgerID, &lr.FDID, &lr.NetInterest,
-			&lr.PeriodStart, &lr.PeriodEnd, &lr.EntityID, &lr.EntityName); err != nil {
+			&lr.PeriodStart, &lr.PeriodEnd, &lr.EntityID, &lr.EntityName,
+			&lr.PeriodInterest, &lr.ClosingBalance, &lr.TDS, &lr.FormulaUsed); err != nil {
 			return fmt.Errorf("postAccrualJournals scan: %w", err)
 		}
 		ledgerRows = append(ledgerRows, lr)
@@ -1505,9 +1819,65 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			continue
 		}
 
+		// Audit ledger row: status CALCULATED → POSTED (full context + override snapshot)
+		// Fetch current override state before marking POSTED
+		var aOldIsOverridden bool
+		var aOldOverrideAmt, aOldOverrideAdj, aOldTDSApplicable, aOldOpeningBal, aOldIntReceived float64
+		var aOldOverrideCode, aOldOverrideText, aOldOverrideStatus string
+		var aFdRefNo, aBankID, aBankName, aEntityID string
+		var aPrincipal, aRate float64
+		var aAccrualDays int
+		_ = pool.QueryRow(ctx, `
+			SELECT
+				COALESCE(fd_ref_no,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(entity_id,''),
+				COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(accrual_days,0),
+				COALESCE(is_overridden,false),
+				COALESCE(override_amount,0), COALESCE(override_adjustment,0),
+				COALESCE(override_reason_code,''), COALESCE(override_reason_text,''),
+				COALESCE(override_status,''),
+				COALESCE(opening_accrued_balance,0), COALESCE(interest_received_in_period,0),
+				COALESCE(tds_applicable_amount,0)
+			FROM investment.fd_accrual_ledger WHERE ledger_id=$1`, lr.LedgerID,
+		).Scan(
+			&aFdRefNo, &aBankID, &aBankName, &aEntityID,
+			&aPrincipal, &aRate, &aAccrualDays,
+			&aOldIsOverridden, &aOldOverrideAmt, &aOldOverrideAdj,
+			&aOldOverrideCode, &aOldOverrideText, &aOldOverrideStatus,
+			&aOldOpeningBal, &aOldIntReceived, &aOldTDSApplicable)
+		_, _ = pool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_ledger_audit (
+				ledger_id, run_id, fd_id,
+				fd_ref_no, bank_id, bank_name, entity_id,
+				principal_amount, interest_rate, accrual_days,
+				action_type, processing_status, requested_by, requested_at,
+				checker_by, checker_at, checker_comment,
+				old_period_interest_accrued, old_closing_accrued_balance,
+				old_tds_deducted_in_period, old_net_interest_in_period,
+				old_ledger_row_status, old_formula_used,
+				old_is_overridden, old_override_amount, old_override_adjustment,
+				old_override_reason_code, old_override_reason_text, old_override_status,
+				old_opening_accrued_balance, old_interest_received_in_period, old_tds_applicable_amount
+			) VALUES (
+				$1,$2,$3,
+				$4,$5,$6,$7,
+				$8,$9,$10,
+				'APPROVE','POSTED',$11,now(),
+				$11,now(),'Journal posted',
+				$12,$13,$14,$15,'CALCULATED',$16,
+				$17,$18,$19,$20,$21,$22,
+				$23,$24,$25
+			)`,
+			lr.LedgerID, runID, lr.FDID,
+			aFdRefNo, aBankID, aBankName, aEntityID,
+			aPrincipal, aRate, aAccrualDays,
+			userEmail,
+			lr.PeriodInterest, lr.ClosingBalance, lr.TDS, lr.NetInterest, lr.FormulaUsed,
+			aOldIsOverridden, aOldOverrideAmt, aOldOverrideAdj, aOldOverrideCode, aOldOverrideText, aOldOverrideStatus,
+			aOldOpeningBal, aOldIntReceived, aOldTDSApplicable)
+
 		// Update ledger with journal_entry_id
 		_, _ = pool.Exec(ctx,
-			`UPDATE investment.fd_accrual_ledger SET journal_entry_id=$1, updated_at=now()
+			`UPDATE investment.fd_accrual_ledger SET journal_entry_id=$1, ledger_row_status='POSTED', updated_at=now()
 			 WHERE run_id=$2 AND fd_id=$3`,
 			entryID, runID, lr.FDID)
 

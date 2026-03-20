@@ -25,23 +25,24 @@ type ReceiptRow struct {
 // runReconciliation executes the full reconciliation loop for a given run ID.
 func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) error {
 	// Step 1: Fetch run metadata
-	var entityID, periodStart, periodEnd string
+	var entityID, periodStart, periodEnd, matchingBasis, triggeredBy string
 	err := pool.QueryRow(ctx, `
-		SELECT entity_id, period_start::text, period_end::text
+		SELECT entity_id, period_start::text, period_end::text,
+		       COALESCE(matching_basis,'BOTH'), COALESCE(triggered_by,'system')
 		FROM investment.fd_receipt_reconcile_run
-		WHERE reconcile_run_id=$1`, runID).Scan(&entityID, &periodStart, &periodEnd)
+		WHERE reconcile_run_id=$1`, runID).Scan(&entityID, &periodStart, &periodEnd, &matchingBasis, &triggeredBy)
 	if err != nil {
 		return fmt.Errorf("fetch run metadata: %w", err)
 	}
 
-	// Step 2: Load all APPROVED receipts for this entity + period
+	// Step 2: Load all APPROVED/POSTED receipts for this entity + period
 	rows, err := pool.Query(ctx, `
 		SELECT receipt_id, fd_id, fd_ref_no, entity_id,
 		       receipt_date, gross_interest_received, tds_amount_deducted, net_amount_received
 		FROM investment.fd_interest_receipt
 		WHERE entity_id=$1
 		  AND receipt_date BETWEEN $2::date AND $3::date
-		  AND receipt_status='APPROVED'
+		  AND receipt_status IN ('APPROVED','POSTED')
 		  AND is_deleted=false`, entityID, periodStart, periodEnd)
 	if err != nil {
 		return fmt.Errorf("load receipts: %w", err)
@@ -74,24 +75,33 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 		matchStatus, variance, variancePct := classify(rec.Gross, cashflowAmt, accrualAmt)
 
 		hasException := variancePct > MatchTolerancePct
-		if matchStatus == "MISSING_CASHFLOW" || matchStatus == "MISSING_RECEIPT" || matchStatus == "OVER_RECEIVED" {
+		if matchStatus == "EXCEPTION" {
 			hasException = true
 		}
 
 		// Step 5: Insert result
-		resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, matchStatus, variance, variancePct, hasException, cashflowID, accrualID, cashflowAmt, accrualAmt)
+		resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, matchStatus, matchingBasis, variance, variancePct, hasException, cashflowID, accrualID, cashflowAmt, accrualAmt)
 		if rErr != nil {
 			continue
 		}
 
-		// Step 6: Mark cashflow cleared
+		// Step 6: Mark cashflow cleared and update receipt reconcile status
 		if cashflowID != "" {
 			pool.Exec(ctx, `UPDATE investment.fd_cashflow_schedule SET receipt_cleared=true WHERE cashflow_id=$1`, cashflowID) //nolint:errcheck
 		}
+		reconcileStatus := "MATCHED"
+		if matchStatus != "MATCHED" {
+			reconcileStatus = "UNMATCHED"
+		}
+		pool.Exec(ctx, `UPDATE investment.fd_interest_receipt SET reconcile_status=$1, reconcile_run_id=$2 WHERE receipt_id=$3`, //nolint:errcheck
+			reconcileStatus, runID, rec.ReceiptID)
 
 		// Step 7: Insert exception if needed
 		if hasException {
-			insertException(ctx, pool, rec, runID, resultID, matchStatus, variance, variancePct) //nolint:errcheck
+			exID, _ := insertException(ctx, pool, rec, runID, resultID, matchStatus, cashflowAmt, rec.Gross, triggeredBy)
+			if exID != "" {
+				pool.Exec(ctx, `UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`, exID, resultID) //nolint:errcheck
+			}
 			exceptions++
 		}
 
@@ -121,9 +131,12 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 				continue
 			}
 			rec := ReceiptRow{FDID: fdID, FdRefNo: fdRef, EntityID: entID, Gross: schAmt}
-			resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, "MISSING_RECEIPT", schAmt, 100.0, true, cfID, "", schAmt, 0)
+			resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, "UNMATCHED", matchingBasis, schAmt, 100.0, true, cfID, "", schAmt, 0)
 			if rErr == nil {
-				insertException(ctx, pool, rec, runID, resultID, "MISSING_RECEIPT", schAmt, 100.0) //nolint:errcheck
+				exID, _ := insertException(ctx, pool, rec, runID, resultID, "MISSING_RECEIPT", schAmt, 0, triggeredBy)
+				if exID != "" {
+					pool.Exec(ctx, `UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`, exID, resultID) //nolint:errcheck
+				}
 				exceptions++
 			}
 		}
@@ -182,13 +195,15 @@ func findMatchingAccrualLedger(ctx context.Context, pool *pgxpool.Pool, rec Rece
 }
 
 // classify determines match status and variance from gross vs expected amounts.
+// Returns only valid match_status values: MATCHED, PARTIAL, UNMATCHED, EXCEPTION
 func classify(gross, cashflowAmt, accrualAmt float64) (string, float64, float64) {
 	expected := cashflowAmt
 	if expected == 0 {
 		expected = accrualAmt
 	}
 	if expected == 0 {
-		return "MISSING_CASHFLOW", gross, 100.0
+		// No cashflow or accrual found — flag as exception
+		return "EXCEPTION", gross, 100.0
 	}
 	variance := gross - expected
 	var variancePct float64
@@ -201,68 +216,101 @@ func classify(gross, cashflowAmt, accrualAmt float64) (string, float64, float64)
 	if variancePct <= MatchTolerancePct {
 		return "MATCHED", variance, variancePct
 	}
-	if gross > expected {
-		return "OVER_RECEIVED", variance, variancePct
+	// Within 10% = PARTIAL; beyond = UNMATCHED
+	if variancePct <= 10.0 {
+		return "PARTIAL", variance, variancePct
 	}
-	return "UNDER_RECEIVED", variance, variancePct
+	return "UNMATCHED", variance, variancePct
 }
 
 // insertReconcileResult writes one reconciliation result row and returns its ID.
+// Columns match investment.fd_receipt_reconcile_result schema exactly.
 func insertReconcileResult(ctx context.Context, pool *pgxpool.Pool,
-	rec ReceiptRow, runID, matchStatus string,
+	rec ReceiptRow, runID, matchStatus, matchingBasis string,
 	variance, variancePct float64, hasException bool,
-	cashflowID, accrualID string,
-	cashflowAmt, accrualAmt float64) (string, error) {
+	cashflowID, accrualLedgerID string,
+	expectedInterest, receivedInterest float64) (string, error) {
+
+	// Fetch bank_id, bank_name from fd_master for the result row
+	var bankID, bankName string
+	_ = pool.QueryRow(ctx,
+		`SELECT COALESCE(bank_id,''), COALESCE(bank_name,'') FROM investment.fd_master WHERE fd_id=$1 AND is_deleted=false`,
+		rec.FDID).Scan(&bankID, &bankName)
+
+	// Derive period from receipt or default
+	periodStart := rec.ReceiptDate.AddDate(0, -3, 0)
+	periodEnd := rec.ReceiptDate
+
+	// TDS variance
+	tdsVariance := rec.TDS // received TDS; expected TDS not tracked separately here
 
 	var resultID string
 	err := pool.QueryRow(ctx, `
 		INSERT INTO investment.fd_receipt_reconcile_result (
-			result_id, reconcile_run_id, receipt_id, fd_id, fd_ref_no, entity_id,
-			cashflow_id, accrual_id,
-			receipt_amount, cashflow_amount, accrual_amount,
-			variance_amount, variance_pct,
-			match_status, has_exception,
-			reconciled_at
+			reconcile_run_id, fd_id, fd_ref_no, receipt_id,
+			cashflow_id, accrual_ledger_id,
+			entity_id, bank_id, bank_name,
+			period_start, period_end, matching_basis,
+			expected_interest, expected_tds, expected_net,
+			received_interest, received_tds, received_net,
+			interest_variance, tds_variance, interest_variance_pct,
+			match_status, match_type, has_exception
 		) VALUES (
-			'RRES-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now()
+			$1,$2,$3,$4,
+			$5,$6,
+			$7,$8,$9,
+			$10,$11,$12,
+			$13,0,$14,
+			$15,$16,$17,
+			$18,$19,$20,
+			$21,'AUTO',$22
 		) RETURNING result_id`,
-		runID,
-		nullStr(rec.ReceiptID), rec.FDID, rec.FdRefNo, rec.EntityID,
-		nullStr(cashflowID), nullStr(accrualID),
-		rec.Gross, cashflowAmt, accrualAmt,
-		variance, variancePct,
+		runID, rec.FDID, rec.FdRefNo, nullStr(rec.ReceiptID),
+		nullStr(cashflowID), nullStr(accrualLedgerID),
+		rec.EntityID, bankID, bankName,
+		periodStart, periodEnd, matchingBasis,
+		expectedInterest, expectedInterest,     // expected_net = expected_interest (no TDS expected side)
+		receivedInterest, rec.TDS, rec.Net,
+		variance, tdsVariance, variancePct,
 		matchStatus, hasException,
 	).Scan(&resultID)
 	return resultID, err
 }
 
 // insertException creates an exception record for a result with variance/missing.
+// Returns the new exception_id and any error.
 func insertException(ctx context.Context, pool *pgxpool.Pool,
 	rec ReceiptRow, runID, resultID, exceptionType string,
-	variance, variancePct float64) error {
+	expectedAmt, receivedAmt float64,
+	raisedBy string) (string, error) {
 
 	severity := "WARNING"
-	if exceptionType == "OVER_RECEIVED" || exceptionType == "MISSING_RECEIPT" {
+	if exceptionType == "MISSING_RECEIPT" || exceptionType == "EXCEPTION" {
 		severity = "BLOCKER"
 	}
+	variance := receivedAmt - expectedAmt
+	if variance < 0 {
+		variance = -variance
+	}
 
-	_, err := pool.Exec(ctx, `
+	var exID string
+	err := pool.QueryRow(ctx, `
 		INSERT INTO investment.fd_receipt_exception (
 			exception_id, reconcile_run_id, result_id,
-			receipt_id, fd_id, fd_ref_no, entity_id,
+			receipt_id, fd_id, fd_ref_no,
 			exception_type, severity,
-			variance_amount, variance_pct,
-			exception_status, raised_at,
-			is_deleted
+			expected_amount, received_amount, variance_amount,
+			exception_status, raised_by, raised_at,
+			is_active, is_deleted
 		) VALUES (
 			'IREX-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'OPEN',now(),false
-		)`,
-		runID, nullStr(resultID),
-		nullStr(rec.ReceiptID), rec.FDID, rec.FdRefNo, rec.EntityID,
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'OPEN',$11,now(),true,false
+		) RETURNING exception_id`,
+		runID, resultID,
+		nullStr(rec.ReceiptID), rec.FDID, rec.FdRefNo,
 		exceptionType, severity,
-		variance, variancePct,
-	)
-	return err
+		expectedAmt, receivedAmt, variance,
+		raisedBy,
+	).Scan(&exID)
+	return exID, err
 }
