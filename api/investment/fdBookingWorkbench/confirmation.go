@@ -97,9 +97,10 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		)
 
 		// Determine confirmation status
-		confirmationStatus := "CONFIRMED"
+		// DB constraint allows: CAPTURED, APPROVAL_PENDING, VARIANCE_PENDING, CONFIRMED, REJECTED
+		confirmationStatus := "CAPTURED"
 		if variance.HasVariance {
-			confirmationStatus = "VARIANCE_REVIEW"
+			confirmationStatus = "VARIANCE_PENDING"
 		}
 
 		tx, err := pgxPool.Begin(ctx)
@@ -151,6 +152,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				actual_start_date, actual_maturity_date,
 				bank_fd_ref_no, bank_reference_number,
 				confirmation_received_date,
+				confirmation_mode,
 				variance_flag, variance_threshold_breached,
 				variance_details,
 				confirmation_status,
@@ -161,6 +163,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				$4,$5,
 				$6,$7,
 				$8,
+				'MANUAL',
 				$9,$10,
 				$11,
 				$12,

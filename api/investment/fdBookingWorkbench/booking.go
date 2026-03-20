@@ -883,26 +883,233 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // user is an eligible approver, calls RecordAction (which respects eye
 // sequence and handles audit stamping + status flip via finalizeRecord).
 // Falls back to direct DB stamp only when no engine instance exists.
+// func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+
+// 		var req struct {
+// 			UserID     string   `json:"user_id"`
+// 			BookingIDs []string `json:"booking_ids"`
+// 			Comment    string   `json:"comment"`
+// 		}
+
+// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+// 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+// 			return
+// 		}
+
+// 		if len(req.BookingIDs) == 0 {
+// 			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
+// 			return
+// 		}
+
+// 		// ---------------- USER VALIDATION ----------------
+// 		userEmail := ""
+// 		for _, s := range auth.GetActiveSessions() {
+// 			if s.UserID == req.UserID {
+// 				userEmail = s.Email
+// 				break
+// 			}
+// 		}
+
+// 		if userEmail == "" {
+// 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+// 			return
+// 		}
+
+// 		ctx := r.Context()
+// 		engineActed := 0
+// 		directActed := 0
+// 		var errors []string
+
+// 		for _, bID := range req.BookingIDs {
+
+// 			// ---------------- ENGINE PATH ----------------
+// 			var instanceEyeID string
+
+// 			engineErr := pgxPool.QueryRow(ctx, `
+// 				SELECT ie.instance_eye_id
+// 				FROM uam.approval_instance i
+// 				JOIN uam.approval_instance_eye ie
+// 					ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+// 				JOIN uam.approval_matrix_eye_member m
+// 					ON m.eye_id = ie.matrix_eye_id
+// 					AND m.member_type = 'APPROVER'
+// 					AND m.is_active = true
+// 					AND m.is_deleted = false
+// 					AND m.assignment_type IN ('USER_ONLY','ROLE_USER')
+// 					AND m.user_id = $2
+// 				WHERE i.record_id = $1
+// 				  AND i.module_code = 'FIXED_DEPOSIT'
+// 				  AND i.status = 'PENDING'
+// 				ORDER BY ie.position ASC
+// 				LIMIT 1
+// 			`, bID, req.UserID).Scan(&instanceEyeID)
+
+// 			if engineErr == nil && instanceEyeID != "" {
+
+// 				// 🔥 APPROVAL ENGINE ACTION
+// 				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+// 					InstanceEyeID: instanceEyeID,
+// 					ActorUserID:   req.UserID,
+// 					ActorEmail:    userEmail,
+// 					ActionType:    approvalengine.ActionApproved,
+// 					Comment:       req.Comment,
+// 				}); err != nil {
+// 					api.LogError("[FDBooking] RecordAction approve failed for booking %s: %v", bID, err)
+// 					errors = append(errors, bID+": "+err.Error())
+// 					continue
+// 				}
+
+// 				// 🔥 CHECK FINAL APPROVAL
+// 				var instStatus string
+// 				_ = pgxPool.QueryRow(ctx, `
+// 					SELECT i.status
+// 					FROM uam.approval_instance i
+// 					JOIN uam.approval_instance_eye ie
+// 						ON ie.instance_id = i.instance_id
+// 					WHERE ie.instance_eye_id = $1
+// 				`, instanceEyeID).Scan(&instStatus)
+
+// 				if instStatus == "APPROVED" {
+
+// 					// ✅ FINAL STATUS CHANGE (UPDATED)
+// 					_, _ = pgxPool.Exec(ctx, `
+// 						UPDATE investment.fd_booking_request
+// 						SET booking_status = 'SENT_TO_BANK',
+// 						    approved_at = NOW(),
+// 						    sent_to_bank_at = NOW()
+// 						WHERE booking_id = $1
+// 						  AND booking_status <> 'SENT_TO_BANK'
+// 					`, bID)
+
+// 					// delete handling
+// 					_, _ = pgxPool.Exec(ctx, `
+// 						UPDATE investment.fd_booking_request
+// 						SET is_deleted = true
+// 						WHERE booking_id IN (
+// 							SELECT DISTINCT a.booking_id
+// 							FROM investment.fd_audit_booking_request a
+// 							WHERE a.booking_id = $1
+// 							  AND a.action_type = 'DELETE'
+// 							  AND a.processing_status = 'APPROVED'
+// 						)
+// 					`, bID)
+// 				}
+
+// 				engineActed++
+// 				continue
+// 			}
+
+// 			// ---------------- DIRECT PATH ----------------
+// 			var anyInstance int
+// 			_ = pgxPool.QueryRow(ctx, `
+// 				SELECT COUNT(*)
+// 				FROM uam.approval_instance
+// 				WHERE record_id = $1
+// 				  AND module_code = 'FIXED_DEPOSIT'
+// 				  AND status = 'PENDING'
+// 			`, bID).Scan(&anyInstance)
+
+// 			if anyInstance > 0 {
+// 				errors = append(errors, bID+": not your turn in approval sequence")
+// 				continue
+// 			}
+
+// 			tx, err := pgxPool.Begin(ctx)
+// 			if err != nil {
+// 				errors = append(errors, bID+": tx begin failed")
+// 				continue
+// 			}
+
+// 			_, err1 := tx.Exec(ctx, `
+// 				UPDATE investment.fd_audit_booking_request
+// 				SET processing_status='APPROVED',
+// 				    checker_by=$1,
+// 				    checker_at=NOW(),
+// 				    checker_comment=$2
+// 				WHERE booking_id=$3
+// 				  AND processing_status LIKE '%PENDING%'
+// 			`, userEmail, req.Comment, bID)
+
+// 			// ✅ FINAL STATUS CHANGE (UPDATED)
+// 			_, err2 := tx.Exec(ctx, `
+// 				UPDATE investment.fd_booking_request
+// 				SET booking_status='SENT_TO_BANK',
+// 				    approved_at = NOW(),
+// 				    sent_to_bank_at = NOW()
+// 				WHERE booking_id=$1
+// 				  AND booking_status <> 'SENT_TO_BANK'
+// 			`, bID)
+
+// 			_, err3 := tx.Exec(ctx, `
+// 				UPDATE investment.fd_booking_request
+// 				SET is_deleted=true
+// 				WHERE booking_id IN (
+// 					SELECT DISTINCT a.booking_id
+// 					FROM investment.fd_audit_booking_request a
+// 					WHERE a.booking_id=$1
+// 					  AND a.action_type='DELETE'
+// 					  AND a.processing_status='APPROVED'
+// 				)
+// 			`, bID)
+
+// 			if err1 != nil || err2 != nil || err3 != nil {
+// 				_ = tx.Rollback(ctx)
+// 				errors = append(errors, bID+": direct stamp failed")
+// 				continue
+// 			}
+
+// 			if err := tx.Commit(ctx); err != nil {
+// 				errors = append(errors, bID+": commit failed")
+// 				continue
+// 			}
+
+// 			directActed++
+// 		}
+
+// 		// ---------------- RESPONSE ----------------
+// 		api.RespondWithPayload(w, true, "", map[string]interface{}{
+// 			"engine_acted": engineActed,
+// 			"direct_acted": directActed,
+// 			"errors":       errors,
+// 			"checker":      userEmail,
+// 		})
+
+// 		// ---------------- NOTIFICATIONS ----------------
+// 		for _, bID := range req.BookingIDs {
+// 			go func(id, uEmail string) {
+// 				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+// 					"/investment/fd/booking/approve",
+// 					id,
+// 					map[string]interface{}{
+// 						"record_id":   id,
+// 						"event":       "FD_BOOKING_SENT_TO_BANK", // ✅ updated event
+// 						"actor_email": uEmail,
+// 					})
+// 			}(bID, userEmail)
+// 		}
+
+// 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
+// 			engineActed, directActed, len(errors), userEmail)
+// 	}
+// }
+
 func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
 		var req struct {
 			UserID     string   `json:"user_id"`
 			BookingIDs []string `json:"booking_ids"`
 			Comment    string   `json:"comment"`
 		}
-
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-
 		if len(req.BookingIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
 			return
 		}
 
-		// ---------------- USER VALIDATION ----------------
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -910,7 +1117,6 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
-
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -922,32 +1128,21 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-
-			// ---------------- ENGINE PATH ----------------
+			// Try engine path first: find the active eye this user can act on.
 			var instanceEyeID string
-
 			engineErr := pgxPool.QueryRow(ctx, `
 				SELECT ie.instance_eye_id
 				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie 
-					ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m 
-					ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER'
-					AND m.is_active = true 
-					AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') 
-					AND m.user_id = $2
-				WHERE i.record_id = $1 
-				  AND i.module_code = 'FIXED_DEPOSIT' 
-				  AND i.status = 'PENDING'
-				ORDER BY ie.position ASC 
-				LIMIT 1
-			`, bID, req.UserID).Scan(&instanceEyeID)
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
+					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
+					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
+				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
+				ORDER BY ie.position ASC LIMIT 1`, bID, req.UserID,
+			).Scan(&instanceEyeID)
 
 			if engineErr == nil && instanceEyeID != "" {
-
-				// 🔥 APPROVAL ENGINE ACTION
+				// Engine path: RecordAction handles audit stamp + status flip for final eye.
 				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
 					InstanceEyeID: instanceEyeID,
 					ActorUserID:   req.UserID,
@@ -959,136 +1154,81 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": "+err.Error())
 					continue
 				}
-
-				// 🔥 CHECK FINAL APPROVAL
+				// If the engine fully approved (last eye done), flip booking status.
+				// Check if instance is now APPROVED.
 				var instStatus string
 				_ = pgxPool.QueryRow(ctx, `
-					SELECT i.status 
-					FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie 
-						ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1
-				`, instanceEyeID).Scan(&instStatus)
-
+					SELECT i.status FROM uam.approval_instance i
+					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
 				if instStatus == "APPROVED" {
-
-					// ✅ FINAL STATUS CHANGE (UPDATED)
 					_, _ = pgxPool.Exec(ctx, `
 						UPDATE investment.fd_booking_request
-						SET booking_status = 'SENT_TO_BANK',
-						    approved_at = NOW(),
-						    sent_to_bank_at = NOW()
-						WHERE booking_id = $1 
-						  AND booking_status <> 'SENT_TO_BANK'
-					`, bID)
-
-					// delete handling
+						SET booking_status = 'SENT_TO_BANK', approved_at = NOW(), sent_to_bank_at = NOW()
+						WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
 					_, _ = pgxPool.Exec(ctx, `
-						UPDATE investment.fd_booking_request 
-						SET is_deleted = true
+						UPDATE investment.fd_booking_request SET is_deleted = true
 						WHERE booking_id IN (
-							SELECT DISTINCT a.booking_id 
-							FROM investment.fd_audit_booking_request a
-							WHERE a.booking_id = $1 
-							  AND a.action_type = 'DELETE' 
-							  AND a.processing_status = 'APPROVED'
-						)
-					`, bID)
+							SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
+							WHERE a.booking_id = $1 AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
+						)`, bID)
 				}
-
 				engineActed++
-				continue
+			} else {
+				// No active eye for this user — check if any engine instance exists at all.
+				var anyInstance int
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT COUNT(*) FROM uam.approval_instance
+					WHERE record_id = $1 AND module_code = 'FIXED_DEPOSIT' AND status = 'PENDING'`, bID,
+				).Scan(&anyInstance)
+				if anyInstance > 0 {
+					// Instance exists but this user is not the current eye — don't allow out-of-sequence approve.
+					errors = append(errors, bID+": not your turn in approval sequence")
+					continue
+				}
+				// No matrix/instance — direct stamp (legacy / no-matrix path).
+				tx, err := pgxPool.Begin(ctx)
+				if err != nil {
+					errors = append(errors, bID+": tx begin failed")
+					continue
+				}
+				_, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
+					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
+					WHERE booking_id=$3 AND processing_status LIKE '%PENDING%'`,
+					userEmail, req.Comment, bID)
+				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='SENT_TO_BANK'
+					WHERE booking_id=$1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
+				_, err3 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET is_deleted=true
+					WHERE booking_id IN (
+						SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
+						WHERE a.booking_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
+					)`, bID)
+				if err1 != nil || err2 != nil || err3 != nil {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, bID+": direct stamp failed")
+					continue
+				}
+				if cerr := tx.Commit(ctx); cerr != nil {
+					errors = append(errors, bID+": commit failed")
+					continue
+				}
+				directActed++
 			}
-
-			// ---------------- DIRECT PATH ----------------
-			var anyInstance int
-			_ = pgxPool.QueryRow(ctx, `
-				SELECT COUNT(*) 
-				FROM uam.approval_instance
-				WHERE record_id = $1 
-				  AND module_code = 'FIXED_DEPOSIT' 
-				  AND status = 'PENDING'
-			`, bID).Scan(&anyInstance)
-
-			if anyInstance > 0 {
-				errors = append(errors, bID+": not your turn in approval sequence")
-				continue
-			}
-
-			tx, err := pgxPool.Begin(ctx)
-			if err != nil {
-				errors = append(errors, bID+": tx begin failed")
-				continue
-			}
-
-			_, err1 := tx.Exec(ctx, `
-				UPDATE investment.fd_audit_booking_request
-				SET processing_status='APPROVED', 
-				    checker_by=$1, 
-				    checker_at=NOW(), 
-				    checker_comment=$2
-				WHERE booking_id=$3 
-				  AND processing_status LIKE '%PENDING%'
-			`, userEmail, req.Comment, bID)
-
-			// ✅ FINAL STATUS CHANGE (UPDATED)
-			_, err2 := tx.Exec(ctx, `
-				UPDATE investment.fd_booking_request
-				SET booking_status='SENT_TO_BANK',
-				    approved_at = NOW(),
-				    sent_to_bank_at = NOW()
-				WHERE booking_id=$1 
-				  AND booking_status <> 'SENT_TO_BANK'
-			`, bID)
-
-			_, err3 := tx.Exec(ctx, `
-				UPDATE investment.fd_booking_request 
-				SET is_deleted=true
-				WHERE booking_id IN (
-					SELECT DISTINCT a.booking_id 
-					FROM investment.fd_audit_booking_request a
-					WHERE a.booking_id=$1 
-					  AND a.action_type='DELETE' 
-					  AND a.processing_status='APPROVED'
-				)
-			`, bID)
-
-			if err1 != nil || err2 != nil || err3 != nil {
-				_ = tx.Rollback(ctx)
-				errors = append(errors, bID+": direct stamp failed")
-				continue
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				errors = append(errors, bID+": commit failed")
-				continue
-			}
-
-			directActed++
 		}
 
-		// ---------------- RESPONSE ----------------
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"engine_acted": engineActed,
-			"direct_acted": directActed,
-			"errors":       errors,
-			"checker":      userEmail,
+			"engine_acted": engineActed, "direct_acted": directActed,
+			"errors": errors, "checker": userEmail,
 		})
-
-		// ---------------- NOTIFICATIONS ----------------
 		for _, bID := range req.BookingIDs {
 			go func(id, uEmail string) {
-				notifcatalog.TriggerNotification(context.Background(), pgxPool,
-					"/investment/fd/booking/approve",
-					id,
-					map[string]interface{}{
-						"record_id":   id,
-						"event":       "FD_BOOKING_SENT_TO_BANK", // ✅ updated event
-						"actor_email": uEmail,
-					})
+				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
+					"record_id":   id,
+					"event":       "FD_BOOKING_APPROVED",
+					"actor_email": uEmail,
+				})
 			}(bID, userEmail)
 		}
-
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -1746,8 +1886,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE booking_id = m.booking_id AND processing_status = 'APPROVED'
 				ORDER BY requested_at DESC LIMIT 1
 			) aud ON true
-			WHERE m.booking_status = 'SENT_TO_BANK' AND 
-			COALESCE(m.is_deleted,false) = false`
+			WHERE COALESCE(m.is_deleted,false) = false`
 
 		var q string
 		var args []interface{}
@@ -1760,8 +1899,8 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, statusFilter)
 			argIdx++
 		} else {
-			// default: everything past internal approval — APPROVED, SENT_TO_BANK, CONFIRMED
-			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK','CONFIRMED')`
+			// default: bookings eligible for confirmation — APPROVED and SENT_TO_BANK
+			q = baseSelect + ` AND m.booking_status IN ('APPROVED','SENT_TO_BANK')`
 		}
 
 		if entityID != "" {

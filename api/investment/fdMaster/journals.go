@@ -145,11 +145,11 @@ func SaveFDJournalEntries(ctx context.Context, exec queryExecutor, fdID string, 
 		err := exec.QueryRow(ctx, `
 			INSERT INTO investment.accounting_journal_entry (
 				activity_id, entity_id, entity_name, folio_id, demat_id, entry_date,
-				accounting_period, entry_type, description, total_debit, total_credit, status, created_by
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'POSTED',$12)
+				accounting_period, entry_type, description, total_debit, total_credit, status, fd_id, created_by
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'POSTED',$12,$13)
 			RETURNING entry_id
 		`, je.ActivityID, je.EntityID, je.EntityName, je.FolioID, je.DematID, je.EntryDate,
-			je.AccountingPeriod, je.EntryType, fmt.Sprintf("%s | fd_id=%s", je.Description, fdID), je.TotalDebit, je.TotalCredit, userEmail,
+			je.AccountingPeriod, je.EntryType, fmt.Sprintf("%s | fd_id=%s", je.Description, fdID), je.TotalDebit, je.TotalCredit, fdID, userEmail,
 		).Scan(&entryID)
 		if err != nil {
 			return fmt.Errorf("insert journal entry: %w", err)
