@@ -383,15 +383,21 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 // POST /investment/fd/tds-register/journal
 // Returns TDS journal entries (simplified for now without accounting integration)
 
+// GetTDSJournalEntries returns journal entries from accounting_journal_entry for a given
+// receipt_id, tds_id, or fd_id — with all line items included.
+//
+// Lookup priority:
+//  1. receipt_id  → je.receipt_id = $receipt_id
+//  2. tds_id      → resolve receipt_id from fd_tds_receipt, then same as above
+//  3. fd_id       → je.fd_id = $fd_id  (returns all journals for that FD)
+//  4. entity_id   → je.entity_id = $entity_id  (with optional date range)
 func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID         string `json:"user_id"`
-			EntityID       string `json:"entity_id"`
-			TDSReceiptID   string `json:"tds_receipt_id"`
-			ReceiptID      string `json:"receipt_id"`
-			DateFrom       string `json:"date_from"`
-			DateTo         string `json:"date_to"`
+			UserID    string `json:"user_id"`
+			ReceiptID string `json:"receipt_id"`
+			TDSID     string `json:"tds_id"`
+			FDID      string `json:"fd_id"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -407,96 +413,65 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// Simple TDS journal query (without accounting integration for now)
-		sql := `
-			SELECT 
-				tds.tds_id,
-				tds.receipt_id,
-				tds.entity_id,
-				tds.fd_id,
-				tds.fd_ref_no,
-				TO_CHAR(tds.period_start, 'YYYY-MM-DD') AS period_start,
-				TO_CHAR(tds.period_end, 'YYYY-MM-DD') AS period_end,
-				COALESCE(tds.tds_expected, 0) AS tds_expected,
-				COALESCE(tds.tds_deducted_actual, 0) AS tds_deducted_actual,
-				COALESCE(tds.tds_variance, 0) AS tds_variance,
-				COALESCE(tds.gross_interest, 0) AS gross_interest,
-				COALESCE(tds.tds_status, 'CAPTURED') AS tds_status,
-				TO_CHAR(tds.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
-				COALESCE(fd.entity_name, '') AS entity_name,
-				COALESCE(fd.bank_name, '') AS bank_name
-			FROM investment.fd_tds_receipt tds
-			LEFT JOIN investment.fd_master fd ON fd.fd_id = tds.fd_id
-			WHERE tds.is_deleted = false`
-
-		args := []interface{}{}
-		argIdx := 1
-
-		if req.EntityID != "" {
-			sql += fmt.Sprintf(" AND tds.entity_id = $%d", argIdx)
-			args = append(args, req.EntityID)
-			argIdx++
+		// If tds_id provided, resolve it to its receipt_id
+		if req.TDSID != "" && req.ReceiptID == "" {
+			var rid string
+			if err := pool.QueryRow(ctx,
+				`SELECT receipt_id FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
+				req.TDSID).Scan(&rid); err == nil {
+				req.ReceiptID = rid
+			}
 		}
 
-		if req.TDSReceiptID != "" {
-			sql += fmt.Sprintf(" AND tds.tds_id = $%d", argIdx)
-			args = append(args, req.TDSReceiptID)
-			argIdx++
+		if req.ReceiptID == "" && req.FDID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "one of receipt_id, tds_id or fd_id is required")
+			return
 		}
 
+		var filterCol, filterVal string
 		if req.ReceiptID != "" {
-			sql += fmt.Sprintf(" AND tds.receipt_id = $%d", argIdx)
-			args = append(args, req.ReceiptID)
-			argIdx++
+			filterCol = "je.receipt_id"
+			filterVal = req.ReceiptID
+		} else {
+			filterCol = "je.fd_id"
+			filterVal = req.FDID
 		}
 
-		if req.DateFrom != "" {
-			sql += fmt.Sprintf(" AND tds.period_start >= $%d", argIdx)
-			args = append(args, req.DateFrom)
-			argIdx++
-		}
-
-		if req.DateTo != "" {
-			sql += fmt.Sprintf(" AND tds.period_end <= $%d", argIdx)
-			args = append(args, req.DateTo)
-			argIdx++
-		}
-
-		sql += " ORDER BY tds.created_at DESC"
-
-		rows, err := pool.Query(ctx, sql, args...)
+		rows, err := pool.Query(ctx, `
+			SELECT
+				je.entry_id, je.activity_id, je.entity_id, je.entity_name,
+				je.fd_id, je.receipt_id, je.accrual_run_id, je.accrual_ledger_id,
+				TO_CHAR(je.entry_date, 'YYYY-MM-DD') AS entry_date,
+				je.accounting_period, je.entry_type, je.description,
+				je.total_debit, je.total_credit, je.status,
+				TO_CHAR(je.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				je.created_by,
+				jl.line_id, jl.line_number, jl.account_number, jl.account_name,
+				jl.account_type, jl.debit_amount, jl.credit_amount, jl.narration,
+				jl.folio_id, jl.demat_id
+			FROM investment.accounting_journal_entry je
+			LEFT JOIN investment.accounting_journal_entry_line jl ON jl.entry_id = je.entry_id
+			WHERE `+filterCol+` = $1 AND je.is_deleted = false
+			ORDER BY je.entry_date DESC, jl.line_number ASC`, filterVal)
 		if err != nil {
-			api.LogError("[TDSJournal] Query failed: %v", err)
-			api.RespondWithError(w, http.StatusInternalServerError, "TDS journal query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Journal query failed: "+err.Error())
 			return
 		}
 		defer rows.Close()
 
-		journals, err := rowsToMapSlice(rows)
+		payload, err := rowsToMapSlice(rows)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Failed to parse TDS journal data")
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to read journal rows")
 			return
 		}
-
-		// Calculate summary
-		summary := map[string]interface{}{
-			"total_count":         len(journals),
-			"total_tds_expected":  0.0,
-			"total_tds_actual":    0.0,
-			"total_gross_interest": 0.0,
-		}
-
-		for _, journal := range journals {
-			summary["total_tds_expected"] = summary["total_tds_expected"].(float64) + toFloat64(journal["tds_expected"])
-			summary["total_tds_actual"] = summary["total_tds_actual"].(float64) + toFloat64(journal["tds_deducted_actual"])
-			summary["total_gross_interest"] = summary["total_gross_interest"].(float64) + toFloat64(journal["gross_interest"])
+		if payload == nil {
+			payload = []map[string]interface{}{}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data":    journals,
-			"summary": summary,
+			"data":    payload,
 		})
 	}
 }
