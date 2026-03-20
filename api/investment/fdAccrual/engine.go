@@ -220,7 +220,7 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 	argIdx := 5
 
 	if params.BankIDFilter != "" {
-		query += fmt.Sprintf(" AND f.bank_id = $%d", argIdx)
+		query += fmt.Sprintf(" AND (f.bank_id = $%d OR f.bank_name ILIKE $%d)", argIdx, argIdx)
 		args = append(args, params.BankIDFilter)
 		argIdx++
 	}
