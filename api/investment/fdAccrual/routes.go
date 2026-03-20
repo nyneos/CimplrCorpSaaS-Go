@@ -39,6 +39,14 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		"/investment/fd/accrual/run/reject",
 		mid(http.HandlerFunc(BulkRejectAccrualRun(pool))),
 	)
+	mux.Handle(
+		"/investment/fd/accrual/run/recompute",
+		mid(http.HandlerFunc(RecomputeAccrualRun(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/run/bulk-generate",
+		mid(http.HandlerFunc(BulkGenerateMonthlyAccruals(pool))),
+	)
 
 	// ── Accrual data / detail ────────────────────────────────────────────────
 	mux.Handle(

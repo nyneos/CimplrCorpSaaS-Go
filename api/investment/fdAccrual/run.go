@@ -1894,6 +1894,309 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 	return nil
 }
 
+// ─── 15. RecomputeAccrualRun ──────────────────────────────────────────────────
+// Re-runs the accrual engine for one or more existing runs whose ledger is
+// empty (or for any run regardless, if force=true).  Useful for backfilling
+// runs that were created before the bank_name filter fix.
+
+func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string   `json:"user_id"`
+			RunIDs []string `json:"run_ids"` // explicit list – or leave empty + entity_id to auto-pick
+			// If run_ids is empty, backfill all runs for entity_id with ledger_count=0
+			EntityID string `json:"entity_id"`
+			Force    bool   `json:"force"` // if true, re-run even if ledger is already populated
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		// If no explicit run_ids, find all empty runs for the entity
+		if len(req.RunIDs) == 0 {
+			var rows []string
+			q := `
+				SELECT r.run_id
+				FROM investment.fd_accrual_run r
+				WHERE COALESCE(r.is_deleted,false)=false`
+			args := []interface{}{}
+			argIdx := 1
+			if req.EntityID != "" {
+				q += fmt.Sprintf(" AND r.entity_id=$%d", argIdx)
+				args = append(args, req.EntityID)
+				argIdx++
+			}
+			if !req.Force {
+				q += ` AND (SELECT COUNT(*) FROM investment.fd_accrual_ledger l WHERE l.run_id=r.run_id AND COALESCE(l.is_deleted,false)=false)=0`
+			}
+			q += " ORDER BY r.created_at"
+			dbRows, err := pgxPool.Query(ctx, q, args...)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+				return
+			}
+			for dbRows.Next() {
+				var rid string
+				_ = dbRows.Scan(&rid)
+				rows = append(rows, rid)
+			}
+			dbRows.Close()
+			req.RunIDs = rows
+		}
+
+		if len(req.RunIDs) == 0 {
+			api.RespondWithPayload(w, true, "No runs to recompute", map[string]interface{}{"recomputed": 0})
+			return
+		}
+
+		type runResult struct {
+			RunID      string `json:"run_id"`
+			Calculated int    `json:"calculated"`
+			Failed     int    `json:"failed"`
+			Error      string `json:"error,omitempty"`
+		}
+
+		results := make([]runResult, 0, len(req.RunIDs))
+		for _, runID := range req.RunIDs {
+			// Clear old ledger rows so we don't double-count
+			_, _ = pgxPool.Exec(ctx,
+				`DELETE FROM investment.fd_accrual_ledger WHERE run_id=$1`, runID)
+
+			// Reset run to allow re-execution
+			_, _ = pgxPool.Exec(ctx,
+				`UPDATE investment.fd_accrual_run
+				 SET run_status='DRAFT', fds_in_scope=0, fds_calculated=0, fds_failed=0,
+				     total_interest_accrued=0, total_tds_deducted=0, total_accrued_closing_balance=0,
+				     started_at=NULL, completed_at=NULL, updated_at=now()
+				 WHERE run_id=$1`, runID)
+
+			calc, failed, err := executeAccrualRun(ctx, pgxPool, runID, userEmail)
+			res := runResult{RunID: runID, Calculated: calc, Failed: failed}
+			if err != nil {
+				res.Error = err.Error()
+				api.LogError("[FDAccrual] RecomputeAccrualRun: run=%s err=%v", runID, err)
+			}
+			results = append(results, res)
+			api.LogInfo("[FDAccrual] RecomputeAccrualRun: run=%s calc=%d failed=%d", runID, calc, failed)
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"recomputed": len(results),
+			"results":    results,
+		})
+	}
+}
+
+// ─── 16. BulkGenerateMonthlyAccruals ─────────────────────────────────────────
+// Creates, validates, and executes one accrual run per month between
+// start_month (YYYY-MM) and end_month (YYYY-MM) inclusive.
+// Skips months that already have a FINAL run for the entity.
+
+func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID             string `json:"user_id"`
+			EntityID           string `json:"entity_id"`
+			EntityName         string `json:"entity_name"`
+			StartMonth         string `json:"start_month"` // YYYY-MM
+			EndMonth           string `json:"end_month"`   // YYYY-MM  (inclusive)
+			BankIDFilter       string `json:"bank_id_filter"`
+			FDStatusFilter     string `json:"fd_status_filter"`
+			DayCountConvention string `json:"day_count_convention"`
+			RoundingRule       string `json:"rounding_rule"`
+			PrecisionDecimals  int    `json:"precision_decimals"`
+			RunMode            string `json:"run_mode"` // SIMULATION or FINAL
+			SkipExisting       bool   `json:"skip_existing"` // default true – skip months with existing FINAL run
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.EntityID == "" || req.StartMonth == "" || req.EndMonth == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "entity_id, start_month and end_month are required")
+			return
+		}
+
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		// Defaults
+		if req.RunMode == "" {
+			req.RunMode = "FINAL"
+		}
+		if req.DayCountConvention == "" {
+			req.DayCountConvention = "ACT_365"
+		}
+		if req.RoundingRule == "" {
+			req.RoundingRule = "ROUND"
+		}
+		if req.PrecisionDecimals <= 0 {
+			req.PrecisionDecimals = 2
+		}
+		if req.FDStatusFilter == "" {
+			req.FDStatusFilter = "ACTIVE"
+		}
+		// SkipExisting defaults to true unless caller explicitly sets false
+		skipExisting := true
+		if !req.SkipExisting {
+			skipExisting = false
+		}
+
+		// Parse months
+		start, err := time.Parse("2006-01", req.StartMonth)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "start_month must be YYYY-MM")
+			return
+		}
+		end, err := time.Parse("2006-01", req.EndMonth)
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "end_month must be YYYY-MM")
+			return
+		}
+		if end.Before(start) {
+			api.RespondWithError(w, http.StatusBadRequest, "end_month must be >= start_month")
+			return
+		}
+
+		ctx := r.Context()
+
+		type monthResult struct {
+			Month      string `json:"month"`
+			RunID      string `json:"run_id"`
+			Calculated int    `json:"calculated"`
+			Failed     int    `json:"failed"`
+			Skipped    bool   `json:"skipped,omitempty"`
+			SkipReason string `json:"skip_reason,omitempty"`
+			Error      string `json:"error,omitempty"`
+		}
+
+		var monthResults []monthResult
+
+		for m := start; !m.After(end); m = m.AddDate(0, 1, 0) {
+			monthStr := m.Format("2006-01")
+			// Period: 1st to last day of month
+			periodStart := time.Date(m.Year(), m.Month(), 1, 0, 0, 0, 0, time.UTC)
+			periodEnd := time.Date(m.Year(), m.Month()+1, 0, 0, 0, 0, 0, time.UTC) // last day
+
+			res := monthResult{Month: monthStr}
+
+			// Skip if a FINAL run already exists for this entity+month
+			if skipExisting {
+				var existingRunID string
+				_ = pgxPool.QueryRow(ctx, `
+					SELECT run_id FROM investment.fd_accrual_run
+					WHERE entity_id=$1
+					  AND run_mode='FINAL'
+					  AND accrual_period_start=$2
+					  AND run_status NOT IN ('DRAFT','VALIDATION_FAILED','REJECTED')
+					  AND COALESCE(is_deleted,false)=false
+					LIMIT 1`, req.EntityID, periodStart,
+				).Scan(&existingRunID)
+				if existingRunID != "" {
+					res.RunID = existingRunID
+					res.Skipped = true
+					res.SkipReason = "FINAL run already exists: " + existingRunID
+					monthResults = append(monthResults, res)
+					api.LogInfo("[FDAccrual] BulkGenerate: skipping %s — existing run %s", monthStr, existingRunID)
+					continue
+				}
+			}
+
+			// Step 1: Create run
+			input := CreateAccrualRunInput{
+				RunType:            "SCHEDULED",
+				RunMode:            req.RunMode,
+				EntityID:           req.EntityID,
+				EntityName:         req.EntityName,
+				BankIDFilter:       req.BankIDFilter,
+				FDStatusFilter:     req.FDStatusFilter,
+				FinancialPeriod:    buildAccrualPeriod(periodStart),
+				DayCountConvention: req.DayCountConvention,
+				RoundingRule:       req.RoundingRule,
+				PrecisionDecimals:  req.PrecisionDecimals,
+				AccrualPeriodStart: periodStart,
+				AccrualPeriodEnd:   periodEnd,
+				CreatedBy:          userEmail,
+			}
+			runID, createErr := createAccrualRunInternal(ctx, pgxPool, input)
+			if createErr != nil {
+				res.Error = "create failed: " + createErr.Error()
+				monthResults = append(monthResults, res)
+				api.LogError("[FDAccrual] BulkGenerate: create %s err=%v", monthStr, createErr)
+				continue
+			}
+			res.RunID = runID
+
+			// Step 2: Validate scope (updates fds_in_scope, status→VALIDATED/VALIDATION_FAILED)
+			eligible, blockers, valErr := validateAndPersistFindings(ctx, pgxPool, runID)
+			if valErr != nil {
+				res.Error = "validate failed: " + valErr.Error()
+				monthResults = append(monthResults, res)
+				continue
+			}
+			newStatus := "VALIDATED"
+			if blockers > 0 {
+				newStatus = "VALIDATION_FAILED"
+			}
+			_, _ = pgxPool.Exec(ctx,
+				`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
+				newStatus, eligible, runID)
+
+			if eligible == 0 {
+				res.Skipped = true
+				res.SkipReason = fmt.Sprintf("no FDs in scope for %s (entity=%s)", monthStr, req.EntityID)
+				_, _ = pgxPool.Exec(ctx,
+					`UPDATE investment.fd_accrual_run SET run_status='COMPUTED' WHERE run_id=$1`, runID)
+				monthResults = append(monthResults, res)
+				api.LogInfo("[FDAccrual] BulkGenerate: %s run=%s — 0 FDs in scope", monthStr, runID)
+				continue
+			}
+
+			// Step 3: Execute
+			calc, failed, execErr := executeAccrualRun(ctx, pgxPool, runID, userEmail)
+			res.Calculated = calc
+			res.Failed = failed
+			if execErr != nil {
+				res.Error = "execute failed: " + execErr.Error()
+				api.LogError("[FDAccrual] BulkGenerate: execute %s run=%s err=%v", monthStr, runID, execErr)
+			}
+			monthResults = append(monthResults, res)
+			api.LogInfo("[FDAccrual] BulkGenerate: %s run=%s calc=%d failed=%d", monthStr, runID, calc, failed)
+		}
+
+		totalCalc, totalFailed, skipped := 0, 0, 0
+		for _, mr := range monthResults {
+			totalCalc += mr.Calculated
+			totalFailed += mr.Failed
+			if mr.Skipped {
+				skipped++
+			}
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"months_processed": len(monthResults),
+			"months_skipped":   skipped,
+			"total_calculated": totalCalc,
+			"total_failed":     totalFailed,
+			"results":          monthResults,
+		})
+		api.LogInfo("[FDAccrual] BulkGenerateMonthlyAccruals: entity=%s %s→%s processed=%d skipped=%d",
+			req.EntityID, req.StartMonth, req.EndMonth, len(monthResults), skipped)
+	}
+}
+
 // logAccrualEvent inserts a row into fd_accrual_run_execution_log.
 func logAccrualEvent(ctx context.Context, pool *pgxpool.Pool,
 	runID, fdID, level, eventType, message string, detail map[string]interface{}) {
