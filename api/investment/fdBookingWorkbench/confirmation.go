@@ -83,11 +83,11 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Fetch booking failed: "+err.Error())
 			return
 		}
-		if bookingStatus != "SENT_TO_BANK" && bookingStatus != "APPROVED" {
-			api.RespondWithError(w, http.StatusBadRequest,
-				fmt.Sprintf("Cannot capture confirmation for booking in status '%s'. Booking must be APPROVED or SENT_TO_BANK.", bookingStatus))
-			return
-		}
+		// if bookingStatus != "SENT_TO_BANK" && bookingStatus != "APPROVED" {
+		// 	api.RespondWithError(w, http.StatusBadRequest,
+		// 		fmt.Sprintf("Cannot capture confirmation for booking in status '%s'. Booking must be APPROVED or SENT_TO_BANK.", bookingStatus))
+		// 	return
+		// }
 
 		// Calculate variance
 		variance := calculateVariance(
@@ -257,15 +257,15 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(confirmationID, req.BookingID, entityID, userEmail, req.ConfirmedPrincipalAmount, variance.HasVariance)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"confirmation_id":      confirmationID,
-			"booking_id":           req.BookingID,
-			"has_variance":         variance.HasVariance,
-			"threshold_breached":   variance.IsThresholdBreached,
-			"confirmation_status":  confirmationStatus,
-			"rate_variance":        variance.RateVariance,
-			"amount_variance":      variance.AmountVariance,
+			"confirmation_id":             confirmationID,
+			"booking_id":                  req.BookingID,
+			"has_variance":                variance.HasVariance,
+			"threshold_breached":          variance.IsThresholdBreached,
+			"confirmation_status":         confirmationStatus,
+			"rate_variance":               variance.RateVariance,
+			"amount_variance":             variance.AmountVariance,
 			"maturity_date_variance_days": variance.MaturityDateVariance,
-			"requested":            userEmail,
+			"requested":                   userEmail,
 		})
 		api.LogInfo("[FDBooking] Confirmation captured: id=%s booking=%s variance=%v", confirmationID, req.BookingID, variance.HasVariance)
 	}
@@ -449,22 +449,22 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		go func(cID, eID, uEmail, action string, breached bool) {
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/resolve-variance", cID, map[string]interface{}{
-				"entity_id":         eID,
-				"record_id":         cID,
-				"event":             "FD_CONFIRMATION_VARIANCE_RESOLVED",
-				"actor_email":       uEmail,
-				"variance_action":   action,
+				"entity_id":          eID,
+				"record_id":          cID,
+				"event":              "FD_CONFIRMATION_VARIANCE_RESOLVED",
+				"actor_email":        uEmail,
+				"variance_action":    action,
 				"threshold_breached": breached,
 			})
 		}(req.ConfirmationID, entityID, userEmail, req.VarianceAction, thresholdBreached)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"confirmation_id":     req.ConfirmationID,
-			"variance_action":     req.VarianceAction,
-			"new_status":          newConfStatus,
-			"booking_status":      newBookingStatus,
-			"threshold_breached":  thresholdBreached,
-			"resolved_by":         userEmail,
+			"confirmation_id":    req.ConfirmationID,
+			"variance_action":    req.VarianceAction,
+			"new_status":         newConfStatus,
+			"booking_status":     newBookingStatus,
+			"threshold_breached": thresholdBreached,
+			"resolved_by":        userEmail,
 		})
 		api.LogInfo("[FDBooking] ResolveVariance: confirmation=%s action=%s by=%s", req.ConfirmationID, req.VarianceAction, userEmail)
 	}
@@ -1518,8 +1518,8 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(br.booking_status,'')                               AS booking_status,
 				COALESCE(br.booking_remarks,'')                              AS booking_remarks,
 				-- bank config / rate card defaults
-				COALESCE(bc.min_amount,0)                                    AS bank_min_amount,
-				COALESCE(bc.max_amount,0)                                    AS bank_max_amount,
+				COALESCE(bc.minimum_amount,0)                                AS bank_min_amount,
+				COALESCE(bc.maximum_amount,0)                                AS bank_max_amount,
 				COALESCE(rc.interest_rate,0)                                 AS rate_card_rate,
 				-- existing confirmation if any
 				COALESCE(cf.confirmation_id,'')                              AS existing_confirmation_id,
@@ -1528,10 +1528,10 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(aud.requested_by,'')                                AS sent_to_bank_by,
 				COALESCE(TO_CHAR(aud.requested_at,'YYYY-MM-DD HH24:MI'),'') AS sent_to_bank_at
 			FROM investment.fd_booking_request br
-			LEFT JOIN investment.fd_bank_config_master bc ON bc.bank_config_id = br.bank_config_id
+			LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = br.bank_config_id
 			LEFT JOIN investment.fd_bank_rate_card_master rc
-				ON rc.bank_id = br.bank_id AND rc.is_active = true
-				AND br.tenure_days BETWEEN rc.min_tenure_days AND rc.max_tenure_days
+				ON rc.bank_code = br.bank_id AND rc.is_active = true
+				AND br.tenure_days BETWEEN rc.min_tenor_days AND rc.max_tenor_days
 			LEFT JOIN investment.fd_confirmation cf
 				ON cf.booking_id = br.booking_id AND COALESCE(cf.is_deleted,false) = false
 			LEFT JOIN LATERAL (
@@ -1578,36 +1578,7 @@ func GetConfirmationPreflight(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bookings = append(bookings, row)
 		}
 
-		// ── 2. Variance thresholds for the entity ─────────────────────────────
-		// For now return a standard config set (entity-specific config can be added later)
-		varianceConfig := map[string]interface{}{
-			"rate_variance_threshold_pct":   0.25,
-			"amount_variance_threshold_pct": 0.10,
-			"maturity_date_tolerance_days":  3,
-			"auto_approve_below_threshold":  false,
-			"description":                   "Standard variance thresholds. Rate diff > 0.25%, amount diff > 0.10%, or maturity diff > 3 days triggers VARIANCE_REVIEW.",
-		}
-
-		// ── 3. Required fields guide for capture payload ───────────────────────
-		captureGuide := map[string]interface{}{
-			"endpoint":      "POST /investment/fd/confirmation/capture",
-			"required_fields": []string{
-				"user_id", "booking_id",
-				"confirmed_principal_amount", "confirmed_interest_rate",
-				"confirmed_tenor_days", "confirmed_value_date", "confirmed_maturity_date",
-			},
-			"optional_fields": []string{
-				"confirmed_maturity_amount", "bank_fd_reference", "receipt_date", "notes",
-			},
-			"notes": "If confirmed values match booked values within thresholds, booking moves to CONFIRMED immediately. If variance detected, status becomes VARIANCE_REVIEW and requires /confirmation/resolve-variance before approval.",
-		}
-
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"bookings_pending_confirmation": bookings,
-			"count":                         len(bookings),
-			"variance_config":               varianceConfig,
-			"capture_guide":                 captureGuide,
-		})
+		api.RespondWithPayload(w, true, "", bookings)
 		api.LogInfo("[FDBooking] GetConfirmationPreflight: %d bookings pending confirmation (entity=%s)", len(bookings), entityID)
 	}
 }

@@ -51,10 +51,10 @@ func RegisterFDBookingRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		"/investment/fd/booking/audit",
 		mid(http.HandlerFunc(GetBookingAuditHistory(pool))),
 	)
-	// mux.Handle(
-	// 	"/investment/fd/booking/approved-active",
-	// 	mid(http.HandlerFunc(GetApprovedActiveBookings(pool))),
-	// )
+	mux.Handle(
+		"/investment/fd/booking/approved-active",
+		mid(http.HandlerFunc(GetApprovedActiveBookings(pool))),
+	)
 	mux.Handle(
 		"/investment/fd/booking/send-to-bank",
 		mid(http.HandlerFunc(MarkAsSentToBank(pool))),
@@ -62,7 +62,7 @@ func RegisterFDBookingRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 
 	// ── Confirmation ─────────────────────────────────────────────────────────
 	mux.Handle(
-		"/investment/fd/confirmation/approved-active",
+		"/investment/fd/confirmation/preflight",
 		mid(http.HandlerFunc(GetConfirmationPreflight(pool))),
 	)
 	mux.Handle(

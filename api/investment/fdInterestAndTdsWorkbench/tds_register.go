@@ -79,16 +79,25 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// If no receipt_id provided, find the latest one for this fd_id
 		receiptID := req.ReceiptID
+		var fdRefNo, bankID string
 		if receiptID == "" {
 			err := pool.QueryRow(ctx, `
-				SELECT receipt_id FROM investment.fd_interest_receipt 
+				SELECT receipt_id, COALESCE(fd_ref_no,''), COALESCE(bank_id,'')
+				FROM investment.fd_interest_receipt 
 				WHERE fd_id = $1 AND is_deleted = false 
 				ORDER BY created_at DESC LIMIT 1`,
-				req.FDID).Scan(&receiptID)
+				req.FDID).Scan(&receiptID, &fdRefNo, &bankID)
 			if err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, "No interest receipt found for fd_id '"+req.FDID+"'. Provide a valid receipt_id.")
 				return
 			}
+		} else {
+			// Fetch fd_ref_no and bank_id from the provided receipt_id
+			pool.QueryRow(ctx, `
+				SELECT COALESCE(fd_ref_no,''), COALESCE(bank_id,'')
+				FROM investment.fd_interest_receipt 
+				WHERE receipt_id = $1 AND is_deleted = false`,
+				receiptID).Scan(&fdRefNo, &bankID)
 		}
 
 		// Verify the receipt_id actually exists
@@ -101,7 +110,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Insert TDS receipt
+		// Insert TDS receipt — fd_ref_no comes from fd_interest_receipt (not fd_master)
 		var tdsID string
 		err := pool.QueryRow(ctx, `
 			INSERT INTO investment.fd_tds_receipt (
@@ -114,15 +123,15 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				'TDSR-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,8)),
 				$1,
 				$2,
-				COALESCE((SELECT fd_ref_no FROM investment.fd_master WHERE fd_id = $2), $2),
 				$3,
-				COALESCE((SELECT bank_id FROM investment.fd_master WHERE fd_id = $2), ''),
-				$4::date, $5::date, COALESCE($6::date, $5::date),
-				$7, $8, $9, ($9::numeric - $8::numeric),
-				'CAPTURED', ($9::numeric - $8::numeric) != 0,
-				true, false, $10, NOW()
+				$4,
+				$5,
+				$6::date, $7::date, COALESCE($8::date, $7::date),
+				$9, $10, $11, ($11::numeric - $10::numeric),
+				'CAPTURED', ($11::numeric - $10::numeric) != 0,
+				true, false, $12, NOW()
 			) RETURNING tds_id`,
-			receiptID, req.FDID, req.EntityID,
+			receiptID, req.FDID, fdRefNo, req.EntityID, bankID,
 			req.PeriodStart, req.PeriodEnd, nullIfEmpty(req.TDSDeductionDate),
 			req.InterestAmount, req.TDSExpected, req.TDSDeductedActual,
 			userEmail,

@@ -20,32 +20,32 @@ import (
 func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                string   `json:"user_id"`
-			EntityID              string   `json:"entity_id"`
-			EntityName            string   `json:"entity_name"`
-			BankID                string   `json:"bank_id"`
-			BankName              string   `json:"bank_name"`
-			BankAccountID         string   `json:"bank_account_id"`         // → source_account_id
-			SourceAccountNumber   string   `json:"source_account_number"`
-			BankConfigID          string   `json:"bank_config_id"`
-			PrincipalAmount       float64  `json:"principal_amount"`
-			InterestRate          float64  `json:"interest_rate"`
-			TenorDays             int      `json:"tenor_days"`              // → tenure_days
-			TenorMonths           int      `json:"tenor_months"`            // → tenure_months
-			ExpectedStartDate     string   `json:"expected_start_date"`     // NOT NULL
-			ValueDate             string   `json:"value_date"`              // NOT NULL
-			MaturityDate          string   `json:"maturity_date"`           // → expected_maturity_date NOT NULL
-			InterestType          string   `json:"interest_type"`           // → interest_type_code NOT NULL
-			FrequencyID           string   `json:"frequency_id"`            // → frequency_id
-			InterestPayoutFreq    string   `json:"interest_payout_frequency"` // alias for frequency_id
-			DayCountCode          string   `json:"day_count_code"`          // → day_count_code
-			DayCountConvention    string   `json:"day_count_convention"`    // alias for day_count_code
-			TdsPlanID             string   `json:"tds_plan_id"`
-			ProductCode           string   `json:"product_code"`
-			AutoRenewal           bool     `json:"auto_renewal"`
-			RenewalInstructions   string   `json:"renewal_instructions"`    // kept for compat, maps to auto_renewal
-			Notes                 string   `json:"notes"`                   // → booking_remarks
-			BookingRemarks        string   `json:"booking_remarks"`
+			UserID              string  `json:"user_id"`
+			EntityID            string  `json:"entity_id"`
+			EntityName          string  `json:"entity_name"`
+			BankID              string  `json:"bank_id"`
+			BankName            string  `json:"bank_name"`
+			BankAccountID       string  `json:"bank_account_id"` // → source_account_id
+			SourceAccountNumber string  `json:"source_account_number"`
+			BankConfigID        string  `json:"bank_config_id"`
+			PrincipalAmount     float64 `json:"principal_amount"`
+			InterestRate        float64 `json:"interest_rate"`
+			TenorDays           int     `json:"tenor_days"`                // → tenure_days
+			TenorMonths         int     `json:"tenor_months"`              // → tenure_months
+			ExpectedStartDate   string  `json:"expected_start_date"`       // NOT NULL
+			ValueDate           string  `json:"value_date"`                // NOT NULL
+			MaturityDate        string  `json:"maturity_date"`             // → expected_maturity_date NOT NULL
+			InterestType        string  `json:"interest_type"`             // → interest_type_code NOT NULL
+			FrequencyID         string  `json:"frequency_id"`              // → frequency_id
+			InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
+			DayCountCode        string  `json:"day_count_code"`            // → day_count_code
+			DayCountConvention  string  `json:"day_count_convention"`      // alias for day_count_code
+			TdsPlanID           string  `json:"tds_plan_id"`
+			ProductCode         string  `json:"product_code"`
+			AutoRenewal         bool    `json:"auto_renewal"`
+			RenewalInstructions string  `json:"renewal_instructions"` // kept for compat, maps to auto_renewal
+			Notes               string  `json:"notes"`                // → booking_remarks
+			BookingRemarks      string  `json:"booking_remarks"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -131,7 +131,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"entity_name":            entityName,
 			"bank_id":                req.BankID,
 			"bank_name":              nullIfEmpty(req.BankName),
-			accountColumn:             req.BankAccountID,
+			accountColumn:            req.BankAccountID,
 			"source_account_number":  nullIfEmpty(req.SourceAccountNumber),
 			"bank_config_id":         nullIfEmpty(req.BankConfigID),
 			"principal_amount":       req.PrincipalAmount,
@@ -215,7 +215,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.LogError("[FDBooking] CreateInstance failed for booking %s: %v", bID, err)
 				return
 			}
-				if instID != "" {
+			if instID != "" {
 				// Instance created — flip booking_status to APPROVAL_PENDING
 				if _, uerr := pgxPool.Exec(bgCtx,
 					`UPDATE investment.fd_booking_request SET booking_status = 'APPROVAL_PENDING' WHERE booking_id = $1`,
@@ -255,31 +255,31 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID string `json:"user_id"`
 			Rows   []struct {
-				EntityID              string  `json:"entity_id"`
-				EntityName            string  `json:"entity_name"`
-				BankID                string  `json:"bank_id"`
-				BankName              string  `json:"bank_name"`
-				BankAccountID         string  `json:"bank_account_id"`         // → source_account_id
-				SourceAccountNumber   string  `json:"source_account_number"`
-				BankConfigID          string  `json:"bank_config_id"`
-				PrincipalAmount       float64 `json:"principal_amount"`
-				InterestRate          float64 `json:"interest_rate"`
-				TenorDays             int     `json:"tenor_days"`              // → tenure_days
-				TenorMonths           int     `json:"tenor_months"`            // → tenure_months
-				ExpectedStartDate     string  `json:"expected_start_date"`     // NOT NULL
-				ValueDate             string  `json:"value_date"`              // NOT NULL
-				MaturityDate          string  `json:"maturity_date"`           // → expected_maturity_date NOT NULL
-				InterestType          string  `json:"interest_type"`           // → interest_type_code NOT NULL
-				FrequencyID           string  `json:"frequency_id"`
-				InterestPayoutFreq    string  `json:"interest_payout_frequency"` // alias for frequency_id
-				DayCountCode          string  `json:"day_count_code"`
-				DayCountConvention    string  `json:"day_count_convention"`    // alias for day_count_code
-				TdsPlanID             string  `json:"tds_plan_id"`
-				ProductCode           string  `json:"product_code"`
-				AutoRenewal           bool    `json:"auto_renewal"`
-				RenewalInstructions   string  `json:"renewal_instructions"`    // compat: maps to auto_renewal
-				Notes                 string  `json:"notes"`                   // → booking_remarks
-				BookingRemarks        string  `json:"booking_remarks"`
+				EntityID            string  `json:"entity_id"`
+				EntityName          string  `json:"entity_name"`
+				BankID              string  `json:"bank_id"`
+				BankName            string  `json:"bank_name"`
+				BankAccountID       string  `json:"bank_account_id"` // → source_account_id
+				SourceAccountNumber string  `json:"source_account_number"`
+				BankConfigID        string  `json:"bank_config_id"`
+				PrincipalAmount     float64 `json:"principal_amount"`
+				InterestRate        float64 `json:"interest_rate"`
+				TenorDays           int     `json:"tenor_days"`          // → tenure_days
+				TenorMonths         int     `json:"tenor_months"`        // → tenure_months
+				ExpectedStartDate   string  `json:"expected_start_date"` // NOT NULL
+				ValueDate           string  `json:"value_date"`          // NOT NULL
+				MaturityDate        string  `json:"maturity_date"`       // → expected_maturity_date NOT NULL
+				InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
+				FrequencyID         string  `json:"frequency_id"`
+				InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
+				DayCountCode        string  `json:"day_count_code"`
+				DayCountConvention  string  `json:"day_count_convention"` // alias for day_count_code
+				TdsPlanID           string  `json:"tds_plan_id"`
+				ProductCode         string  `json:"product_code"`
+				AutoRenewal         bool    `json:"auto_renewal"`
+				RenewalInstructions string  `json:"renewal_instructions"` // compat: maps to auto_renewal
+				Notes               string  `json:"notes"`                // → booking_remarks
+				BookingRemarks      string  `json:"booking_remarks"`
 			} `json:"rows"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -382,7 +382,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"entity_name":            entityName,
 				"bank_id":                row.BankID,
 				"bank_name":              nullIfEmpty(row.BankName),
-				accountColumn:             row.BankAccountID,
+				accountColumn:            row.BankAccountID,
 				"source_account_number":  nullIfEmpty(row.SourceAccountNumber),
 				"bank_config_id":         nullIfEmpty(row.BankConfigID),
 				"principal_amount":       row.PrincipalAmount,
@@ -885,20 +885,24 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // Falls back to direct DB stamp only when no engine instance exists.
 func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+
 		var req struct {
 			UserID     string   `json:"user_id"`
 			BookingIDs []string `json:"booking_ids"`
 			Comment    string   `json:"comment"`
 		}
+
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
+
 		if len(req.BookingIDs) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
 			return
 		}
 
+		// ---------------- USER VALIDATION ----------------
 		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
@@ -906,6 +910,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
+
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -917,21 +922,32 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var errors []string
 
 		for _, bID := range req.BookingIDs {
-			// Try engine path first: find the active eye this user can act on.
+
+			// ---------------- ENGINE PATH ----------------
 			var instanceEyeID string
+
 			engineErr := pgxPool.QueryRow(ctx, `
 				SELECT ie.instance_eye_id
 				FROM uam.approval_instance i
-				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
-				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
-					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
-					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
-				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
-				ORDER BY ie.position ASC LIMIT 1`, bID, req.UserID,
-			).Scan(&instanceEyeID)
+				JOIN uam.approval_instance_eye ie 
+					ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+				JOIN uam.approval_matrix_eye_member m 
+					ON m.eye_id = ie.matrix_eye_id
+					AND m.member_type = 'APPROVER'
+					AND m.is_active = true 
+					AND m.is_deleted = false
+					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') 
+					AND m.user_id = $2
+				WHERE i.record_id = $1 
+				  AND i.module_code = 'FIXED_DEPOSIT' 
+				  AND i.status = 'PENDING'
+				ORDER BY ie.position ASC 
+				LIMIT 1
+			`, bID, req.UserID).Scan(&instanceEyeID)
 
 			if engineErr == nil && instanceEyeID != "" {
-				// Engine path: RecordAction handles audit stamp + status flip for final eye.
+
+				// 🔥 APPROVAL ENGINE ACTION
 				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
 					InstanceEyeID: instanceEyeID,
 					ActorUserID:   req.UserID,
@@ -943,81 +959,136 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": "+err.Error())
 					continue
 				}
-				// If the engine fully approved (last eye done), flip booking status.
-				// Check if instance is now APPROVED.
+
+				// 🔥 CHECK FINAL APPROVAL
 				var instStatus string
 				_ = pgxPool.QueryRow(ctx, `
-					SELECT i.status FROM uam.approval_instance i
-					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
-					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
+					SELECT i.status 
+					FROM uam.approval_instance i
+					JOIN uam.approval_instance_eye ie 
+						ON ie.instance_id = i.instance_id
+					WHERE ie.instance_eye_id = $1
+				`, instanceEyeID).Scan(&instStatus)
+
 				if instStatus == "APPROVED" {
+
+					// ✅ FINAL STATUS CHANGE (UPDATED)
 					_, _ = pgxPool.Exec(ctx, `
 						UPDATE investment.fd_booking_request
-						SET booking_status = 'APPROVED'
-						WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
+						SET booking_status = 'SENT_TO_BANK',
+						    approved_at = NOW(),
+						    sent_to_bank_at = NOW()
+						WHERE booking_id = $1 
+						  AND booking_status <> 'SENT_TO_BANK'
+					`, bID)
+
+					// delete handling
 					_, _ = pgxPool.Exec(ctx, `
-						UPDATE investment.fd_booking_request SET is_deleted = true
+						UPDATE investment.fd_booking_request 
+						SET is_deleted = true
 						WHERE booking_id IN (
-							SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
-							WHERE a.booking_id = $1 AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
-						)`, bID)
+							SELECT DISTINCT a.booking_id 
+							FROM investment.fd_audit_booking_request a
+							WHERE a.booking_id = $1 
+							  AND a.action_type = 'DELETE' 
+							  AND a.processing_status = 'APPROVED'
+						)
+					`, bID)
 				}
+
 				engineActed++
-			} else {
-				// No active eye for this user — check if any engine instance exists at all.
-				var anyInstance int
-				_ = pgxPool.QueryRow(ctx, `
-					SELECT COUNT(*) FROM uam.approval_instance
-					WHERE record_id = $1 AND module_code = 'FIXED_DEPOSIT' AND status = 'PENDING'`, bID,
-				).Scan(&anyInstance)
-				if anyInstance > 0 {
-					// Instance exists but this user is not the current eye — don't allow out-of-sequence approve.
-					errors = append(errors, bID+": not your turn in approval sequence")
-					continue
-				}
-				// No matrix/instance — direct stamp (legacy / no-matrix path).
-				tx, err := pgxPool.Begin(ctx)
-				if err != nil {
-					errors = append(errors, bID+": tx begin failed")
-					continue
-				}
-				_, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
-					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
-					WHERE booking_id=$3 AND processing_status LIKE '%PENDING%'`,
-					userEmail, req.Comment, bID)
-				_, err2 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='APPROVED'
-					WHERE booking_id=$1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
-				_, err3 := tx.Exec(ctx, `UPDATE investment.fd_booking_request SET is_deleted=true
-					WHERE booking_id IN (
-						SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
-						WHERE a.booking_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
-					)`, bID)
-				if err1 != nil || err2 != nil || err3 != nil {
-					_ = tx.Rollback(ctx)
-					errors = append(errors, bID+": direct stamp failed")
-					continue
-				}
-				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, bID+": commit failed")
-					continue
-				}
-				directActed++
+				continue
 			}
+
+			// ---------------- DIRECT PATH ----------------
+			var anyInstance int
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT COUNT(*) 
+				FROM uam.approval_instance
+				WHERE record_id = $1 
+				  AND module_code = 'FIXED_DEPOSIT' 
+				  AND status = 'PENDING'
+			`, bID).Scan(&anyInstance)
+
+			if anyInstance > 0 {
+				errors = append(errors, bID+": not your turn in approval sequence")
+				continue
+			}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				errors = append(errors, bID+": tx begin failed")
+				continue
+			}
+
+			_, err1 := tx.Exec(ctx, `
+				UPDATE investment.fd_audit_booking_request
+				SET processing_status='APPROVED', 
+				    checker_by=$1, 
+				    checker_at=NOW(), 
+				    checker_comment=$2
+				WHERE booking_id=$3 
+				  AND processing_status LIKE '%PENDING%'
+			`, userEmail, req.Comment, bID)
+
+			// ✅ FINAL STATUS CHANGE (UPDATED)
+			_, err2 := tx.Exec(ctx, `
+				UPDATE investment.fd_booking_request
+				SET booking_status='SENT_TO_BANK',
+				    approved_at = NOW(),
+				    sent_to_bank_at = NOW()
+				WHERE booking_id=$1 
+				  AND booking_status <> 'SENT_TO_BANK'
+			`, bID)
+
+			_, err3 := tx.Exec(ctx, `
+				UPDATE investment.fd_booking_request 
+				SET is_deleted=true
+				WHERE booking_id IN (
+					SELECT DISTINCT a.booking_id 
+					FROM investment.fd_audit_booking_request a
+					WHERE a.booking_id=$1 
+					  AND a.action_type='DELETE' 
+					  AND a.processing_status='APPROVED'
+				)
+			`, bID)
+
+			if err1 != nil || err2 != nil || err3 != nil {
+				_ = tx.Rollback(ctx)
+				errors = append(errors, bID+": direct stamp failed")
+				continue
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				errors = append(errors, bID+": commit failed")
+				continue
+			}
+
+			directActed++
 		}
 
+		// ---------------- RESPONSE ----------------
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"engine_acted": engineActed, "direct_acted": directActed,
-			"errors": errors, "checker": userEmail,
+			"engine_acted": engineActed,
+			"direct_acted": directActed,
+			"errors":       errors,
+			"checker":      userEmail,
 		})
+
+		// ---------------- NOTIFICATIONS ----------------
 		for _, bID := range req.BookingIDs {
 			go func(id, uEmail string) {
-				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
-					"record_id":    id,
-					"event":        "FD_BOOKING_APPROVED",
-					"actor_email":  uEmail,
-				})
+				notifcatalog.TriggerNotification(context.Background(), pgxPool,
+					"/investment/fd/booking/approve",
+					id,
+					map[string]interface{}{
+						"record_id":   id,
+						"event":       "FD_BOOKING_SENT_TO_BANK", // ✅ updated event
+						"actor_email": uEmail,
+					})
 			}(bID, userEmail)
 		}
+
 		api.LogInfo("[FDBooking] BulkApproveBooking: engine=%d direct=%d errors=%d by=%s",
 			engineActed, directActed, len(errors), userEmail)
 	}
@@ -1675,7 +1746,8 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				WHERE booking_id = m.booking_id AND processing_status = 'APPROVED'
 				ORDER BY requested_at DESC LIMIT 1
 			) aud ON true
-			WHERE COALESCE(m.is_deleted,false) = false`
+			WHERE m.booking_status = 'SENT_TO_BANK' AND 
+			COALESCE(m.is_deleted,false) = false`
 
 		var q string
 		var args []interface{}
