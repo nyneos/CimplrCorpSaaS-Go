@@ -202,10 +202,12 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			COALESCE(bc.holiday_calendar_code, '')            AS holiday_calendar_code,
 			COALESCE(bc.weekend_accrual, true)                AS weekend_accrual,
 			COALESCE(bc.holiday_accrual, true)                AS holiday_accrual,
-			COALESCE(bc.weekend_pattern, 'Sat,Sun')           AS weekend_pattern
+			COALESCE(mc.weekend_pattern, 'Sat,Sun')           AS weekend_pattern
 		FROM investment.fd_master f
-		LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = f.bank_config_id
-			AND COALESCE(bc.is_deleted, false) = false
+			LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = f.bank_config_id
+				AND COALESCE(bc.is_deleted, false) = false
+			LEFT JOIN investment.mastercalendar mc ON mc.calendar_code = bc.holiday_calendar_code
+				AND COALESCE(mc.is_deleted, false) = false
 		WHERE f.entity_id = $1
 		  AND f.fd_status = $2
 		  AND f.cashflow_generated = true

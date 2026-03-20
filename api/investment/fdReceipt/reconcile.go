@@ -104,13 +104,14 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 
 	// Step 8: Handle missing receipts (cashflows with no receipt)
 	missingRows, mErr := pool.Query(ctx, `
-		SELECT cashflow_id, fd_id, fd_ref_no, entity_id, scheduled_amount
+		SELECT cashflow_id, fd_id, COALESCE(fd_ref_no,''), entity_id, net_cash_flow
 		FROM investment.fd_cashflow_schedule
+		JOIN investment.fd_master fm ON fm.fd_id = fd_cashflow_schedule.fd_id
 		WHERE entity_id=$1
 		  AND event_type='INTEREST_RECEIPT'
 		  AND COALESCE(receipt_cleared,false)=false
-		  AND scheduled_date BETWEEN $2::date AND $3::date
-		  AND is_deleted=false`, entityID, periodStart, periodEnd)
+		  AND event_date BETWEEN $2::date AND $3::date
+		  AND COALESCE(fd_cashflow_schedule.is_deleted,false)=false`, entityID, periodStart, periodEnd)
 	if mErr == nil {
 		defer missingRows.Close()
 		for missingRows.Next() {
@@ -133,10 +134,10 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 		UPDATE investment.fd_receipt_reconcile_run
 		SET run_status='COMPLETED',
 		    completed_at=now(),
-		    total_receipts_processed=$1,
-		    matched_count=$2,
-		    unmatched_count=$3,
-		    exception_count=$4
+		    receipts_processed=$1,
+		    receipts_matched=$2,
+		    receipts_unmatched=$3,
+		    receipts_exception=$4
 		WHERE reconcile_run_id=$5`,
 		len(receipts), matched, unmatched, exceptions, runID)
 
@@ -148,13 +149,13 @@ func findMatchingCashflow(ctx context.Context, pool *pgxpool.Pool, rec ReceiptRo
 	var cfID string
 	var schAmt float64
 	err := pool.QueryRow(ctx, `
-		SELECT cashflow_id, scheduled_amount
+		SELECT cashflow_id, net_cash_flow
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id=$1
 		  AND event_type='INTEREST_RECEIPT'
 		  AND COALESCE(receipt_cleared,false)=false
 		  AND is_deleted=false
-		ORDER BY ABS(EXTRACT(EPOCH FROM (scheduled_date - $2::date)))
+		ORDER BY ABS(EXTRACT(EPOCH FROM (event_date - $2::date)))
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&cfID, &schAmt)
 	if err != nil {
 		return 0, ""
@@ -167,12 +168,12 @@ func findMatchingAccrualLedger(ctx context.Context, pool *pgxpool.Pool, rec Rece
 	var ledgerID string
 	var accrualAmt float64
 	err := pool.QueryRow(ctx, `
-		SELECT ledger_id, accrual_amount
+		SELECT ledger_id, period_interest_accrued
 		FROM investment.fd_accrual_ledger
 		WHERE fd_id=$1
 		  AND ledger_row_status='CALCULATED'
 		  AND is_deleted=false
-		ORDER BY ABS(EXTRACT(EPOCH FROM (ledger_date - $2::date)))
+		ORDER BY ABS(EXTRACT(EPOCH FROM (accrual_period_end - $2::date)))
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&ledgerID, &accrualAmt)
 	if err != nil {
 		return 0, ""

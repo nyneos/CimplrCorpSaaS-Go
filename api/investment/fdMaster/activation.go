@@ -502,6 +502,16 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Mark cashflow_generated=true so the accrual engine picks this FD up in scope.
+		if _, err := tx.Exec(ctx,
+			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
+			fdID,
+		); err != nil {
+			msg, status := getFDMasterError(err, "Cashflow flag update failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getFDMasterError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)

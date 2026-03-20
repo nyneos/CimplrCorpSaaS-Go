@@ -517,7 +517,7 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				_, dbErr := pgxPool.Exec(ctx, `
 					UPDATE investment.fd_accrual_run
 					SET run_status = 'APPROVED', updated_at = now()
-					WHERE run_id = $2 AND run_status = 'PENDING_APPROVAL'`,
+					WHERE run_id = $1 AND run_status = 'PENDING_APPROVAL'`,
 					runID)
 				if dbErr != nil {
 					res[constants.ValueSuccess] = false
@@ -530,9 +530,27 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					res["journal_error"] = jErr.Error()
 				} else {
 					res["journals_posted"] = true
+					// Mark POSTED and lock period
+					_, _ = pgxPool.Exec(ctx,
+						`UPDATE investment.fd_accrual_run SET run_status='POSTED', posting_status='POSTED', posting_completed_at=now() WHERE run_id=$1`,
+						runID)
+					var periodStart time.Time
+					_ = pgxPool.QueryRow(ctx,
+						`SELECT accrual_period_start FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+					).Scan(&periodStart)
+					if !periodStart.IsZero() {
+						_, _ = pgxPool.Exec(ctx, `
+							INSERT INTO investment.fd_accrual_period_lock (entity_id, financial_period, run_id, locked_at, locked_by, is_locked)
+							SELECT entity_id, $1, $2, now(), $3, true
+							FROM investment.fd_accrual_run WHERE run_id = $2
+							ON CONFLICT (entity_id, financial_period) DO UPDATE
+							  SET run_id=EXCLUDED.run_id, locked_at=now(), locked_by=EXCLUDED.locked_by, is_locked=true`,
+							buildAccrualPeriod(periodStart), runID, userEmail)
+						res["period_locked"] = buildAccrualPeriod(periodStart)
+					}
 				}
 				res[constants.ValueSuccess] = true
-				res["status"] = "APPROVED"
+				res["status"] = "POSTED"
 				results = append(results, res)
 				continue
 			}
@@ -723,7 +741,9 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(r.run_mode,''),
 				COALESCE(r.created_by,''), r.created_at,
 				COALESCE(r.submitted_by,''), r.submitted_at,
-				r.posting_completed_at
+				r.posting_completed_at,
+				(SELECT COUNT(*) FROM investment.fd_accrual_ledger l
+				 WHERE l.run_id = r.run_id AND COALESCE(l.is_deleted,false) = false) AS ledger_count
 			FROM investment.fd_accrual_run r
 			WHERE COALESCE(r.is_deleted, false) = false`
 		args := []interface{}{}
@@ -1443,12 +1463,14 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 				entry_date, accounting_period,
 				entry_type, description,
 				total_debit, total_credit,
-				status, created_by
-			) VALUES ($1,$2,$3,$4,$5,'FD_INTEREST_ACCRUAL',$6,$7,$8,'POSTED',$9)
+				status, created_by,
+				fd_id, accrual_run_id, accrual_ledger_id
+			) VALUES ($1,$2,$3,$4,$5,'FD_INTEREST_ACCRUAL',$6,$7,$8,'POSTED',$9,$10,$11,$12)
 			RETURNING entry_id`,
 			activityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
 			lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
 			description, amount, amount, userEmail,
+			nullIfEmpty(lr.FDID), nullIfEmpty(runID), nullIfEmpty(lr.LedgerID),
 		).Scan(&entryID); err != nil {
 			_ = tx.Rollback(ctx)
 			api.LogError("[FDAccrual] Insert journal entry failed fd %s: %v", lr.FDID, err)

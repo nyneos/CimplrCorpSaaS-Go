@@ -260,10 +260,10 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			       TO_CHAR(period_start,'YYYY-MM-DD') AS period_start,
 			       TO_CHAR(period_end,'YYYY-MM-DD')   AS period_end,
 			       run_status, trigger_mode,
-			       COALESCE(matched_count,0) AS matched_count,
-			       COALESCE(unmatched_count,0) AS unmatched_count,
-			       COALESCE(exception_count,0) AS exception_count,
-			       COALESCE(total_receipts_processed,0) AS total_processed,
+			       COALESCE(receipts_matched,0) AS matched_count,
+			       COALESCE(receipts_unmatched,0) AS unmatched_count,
+			       COALESCE(receipts_exception,0) AS exception_count,
+			       COALESCE(receipts_processed,0) AS total_processed,
 			       TO_CHAR(triggered_at,'YYYY-MM-DD HH24:MI:SS') AS triggered_at,
 			       TO_CHAR(completed_at,'YYYY-MM-DD HH24:MI:SS') AS completed_at
 			FROM investment.fd_receipt_reconcile_run`

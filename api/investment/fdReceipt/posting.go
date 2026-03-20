@@ -40,6 +40,15 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 		entryDate = time.Now()
 	}
 
+	// Fetch entity_name from public.masterentity if not already populated.
+	entityName := rec.EntityName
+	if entityName == "" {
+		_ = pool.QueryRow(ctx,
+			`SELECT COALESCE(entity_name,'') FROM public.masterentity WHERE entity_id = $1`,
+			rec.EntityID,
+		).Scan(&entityName)
+	}
+
 	interestEntryID := fmt.Sprintf("JE_%d_%04d", time.Now().UnixMilli(), rand.Intn(10000))
 	tdsEntryID := ""
 
@@ -49,38 +58,34 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Step 1: INSERT accounting_activity
+	// Step 1: INSERT accounting_activity (required parent row for FK)
 	var activityID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO investment.accounting_activity (
-			activity_id, activity_type, activity_subtype,
-			entity_id, entity_name, fd_id, fd_ref_no,
-			receipt_id, amount, currency,
-			activity_date, accounting_period,
-			created_by, created_at
+			activity_type, activity_subtype,
+			effective_date, accounting_period,
+			data_source, status
 		) VALUES (
-			'ACT-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-			'FIXED_DEPOSIT','INTEREST_RECEIPT',
-			$1,$2,$3,$4,$5,$6,'INR',$7,$8,$9,now()
+			'FIXED_DEPOSIT', 'INTEREST_RECEIPT',
+			$1, $2,
+			'Manual', 'POSTED'
 		) RETURNING activity_id`,
-		rec.EntityID, rec.EntityName, rec.FDID, rec.FdRefNo,
-		rec.ReceiptID, rec.GrossInterestReceived,
-		entryDate, period, userEmail,
+		entryDate, period,
 	).Scan(&activityID)
 	if err != nil {
 		return "", "", fmt.Errorf("activity insert: %w", err)
 	}
 
-	// Step 2: INSERT interest journal entry (2 lines: Dr Bank, Cr Accrued Interest)
+	// Step 2: INSERT interest journal entry (Dr Bank, Cr Accrued Interest)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO investment.accounting_journal_entry (
 			entry_id, activity_id, entry_type, entry_date, accounting_period,
-			entity_id, fd_id, receipt_id,
-			description, currency, total_amount,
+			entity_id, entity_name, fd_id, receipt_id,
+			description, total_debit, total_credit,
 			created_by, created_at, is_deleted
-		) VALUES ($1,$2,'FD_INTEREST_RECEIPT',$3,$4,$5,$6,$7,$8,'INR',$9,$10,now(),false)`,
+		) VALUES ($1,$2,'FD_INTEREST_RECEIPT',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false)`,
 		interestEntryID, activityID, entryDate, period,
-		rec.EntityID, rec.FDID, rec.ReceiptID,
+		rec.EntityID, entityName, rec.FDID, rec.ReceiptID,
 		fmt.Sprintf("Interest receipt for FD %s period %s", rec.FdRefNo, period),
 		rec.GrossInterestReceived, userEmail)
 	if err != nil {
@@ -89,27 +94,27 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO investment.accounting_journal_entry_line
-			(entry_id, line_no, account_code, account_name, debit_amount, credit_amount, receipt_id)
+			(entry_id, line_number, account_number, account_name, debit_amount, credit_amount)
 		VALUES
-			($1, 1, '1001-BANK', 'Bank Account', $2, 0, $3),
-			($1, 2, '1201-ACCRUED-INT', 'Accrued Interest Income', 0, $2, $3)`,
-		interestEntryID, rec.GrossInterestReceived, rec.ReceiptID)
+			($1, 1, '1001-BANK', 'Bank Account', $2, 0),
+			($1, 2, '1201-ACCRUED-INT', 'Accrued Interest Income', 0, $2)`,
+		interestEntryID, rec.GrossInterestReceived)
 	if err != nil {
 		return "", "", fmt.Errorf("interest journal lines insert: %w", err)
 	}
 
-	// Step 3: INSERT TDS journal entry if TDS > 0
+	// Step 2: INSERT TDS journal entry if TDS > 0
 	if rec.TDSAmountDeducted > 0 {
 		tdsEntryID = fmt.Sprintf("JE_%d_%04d", time.Now().UnixMilli(), rand.Intn(10000))
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.accounting_journal_entry (
 				entry_id, activity_id, entry_type, entry_date, accounting_period,
-				entity_id, fd_id, receipt_id,
-				description, currency, total_amount,
+				entity_id, entity_name, fd_id, receipt_id,
+				description, total_debit, total_credit,
 				created_by, created_at, is_deleted
-			) VALUES ($1,$2,'FD_TDS_DEDUCTED',$3,$4,$5,$6,$7,$8,'INR',$9,$10,now(),false)`,
+			) VALUES ($1,$2,'FD_TDS_DEDUCTED',$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,now(),false)`,
 			tdsEntryID, activityID, entryDate, period,
-			rec.EntityID, rec.FDID, rec.ReceiptID,
+			rec.EntityID, entityName, rec.FDID, rec.ReceiptID,
 			fmt.Sprintf("TDS deducted for FD %s period %s", rec.FdRefNo, period),
 			rec.TDSAmountDeducted, userEmail)
 		if err != nil {
@@ -118,11 +123,11 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 
 		_, err = tx.Exec(ctx, `
 			INSERT INTO investment.accounting_journal_entry_line
-				(entry_id, line_no, account_code, account_name, debit_amount, credit_amount, receipt_id)
+				(entry_id, line_number, account_number, account_name, debit_amount, credit_amount)
 			VALUES
-				($1, 1, '1301-TDS-RECV', 'TDS Receivable', $2, 0, $3),
-				($1, 2, '1001-BANK', 'Bank Account', 0, $2, $3)`,
-			tdsEntryID, rec.TDSAmountDeducted, rec.ReceiptID)
+				($1, 1, '1301-TDS-RECV', 'TDS Receivable', $2, 0),
+				($1, 2, '1001-BANK', 'Bank Account', 0, $2)`,
+			tdsEntryID, rec.TDSAmountDeducted)
 		if err != nil {
 			return "", "", fmt.Errorf("tds journal lines insert: %w", err)
 		}

@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -281,6 +282,50 @@ func resolveUserEmail(userID string) string {
 	return ""
 }
 
+// validateUserIDsExist checks that every user_id in the supplied list actually
+// exists in public.users. Returns an error listing all unknown IDs.
+func validateUserIDsExist(ctx context.Context, pool *pgxpool.Pool, userIDs []string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	// Deduplicate.
+	seen := make(map[string]struct{}, len(userIDs))
+	uniq := userIDs[:0]
+	for _, id := range userIDs {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			uniq = append(uniq, id)
+		}
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT id FROM public.users WHERE id = ANY($1)`,
+		uniq,
+	)
+	if err != nil {
+		return fmt.Errorf("user_id existence check failed: %w", err)
+	}
+	defer rows.Close()
+	existing := make(map[string]struct{}, len(uniq))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("user_id existence scan: %w", err)
+		}
+		existing[id] = struct{}{}
+	}
+	var missing []string
+	for _, id := range uniq {
+		if _, ok := existing[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("unknown user_id(s): %s — use the real DB user id, not a display name",
+			strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // ─── 1. CreateApprovalMatrix ──────────────────────────────────────────────────
 // Creates matrix master + audit, all eyes + eye audits, all members + member audits
 // All 6 tables in one atomic transaction.
@@ -316,9 +361,23 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		var allUserIDs []string
 		for i, eye := range req.Eyes {
 			if err := validateEyeFields(eye.EyeCount, eye.Position, eye.SlaHours); err != nil {
 				api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("eye[%d]: %s", i, err.Error()))
+				return
+			}
+			// Ensure every slot is filled: members count must equal eye_count
+			if len(eye.Members) == 0 {
+				api.RespondWithError(w, http.StatusBadRequest,
+					fmt.Sprintf("eye[%d] (position %d): eye_count is %d but 0 members provided — every slot must have an assigned person",
+						i, eye.Position, eye.EyeCount))
+				return
+			}
+			if len(eye.Members) != eye.EyeCount {
+				api.RespondWithError(w, http.StatusBadRequest,
+					fmt.Sprintf("eye[%d] (position %d): eye_count is %d but %d member(s) provided — all %d slots must be filled",
+						i, eye.Position, eye.EyeCount, len(eye.Members), eye.EyeCount))
 				return
 			}
 			for j, m := range eye.Members {
@@ -329,10 +388,19 @@ func CreateApprovalMatrix(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("eye[%d].member[%d]: %s", i, j, err.Error()))
 					return
 				}
+				// Collect user_ids for existence check
+				if (m.AssignmentType == "USER_ONLY" || m.AssignmentType == "ROLE_USER") && m.UserID != nil && *m.UserID != "" {
+					allUserIDs = append(allUserIDs, *m.UserID)
+				}
 			}
 		}
 
 		ctx := r.Context()
+		// Validate all user_ids exist in public.users BEFORE opening the DB transaction.
+		if err := validateUserIDsExist(ctx, pgxPool, allUserIDs); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")

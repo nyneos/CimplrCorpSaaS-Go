@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -132,6 +133,17 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bookedPrincipal, req.ConfirmedPrincipalAmount, variance.AmountVariance,
 			variance.MaturityDateVariance,
 		)
+		// bank_fd_ref_no and bank_reference_number are NOT NULL — default to booking_id if empty
+		bankFDRef := req.BankFDReference
+		if bankFDRef == "" {
+			bankFDRef = req.BookingID
+		}
+		// confirmation_received_date is NOT NULL — default to today if empty
+		receivedDate := req.ReceiptDate
+		if receivedDate == "" {
+			receivedDate = time.Now().Format("2006-01-02")
+		}
+
 		err = tx.QueryRow(ctx, `
 			INSERT INTO investment.fd_confirmation (
 				booking_id,
@@ -157,8 +169,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.BookingID,
 			req.ConfirmedPrincipalAmount, req.ConfirmedInterestRate,
 			coerceDateValue(req.ConfirmedValueDate), coerceDateValue(req.ConfirmedMaturityDate),
-			nullIfEmpty(req.BankFDReference), nullIfEmpty(req.BankFDReference),
-			coerceDateValue(req.ReceiptDate),
+			bankFDRef, bankFDRef,
+			coerceDateValue(receivedDate),
 			variance.HasVariance, variance.IsThresholdBreached,
 			varianceDetailsJSON,
 			confirmationStatus,

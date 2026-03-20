@@ -1480,7 +1480,15 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		rows, err := pool.Query(ctx, `SELECT * FROM investment.fd_receipt_reconcile_run WHERE reconcile_run_id=$1`, req.ReconcileRunID)
+		rows, err := pool.Query(ctx, `
+			SELECT reconcile_run_id, entity_id, entity_name, bank_id_filter,
+			       period_start, period_end, matching_basis, run_status, trigger_mode,
+			       receipts_processed, receipts_matched, receipts_unmatched, receipts_exception,
+			       receipts_partial, total_expected_interest, total_received_interest, total_interest_variance,
+			       total_expected_tds, total_received_tds, total_tds_variance,
+			       triggered_by, triggered_at, completed_at, error_message
+			FROM investment.fd_receipt_reconcile_run 
+			WHERE reconcile_run_id=$1`, req.ReconcileRunID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
 			return
