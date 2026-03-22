@@ -269,16 +269,18 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 	}
 
 	if remaining == 0 {
+		// No escalation target and no remaining eyes — auto-reject the instance
 		if _, err = tx.Exec(ctx, `
 			UPDATE uam.approval_instance
-			SET status = 'APPROVED', resolved_at = now(), resolved_by_email = 'SYSTEM'
+			SET status = 'REJECTED', resolved_at = now(), resolved_by_email = 'SYSTEM'
 			WHERE instance_id = $1`, eye.instanceID); err != nil {
 			api.LogError("[SLA WORKER] SeqSkip finalize instance=%s: %v", eye.instanceID, err)
 			return
 		}
+		// Write final audit: mark record as rejected by system due to SLA
 		if err = finalizeRecord(ctx, tx, eye.recordID, eye.auditTable, eye.auditIDColumn,
-			eye.recordTable, eye.actionType, InstStatusApproved,
-			"system@auto", "Auto-approved: all eyes resolved"); err != nil {
+			eye.recordTable, eye.actionType, InstStatusRejected,
+			"system@auto", "Auto-rejected: SLA breached and no escalation configured"); err != nil {
 			api.LogError("[SLA WORKER] SeqSkip finalizeRecord instance=%s: %v", eye.instanceID, err)
 			return
 		}
@@ -286,7 +288,7 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 			api.LogError("[SLA WORKER] SeqSkip finalize commit instance=%s: %v", eye.instanceID, err)
 			return
 		}
-		api.LogInfo("[SLA WORKER] Instance %s auto-finalized after last eye skipped", eye.instanceID)
+		api.LogInfo("[SLA WORKER] Instance %s auto-rejected after last eye skipped", eye.instanceID)
 		return
 	}
 
@@ -335,16 +337,17 @@ func handleParallelSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 	}
 
 	if remaining == 0 {
+		// No escalation target and no remaining eyes — auto-reject the instance
 		if _, err = tx.Exec(ctx, `
 			UPDATE uam.approval_instance
-			SET status = 'APPROVED', resolved_at = now(), resolved_by_email = 'SYSTEM'
+			SET status = 'REJECTED', resolved_at = now(), resolved_by_email = 'SYSTEM'
 			WHERE instance_id = $1`, eye.instanceID); err != nil {
 			api.LogError("[SLA WORKER] ParSkip finalize instance=%s: %v", eye.instanceID, err)
 			return
 		}
 		if err = finalizeRecord(ctx, tx, eye.recordID, eye.auditTable, eye.auditIDColumn,
-			eye.recordTable, eye.actionType, InstStatusApproved,
-			"system@auto", "Auto-approved: all parallel eyes resolved or skipped"); err != nil {
+			eye.recordTable, eye.actionType, InstStatusRejected,
+			"system@auto", "Auto-rejected: SLA breached and no escalation configured"); err != nil {
 			api.LogError("[SLA WORKER] ParSkip finalizeRecord instance=%s: %v", eye.instanceID, err)
 			return
 		}
