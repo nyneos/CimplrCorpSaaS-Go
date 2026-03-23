@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,10 +152,64 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		var createdRun struct {
+			RunID              string      `json:"run_id"`
+			RunType            string      `json:"run_type"`
+			RunMode            string      `json:"run_mode"`
+			RunStatus          string      `json:"run_status"`
+			EntityID           string      `json:"entity_id"`
+			EntityName         string      `json:"entity_name"`
+			AccrualPeriodStart interface{} `json:"accrual_period_start"`
+			AccrualPeriodEnd   interface{} `json:"accrual_period_end"`
+			FinancialPeriod    string      `json:"financial_period"`
+			DayCountConvention string      `json:"day_count_convention"`
+			RoundingRule       string      `json:"rounding_rule"`
+			PrecisionDecimals  int         `json:"precision_decimals"`
+			FDStatusFilter     string      `json:"fd_status_filter"`
+			FDInclusionMethod  string      `json:"fd_inclusion_method"`
+			AcrualGranularity  string      `json:"accrual_granularity"`
+			EngineVersion      string      `json:"engine_version"`
+			CreatedBy          string      `json:"created_by"`
+			CreatedAt          interface{} `json:"created_at"`
+		}
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT
+				run_id,
+				COALESCE(run_type,''),
+				COALESCE(run_mode,'SIMULATION'),
+				COALESCE(run_status,'DRAFT'),
+				COALESCE(entity_id,''),
+				COALESCE(entity_name,''),
+				accrual_period_start,
+				accrual_period_end,
+				COALESCE(financial_period,''),
+				COALESCE(day_count_convention,'ACT_365'),
+				COALESCE(rounding_rule,'ROUND'),
+				COALESCE(precision_decimals,2),
+				COALESCE(fd_status_filter,'ACTIVE'),
+				COALESCE(fd_inclusion_method,'ALL'),
+				COALESCE(accrual_granularity,'RUN'),
+				COALESCE(engine_version,''),
+				COALESCE(created_by,''),
+				created_at
+			FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+		).Scan(
+			&createdRun.RunID, &createdRun.RunType, &createdRun.RunMode,
+			&createdRun.RunStatus, &createdRun.EntityID, &createdRun.EntityName,
+			&createdRun.AccrualPeriodStart, &createdRun.AccrualPeriodEnd,
+			&createdRun.FinancialPeriod, &createdRun.DayCountConvention,
+			&createdRun.RoundingRule, &createdRun.PrecisionDecimals,
+			&createdRun.FDStatusFilter, &createdRun.FDInclusionMethod,
+			&createdRun.AcrualGranularity, &createdRun.EngineVersion,
+			&createdRun.CreatedBy, &createdRun.CreatedAt,
+		)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"run_id":   runID,
-			"run_mode": req.RunMode,
-			"status":   "DRAFT",
+			"run": createdRun,
+			"next_step": map[string]interface{}{
+				"action":   "validate",
+				"endpoint": "/investment/fd/accrual/run/validate",
+				"body":     map[string]string{"run_id": runID},
+			},
 		})
 		api.LogInfo("[FDAccrual] CreateAccrualRun: run_id=%s mode=%s entity=%s period=%s→%s",
 			runID, req.RunMode, req.EntityID, req.AccrualPeriodStart, req.AccrualPeriodEnd)
@@ -180,40 +235,47 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		eligible, blockers, err := validateAndPersistFindings(ctx, pgxPool, req.RunID)
+		eligible, blockers, findings, err := validateAndPersistFindings(ctx, pgxPool, req.RunID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Validation failed: "+err.Error())
 			return
 		}
 
 		newStatus := "VALIDATED"
+		validationFailed := false
 		if blockers > 0 {
 			newStatus = "VALIDATION_FAILED"
+			validationFailed = true
 		}
 		_, _ = pgxPool.Exec(ctx,
 			`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
 			newStatus, eligible, req.RunID)
 
-		if blockers > 0 {
-			api.RespondWithError(w, http.StatusBadRequest,
-				fmt.Sprintf("Validation failed: %d blocker(s) found — run_id=%s status=VALIDATION_FAILED", blockers, req.RunID))
-			return
-		}
-
-		// ── Fetch validation findings for UI ──────────────────────────────────
+		// ── Fetch validation findings for UI — joined with fd_master context ───
 		findingRows, _ := pgxPool.Query(ctx, `
-			SELECT finding_id, fd_id,
-			       COALESCE(fd_ref_no,'') AS fd_ref_no,
-			       COALESCE(bank_name,'') AS bank_name,
-			       COALESCE(issue_type,'') AS issue_type,
-			       COALESCE(severity,'') AS severity,
-			       COALESCE(issue_description,'') AS issue_description,
-			       COALESCE(suggested_action,'') AS suggested_action,
-			       COALESCE(is_resolved,false) AS is_resolved,
-			       TO_CHAR(created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at
-			FROM investment.fd_accrual_validation_finding
-			WHERE run_id=$1 ORDER BY severity DESC, fd_id`, req.RunID)
-		findings := make([]map[string]interface{}, 0)
+			SELECT
+				COALESCE(vf.fd_id,'')                          AS fd_id,
+				COALESCE(vf.fd_ref_no,'')                      AS fd_ref_no,
+				COALESCE(vf.bank_name,'')                      AS bank_name,
+				COALESCE(vf.issue_type,'')                     AS issue_type,
+				COALESCE(vf.severity,'')                       AS severity,
+				COALESCE(vf.issue_description,'')              AS issue_description,
+				COALESCE(vf.suggested_action,'')               AS suggested_action,
+				COALESCE(vf.is_resolved,false)                 AS is_resolved,
+				TO_CHAR(vf.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				COALESCE(fm.fd_status,'')                      AS fd_current_status,
+				COALESCE(fm.principal_amount,0)                AS fd_principal,
+				COALESCE(fm.interest_rate,0)                   AS fd_interest_rate,
+				COALESCE(fm.cashflow_generated,false)          AS fd_cashflow_generated,
+				TO_CHAR(fm.start_date,'YYYY-MM-DD')            AS fd_start_date,
+				TO_CHAR(fm.maturity_date,'YYYY-MM-DD')         AS fd_maturity_date
+			FROM investment.fd_accrual_validation_finding vf
+			LEFT JOIN investment.fd_master fm
+				ON fm.fd_id = vf.fd_id
+				AND COALESCE(fm.is_deleted,false) = false
+			WHERE vf.run_id = $1
+			ORDER BY vf.severity DESC, vf.fd_id`, req.RunID)
+		dbFindings := make([]map[string]interface{}, 0)
 		warningFindings, infoFindings := 0, 0
 		if findingRows != nil {
 			flds := findingRows.FieldDescriptions()
@@ -227,7 +289,7 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						row[string(f.Name)] = vals[i]
 					}
 				}
-				findings = append(findings, row)
+				dbFindings = append(dbFindings, row)
 				switch row["severity"] {
 				case "WARNING":
 					warningFindings++
@@ -245,11 +307,24 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"blocker_count": blockers,
 			"warning_count": warningFindings,
 			"info_count":    infoFindings,
-			"has_blockers":  false,
+			"has_blockers":  blockers > 0,
 			"status":        newStatus,
 		}
-		payload["findings"] = findings
-		payload["finding_count"] = len(findings)
+		// prefer the DB-enriched findings for UI, but fall back to the in-memory findings
+		if len(dbFindings) > 0 {
+			payload["findings"] = dbFindings
+			payload["finding_count"] = len(dbFindings)
+		} else {
+			payload["findings"] = findings
+			payload["finding_count"] = len(findings)
+		}
+
+		if validationFailed {
+			api.RespondWithPayload(w, false, fmt.Sprintf("Validation failed: %d blocker(s) found — run_id=%s status=VALIDATION_FAILED", blockers, req.RunID), payload)
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", payload)
 
 		api.RespondWithPayload(w, true, "", payload)
 		api.LogInfo("[FDAccrual] ValidateScope: run_id=%s eligible=%d blockers=%d status=%s",
@@ -1635,15 +1710,15 @@ func createAccrualRunInternal(ctx context.Context, pool *pgxpool.Pool, input Cre
 }
 
 // validateAndPersistFindings runs scope+validation and saves findings to DB.
-func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID string) (eligibleCount int, blockerCount int, err error) {
+func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID string) (eligibleCount int, blockerCount int, findings []map[string]interface{}, err error) {
 	params, err := loadRunParams(ctx, pool, runID)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 
 	fds, err := getFDsInScope(ctx, pool, params)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 
 	if len(fds) == 0 {
@@ -1674,15 +1749,36 @@ func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID s
 			`UPDATE investment.fd_accrual_run
 			 SET run_status='VALIDATION_FAILED', fds_in_scope=0
 			 WHERE run_id=$1`, runID)
-		return 0, 1, nil
+		// return a structured finding so caller/UI can display details
+		f := map[string]interface{}{
+			"finding_id": fmt.Sprintf("%s-F%03d", runID, 1),
+			"run_id":     runID,
+			"fd_id":      "",
+			"fd_ref_no":  "",
+			"bank_name":  "",
+			"issue_type": "NO_FDS_IN_SCOPE",
+			"severity":   "BLOCKER",
+			"issue_description": fmt.Sprintf(
+				"No FDs found for entity=%s fd_status_filter=%s period=%s to %s bank_filter=%q",
+				params.EntityID, params.FDStatusFilter,
+				params.PeriodStart.Format("2006-01-02"), params.PeriodEnd.Format("2006-01-02"), params.BankIDFilter,
+			),
+			"suggested_action": "Verify FD scope and input filters",
+			"detail":           map[string]interface{}{},
+			"created_by":       "auto-validator",
+			"created_at":       time.Now().UTC().Format(time.RFC3339),
+		}
+		return 0, 1, []map[string]interface{}{f}, nil
 	}
 
-	findings := validateFDsForAccrual(fds, params)
+	vf := validateFDsForAccrual(fds, params)
 
 	// Delete existing findings for this run
 	_, _ = pool.Exec(ctx, `DELETE FROM investment.fd_accrual_validation_finding WHERE run_id=$1`, runID)
 
-	for _, f := range findings {
+	resultFindings := make([]map[string]interface{}, 0, len(vf))
+	for i, f := range vf {
+		// persist as before (legacy table fields)
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_validation_finding (
 				run_id, fd_id, fd_ref_no, bank_name,
@@ -1691,12 +1787,33 @@ func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID s
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false,now())`,
 			runID, f.FDID, nullIfEmpty(f.FdRefNo), nullIfEmpty(f.BankName),
 			f.IssueType, f.Severity, f.Description, nullIfEmpty(f.SuggestedAction))
+
 		if f.Severity == "BLOCKER" {
 			blockerCount++
 		}
+
+		fid := fmt.Sprintf("%s-F%03d", runID, i+1)
+		rf := map[string]interface{}{
+			"finding_id":       fid,
+			"run_id":           runID,
+			"fd_id":            f.FDID,
+			"fd_ref_no":        f.FdRefNo,
+			"bank_name":        f.BankName,
+			"issue_type":       f.IssueType,
+			"severity":         f.Severity,
+			"issue_description": f.Description,
+			"suggested_action": f.SuggestedAction,
+			"error_code":       f.IssueType,
+			"location":         "validateFDsForAccrual",
+			"detail":           map[string]interface{}{},
+			"created_by":       "auto-validator",
+			"created_at":       time.Now().UTC().Format(time.RFC3339),
+			"resolved":         false,
+		}
+		resultFindings = append(resultFindings, rf)
 	}
 
-	return len(fds), blockerCount, nil
+	return len(fds), blockerCount, resultFindings, nil
 }
 
 // executeAccrualRun performs the accrual calculation for all FDs in scope.
@@ -2483,7 +2600,7 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 WHERE run_id=$1`, runID)
 
 			// STEP 6: Re-validate scope so fds_in_scope is accurate before execute
-			eligible, blockers, valErr := validateAndPersistFindings(ctx, pgxPool, runID)
+			eligible, blockers, _, valErr := validateAndPersistFindings(ctx, pgxPool, runID)
 			if valErr != nil {
 				res := runResult{RunID: runID, Error: "revalidate failed: " + friendlyAccrualError(valErr, "scope validation")}
 				results = append(results, res)
@@ -2669,7 +2786,7 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			res.RunID = runID
 
 			// Step 2: Validate scope (updates fds_in_scope, status→VALIDATED/VALIDATION_FAILED)
-			eligible, blockers, valErr := validateAndPersistFindings(ctx, pgxPool, runID)
+			eligible, blockers, _, valErr := validateAndPersistFindings(ctx, pgxPool, runID)
 			if valErr != nil {
 				res.Error = "validate failed: " + valErr.Error()
 				monthResults = append(monthResults, res)
@@ -2799,27 +2916,75 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 	}
 
 	if isSimulation {
-		// ── Simulation rows from execution log ────────────────────────────────
+		// ── Simulation rows from execution log — parsed into structured fields ─
+		var parseSimMsg = func(msg string) map[string]interface{} {
+			result := map[string]interface{}{
+				"raw_message": msg,
+				"days":        0,
+				"interest":    0.0,
+				"tds":         0.0,
+				"net":         0.0,
+				"formula":     "",
+				"sub_period":  "",
+			}
+			parts := strings.Fields(msg)
+			for _, p := range parts {
+				kv := strings.SplitN(p, "=", 2)
+				if len(kv) != 2 {
+					continue
+				}
+				switch kv[0] {
+				case "days":
+					if v, err := strconv.Atoi(kv[1]); err == nil {
+						result["days"] = v
+					}
+				case "interest":
+					if v, err := strconv.ParseFloat(kv[1], 64); err == nil {
+						result["interest"] = math.Round(v*100) / 100
+					}
+				case "tds":
+					if v, err := strconv.ParseFloat(kv[1], 64); err == nil {
+						result["tds"] = math.Round(v*100) / 100
+					}
+				case "net":
+					if v, err := strconv.ParseFloat(kv[1], 64); err == nil {
+						result["net"] = math.Round(v*100) / 100
+					}
+				case "formula":
+					result["formula"] = kv[1]
+				}
+			}
+			// extract sub_period from "sub=[2024-10-01,2024-10-02]"
+			if idx := strings.Index(msg, "sub=["); idx >= 0 {
+				end := strings.Index(msg[idx:], "]")
+				if end >= 0 {
+					result["sub_period"] = msg[idx+5 : idx+end]
+				}
+			}
+			return result
+		}
+
 		simRows := []map[string]interface{}{}
 		simR, simErr := pool.Query(ctx, `
 			SELECT
-				COALESCE(fd_id,''),
-				COALESCE(message,''),
+				COALESCE(fd_id,'')                               AS fd_id,
+				COALESCE(message,'')                             AS message,
+				TO_CHAR(logged_at,'YYYY-MM-DD')                  AS period_date,
 				logged_at
 			FROM investment.fd_accrual_run_execution_log
 			WHERE run_id=$1 AND event_type='SIMULATED'
-			ORDER BY logged_at`, runID)
+			ORDER BY fd_id, logged_at`, runID)
 		if simErr == nil {
 			defer simR.Close()
 			for simR.Next() {
-				var fdID, msg string
+				var fdID, msg, periodDate string
 				var loggedAt time.Time
-				if scanErr := simR.Scan(&fdID, &msg, &loggedAt); scanErr == nil {
-					simRows = append(simRows, map[string]interface{}{
-						"fd_id":     fdID,
-						"message":   msg,
-						"logged_at": loggedAt.Format(time.RFC3339),
-					})
+				if scanErr := simR.Scan(&fdID, &msg, &periodDate, &loggedAt); scanErr == nil {
+					row := parseSimMsg(msg)
+					row["fd_id"] = fdID
+					row["period_date"] = periodDate
+					row["logged_at"] = loggedAt.Format(time.RFC3339)
+					simRows = append(simRows, row)
 				}
 			}
 		}
@@ -2880,6 +3045,117 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 				}
 			}
 		}
+
+		// ── Enrich each ledger row with audit_trail + exception ──────────────
+		for i, row := range ledgerRows {
+			ledgerID, _ := row["ledger_id"].(string)
+			if ledgerID == "" {
+				ledgerRows[i]["audit_trail"] = []map[string]interface{}{}
+				ledgerRows[i]["exception"] = nil
+				continue
+			}
+
+			// Per-row audit trail
+			auditRows := []map[string]interface{}{}
+			aRows, aErr := pool.Query(ctx, `
+				SELECT
+					COALESCE(action_type,'')                                    AS action_type,
+					COALESCE(processing_status,'')                              AS processing_status,
+					COALESCE(requested_by,'')                                   AS requested_by,
+					COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+					COALESCE(checker_by,'')                                     AS checker_by,
+					COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+					COALESCE(checker_comment,'')                                AS checker_comment,
+					COALESCE(old_ledger_row_status,'')                          AS old_status,
+					COALESCE(old_period_interest_accrued,0)                     AS old_interest,
+					COALESCE(old_closing_accrued_balance,0)                     AS old_closing_balance,
+					COALESCE(old_formula_used,'')                               AS old_formula
+				FROM investment.fd_accrual_ledger_audit
+				WHERE ledger_id = $1
+				ORDER BY requested_at DESC`, ledgerID)
+			if aErr == nil {
+				for aRows.Next() {
+					var actionType, procStatus, reqBy, reqAt string
+					var checkerBy, checkerAt, checkerComment string
+					var oldStatus, oldFormula string
+					var oldInterest, oldClosing float64
+					if sErr := aRows.Scan(
+						&actionType, &procStatus,
+						&reqBy, &reqAt,
+						&checkerBy, &checkerAt, &checkerComment,
+						&oldStatus, &oldInterest, &oldClosing, &oldFormula,
+					); sErr == nil {
+						auditRows = append(auditRows, map[string]interface{}{
+							"action_type":         actionType,
+							"processing_status":  procStatus,
+							"requested_by":       reqBy,
+							"requested_at":       reqAt,
+							"checker_by":         checkerBy,
+							"checker_at":         checkerAt,
+							"checker_comment":    checkerComment,
+							"old_status":         oldStatus,
+							"old_interest":       oldInterest,
+							"old_closing_balance": oldClosing,
+							"old_formula":        oldFormula,
+						})
+					}
+				}
+				aRows.Close()
+			}
+			ledgerRows[i]["audit_trail"] = auditRows
+
+			// Per-row exception record
+			var exceptionRecord interface{} = nil
+			var exID, exType, exStatus string
+			var exComputed, exProposed float64
+			var exReasonCode, exReasonText string
+			var exProposedBy, exApprovedBy, exCheckerComment string
+			var exProposedAt, exApprovedAt interface{}
+			exErr := pool.QueryRow(ctx, `
+				SELECT
+					COALESCE(exception_id,''),
+					COALESCE(exception_type,''),
+					COALESCE(exception_status,''),
+					COALESCE(computed_amount,0),
+					COALESCE(proposed_override_amount,0),
+					COALESCE(override_reason_code,''),
+					COALESCE(override_reason_text,''),
+					COALESCE(proposed_by,''),
+					proposed_at,
+					COALESCE(approved_by,''),
+					approved_at,
+					COALESCE(checker_comment,'')
+				FROM investment.fd_accrual_exception
+				WHERE ledger_id = $1
+				  AND COALESCE(is_deleted,false) = false
+				ORDER BY created_at DESC LIMIT 1`, ledgerID,
+			).Scan(
+				&exID, &exType, &exStatus,
+				&exComputed, &exProposed,
+				&exReasonCode, &exReasonText,
+				&exProposedBy, &exProposedAt,
+				&exApprovedBy, &exApprovedAt,
+				&exCheckerComment,
+			)
+			if exErr == nil && exID != "" {
+				exceptionRecord = map[string]interface{}{
+					"exception_id":             exID,
+					"exception_type":           exType,
+					"exception_status":         exStatus,
+					"computed_amount":          exComputed,
+					"proposed_override_amount": exProposed,
+					"override_reason_code":     exReasonCode,
+					"override_reason_text":     exReasonText,
+					"proposed_by":              exProposedBy,
+					"proposed_at":              exProposedAt,
+					"approved_by":              exApprovedBy,
+					"approved_at":              exApprovedAt,
+					"checker_comment":          exCheckerComment,
+				}
+			}
+			ledgerRows[i]["exception"] = exceptionRecord
+		}
+
 		payload["ledger"] = ledgerRows
 
 		// ── Per-FD KPIs ───────────────────────────────────────────────────────

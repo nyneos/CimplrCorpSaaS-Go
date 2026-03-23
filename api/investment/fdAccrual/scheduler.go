@@ -762,7 +762,7 @@ func fireScheduledRun(
 		runID, entityID, periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02"))
 
 	// Validate
-	eligible, blockers, vErr := validateAndPersistFindings(ctx, pool, runID)
+	eligible, blockers, _, vErr := validateAndPersistFindings(ctx, pool, runID)
 	if vErr != nil {
 		api.LogError("[FDAccrual] Scheduler validate run=%s: %v", runID, vErr)
 		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATE_FAILED", scheduleFreq, runDay)
