@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -56,7 +57,12 @@ type BankConfig struct {
         WeekendAccrual             bool
         HolidayAccrual             bool
         HolidayCalendarCode        string  // e.g. "Q" or "IN" — code from mastercalendar
-        BrokenPeriodMethod         string  // SIMPLE | NONE
+		BrokenPeriodMethod         string  // SIMPLE | NONE
+		CapitalizationDateAdjustment string  // NO_ADJUST / PRECEDING_WD / FOLLOWING_WD
+		BrokenPeriodLocation         string  // FIRST / LAST / BOTH
+		GracePeriodDays              int
+		GracePeriodRateType          string  // SAME_RATE / SAVINGS_RATE / NO_INTEREST
+		MinimumCompoundingPeriodDays int
 }
 
 type CompoundingFreq struct {
@@ -246,7 +252,13 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 
 func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string) (*BankConfig, error) {
 	if strings.TrimSpace(bankConfigID) == "" {
-		return &BankConfig{InterestRoundingDecimals: 2}, nil
+		return &BankConfig{
+			InterestRoundingDecimals: 2,
+			RoundingMethod: "ROUND",
+			RoundingFrequency: "EACH_PERIOD",
+			WeekendAccrual: true,
+			HolidayAccrual: true,
+		}, nil
 	}
 
 	cfg := &BankConfig{}
@@ -266,7 +278,12 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 			COALESCE(weekend_accrual, true),
 			COALESCE(holiday_accrual, true),
 			COALESCE(holiday_calendar_code, ''),
-			COALESCE(broken_period_method, 'SIMPLE')
+			COALESCE(broken_period_method, 'SIMPLE'),
+			COALESCE(capitalization_date_adjustment, 'NO_ADJUST'),
+			COALESCE(broken_period_location, 'LAST'),
+			COALESCE(grace_period_days, 0),
+			COALESCE(grace_period_rate_type, 'NO_INTEREST'),
+			COALESCE(minimum_compounding_period_days, 0)
 		FROM investment.fd_bank_config_master
 		WHERE config_id = $1
 		  AND COALESCE(is_deleted, false) = false
@@ -286,9 +303,20 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 		&cfg.HolidayAccrual,
 		&cfg.HolidayCalendarCode,
 		&cfg.BrokenPeriodMethod,
+		&cfg.CapitalizationDateAdjustment,
+		&cfg.BrokenPeriodLocation,
+		&cfg.GracePeriodDays,
+		&cfg.GracePeriodRateType,
+		&cfg.MinimumCompoundingPeriodDays,
 	)
 	if err != nil {
-		return &BankConfig{InterestRoundingDecimals: 2}, nil
+		return &BankConfig{
+			InterestRoundingDecimals: 2,
+			RoundingMethod: "ROUND",
+			RoundingFrequency: "EACH_PERIOD",
+			WeekendAccrual: true,
+			HolidayAccrual: true,
+		}, nil
 	}
 	if cfg.InterestRoundingDecimals == 0 {
 		cfg.InterestRoundingDecimals = 2
@@ -582,6 +610,41 @@ func expandRRule(seed time.Time, rrule string, from, to time.Time) []time.Time {
 	return out
 }
 
+// adjustToWorkingDay moves a date to the preceding or following working day
+// according to the bank config and holiday calendar. If adjustment is
+// "NO_ADJUST" or calendar is empty, the original date is returned.
+func adjustToWorkingDay(d time.Time, adjustment string, cfg *BankConfig, cal HolidayCalendarInfo) time.Time {
+	adj := strings.ToUpper(strings.TrimSpace(adjustment))
+	if adj == "" || adj == "NO_ADJUST" {
+		return d
+	}
+	isNonWorking := func(t time.Time) bool {
+		if !cfg.WeekendAccrual && cal.WeekendPattern != "" && isWeekend(t, cal.WeekendPattern) {
+			return true
+		}
+		if !cfg.HolidayAccrual && len(cal.HolidayDates) > 0 {
+			if cal.HolidayDates[t.Format("2006-01-02")] {
+				return true
+			}
+		}
+		return false
+	}
+	switch adj {
+	case "FOLLOWING_WD":
+		for isNonWorking(d) {
+			d = d.AddDate(0, 0, 1)
+		}
+		return d
+	case "PRECEDING_WD":
+		for isNonWorking(d) {
+			d = d.AddDate(0, 0, -1)
+		}
+		return d
+	default:
+		return d
+	}
+}
+
 // loadHolidayCalendar fetches calendar + holidays from mastercalendar/masterholiday
 // and expands recurrence_rule entries for the range [from-2yr, to+2yr].
 // Returns an empty HolidayCalendarInfo if calCode is empty or calendar not found.
@@ -666,9 +729,22 @@ func isNonAccrualDay(d time.Time, cfg *BankConfig, cal HolidayCalendarInfo) bool
 // For conventions that use raw calendar days (ACT_365, ACT_360, ACT_ACT) this
 // replaces simple date-subtraction when the bank excludes non-working days.
 func countAccrualDays(conventionType string, periodStart, periodEnd time.Time, cfg *BankConfig, cal HolidayCalendarInfo) int {
+	// Respect accrual start/end conventions by adjusting the window.
+	start := periodStart
+	end := periodEnd
+	if strings.EqualFold(cfg.AccrualStartConvention, "EXCLUDE") {
+		start = start.AddDate(0, 0, 1)
+	}
+	if strings.EqualFold(cfg.AccrualEndConvention, "EXCLUDE") {
+		end = end.AddDate(0, 0, -1)
+	}
+	if !end.After(start) {
+		return 0
+	}
+
 	// If both flags are true (accrue on all days), just use calendar days.
 	if cfg.WeekendAccrual && cfg.HolidayAccrual {
-		return int(periodEnd.Sub(periodStart).Hours() / 24)
+		return int(end.Sub(start).Hours() / 24)
 	}
 	// 30/360 convention: never use calendar-day counting; always use 30/360 formula.
 	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(conventionType)))
@@ -678,7 +754,7 @@ func countAccrualDays(conventionType string, periodStart, periodEnd time.Time, c
 	}
 	// Count working days only.
 	count := 0
-	for cur := periodStart; cur.Before(periodEnd); cur = cur.AddDate(0, 0, 1) {
+	for cur := start; cur.Before(end); cur = cur.AddDate(0, 0, 1) {
 		if !isNonAccrualDay(cur, cfg, cal) {
 			count++
 		}
@@ -737,12 +813,54 @@ func countDays30_360(start, end time.Time) int {
 	return (y2-y1)*360 + int(m2-m1)*30 + (d2 - d1)
 }
 
-func roundAmount(value float64, decimals int) float64 {
+// toFloat64 tries to convert an interface{} value to float64.
+// Handles float64, float32, int, int32, int64, and string (parsed via strconv).
+func toFloat64(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case string:
+		f, err := strconv.ParseFloat(val, 64)
+		return f, err == nil
+	}
+	return 0, false
+}
+
+// roundByMethod applies the requested rounding method to value.
+func roundByMethod(value float64, decimals int, method string) float64 {
 	if decimals < 0 {
 		decimals = 2
 	}
 	pow := math.Pow(10, float64(decimals))
-	return math.Round(value*pow) / pow
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case "TRUNCATE":
+		return math.Trunc(value*pow) / pow
+	case "ROUND_UP":
+		sign := math.Copysign(1, value)
+		return sign * math.Ceil(math.Abs(value)*pow) / pow
+	case "ROUND_DOWN":
+		sign := math.Copysign(1, value)
+		return sign * math.Floor(math.Abs(value)*pow) / pow
+	default: // ROUND
+		return math.Round(value*pow) / pow
+	}
+}
+
+// applyRounding applies rounding according to method and frequency.
+// If frequency is AT_MATURITY and this is not the final rounding, the value is returned unrounded.
+func applyRounding(value float64, decimals int, method string, frequency string, isFinal bool) float64 {
+	if strings.ToUpper(strings.TrimSpace(frequency)) == "AT_MATURITY" && !isFinal {
+		return value
+	}
+	return roundByMethod(value, decimals, method)
 }
 
 // getDivisorAndDaysWithCal is like getDivisorAndDays but uses countAccrualDays
@@ -795,7 +913,7 @@ func nextCalendarQuarterEnd(date time.Time) time.Time {
 
 // buildCapitalizationDates returns the period-end dates for compound/capitalized FDs.
 // These determine CAPITALIZATION event boundaries.
-func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig) []time.Time {
+func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, cal HolidayCalendarInfo) []time.Time {
 	capType := strings.ToUpper(strings.TrimSpace(cfg.CapitalizationScheduleType))
 	qDef := strings.ToUpper(strings.TrimSpace(cfg.QuarterDefinition))
 
@@ -811,13 +929,38 @@ func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig) []time.Time {
 			if !next.After(current) {
 				next = nextCalendarQuarterEnd(current.AddDate(0, 1, 0))
 			}
+			// adjust to working day if needed
+			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
 		case "ANNIVERSARY":
-			// Use 90-day anniversary or the configured days_per_period.
-			offsetDays := 91
-			if qDef == "90_DAYS" {
+			// Use DaysPerPeriod from freq when available, otherwise fall back to
+			// configured 90-day behaviour or compute from periods-per-year.
+			offsetDays := 91 // default quarterly fallback
+			if freq != nil && freq.DaysPerPeriod > 0 {
+				offsetDays = freq.DaysPerPeriod
+			} else if qDef == "90_DAYS" {
 				offsetDays = 90
+			} else if freq != nil && freq.CompoundingPeriodsPerYear > 0 {
+				offsetDays = 365 / freq.CompoundingPeriodsPerYear
 			}
 			next = current.AddDate(0, 0, offsetDays)
+			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+		case "MONTH_END":
+			// Next month-end after current
+			y, m, _ := current.Date()
+			next = lastDayOfMonth(y, m)
+			if !next.After(current) {
+				m++
+				if m > 12 {
+					m = 1
+					y++
+				}
+				next = lastDayOfMonth(y, m)
+			}
+			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+		case "FIXED_DAY":
+			// Not implemented in v1 — treat same as ANNIVERSARY (quarterly)
+			next = current.AddDate(0, 3, 0)
+			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
 		default:
 			// Fallback: quarterly anniversary.
 			next = current.AddDate(0, 3, 0)
@@ -936,20 +1079,9 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 	calcMethod := firstNonEmpty(itInfo.CalculationMethod, strings.ToUpper(fd.InterestTypeCode), "SIMPLE")
 	isCompound := calcMethod == "COMPOUND"
 
-	// Resolve the human-readable frequency type: prefer freq.FrequencyType (from master),
-	// then fall back to the raw frequency_id / payout field which may itself be a code.
-	freqType := strings.ToUpper(strings.TrimSpace(firstNonEmpty(
-		freq.FrequencyType,
-		freq.FrequencyCode,
-		fd.InterestPayoutFrequency,
-		fd.FrequencyID,
-	)))
-	payoutMonths := freqTypeToMonths(freqType)
-	isAtMaturity := payoutMonths == 0
-
+	// Resolve the human-readable frequency type if needed by callers.
 	// Determine TDS deduction timing and TDS payout frequency.
 	tdsDeductionTiming := ""
-	tdsPeriodMonths := 0 // 0 = same as interest payout
 	if tdsCfg != nil {
 		tdsDeductionTiming = strings.ToUpper(strings.TrimSpace(tdsCfg.DeductionTiming))
 	}
@@ -958,21 +1090,7 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 	}
 	hasTDS := tdsCfg != nil && tdsCfg.TDSRate > 0
 
-	// Derive TDS deduction period from its timing code.
-	// Examples: "HALF_YEARLY" / "SEMI_ANNUAL" → 6 months, "ANNUAL" → 12, "MATURITY" → 0 (at maturity), "ACCRUAL_ANNUAL" → 12.
-	switch {
-	case strings.Contains(tdsDeductionTiming, "HALF") || strings.Contains(tdsDeductionTiming, "SEMI"):
-		tdsPeriodMonths = 6
-	case strings.Contains(tdsDeductionTiming, "QUARTER"):
-		tdsPeriodMonths = 3
-	case strings.Contains(tdsDeductionTiming, "MONTH"):
-		tdsPeriodMonths = 1
-	case strings.Contains(tdsDeductionTiming, "ANNUAL") || strings.Contains(tdsDeductionTiming, "YEAR"):
-		tdsPeriodMonths = 12
-	default:
-		// MATURITY or NONE — TDS at maturity only.
-		tdsPeriodMonths = 0
-	}
+	// tdsDeductionTiming is left for downstream logic (compound handler).
 
 	// ── COMPOUND FDs: use capitalization dates ─────────────────────────────
 	if isCompound {
@@ -980,145 +1098,224 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 			effectiveConvention, effectiveDayCountCode, decimals, hasTDS, tdsDeductionTiming)
 	}
 
-	// ── SIMPLE / AT_MATURITY FDs: payout-frequency schedule ───────────────
-	// Build the interest payment boundaries.
-	payoutDates := buildPayoutDates(fd, payoutMonths)
+	// BRD: Build ACCRUAL rows first (monthly), then CAPITALIZATION/TDS/MATURITY.
+	var rows []CashflowRow
 
-	// Build the TDS deduction dates (may differ from payout dates).
-	var tdsDeductionDates map[string]bool
-	if hasTDS && tdsPeriodMonths > 0 && tdsPeriodMonths != payoutMonths {
-		tdsDeductionDates = make(map[string]bool)
-		for _, d := range buildPayoutDates(fd, tdsPeriodMonths) {
-			tdsDeductionDates[d.Format("2006-01-02")] = true
-		}
+	// Build monthly accrual boundaries.
+	accrualDates := buildMonthlyAccrualDates(fd)
+	type accrualEntry struct {
+		PeriodStart time.Time
+		PeriodEnd   time.Time
+		PeriodDays  int
+		OpeningP    float64
+		Interest    float64
+		Divisor     int
 	}
 
-	openingPrincipal := fd.PrincipalAmount
-	periodStart := fd.ValueDate
-	seq := 0
-	var rows []CashflowRow
-	var cumulativeTDSInterest float64 // interest accrued since last TDS deduction
-
-	for idx, periodEnd := range payoutDates {
-		if !periodEnd.After(periodStart) {
-			continue
+	accrualRows := make([]*accrualEntry, 0, len(accrualDates))
+	// initial opening principal is fd.PrincipalAmount; for compound we'll update per cap window.
+	for i, end := range accrualDates {
+		var start time.Time
+		if i == 0 {
+			start = fd.ValueDate
+		} else {
+			start = accrualDates[i-1]
 		}
-
-		divisor, days := getDivisorAndDaysWithCal(effectiveConvention, periodStart, periodEnd, cfg, calInfo)
+		divisor, days := getDivisorAndDaysWithCal(effectiveConvention, start, end, cfg, calInfo)
 		if days <= 0 {
 			days = 1
 		}
 		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") {
 			days++
 		}
-
-		ratePerDay := fd.InterestRate / (float64(divisor) * 100)
-		interest := roundAmount(openingPrincipal*fd.InterestRate*float64(days)/float64(divisor)/100, decimals)
-		cumulativeTDSInterest += interest
-
-		isMaturity := idx == len(payoutDates)-1
-
-		// ── TDS_DEDUCTION event (if separate from interest payment) ─────
-		needsTDS := hasTDS
-		if hasTDS && tdsPeriodMonths > 0 && tdsPeriodMonths != payoutMonths {
-			// TDS only on its own schedule dates.
-			needsTDS = tdsDeductionDates[periodEnd.Format("2006-01-02")]
+		ae := &accrualEntry{
+			PeriodStart: start,
+			PeriodEnd:   end,
+			PeriodDays:  days,
+			OpeningP:    fd.PrincipalAmount,
+			Divisor:     divisor,
 		}
-		if hasTDS && tdsDeductionTiming == "MATURITY" {
-			needsTDS = isMaturity
-		}
+		// interest with current OpeningP (base principal for now)
+		raw := ae.OpeningP * fd.InterestRate * float64(ae.PeriodDays) / float64(ae.Divisor) / 100
+		ae.Interest = applyRounding(raw, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
+		accrualRows = append(accrualRows, ae)
+	}
 
-		var tdsAmount float64
-		if needsTDS && cumulativeTDSInterest > 0 {
-			tdsAmount = roundAmount(cumulativeTDSInterest*tdsCfg.TDSRate/100, decimals)
-		}
-
-		// ── Determine event type ─────────────────────────────────────────
-		eventType := "INTEREST_RECEIPT"
-		if isAtMaturity || isMaturity {
-			eventType = "MATURITY"
-		}
-
-		// Net cash flow for INTEREST_RECEIPT: interest paid out minus TDS withheld.
-		var netCashflow float64
-		if eventType == "MATURITY" {
-			// Return principal + accumulated interest − TDS.
-			netCashflow = roundAmount(openingPrincipal+interest-tdsAmount, decimals)
-		} else {
-			// Periodic interest payout.
-			netCashflow = roundAmount(interest-tdsAmount, decimals)
-		}
-
-		seq++
-		rows = append(rows, CashflowRow{
-			PeriodNumber:      seq,
-			EventType:         eventType,
-			EventDate:         periodEnd,
-			PeriodStartDate:   periodStart,
-			PeriodEndDate:     periodEnd,
-			PeriodDays:        days,
-			OpeningPrincipal:  openingPrincipal,
-			InterestAccrued:   interest,
-			CapitalizedAmount: 0,
-			ClosingPrincipal: func() float64 {
-				if isMaturity {
-					return 0
-				}
-				return openingPrincipal
-			}(),
-			TDSAmount:         tdsAmount,
-			NetCashFlow:       netCashflow,
-			DayCountCode:      effectiveDayCountCode,
-			Divisor:           divisor,
-			FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d) [%s]", openingPrincipal, fd.InterestRate, days, divisor, effectiveConvention),
-			AccrualRatePerDay: ratePerDay,
-		})
-
-		// If TDS deduction is on a separate schedule (different period from payout)
-		// and this is a TDS date, insert a dedicated TDS_DEDUCTION row too.
-		if needsTDS && tdsAmount > 0 && tdsPeriodMonths > 0 && tdsPeriodMonths != payoutMonths && !isMaturity {
-			seq++
+	// If SIMPLE or AT_MATURITY — no capitalization. Build accrual rows + maturity + TDS.
+	if !isCompound {
+		// Append accrual rows
+		for _, ae := range accrualRows {
 			rows = append(rows, CashflowRow{
-				PeriodNumber:     seq,
-				EventType:        "TDS_DEDUCTION",
-				EventDate:        periodEnd,
-				PeriodStartDate:  periodStart,
-				PeriodEndDate:    periodEnd,
-				PeriodDays:       days,
-				OpeningPrincipal: openingPrincipal,
-				TDSAmount:        tdsAmount,
-				NetCashFlow:      -tdsAmount,
-				ClosingPrincipal: openingPrincipal,
-				DayCountCode:     effectiveDayCountCode,
-				Divisor:          divisor,
-				FormulaUsed:      fmt.Sprintf("TDS = CumulativeInterest(%.2f) × %.4f%%", cumulativeTDSInterest, tdsCfg.TDSRate),
+				EventType:         "ACCRUAL",
+				EventDate:         ae.PeriodEnd,
+				PeriodStartDate:   ae.PeriodStart,
+				PeriodEndDate:     ae.PeriodEnd,
+				PeriodDays:        ae.PeriodDays,
+				OpeningPrincipal:  ae.OpeningP,
+				InterestAccrued:   ae.Interest,
+				CapitalizedAmount: 0,
+				ClosingPrincipal:  ae.OpeningP,
+				TDSAmount:         0,
+				NetCashFlow:       0,
+				DayCountCode:      effectiveDayCountCode,
+				Divisor:           ae.Divisor,
+				FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d) [%s]", ae.OpeningP, fd.InterestRate, ae.PeriodDays, ae.Divisor, effectiveConvention),
+				AccrualRatePerDay: fd.InterestRate / (float64(ae.Divisor) * 100),
 			})
-			cumulativeTDSInterest = 0
-		} else if needsTDS {
-			cumulativeTDSInterest = 0
 		}
 
-		periodStart = periodEnd
-	}
+		// Determine payout frequency — if payouts are periodic, create INTEREST_RECEIPT events (non-cumulative)
+		freqType := strings.ToUpper(strings.TrimSpace(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, fd.InterestPayoutFrequency, fd.FrequencyID)))
+		payoutMonths := freqTypeToMonths(freqType)
+		isNonCumulative := payoutMonths > 0
 
-	// Sort by event date then sequence.
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].EventDate.Equal(rows[j].EventDate) {
-			return rows[i].PeriodNumber < rows[j].PeriodNumber
+		if isNonCumulative {
+			// Build payout boundaries and emit INTEREST_RECEIPT + per-payout TDS (if threshold crossed)
+			payoutDates := buildPayoutDates(fd, payoutMonths)
+			lastPayout := fd.ValueDate
+			for _, payoutDate := range payoutDates {
+				payoutInterest := 0.0
+				for _, a := range accrualRows {
+					if a.PeriodEnd.After(lastPayout) && !a.PeriodEnd.After(payoutDate) {
+						payoutInterest += a.Interest
+					}
+				}
+				if payoutInterest > 0 {
+					tdsAmt := 0.0
+					if hasTDS && payoutInterest >= tdsCfg.ThresholdAmount {
+						tdsAmt = applyRounding(payoutInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, payoutDate.Equal(fd.MaturityDate))
+					}
+					rows = append(rows, CashflowRow{
+						EventType: "INTEREST_RECEIPT",
+						EventDate: payoutDate,
+						PeriodStartDate: lastPayout,
+						PeriodEndDate: payoutDate,
+						PeriodDays: int(payoutDate.Sub(lastPayout).Hours()/24),
+						OpeningPrincipal: fd.PrincipalAmount,
+						InterestAccrued: payoutInterest,
+						CapitalizedAmount: 0,
+						ClosingPrincipal: fd.PrincipalAmount,
+						TDSAmount: tdsAmt,
+						NetCashFlow: applyRounding(payoutInterest-tdsAmt, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, payoutDate.Equal(fd.MaturityDate)),
+						DayCountCode: effectiveDayCountCode,
+					})
+					if tdsAmt > 0 {
+						rows = append(rows, CashflowRow{
+							EventType: "TDS_DEDUCTION",
+							EventDate: payoutDate,
+							PeriodStartDate: lastPayout,
+							PeriodEndDate: payoutDate,
+							OpeningPrincipal: fd.PrincipalAmount,
+							TDSAmount: tdsAmt,
+							NetCashFlow: -tdsAmt,
+							ClosingPrincipal: fd.PrincipalAmount,
+							DayCountCode: effectiveDayCountCode,
+						})
+					}
+				}
+				lastPayout = payoutDate
+			}
+
+			// Maturity: return principal only (interest already paid out)
+			rows = append(rows, CashflowRow{
+				EventType: "MATURITY",
+				EventDate: fd.MaturityDate,
+				PeriodStartDate: lastPayout,
+				PeriodEndDate: fd.MaturityDate,
+				PeriodDays: int(fd.MaturityDate.Sub(lastPayout).Hours()/24),
+				OpeningPrincipal: fd.PrincipalAmount,
+				InterestAccrued: 0,
+				CapitalizedAmount: 0,
+				ClosingPrincipal: 0,
+				TDSAmount: 0,
+				NetCashFlow: fd.PrincipalAmount,
+				DayCountCode: effectiveDayCountCode,
+			})
+		} else {
+			// AT_MATURITY cumulative behaviour — TDS per FY if threshold crossed
+			if hasTDS {
+				// Map accruals into FY buckets
+				fyMap := map[int]float64{}
+				for _, a := range accrualRows {
+					y := a.PeriodEnd.Year()
+					fy := y
+					if a.PeriodEnd.Month() >= time.April {
+						fy = y + 1
+					}
+					fyMap[fy] += a.Interest
+				}
+				for fy, interestSum := range fyMap {
+					if interestSum < tdsCfg.ThresholdAmount {
+						continue
+					}
+					tdsAmt := applyRounding(interestSum*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+					// FY end date is Mar 31 of fy
+					ed := time.Date(fy, time.March, 31, 0, 0, 0, 0, time.UTC)
+					rows = append(rows, CashflowRow{
+						EventType:       "TDS_DEDUCTION",
+						EventDate:       ed,
+						PeriodStartDate: time.Date(fy-1, time.April, 1, 0, 0, 0, 0, time.UTC),
+						PeriodEndDate:   ed,
+						PeriodDays:      365,
+						OpeningPrincipal: fd.PrincipalAmount,
+						TDSAmount:        tdsAmt,
+						NetCashFlow:      -tdsAmt,
+						ClosingPrincipal: fd.PrincipalAmount,
+						DayCountCode:     effectiveDayCountCode,
+					})
+				}
+			}
+
+			// Maturity row
+			var totalInterest float64
+			for _, a := range accrualRows {
+				totalInterest += a.Interest
+			}
+			tdsAtMaturity := 0.0
+			if hasTDS && (strings.ToUpper(cfg.TDSDeductionTiming) == "MATURITY" || strings.ToUpper(tdsDeductionTiming) == "MATURITY") {
+				if totalInterest >= tdsCfg.ThresholdAmount {
+					tdsAtMaturity = applyRounding(totalInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+				}
+			}
+			net := applyRounding(fd.PrincipalAmount+totalInterest-tdsAtMaturity, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+			rows = append(rows, CashflowRow{
+				EventType:         "MATURITY",
+				EventDate:         fd.MaturityDate,
+				PeriodStartDate:   accrualDates[len(accrualDates)-1],
+				PeriodEndDate:     fd.MaturityDate,
+				PeriodDays:        int(fd.MaturityDate.Sub(accrualDates[len(accrualDates)-1]).Hours()/24),
+				OpeningPrincipal:  fd.PrincipalAmount,
+				InterestAccrued:   totalInterest,
+				CapitalizedAmount: 0,
+				ClosingPrincipal:  0,
+				TDSAmount:         tdsAtMaturity,
+				NetCashFlow:       net,
+				DayCountCode:      effectiveDayCountCode,
+			})
 		}
-		return rows[i].EventDate.Before(rows[j].EventDate)
-	})
-	for i := range rows {
-		rows[i].PeriodNumber = i + 1
+
+			// Sort and renumber per BRD ordering
+			sort.SliceStable(rows, func(i, j int) bool {
+				if rows[i].EventDate.Equal(rows[j].EventDate) {
+					order := map[string]int{"ACCRUAL": 1, "INTEREST_RECEIPT": 2, "CAPITALIZATION": 3, "TDS_DEDUCTION": 4, "MATURITY": 5}
+					return order[rows[i].EventType] < order[rows[j].EventType]
+				}
+				return rows[i].EventDate.Before(rows[j].EventDate)
+			})
+		for i := range rows {
+			rows[i].PeriodNumber = i + 1
+		}
+		return rows
 	}
-	return rows
+    // Fallback return to satisfy compiler (should be unreachable).
+    return nil
 }
 
 // generateCompoundSchedule handles COMPOUND FDs — interest is capitalized each period.
 func generateCompoundSchedule(
 	fd *FDRecord,
 	cfg *BankConfig,
-	_ *CompoundingFreq,
+	freq *CompoundingFreq,
 	tdsCfg *TDSConfig,
 	_ DayCountInfo,
 	_ InterestTypeInfo,
@@ -1128,126 +1325,195 @@ func generateCompoundSchedule(
 	hasTDS bool,
 	tdsDeductionTiming string,
 ) []CashflowRow {
-	periodEnds := buildCapitalizationDates(fd, cfg)
+	// Build monthly accrual entries first
+	accrualDates := buildMonthlyAccrualDates(fd)
+	type aEntry struct{
+		PeriodStart time.Time
+		PeriodEnd time.Time
+		PeriodDays int
+		Divisor int
+		OpeningP float64
+		Interest float64
+	}
+	accrualRows := make([]*aEntry, 0, len(accrualDates))
+	for i, end := range accrualDates {
+		var start time.Time
+		if i == 0 { start = fd.ValueDate } else { start = accrualDates[i-1] }
+		divisor, days := getDivisorAndDaysWithCal(effectiveConvention, start, end, cfg, calInfo)
+		if days <= 0 { days = 1 }
+		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") { days++ }
+		accrualRows = append(accrualRows, &aEntry{PeriodStart:start, PeriodEnd:end, PeriodDays:days, Divisor:divisor})
+	}
 
+	periodEnds := buildCapitalizationDates(fd, cfg, freq, calInfo)
 	openingPrincipal := fd.PrincipalAmount
-	periodStart := fd.ValueDate
 	seq := 0
 	var rows []CashflowRow
 	var cumulativeInterest float64
-	lastTDSYear := fd.ValueDate.Year()
 
-	for _, periodEnd := range periodEnds {
-		if !periodEnd.After(periodStart) {
-			continue
+	// Initialize FY TDS end
+	fyEndYear := fd.ValueDate.Year()
+	if fd.ValueDate.Month() >= time.April { fyEndYear++ }
+	lastTDSFYEnd := time.Date(fyEndYear, time.March, 31,0,0,0,0,time.UTC)
+
+	lastCapDate := fd.ValueDate
+	for _, capEnd := range periodEnds {
+		if !capEnd.After(lastCapDate) { continue }
+
+		// collect accruals within (lastCapDate <= a.PeriodStart) && (a.PeriodEnd <= capEnd)
+		var capInterest float64
+		accrualCountInWindow := 0
+		capDivisor := 0
+		capAccrualRate := 0.0
+		for _, a := range accrualRows {
+			if (a.PeriodStart.Equal(lastCapDate) || a.PeriodStart.After(lastCapDate)) && !a.PeriodEnd.After(capEnd) {
+				a.OpeningP = openingPrincipal
+				raw := a.OpeningP * fd.InterestRate * float64(a.PeriodDays) / float64(a.Divisor) / 100
+				a.Interest = applyRounding(raw, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
+				capInterest += a.Interest
+				cumulativeInterest += a.Interest
+				accrualCountInWindow++
+				if capDivisor == 0 && a.Divisor > 0 {
+					capDivisor = a.Divisor
+					capAccrualRate = fd.InterestRate / (float64(capDivisor) * 100)
+				}
+			}
 		}
 
-		divisor, days := getDivisorAndDaysWithCal(effectiveConvention, periodStart, periodEnd, cfg, calInfo)
-		if days <= 0 {
-			days = 1
-		}
-		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") {
-			days++
+		isCapBoundary := capEnd.Before(fd.MaturityDate)
+		isMaturity := capEnd.Equal(fd.MaturityDate)
+
+		// FIX 3: compute TDS first, then capitalized = interest - TDS (not just interest)
+		tdsThisPeriod := 0.0
+		tdsTiming := strings.ToUpper(strings.TrimSpace(tdsDeductionTiming))
+		if hasTDS {
+			switch {
+			case strings.Contains(tdsTiming, "ANNUAL"):
+				if (capEnd.After(lastTDSFYEnd) || isMaturity) && cumulativeInterest >= tdsCfg.ThresholdAmount {
+					tdsThisPeriod = applyRounding(cumulativeInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isMaturity)
+				}
+			case strings.Contains(tdsTiming, "MATURITY"):
+				if isMaturity && cumulativeInterest >= tdsCfg.ThresholdAmount {
+					tdsThisPeriod = applyRounding(cumulativeInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+				}
+			default: // RECEIPT / EACH_PERIOD — TDS every cap period
+				if capInterest >= tdsCfg.ThresholdAmount {
+					tdsThisPeriod = applyRounding(capInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isMaturity)
+				}
+			}
 		}
 
-		ratePerDay := fd.InterestRate / (float64(divisor) * 100)
-		interest := roundAmount(openingPrincipal*fd.InterestRate*float64(days)/float64(divisor)/100, decimals)
-		cumulativeInterest += interest
-
-		isCapBoundary := periodEnd.Before(fd.MaturityDate)
-		isMaturity := periodEnd.Equal(fd.MaturityDate)
+		// FIX 3: capitalizedAmount = interest - TDS (what actually joins the principal)
+		capitalized := applyRounding(capInterest-tdsThisPeriod, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isMaturity)
+		closingPrincipal := openingPrincipal
+		if isCapBoundary {
+			closingPrincipal = applyRounding(openingPrincipal+capitalized, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isMaturity)
+		}
 
 		eventType := "CAPITALIZATION"
 		if isMaturity {
 			eventType = "MATURITY"
 		}
+		capDays := int(capEnd.Sub(lastCapDate).Hours() / 24)
 
-		// Annual TDS injection.
-		if hasTDS && strings.Contains(tdsDeductionTiming, "ANNUAL") {
-			if periodEnd.Year() > lastTDSYear || isMaturity {
-				tdsOnPeriod := roundAmount(cumulativeInterest*tdsCfg.TDSRate/100, decimals)
-				if tdsOnPeriod > 0 {
-					seq++
-					rows = append(rows, CashflowRow{
-						PeriodNumber:     seq,
-						EventType:        "TDS_DEDUCTION",
-						EventDate:        time.Date(lastTDSYear, 3, 31, 0, 0, 0, 0, time.UTC),
-						PeriodStartDate:  time.Date(lastTDSYear-1, 4, 1, 0, 0, 0, 0, time.UTC),
-						PeriodEndDate:    time.Date(lastTDSYear, 3, 31, 0, 0, 0, 0, time.UTC),
-						PeriodDays:       365,
-						OpeningPrincipal: openingPrincipal,
-						TDSAmount:        tdsOnPeriod,
-						NetCashFlow:      -tdsOnPeriod,
-						ClosingPrincipal: openingPrincipal,
-						DayCountCode:     effectiveDayCountCode,
-						Divisor:          divisor,
-						FormulaUsed:      fmt.Sprintf("TDS = CumulativeInterest(%.2f) × %.4f%%", cumulativeInterest, tdsCfg.TDSRate),
-					})
-					cumulativeInterest = 0
-					lastTDSYear = periodEnd.Year()
-				}
-			}
-		}
-
-		var tdsThisPeriod float64
-		var capitalized float64
-		netCashflow := 0.0
-		closingPrincipal := openingPrincipal
-
-		if isCapBoundary {
-			if hasTDS && tdsDeductionTiming == "MATURITY" {
-				tdsThisPeriod = 0
-			} else if hasTDS && !strings.Contains(tdsDeductionTiming, "ANNUAL") {
-				tdsThisPeriod = roundAmount(interest*tdsCfg.TDSRate/100, decimals)
-			}
-			capitalized = roundAmount(interest-tdsThisPeriod, decimals)
-			closingPrincipal = roundAmount(openingPrincipal+capitalized, decimals)
-			netCashflow = 0
-		} else if isMaturity {
-			if hasTDS && tdsDeductionTiming == "MATURITY" {
-				tdsThisPeriod = roundAmount(cumulativeInterest*tdsCfg.TDSRate/100, decimals)
-			} else if hasTDS && !strings.Contains(tdsDeductionTiming, "ANNUAL") {
-				tdsThisPeriod = roundAmount(interest*tdsCfg.TDSRate/100, decimals)
-			}
-			netCashflow = roundAmount(openingPrincipal+interest-tdsThisPeriod, decimals)
-			closingPrincipal = 0
-		}
-
+		// FIX 2 & 4: CAPITALIZATION/MATURITY row — TDSAmount always 0; separate TDS row below.
 		seq++
+		maturityNetCF := 0.0
+		if isMaturity {
+			maturityNetCF = applyRounding(closingPrincipal, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+		}
 		rows = append(rows, CashflowRow{
 			PeriodNumber:      seq,
 			EventType:         eventType,
-			EventDate:         periodEnd,
-			PeriodStartDate:   periodStart,
-			PeriodEndDate:     periodEnd,
-			PeriodDays:        days,
+			EventDate:         capEnd,
+			PeriodStartDate:   lastCapDate,
+			PeriodEndDate:     capEnd,
+			PeriodDays:        capDays,
 			OpeningPrincipal:  openingPrincipal,
-			InterestAccrued:   interest,
+			InterestAccrued:   capInterest,
 			CapitalizedAmount: capitalized,
-			ClosingPrincipal:  closingPrincipal,
-			TDSAmount:         tdsThisPeriod,
-			NetCashFlow:       netCashflow,
+			ClosingPrincipal:  func() float64 { if isMaturity { return 0 }; return closingPrincipal }(),
+			TDSAmount:         0,
+			NetCashFlow:       maturityNetCF,
 			DayCountCode:      effectiveDayCountCode,
-			Divisor:           divisor,
-			FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d) [%s]", openingPrincipal, fd.InterestRate, days, divisor, effectiveConvention),
-			AccrualRatePerDay: ratePerDay,
+			Divisor:           capDivisor,
+			FormulaUsed:       fmt.Sprintf("CAP_SUM: P(%.2f), %d accruals=%.2f, tds=%.2f, cap=%.2f", openingPrincipal, accrualCountInWindow, capInterest, tdsThisPeriod, capitalized),
+			AccrualRatePerDay: capAccrualRate,
 		})
 
-		if isCapBoundary {
-			openingPrincipal = closingPrincipal
+		// FIX 2: emit separate TDS_DEDUCTION row
+		if tdsThisPeriod > 0 {
+			seq++
+			tdsEventDate := capEnd
+			if strings.Contains(tdsTiming, "ANNUAL") {
+				tdsEventDate = lastTDSFYEnd
+			}
+			rows = append(rows, CashflowRow{
+				PeriodNumber:     seq,
+				EventType:        "TDS_DEDUCTION",
+				EventDate:        tdsEventDate,
+				PeriodStartDate:  lastCapDate,
+				PeriodEndDate:    capEnd,
+				PeriodDays:       capDays,
+				OpeningPrincipal: openingPrincipal,
+				TDSAmount:        tdsThisPeriod,
+				NetCashFlow:      -tdsThisPeriod,
+				ClosingPrincipal: closingPrincipal,
+				DayCountCode:     effectiveDayCountCode,
+				FormulaUsed:      fmt.Sprintf("TDS = %.2f × %.4f%%", capInterest, tdsCfg.TDSRate),
+			})
+			if strings.Contains(tdsTiming, "ANNUAL") {
+				cumulativeInterest = 0
+				lastTDSFYEnd = lastTDSFYEnd.AddDate(1, 0, 0)
+			} else if isMaturity {
+				cumulativeInterest = 0
+			}
 		}
-		periodStart = periodEnd
+
+		// advance
+		openingPrincipal = closingPrincipal
+		lastCapDate = capEnd
 	}
 
+	// FIX 1: fix up accruals that didn't get principal set (post-last-cap rows), then append ALL
+	for _, a := range accrualRows {
+		if a.OpeningP == 0 {
+			a.OpeningP = openingPrincipal
+			raw := a.OpeningP * fd.InterestRate * float64(a.PeriodDays) / float64(a.Divisor) / 100
+			a.Interest = applyRounding(raw, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
+		}
+	}
+	for _, a := range accrualRows {
+		seq++
+		rows = append(rows, CashflowRow{
+			PeriodNumber:      seq,
+			EventType:         "ACCRUAL",
+			EventDate:         a.PeriodEnd,
+			PeriodStartDate:   a.PeriodStart,
+			PeriodEndDate:     a.PeriodEnd,
+			PeriodDays:        a.PeriodDays,
+			OpeningPrincipal:  a.OpeningP,
+			InterestAccrued:   a.Interest,
+			CapitalizedAmount: 0,
+			ClosingPrincipal:  a.OpeningP,
+			TDSAmount:         0,
+			NetCashFlow:       0,
+			DayCountCode:      effectiveDayCountCode,
+			Divisor:           a.Divisor,
+			FormulaUsed:       fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d) [%s]", a.OpeningP, fd.InterestRate, a.PeriodDays, a.Divisor, effectiveConvention),
+			AccrualRatePerDay: fd.InterestRate / (float64(a.Divisor) * 100),
+		})
+	}
+
+	// Final sort and renumber
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].EventDate.Equal(rows[j].EventDate) {
-			return rows[i].PeriodNumber < rows[j].PeriodNumber
+			order := map[string]int{"ACCRUAL": 1, "INTEREST_RECEIPT": 2, "CAPITALIZATION": 3, "TDS_DEDUCTION": 4, "MATURITY": 5}
+			return order[rows[i].EventType] < order[rows[j].EventType]
 		}
 		return rows[i].EventDate.Before(rows[j].EventDate)
 	})
-	for i := range rows {
-		rows[i].PeriodNumber = i + 1
-	}
+	for i := range rows { rows[i].PeriodNumber = i+1 }
 	return rows
 }
 
@@ -1311,6 +1577,20 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 		return nil
 	}
 
+	// Row-level lock: prevent concurrent cashflow regeneration for the same FD.
+	// This is only effective when exec is a transaction (tx); pool-based callers accept the no-op.
+	var lockCheck string
+	if lockErr := exec.QueryRow(ctx,
+		`SELECT fd_id FROM investment.fd_master WHERE fd_id = $1 FOR UPDATE NOWAIT`,
+		fdID,
+	).Scan(&lockCheck); lockErr != nil {
+		return fmt.Errorf("cashflow regeneration lock failed for fd %s — already in progress or fd not found: %w", fdID, lockErr)
+	}
+
+	// Fetch FD master details to populate cosmetic fields on cashflow rows when available.
+	var masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount string
+	_ = exec.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(entity_name,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(source_account_id,'') FROM investment.fd_master WHERE fd_id = $1 LIMIT 1`, fdID).Scan(&masterEntityID, &masterEntityName, &masterBankID, &masterBankName, &masterSourceAccount)
+
 	// Delete existing rows first (clean regeneration).
 	_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
 
@@ -1344,6 +1624,31 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 			"cr_account_name":         nilIfEmpty(row.CrAccountName),
 			"created_by":              createdBy,
 			"created_at":              time.Now(),
+		}
+		// Populate cosmetic/master fields if the target table has them.
+		if cols["bank_id"] {
+			valueMap["bank_id"] = masterBankID
+		}
+		if cols["bank_name"] {
+			valueMap["bank_name"] = masterBankName
+		}
+		if cols["entity_id"] {
+			valueMap["entity_id"] = masterEntityID
+		}
+		if cols["entity_name"] {
+			valueMap["entity_name"] = masterEntityName
+		}
+		if cols["source_account_id"] {
+			valueMap["source_account_id"] = masterSourceAccount
+		}
+		if cols["posting_status"] {
+			valueMap["posting_status"] = "NOT_POSTED"
+		}
+		if cols["bank_confirmed"] {
+			valueMap["bank_confirmed"] = false
+		}
+		if cols["bank_reference"] {
+			valueMap["bank_reference"] = ""
 		}
 		preferredCols := []string{
 			fdCol,

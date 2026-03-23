@@ -15,6 +15,7 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 	mid := api.BusinessUnitMiddleware(db)
 
 	// ── Accrual Run lifecycle ────────────────────────────────────────────────
+	// Workflow order: create → validate → execute → submit → approve/reject
 	mux.Handle(
 		"/investment/fd/accrual/run/create",
 		mid(http.HandlerFunc(CreateAccrualRun(pool))),
@@ -68,6 +69,14 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 	mux.Handle(
 		"/investment/fd/accrual/execution-log",
 		mid(http.HandlerFunc(GetExecutionLog(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/ledger/audit",
+		mid(http.HandlerFunc(GetAccrualLedgerAudit(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/exceptions",
+		mid(http.HandlerFunc(GetAccrualExceptions(pool))),
 	)
 
 	// ── Overrides ────────────────────────────────────────────────────────────

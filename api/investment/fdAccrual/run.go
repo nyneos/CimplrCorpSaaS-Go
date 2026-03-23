@@ -112,6 +112,7 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DayCountConvention: req.DayCountConvention,
 			RoundingRule:       req.RoundingRule,
 			PrecisionDecimals:  req.PrecisionDecimals,
+			FDInclusionMethod:  req.FDInclusionMethod,
 			CreatedBy:          userEmail,
 		}
 		var parseErr error
@@ -131,15 +132,18 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		runID, err := createAccrualRunInternal(ctx, pgxPool, input)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Create accrual run failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Create accrual run failed: "+friendlyAccrualError(err, "run creation"))
 			return
 		}
 
 		// Store inclusion list if any
 		if len(req.FDInclusionList) > 0 {
-			_, _ = pgxPool.Exec(ctx,
+			if _, execErr := pgxPool.Exec(ctx,
 				`UPDATE investment.fd_accrual_run SET fd_inclusion_list = $1 WHERE run_id = $2`,
-				fdListJSON, runID)
+				fdListJSON, runID,
+			); execErr != nil {
+				api.LogError("[FDAccrual] fd_inclusion_list update failed run=%s: %v", runID, execErr)
+			}
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -184,6 +188,12 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		_, _ = pgxPool.Exec(ctx,
 			`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
 			newStatus, eligible, req.RunID)
+
+		if blockers > 0 {
+			api.RespondWithError(w, http.StatusBadRequest,
+				fmt.Sprintf("Validation failed: %d blocker(s) found — run_id=%s status=VALIDATION_FAILED", blockers, req.RunID))
+			return
+		}
 
 		// ── Enrich: return full run header + all validation findings ──────────
 		var runRow struct {
@@ -309,9 +319,37 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// VALIDATED gate: only VALIDATED runs can be executed.
+		var gateStatus string
+		if err := pgxPool.QueryRow(ctx,
+			`SELECT COALESCE(run_status,'') FROM investment.fd_accrual_run WHERE run_id=$1`,
+			req.RunID,
+		).Scan(&gateStatus); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Run not found: "+err.Error())
+			return
+		}
+		if gateStatus != "VALIDATED" {
+			api.RespondWithError(w, http.StatusBadRequest,
+				fmt.Sprintf("Run must be in VALIDATED status before execution (current: %s). Call /validate first.", gateStatus))
+			return
+		}
+
 		calculated, failed, err := executeAccrualRun(ctx, pgxPool, req.RunID, userEmail)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Accrual run failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError,
+				"Accrual execution failed: "+friendlyAccrualError(err, "accrual execution"))
+			return
+		}
+		if calculated == 0 && failed == 0 {
+			api.RespondWithError(w, http.StatusBadRequest,
+				fmt.Sprintf(
+					"Accrual run %s completed with 0 FDs calculated and 0 failures. "+
+						"The FD scope became empty between validate and execute. "+
+						"Check fd_status=ACTIVE and cashflow_generated=true for entity %s.",
+					req.RunID, req.UserID,
+				),
+			)
 			return
 		}
 
@@ -615,6 +653,11 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(runID, uID, uEmail, eID string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] SubmitForApproval engine goroutine panic for run %s: %v", runID, rec)
+				}
+			}()
 			bgCtx := context.Background()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
@@ -637,6 +680,11 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(req.RunID, req.UserID, userEmail, entityID, totalNet)
 
 		go func(runID, eID, uEmail string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDAccrual] SubmitForApproval notification goroutine panic for run %s: %v", runID, rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/run/submit", runID, map[string]interface{}{
 				"entity_id":   eID,
 				"record_id":   runID,
@@ -827,6 +875,11 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", results)
 		for _, runID := range req.RunIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] BulkApproveAccrualRun notification goroutine panic for run %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/run/bulk-approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_ACCRUAL_RUN_APPROVED",
@@ -942,6 +995,11 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", results)
 		for _, runID := range req.RunIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDAccrual] BulkRejectAccrualRun notification goroutine panic for run %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/run/bulk-reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_ACCRUAL_RUN_REJECTED",
@@ -1140,6 +1198,196 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// ─── STEP 8: GetAccrualLedgerAudit ───────────────────────────────────────────
+
+func GetAccrualLedgerAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			RunID    string `json:"run_id"`
+			FDID     string `json:"fd_id"`     // optional
+			LedgerID string `json:"ledger_id"` // optional
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.RunID == "" && req.FDID == "" && req.LedgerID == "" {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"at least one of run_id, fd_id, or ledger_id is required")
+			return
+		}
+
+		ctx := r.Context()
+
+		query := `
+			SELECT
+				a.audit_id, a.ledger_id, a.run_id, a.fd_id,
+				COALESCE(a.fd_ref_no,'')   AS fd_ref_no,
+				COALESCE(a.bank_name,'')   AS bank_name,
+				COALESCE(a.entity_id,'')   AS entity_id,
+				COALESCE(a.action_type,'') AS action_type,
+				COALESCE(a.processing_status,'') AS processing_status,
+				COALESCE(a.requested_by,'') AS requested_by,
+				a.requested_at,
+				COALESCE(a.checker_by,'')  AS checker_by,
+				a.checker_at,
+				COALESCE(a.checker_comment,'') AS checker_comment,
+				COALESCE(a.principal_amount,0),
+				COALESCE(a.interest_rate,0),
+				COALESCE(a.accrual_days,0),
+				COALESCE(a.old_period_interest_accrued,0),
+				COALESCE(a.old_closing_accrued_balance,0),
+				COALESCE(a.old_tds_deducted_in_period,0),
+				COALESCE(a.old_net_interest_in_period,0),
+				COALESCE(a.old_ledger_row_status,''),
+				COALESCE(a.old_formula_used,''),
+				COALESCE(a.old_is_overridden,false),
+				COALESCE(a.old_override_amount,0),
+				COALESCE(a.old_override_status,'')
+			FROM investment.fd_accrual_ledger_audit a
+			WHERE 1=1`
+
+		args := []interface{}{}
+		argIdx := 1
+
+		if req.RunID != "" {
+			query += fmt.Sprintf(" AND a.run_id = $%d", argIdx)
+			args = append(args, req.RunID)
+			argIdx++
+		}
+		if req.FDID != "" {
+			query += fmt.Sprintf(" AND a.fd_id = $%d", argIdx)
+			args = append(args, req.FDID)
+			argIdx++
+		}
+		if req.LedgerID != "" {
+			query += fmt.Sprintf(" AND a.ledger_id = $%d", argIdx)
+			args = append(args, req.LedgerID)
+			argIdx++
+		}
+		query += " ORDER BY a.requested_at DESC"
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError,
+				friendlyAccrualError(err, "ledger audit query"))
+			return
+		}
+		defer rows.Close()
+
+		audit := make([]map[string]interface{}, 0)
+		fields := rows.FieldDescriptions()
+		for rows.Next() {
+			vals, _ := rows.Values()
+			row := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					row[string(f.Name)] = ""
+				} else {
+					row[string(f.Name)] = vals[i]
+				}
+			}
+			audit = append(audit, row)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError,
+				friendlyAccrualError(err, "ledger audit rows"))
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"count": len(audit),
+			"audit": audit,
+		})
+	}
+}
+
+// ─── STEP 9: GetAccrualExceptions ────────────────────────────────────────────
+
+func GetAccrualExceptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+			RunID  string `json:"run_id"`
+			FDID   string `json:"fd_id"` // optional
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.RunID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			return
+		}
+
+		ctx := r.Context()
+		query := `
+			SELECT
+				e.exception_id, e.run_id, e.ledger_id, e.fd_id,
+				COALESCE(e.fd_ref_no,'')              AS fd_ref_no,
+				COALESCE(e.exception_type,'')         AS exception_type,
+				COALESCE(e.exception_description,'')  AS exception_description,
+				COALESCE(e.computed_amount,0)         AS computed_amount,
+				COALESCE(e.proposed_override_amount,0) AS proposed_override_amount,
+				COALESCE(e.override_reason_code,'')   AS override_reason_code,
+				COALESCE(e.override_reason_text,'')   AS override_reason_text,
+				COALESCE(e.exception_status,'')       AS exception_status,
+				COALESCE(e.proposed_by,'')            AS proposed_by,
+				e.proposed_at,
+				COALESCE(e.approved_by,'')            AS approved_by,
+				e.approved_at,
+				COALESCE(e.checker_comment,'')        AS checker_comment,
+				e.ledger_updated, e.ledger_updated_at,
+				COALESCE(e.ledger_update_error,'')    AS ledger_update_error,
+				e.created_at
+			FROM investment.fd_accrual_exception e
+			WHERE e.run_id = $1
+			  AND COALESCE(e.is_deleted,false) = false`
+
+		args := []interface{}{req.RunID}
+		if req.FDID != "" {
+			query += " AND e.fd_id = $2"
+			args = append(args, req.FDID)
+		}
+		query += " ORDER BY e.created_at DESC"
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError,
+				friendlyAccrualError(err, "exceptions query"))
+			return
+		}
+		defer rows.Close()
+
+		exceptions := make([]map[string]interface{}, 0)
+		fields := rows.FieldDescriptions()
+		for rows.Next() {
+			vals, _ := rows.Values()
+			row := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					row[string(f.Name)] = ""
+				} else {
+					row[string(f.Name)] = vals[i]
+				}
+			}
+			exceptions = append(exceptions, row)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError,
+				friendlyAccrualError(err, "exceptions rows"))
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"run_id":     req.RunID,
+			"count":      len(exceptions),
+			"exceptions": exceptions,
+		})
+	}
+}
+
 // ─── 12. ProposeOverride ──────────────────────────────────────────────────────
 
 func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -1189,7 +1437,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullIfEmpty(req.OverrideReasonText), nullIfEmpty(req.OverrideEffPeriod),
 			userEmail, req.RunID, req.FDID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Propose override failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, "Propose override failed: "+friendlyAccrualError(err, "override proposal"))
 			return
 		}
 
@@ -1200,6 +1448,33 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		api.LogInfo("[FDAccrual] ProposeOverride: run=%s fd=%s amount=%.2f by=%s",
 			req.RunID, req.FDID, req.OverrideAmount, userEmail)
+
+		// Also register in exception table for audit visibility (non-fatal)
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_exception (
+				run_id, ledger_id, fd_id, fd_ref_no,
+				exception_type, exception_description,
+				computed_amount, proposed_override_amount,
+				override_reason_code, override_reason_text,
+				override_effective_period,
+				exception_status, proposed_by, proposed_at
+			)
+			SELECT
+				l.run_id, l.ledger_id, l.fd_id, l.fd_ref_no,
+				'MANUAL_OVERRIDE',
+				COALESCE($1, 'Manual override proposed'),
+				l.period_interest_accrued, $2,
+				$3, $1, $4,
+				'OVERRIDE_PROPOSED', $5, now()
+			FROM investment.fd_accrual_ledger l
+			WHERE l.run_id = $6 AND l.fd_id = $7`,
+			nullIfEmpty(req.OverrideReasonText),
+			req.OverrideAmount,
+			nullIfEmpty(req.OverrideReasonCode),
+			nullIfEmpty(req.OverrideEffPeriod),
+			userEmail,
+			req.RunID, req.FDID,
+		)
 	}
 }
 
@@ -1241,26 +1516,87 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		_, err := pgxPool.Exec(ctx, `
-			UPDATE investment.fd_accrual_ledger
-			SET override_status = 'APPROVED',
-			    override_approved_by = $1,
-			    override_approved_at = now(),
-			    override_checker_comment = $2,
-			    updated_at = now()
-			WHERE run_id = $3 AND fd_id = $4 AND override_status = 'PROPOSED'`,
-			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Approve override failed: "+err.Error())
+		// Load current ledger values to compute adjusted figures
+		var overrideAmt, openingBal, intReceived, tdsDeducted float64
+		var ledgerRowStatus string
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT
+				COALESCE(override_amount,0),
+				COALESCE(opening_accrued_balance,0),
+				COALESCE(interest_received_in_period,0),
+				COALESCE(tds_deducted_in_period,0),
+				COALESCE(ledger_row_status,'')
+			FROM investment.fd_accrual_ledger
+			WHERE run_id=$1 AND fd_id=$2 AND override_status='PROPOSED'`,
+			req.RunID, req.FDID,
+		).Scan(&overrideAmt, &openingBal, &intReceived, &tdsDeducted, &ledgerRowStatus); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "No PROPOSED override found for this run/fd")
+			return
+		}
+		if overrideAmt <= 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "override_amount must be > 0 to approve")
 			return
 		}
 
+		// Recompute ledger figures using the approved override amount
+		newPeriodInterest := math.Round(overrideAmt*100) / 100
+		newClosingBal := math.Round((openingBal+overrideAmt-intReceived)*100) / 100
+		newNetInterest := math.Round((overrideAmt-tdsDeducted)*100) / 100
+		overrideAdj := math.Round((overrideAmt-newPeriodInterest)*100) / 100 // delta vs original
+
+		_, err := pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_ledger
+			SET override_status             = 'APPROVED',
+			    override_approved_by        = $1,
+			    override_approved_at        = now(),
+			    override_checker_comment    = $2,
+			    period_interest_accrued     = $3,
+			    closing_accrued_balance     = $4,
+			    net_interest_in_period      = $5,
+			    override_adjustment         = $6,
+			    ledger_row_status           = 'OVERRIDDEN',
+			    updated_at                  = now()
+			WHERE run_id = $7 AND fd_id = $8 AND override_status = 'PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment),
+			newPeriodInterest, newClosingBal, newNetInterest, overrideAdj,
+			req.RunID, req.FDID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Approve override failed: "+friendlyAccrualError(err, "override approval"))
+			return
+		}
+
+		// Reset run back to COMPUTED so it can be submitted/posted again
+		_, _ = pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_run
+			SET run_status = 'COMPUTED', updated_at = now()
+			WHERE run_id = $1 AND run_status IN ('PENDING_APPROVAL','COMPUTED')`,
+			req.RunID)
+
+		// STEP 5: sync exception table status (non-fatal)
+		_, _ = pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_exception
+			SET exception_status  = 'APPROVED',
+			    approved_by       = $1,
+			    approved_at       = now(),
+			    checker_comment   = $2,
+			    ledger_updated    = true,
+			    ledger_updated_at = now()
+			WHERE run_id = $3
+			  AND fd_id  = $4
+			  AND exception_status = 'OVERRIDE_PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"run_id":          req.RunID,
-			"fd_id":           req.FDID,
-			"override_status": "APPROVED",
+			"run_id":                   req.RunID,
+			"fd_id":                    req.FDID,
+			"override_status":          "APPROVED",
+			"period_interest_accrued":  newPeriodInterest,
+			"closing_accrued_balance":  newClosingBal,
+			"net_interest_in_period":   newNetInterest,
+			"override_adjustment":      overrideAdj,
 		})
-		api.LogInfo("[FDAccrual] ApproveOverride: run=%s fd=%s by=%s", req.RunID, req.FDID, userEmail)
+		api.LogInfo("[FDAccrual] ApproveOverride: run=%s fd=%s by=%s override_amt=%.2f new_period_interest=%.2f",
+			req.RunID, req.FDID, userEmail, overrideAmt, newPeriodInterest)
 	}
 }
 
@@ -1374,6 +1710,22 @@ func createAccrualRunInternal(ctx context.Context, pool *pgxpool.Pool, input Cre
 	if dayCount == "" {
 		dayCount = "ACT_365"
 	}
+	fdInclusion := input.FDInclusionMethod
+	if fdInclusion == "" {
+		fdInclusion = "ALL"
+	}
+
+	// Look up entity_name if not provided (fd_accrual_run.entity_name is NOT NULL)
+	entityName := input.EntityName
+	if entityName == "" && input.EntityID != "" {
+		_ = pool.QueryRow(ctx,
+			`SELECT COALESCE(entity_name, entity_id) FROM masterentitycash WHERE entity_id=$1 LIMIT 1`,
+			input.EntityID,
+		).Scan(&entityName)
+		if entityName == "" {
+			entityName = input.EntityID // fallback to entity_id
+		}
+	}
 
 	var runID string
 	err := pool.QueryRow(ctx, `
@@ -1392,16 +1744,16 @@ func createAccrualRunInternal(ctx context.Context, pool *pgxpool.Pool, input Cre
 			$5, $6,
 			$7, $8, $9,
 			$10, $11, $12,
-			'ALL',
+			$14,
 			'2.0',
 			true, false, $13, now()
 		) RETURNING run_id`,
 		input.RunType, input.RunMode,
-		input.EntityID, nullIfEmpty(input.EntityName),
+		input.EntityID, entityName,
 		nullIfEmpty(input.BankIDFilter), fdStatus,
 		input.AccrualPeriodStart, input.AccrualPeriodEnd, input.FinancialPeriod,
 		dayCount, rounding, precision,
-		input.CreatedBy,
+		input.CreatedBy, fdInclusion,
 	).Scan(&runID)
 	return runID, err
 }
@@ -1416,6 +1768,37 @@ func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID s
 	fds, err := getFDsInScope(ctx, pool, params)
 	if err != nil {
 		return 0, 0, err
+	}
+
+	if len(fds) == 0 {
+		_, _ = pool.Exec(ctx,
+			`DELETE FROM investment.fd_accrual_validation_finding WHERE run_id=$1`, runID)
+		_, _ = pool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_validation_finding (
+				run_id, fd_id, issue_type, severity,
+				issue_description, suggested_action,
+				is_resolved, created_at
+			) VALUES ($1, NULL, 'NO_FDS_IN_SCOPE', 'BLOCKER', $2,
+				'Check: (1) fd_status=ACTIVE with cashflow_generated=true, '+
+				'(2) FD start_date <= period_end, '+
+				'(3) FD maturity_date >= period_start, '+
+				'(4) bank_id_filter must exactly match bank_id or bank_name.',
+				false, now())`,
+			runID,
+			fmt.Sprintf(
+				"No FDs found for entity=%s fd_status_filter=%s period=%s to %s bank_filter=%q. "+
+					"Verify at least one FD is ACTIVE with cashflow_generated=true.",
+				params.EntityID, params.FDStatusFilter,
+				params.PeriodStart.Format("2006-01-02"),
+				params.PeriodEnd.Format("2006-01-02"),
+				params.BankIDFilter,
+			),
+		)
+		_, _ = pool.Exec(ctx,
+			`UPDATE investment.fd_accrual_run
+			 SET run_status='VALIDATION_FAILED', fds_in_scope=0
+			 WHERE run_id=$1`, runID)
+		return 0, 1, nil
 	}
 
 	findings := validateFDsForAccrual(fds, params)
@@ -1447,9 +1830,41 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 		return 0, 0, err
 	}
 
+	// STEP 2: read run_mode to decide whether to write ledger rows
+	var runMode string
+	_ = pool.QueryRow(ctx,
+		`SELECT COALESCE(run_mode,'FINAL') FROM investment.fd_accrual_run WHERE run_id=$1`,
+		runID,
+	).Scan(&runMode)
+	isSimulation := strings.EqualFold(runMode, "SIMULATION")
+
 	fds, err := getFDsInScope(ctx, pool, params)
 	if err != nil {
 		return 0, 0, err
+	}
+
+	if len(fds) == 0 {
+		_, _ = pool.Exec(ctx,
+			`UPDATE investment.fd_accrual_run
+			 SET run_status='FAILED', fds_in_scope=0, fds_calculated=0,
+			     completed_at=now(), updated_at=now()
+			 WHERE run_id=$1`, runID)
+		logAccrualEvent(ctx, pool, runID, "", "ERROR", "SCOPE_EMPTY",
+			fmt.Sprintf(
+				"Execute aborted: 0 FDs in scope. entity=%s fd_status_filter=%s period=%s to %s. "+
+					"FDs may have changed status since validation.",
+				params.EntityID, params.FDStatusFilter,
+				params.PeriodStart.Format("2006-01-02"),
+				params.PeriodEnd.Format("2006-01-02"),
+			), nil)
+		return 0, 0, fmt.Errorf(
+			"accrual execute failed: 0 FDs in scope for entity %s "+
+				"(fd_status_filter=%s, period %s to %s). "+
+				"Ensure FDs are ACTIVE with cashflow_generated=true and overlap the accrual period",
+			params.EntityID, params.FDStatusFilter,
+			params.PeriodStart.Format("2006-01-02"),
+			params.PeriodEnd.Format("2006-01-02"),
+		)
 	}
 
 	// Mark run as IN_PROGRESS
@@ -1471,6 +1886,26 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			continue
 		}
 
+		calculated++
+		totalInterest += result.PeriodInterestAccrued
+		totalTDS += result.TDSDeductedInPeriod
+		totalNet += result.NetInterestInPeriod
+
+		if isSimulation {
+			// SIMULATION: log result only — no DB writes to fd_accrual_ledger
+			logAccrualEvent(ctx, pool, runID, fd.FDID, "INFO", "SIMULATED",
+				fmt.Sprintf(
+					"SIMULATION fd=%s days=%d interest=%.4f tds=%.4f net=%.4f formula=%s",
+					fd.FDID, result.AccrualDays,
+					result.PeriodInterestAccrued,
+					result.TDSDeductedInPeriod,
+					result.NetInterestInPeriod,
+					result.FormulaUsed,
+				), nil)
+			continue
+		}
+
+		// FINAL mode: write ledger row
 		cashflowIDsJSON, _ := json.Marshal(result.CashflowRowIDs)
 
 		_, upsertErr := pool.Exec(ctx, `
@@ -1612,20 +2047,19 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 				prevOpeningBal, prevInterestReceived, prevTDSApplicable)
 		}
 
-		calculated++
-		totalInterest += result.PeriodInterestAccrued
-		totalTDS += result.TDSDeductedInPeriod
-		totalNet += result.NetInterestInPeriod
-
 		logAccrualEvent(ctx, pool, runID, fd.FDID, "INFO", "CALCULATED",
 			fmt.Sprintf("interest=%.4f tds=%.4f net=%.4f days=%d",
 				result.PeriodInterestAccrued, result.TDSDeductedInPeriod,
 				result.NetInterestInPeriod, result.AccrualDays), nil)
 	}
 
+	// Log final summary including run mode
+	api.LogInfo("[FDAccrual] executeAccrualRun complete: run=%s mode=%s calc=%d failed=%d total_interest=%.2f",
+		runID, runMode, calculated, failed, totalInterest)
+
 	// Update run summary
 	newStatus := "COMPUTED"
-	if failed > 0 && calculated == 0 {
+	if calculated == 0 && failed > 0 {
 		newStatus = "FAILED"
 	}
 	_, _ = pool.Exec(ctx, `
@@ -1648,6 +2082,16 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 		math.Round(totalNet*100)/100,
 		executedBy, runID,
 	)
+
+	if newStatus == "FAILED" {
+		return 0, failed, fmt.Errorf(
+			"accrual run FAILED: 0 of %d FD(s) calculated successfully for entity %s. "+
+				"Check execution log: SELECT log_level, event_type, fd_id, message "+
+				"FROM investment.fd_accrual_run_execution_log WHERE run_id='%s' "+
+				"AND log_level='ERROR' ORDER BY logged_at",
+			failed, params.EntityID, runID,
+		)
+	}
 
 	return calculated, failed, nil
 }
@@ -1673,6 +2117,11 @@ func submitAccrualRunForApproval(ctx context.Context, pool *pgxpool.Pool, runID 
 	}
 
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("[FDAccrual] submitAccrualRunForApproval engine goroutine panic for run %s: %v", runID, rec)
+			}
+		}()
 		bgCtx := context.Background()
 		instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
 			ModuleCode:       "FIXED_DEPOSIT",
@@ -1695,6 +2144,11 @@ func submitAccrualRunForApproval(ctx context.Context, pool *pgxpool.Pool, runID 
 	}()
 
 	go func(rID, eID, by string, amount float64) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				api.LogError("[FDAccrual] submitAccrualRunForApproval notification goroutine panic for run %s: %v", rID, rec)
+			}
+		}()
 		notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/accrual/run/auto-submit", rID, map[string]interface{}{
 			"entity_id":    eID,
 			"record_id":    rID,
@@ -1713,18 +2167,18 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 		SELECT
 			l.ledger_id,
 			l.fd_id,
-			COALESCE(l.net_interest_in_period,0),
+			COALESCE(l.period_interest_accrued,0)   AS gross_interest,
 			l.accrual_period_start, l.accrual_period_end,
-			COALESCE(l.entity_id,'') AS entity_id,
-			COALESCE(l.entity_name,'') AS entity_name,
-			COALESCE(l.period_interest_accrued,0),
-			COALESCE(l.closing_accrued_balance,0),
-			COALESCE(l.tds_deducted_in_period,0),
-			COALESCE(l.formula_used,'') AS formula_used
+			COALESCE(l.entity_id,'')                AS entity_id,
+			COALESCE(l.entity_name,'')              AS entity_name,
+			COALESCE(l.period_interest_accrued,0)   AS period_interest,
+			COALESCE(l.closing_accrued_balance,0)   AS closing_balance,
+			COALESCE(l.tds_deducted_in_period,0)    AS tds_deducted,
+			COALESCE(l.formula_used,'')             AS formula_used
 		FROM investment.fd_accrual_ledger l
 		WHERE l.run_id = $1
 		  AND COALESCE(l.is_deleted,false) = false
-		  AND l.ledger_row_status = 'CALCULATED'`, runID)
+		  AND l.ledger_row_status IN ('CALCULATED','OVERRIDDEN')`, runID)
 	if err != nil {
 		return fmt.Errorf("postAccrualJournals query: %w", err)
 	}
@@ -1732,13 +2186,13 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 
 	type ledgerRow struct {
 		LedgerID, FDID, EntityID, EntityName, FormulaUsed string
-		NetInterest, PeriodInterest, ClosingBalance, TDS   float64
+		GrossInterest, PeriodInterest, ClosingBalance, TDS float64
 		PeriodStart, PeriodEnd                             time.Time
 	}
 	var ledgerRows []ledgerRow
 	for rows.Next() {
 		var lr ledgerRow
-		if err := rows.Scan(&lr.LedgerID, &lr.FDID, &lr.NetInterest,
+		if err := rows.Scan(&lr.LedgerID, &lr.FDID, &lr.GrossInterest,
 			&lr.PeriodStart, &lr.PeriodEnd, &lr.EntityID, &lr.EntityName,
 			&lr.PeriodInterest, &lr.ClosingBalance, &lr.TDS, &lr.FormulaUsed); err != nil {
 			return fmt.Errorf("postAccrualJournals scan: %w", err)
@@ -1768,7 +2222,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			continue
 		}
 
-		amount := math.Round(lr.NetInterest*100) / 100
+		amount := math.Round(lr.PeriodInterest*100) / 100
 		if amount == 0 {
 			_ = tx.Rollback(ctx)
 			continue
@@ -1826,6 +2280,73 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			continue
 		}
 
+		// TDS journal: debit interest expense TDS / credit TDS payable (non-fatal)
+		if tdsAmt := math.Round(lr.TDS*100) / 100; tdsAmt > 0 {
+			tdsTx, tdsErr := pool.Begin(ctx)
+			if tdsErr == nil {
+				var tdsActivityID string
+				tdsErr = tdsTx.QueryRow(ctx, `
+					INSERT INTO investment.accounting_activity (
+						activity_type, activity_subtype, effective_date,
+						accounting_period, data_source, status
+					) VALUES ('FIXED_DEPOSIT','FD_TDS_ACCRUAL',$1,$2,'FD_ACCRUAL','APPROVED')
+					RETURNING activity_id`,
+					lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
+				).Scan(&tdsActivityID)
+				if tdsErr == nil {
+					var tdsEntryID string
+					tdsDesc := fmt.Sprintf("FD TDS accrual %s period %s→%s | run_id=%s",
+						lr.FDID, lr.PeriodStart.Format("2006-01-02"), lr.PeriodEnd.Format("2006-01-02"), runID)
+					tdsErr = tdsTx.QueryRow(ctx, `
+						INSERT INTO investment.accounting_journal_entry (
+							activity_id, entity_id, entity_name,
+							entry_date, accounting_period,
+							entry_type, description,
+							total_debit, total_credit,
+							status, created_by,
+							fd_id, accrual_run_id, accrual_ledger_id
+						) VALUES ($1,$2,$3,$4,$5,'FD_TDS_ACCRUAL',$6,$7,$8,'POSTED',$9,$10,$11,$12)
+						RETURNING entry_id`,
+						tdsActivityID, nullIfEmpty(lr.EntityID), nullIfEmpty(lr.EntityName),
+						lr.PeriodEnd, buildAccrualPeriod(lr.PeriodEnd),
+						tdsDesc, tdsAmt, tdsAmt, userEmail,
+						nullIfEmpty(lr.FDID), nullIfEmpty(runID), nullIfEmpty(lr.LedgerID),
+					).Scan(&tdsEntryID)
+					if tdsErr == nil {
+						tdsNarration := fmt.Sprintf("FD TDS %s | accrual_run_id=%s | accrual_ledger_id=%s", lr.FDID, runID, lr.LedgerID)
+						_, tdsErr1 := tdsTx.Exec(ctx, `
+							INSERT INTO investment.accounting_journal_entry_line (
+								entry_id, line_number, account_number, account_name, account_type,
+								debit_amount, credit_amount, narration
+							) VALUES ($1,1,'TDS_EXPENSE','TDS on FD Interest','EXPENSE',$2,0,$3)`,
+							tdsEntryID, tdsAmt, tdsNarration)
+						_, tdsErr2 := tdsTx.Exec(ctx, `
+							INSERT INTO investment.accounting_journal_entry_line (
+								entry_id, line_number, account_number, account_name, account_type,
+								debit_amount, credit_amount, narration
+							) VALUES ($1,2,'TDS_PAYABLE','TDS Payable on FD','LIABILITY',0,$2,$3)`,
+							tdsEntryID, tdsAmt, tdsNarration)
+						if tdsErr1 != nil || tdsErr2 != nil {
+							_ = tdsTx.Rollback(ctx)
+							api.LogError("[FDAccrual] TDS journal lines failed fd %s: e1=%v e2=%v", lr.FDID, tdsErr1, tdsErr2)
+						} else if cerr2 := tdsTx.Commit(ctx); cerr2 != nil {
+							api.LogError("[FDAccrual] TDS journal commit failed fd %s: %v", lr.FDID, cerr2)
+						} else {
+							api.LogInfo("[FDAccrual] TDS journal posted fd=%s run=%s tds_entry=%s amt=%.2f", lr.FDID, runID, tdsEntryID, tdsAmt)
+						}
+					} else {
+						_ = tdsTx.Rollback(ctx)
+						api.LogError("[FDAccrual] TDS journal entry insert failed fd %s: %v", lr.FDID, tdsErr)
+					}
+				} else {
+					_ = tdsTx.Rollback(ctx)
+					api.LogError("[FDAccrual] TDS activity insert failed fd %s: %v", lr.FDID, tdsErr)
+				}
+			} else {
+				api.LogError("[FDAccrual] TDS tx begin failed fd %s: %v", lr.FDID, tdsErr)
+			}
+		}
+
 		// Audit ledger row: status CALCULATED → POSTED (full context + override snapshot)
 		// Fetch current override state before marking POSTED
 		var aOldIsOverridden bool
@@ -1878,7 +2399,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 			aFdRefNo, aBankID, aBankName, aEntityID,
 			aPrincipal, aRate, aAccrualDays,
 			userEmail,
-			lr.PeriodInterest, lr.ClosingBalance, lr.TDS, lr.NetInterest, lr.FormulaUsed,
+			lr.PeriodInterest, lr.ClosingBalance, lr.TDS, lr.GrossInterest, lr.FormulaUsed,
 			aOldIsOverridden, aOldOverrideAmt, aOldOverrideAdj, aOldOverrideCode, aOldOverrideText, aOldOverrideStatus,
 			aOldOpeningBal, aOldIntReceived, aOldTDSApplicable)
 
@@ -1978,6 +2499,32 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				     total_interest_accrued=0, total_tds_deducted=0, total_accrued_closing_balance=0,
 				     started_at=NULL, completed_at=NULL, updated_at=now()
 				 WHERE run_id=$1`, runID)
+
+			// STEP 6: Re-validate scope so fds_in_scope is accurate before execute
+			eligible, blockers, valErr := validateAndPersistFindings(ctx, pgxPool, runID)
+			if valErr != nil {
+				res := runResult{RunID: runID, Error: "revalidate failed: " + friendlyAccrualError(valErr, "scope validation")}
+				results = append(results, res)
+				api.LogError("[FDAccrual] RecomputeAccrualRun validate: run=%s err=%v", runID, valErr)
+				continue
+			}
+			newValStatus := "VALIDATED"
+			if blockers > 0 || eligible == 0 {
+				newValStatus = "VALIDATION_FAILED"
+			}
+			_, _ = pgxPool.Exec(ctx,
+				`UPDATE investment.fd_accrual_run SET run_status=$1, fds_in_scope=$2 WHERE run_id=$3`,
+				newValStatus, eligible, runID)
+
+			if newValStatus == "VALIDATION_FAILED" {
+				res := runResult{RunID: runID, Error: fmt.Sprintf(
+					"recompute aborted: 0 FDs in scope or blockers found for run %s. "+
+						"Check fd_status=ACTIVE and cashflow_generated=true.",
+					runID)}
+				results = append(results, res)
+				api.LogInfo("[FDAccrual] RecomputeAccrualRun: run=%s aborted — VALIDATION_FAILED", runID)
+				continue
+			}
 
 			calc, failed, err := executeAccrualRun(ctx, pgxPool, runID, userEmail)
 			res := runResult{RunID: runID, Calculated: calc, Failed: failed}

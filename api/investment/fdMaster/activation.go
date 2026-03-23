@@ -441,6 +441,85 @@ func updateFDMasterStatus(ctx context.Context, exec queryExecutor, fdIDs []strin
 	return err
 }
 
+// insertCashflowAuditRowsApproved writes one APPROVED audit entry per cashflow row
+// into fd_audit_cashflow_schedule. Called at FD activation to seed the audit trail.
+// The cashflow_id is read back from the just-inserted rows using the cashflow table.
+func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
+	table := resolveFirstExistingTable(ctx, exec, []string{
+		"investment.fd_cashflow_schedule",
+		"investment.fd_cashflow",
+		"investment.fd_master_cashflow_schedule",
+	})
+	if table == "" {
+		return nil
+	}
+	schemaName, tableName := splitQualifiedTable(table)
+	cols, err := loadTableColumns(ctx, exec, schemaName, tableName)
+	if err != nil {
+		return err
+	}
+	fdCol := pickFirstExistingColumn(cols, "fd_id", "master_id")
+	cfIDCol := pickFirstExistingColumn(cols, "cashflow_id", "id")
+	seqCol := pickFirstExistingColumn(cols, "sequence_number", "period_number")
+	evtCol := pickFirstExistingColumn(cols, "event_type")
+	if fdCol == "" || cfIDCol == "" || evtCol == "" {
+		return nil
+	}
+
+	// Fetch all cashflow_ids for this FD ordered by sequence so we can match rows.
+	orderCol := seqCol
+	if orderCol == "" {
+		orderCol = cfIDCol
+	}
+	cfRows, qErr := exec.Query(ctx,
+		fmt.Sprintf(`SELECT %s, %s FROM %s WHERE %s = $1 ORDER BY %s`, cfIDCol, evtCol, table, fdCol, orderCol),
+		fdID)
+	if qErr != nil {
+		return qErr
+	}
+	type cfEntry struct {
+		id        string
+		eventType string
+	}
+	var cfList []cfEntry
+	for cfRows.Next() {
+		var e cfEntry
+		if sErr := cfRows.Scan(&e.id, &e.eventType); sErr != nil {
+			cfRows.Close()
+			return sErr
+		}
+		cfList = append(cfList, e)
+	}
+	cfRows.Close()
+	if cfRows.Err() != nil {
+		return cfRows.Err()
+	}
+
+	reason := "System generated at FD activation"
+	for _, cf := range cfList {
+		_, insErr := exec.Exec(ctx, `
+			INSERT INTO investment.fd_audit_cashflow_schedule (
+				cashflow_id, fd_id,
+				action_type, processing_status,
+				reason,
+				requested_by, requested_at,
+				checker_by, checker_at, checker_comment
+			) VALUES (
+				$1, $2,
+				'CREATE', 'APPROVED',
+				$3,
+				$4, now(),
+				$4, now(), 'Auto-approved at FD activation'
+			) ON CONFLICT DO NOTHING`,
+			cf.id, fdID, reason, createdBy,
+		)
+		if insErr != nil {
+			return insErr
+		}
+	}
+	return nil
+}
+
 func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req activateFDRequest
@@ -476,6 +555,20 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
+
+		// Double-submit guard: reject if FD already activated for this confirmation.
+		var existingFDID string
+		_ = tx.QueryRow(ctx,
+			`SELECT COALESCE(fd_id,'') FROM investment.fd_master
+			 WHERE confirmation_id = $1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+			req.ConfirmationID,
+		).Scan(&existingFDID)
+		if existingFDID != "" {
+			api.RespondWithError(w, http.StatusConflict,
+				fmt.Sprintf("FD already activated for this confirmation: %s", existingFDID))
+			return
+		}
+
 		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes, userEmail)
 		if err != nil {
 			msg, status := getFDMasterError(err, "FD activation failed")
@@ -502,6 +595,13 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Write one APPROVED audit row per cashflow row to establish the initial
+		// audit trail. These represent the system-generated state at activation.
+		if auditErr := insertCashflowAuditRowsApproved(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
+			// Non-fatal: log but don't block activation
+			api.LogError("[FDMaster] cashflow audit insert failed fd=%s: %v", fdID, auditErr)
+		}
+
 		// Mark cashflow_generated=true so the accrual engine picks this FD up in scope.
 		if _, err := tx.Exec(ctx,
 			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
@@ -519,6 +619,11 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(fdRecordID string, confirmationID string, email string, entityID string, amount float64, req activateFDRequest) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDMaster] ActivateFD engine goroutine panic for fd %s: %v", fdRecordID, rec)
+				}
+			}()
 			bgCtx := context.Background()
 			auditTableName := resolveFDAuditTable(bgCtx, pgxPool)
 			auditIDColumn := "fd_id"
@@ -566,6 +671,11 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(fdID, req.ConfirmationID, userEmail, rec.EntityID, rec.PrincipalAmount, req)
 
 		go func(fdRecordID, eID, uEmail string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDMaster] ActivateFD notification goroutine panic for fd %s: %v", fdRecordID, rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/master/activate", fdRecordID, map[string]interface{}{
 				"entity_id":   eID,
 				"record_id":   fdRecordID,
@@ -732,6 +842,11 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, fdID := range req.FDIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDMaster] BulkApproveActivation notification goroutine panic for fd %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/master/bulk-approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_ACTIVATION_APPROVED",
@@ -808,8 +923,12 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				// finalizeRecord stamped audit; flip fd_master status.
-				_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_master SET fd_status='REJECTED'
-					WHERE fd_id=$1 AND fd_status NOT IN ('ACTIVE','REJECTED')`, fdID)
+				if _, execErr := pgxPool.Exec(ctx,
+					`UPDATE investment.fd_master SET fd_status='REJECTED'
+					 WHERE fd_id=$1 AND fd_status NOT IN ('ACTIVE','REJECTED')`, fdID,
+				); execErr != nil {
+					api.LogError("[FDMaster] fd_status→REJECTED failed for %s: %v", fdID, execErr)
+				}
 				engineActed++
 			} else {
 				var anyInstance int
@@ -849,6 +968,11 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, fdID := range req.FDIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDMaster] BulkRejectActivation notification goroutine panic for fd %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/master/bulk-reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_ACTIVATION_REJECTED",
@@ -1100,7 +1224,11 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		table := resolveFirstExistingTable(ctx, pgxPool, []string{"investment.fd_cashflow_schedule", "investment.fd_cashflow", "investment.fd_master_cashflow_schedule"})
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			"investment.fd_cashflow_schedule",
+			"investment.fd_cashflow",
+			"investment.fd_master_cashflow_schedule",
+		})
 		if table == "" {
 			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
 			return
@@ -1113,40 +1241,114 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		fdCol := pickFirstExistingColumn(cols, "fd_id", "master_id")
+		cfIDCol := pickFirstExistingColumn(cols, "cashflow_id", "id")
 		if fdCol == "" {
 			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
 			return
 		}
 
-		orderCol := firstNonEmpty(pickFirstExistingColumn(cols, "period_number"), pickFirstExistingColumn(cols, "cashflow_date"), fdCol)
-		rows, err := pgxPool.Query(ctx, fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 ORDER BY %s", table, fdCol, orderCol), fdID)
+		orderCol := firstNonEmpty(
+			pickFirstExistingColumn(cols, "sequence_number"),
+			pickFirstExistingColumn(cols, "period_number"),
+			pickFirstExistingColumn(cols, "event_date"),
+			fdCol,
+		)
+
+		// Fetch cashflow rows
+		cfRows, err := pgxPool.Query(ctx,
+			fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 AND COALESCE(is_deleted,false)=false ORDER BY %s", table, fdCol, orderCol),
+			fdID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		payload, err := rowsToMaps(rows)
+		cashflowMaps, err := rowsToMaps(cfRows)
+		cfRows.Close()
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
 			return
 		}
-		api.RespondWithPayload(w, true, "", payload)
+		if cashflowMaps == nil {
+			cashflowMaps = []map[string]interface{}{}
+		}
+
+		// Fetch ALL audit rows for all cashflow_ids of this FD, grouped per cashflow_id.
+		// Returns full history array (not just latest) so the UI can show complete audit trail.
+		auditByCFID := map[string][]map[string]interface{}{}
+		if cfIDCol != "" {
+			auditRows, aErr := pgxPool.Query(ctx, `
+				SELECT *
+				FROM investment.fd_audit_cashflow_schedule
+				WHERE fd_id = $1
+				ORDER BY cashflow_id, requested_at DESC`, fdID)
+			if aErr == nil {
+				auditMaps, _ := rowsToMaps(auditRows)
+				auditRows.Close()
+				for _, am := range auditMaps {
+					cfID := ""
+					if v, ok := am["cashflow_id"]; ok && v != nil {
+						cfID = fmt.Sprintf("%v", v)
+					}
+					if cfID == "" {
+						continue
+					}
+					// Strip the pending_fields suffix from reason for clean display
+					if reasonRaw, ok := am["reason"]; ok && reasonRaw != nil {
+						rs := fmt.Sprintf("%v", reasonRaw)
+						if idx := strings.Index(rs, " | pending_fields:"); idx >= 0 {
+							am["reason"] = rs[:idx]
+						}
+					}
+					// Rename processing_status → audit_status so it doesn't clash
+					// with any posting_status column on the cashflow row itself.
+					am["audit_status"] = am["processing_status"]
+					delete(am, "processing_status")
+					auditByCFID[cfID] = append(auditByCFID[cfID], am)
+				}
+			}
+		}
+
+		// Merge full audit history array into each cashflow row under "audit_trail".
+		// Also expose the latest audit entry's status as "pending_action" for quick UI checks.
+		for i, row := range cashflowMaps {
+			cfID := ""
+			if v, ok := row[cfIDCol]; ok && v != nil {
+				cfID = fmt.Sprintf("%v", v)
+			}
+			history := auditByCFID[cfID]
+			if history == nil {
+				history = []map[string]interface{}{}
+			}
+			cashflowMaps[i]["audit_trail"] = history
+			// Expose the latest entry's status for easy client-side checks
+			if len(history) > 0 {
+				cashflowMaps[i]["latest_audit_status"] = history[0]["audit_status"]
+				cashflowMaps[i]["latest_audit_action"] = history[0]["action_type"]
+				cashflowMaps[i]["latest_audit_id"] = history[0]["audit_id"]
+				cashflowMaps[i]["latest_audit_requested_by"] = history[0]["requested_by"]
+			} else {
+				cashflowMaps[i]["latest_audit_status"] = nil
+				cashflowMaps[i]["latest_audit_action"] = nil
+				cashflowMaps[i]["latest_audit_id"] = nil
+				cashflowMaps[i]["latest_audit_requested_by"] = nil
+			}
+		}
+
+		api.RespondWithPayload(w, true, "", cashflowMaps)
 	}
 }
 
 func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		// Accept fd_id from query param (GET-style) or from JSON body (POST-style)
+
 		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
 		if fdID == "" {
 			var body struct {
 				FDID string `json:"fd_id"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-				fdID = strings.TrimSpace(body.FDID)
-			}
+			json.NewDecoder(r.Body).Decode(&body)
+			fdID = strings.TrimSpace(body.FDID)
 		}
 		if fdID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
@@ -1155,30 +1357,20 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, `
 			SELECT
-				je.entry_id,
-				je.activity_id,
-				je.entity_id,
-				je.entity_name,
-				je.entry_date,
-				je.accounting_period,
-				je.entry_type,
-				je.description,
-				je.total_debit,
-				je.total_credit,
-				je.status,
-				jl.line_id,
-				jl.line_number,
-				jl.account_number,
-				jl.account_name,
-				jl.account_type,
-				jl.debit_amount,
-				jl.credit_amount,
-				jl.narration
+				je.entry_id, je.activity_id, je.entity_id, je.entity_name,
+				je.fd_id, je.receipt_id, je.accrual_run_id, je.accrual_ledger_id,
+				TO_CHAR(je.entry_date, 'YYYY-MM-DD') AS entry_date,
+				je.accounting_period, je.entry_type, je.description,
+				je.total_debit, je.total_credit, je.status,
+				TO_CHAR(je.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				je.created_by,
+				jl.line_id, jl.line_number, jl.account_number, jl.account_name,
+				jl.account_type, jl.debit_amount, jl.credit_amount, jl.narration,
+				jl.folio_id, jl.demat_id
 			FROM investment.accounting_journal_entry je
 			LEFT JOIN investment.accounting_journal_entry_line jl ON jl.entry_id = je.entry_id
-			WHERE je.description ILIKE $1 OR jl.narration ILIKE $1
-			ORDER BY je.entry_date DESC, jl.line_number ASC
-		`, "%fd_id="+fdID+"%")
+			WHERE je.fd_id = $1 AND je.is_deleted = false
+			ORDER BY je.entry_date DESC, jl.line_number ASC`, fdID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
 			return
@@ -1190,10 +1382,285 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
 			return
 		}
+		if payload == nil {
+			payload = []map[string]interface{}{}
+		}
 		api.RespondWithPayload(w, true, "", payload)
 	}
 }
 
+// ─── BulkApproveCashflowEdit ──────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/bulk-approve
+// Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
+func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string   `json:"user_id"`
+			CashflowIDs []string `json:"cashflow_ids"`
+			Comment     string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if len(req.CashflowIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "cashflow_ids are required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+		approved, skipped, errs := 0, 0, []string{}
+
+		for _, cashflowID := range req.CashflowIDs {
+			var auditID, requestedBy, status string
+			if err := pgxPool.QueryRow(ctx,
+				`SELECT audit_id, COALESCE(requested_by,''), COALESCE(processing_status,'')
+				 FROM investment.fd_audit_cashflow_schedule
+				 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'
+				 ORDER BY requested_at DESC LIMIT 1`,
+				cashflowID,
+			).Scan(&auditID, &requestedBy, &status); err != nil {
+				errs = append(errs, cashflowID+": no pending audit found")
+				continue
+			}
+			if auditID == "" {
+				errs = append(errs, cashflowID+": no pending audit found")
+				continue
+			}
+			if requestedBy == userEmail {
+				errs = append(errs, cashflowID+": maker-checker violation")
+				continue
+			}
+			if !strings.HasPrefix(status, "PENDING") {
+				skipped++
+				continue
+			}
+			// Try engine path
+			var instanceEyeID string
+			engineErr := pgxPool.QueryRow(ctx, `
+				SELECT ie.instance_eye_id
+				FROM uam.approval_instance i
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
+					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
+					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
+				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
+				ORDER BY ie.position ASC LIMIT 1`, auditID, req.UserID,
+			).Scan(&instanceEyeID)
+
+			if engineErr == nil && instanceEyeID != "" {
+				if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+					InstanceEyeID: instanceEyeID,
+					ActorUserID:   req.UserID,
+					ActorEmail:    userEmail,
+					ActionType:    approvalengine.ActionApproved,
+					Comment:       firstNonEmpty(req.Comment, "Bulk cashflow edit approved"),
+				}); err != nil {
+					errs = append(errs, cashflowID+": "+err.Error())
+					continue
+				}
+				var instStatus string
+				_ = pgxPool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i
+					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
+				if instStatus == "APPROVED" {
+					if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, auditID, userEmail); applyErr != nil {
+						errs = append(errs, cashflowID+": apply failed: "+applyErr.Error())
+						continue
+					}
+				}
+			} else {
+				if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, auditID, userEmail); applyErr != nil {
+					errs = append(errs, cashflowID+": apply failed: "+applyErr.Error())
+					continue
+				}
+			}
+			approved++
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"approved": approved, "skipped": skipped,
+			"errors": errs, "checker": userEmail,
+		})
+		api.LogInfo("[BulkApproveCashflow] approved=%d skipped=%d errors=%d by=%s", approved, skipped, len(errs), userEmail)
+	}
+}
+
+// ─── BulkRejectCashflowEdit ───────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/bulk-reject
+// Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
+func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string   `json:"user_id"`
+			CashflowIDs []string `json:"cashflow_ids"`
+			Comment     string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if len(req.CashflowIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "cashflow_ids are required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+		rejected, skipped, errs := 0, 0, []string{}
+
+		for _, cashflowID := range req.CashflowIDs {
+			var auditID, requestedBy, status string
+			if err := pgxPool.QueryRow(ctx,
+				`SELECT audit_id, COALESCE(requested_by,''), COALESCE(processing_status,'')
+				 FROM investment.fd_audit_cashflow_schedule
+				 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'
+				 ORDER BY requested_at DESC LIMIT 1`,
+				cashflowID,
+			).Scan(&auditID, &requestedBy, &status); err != nil {
+				errs = append(errs, cashflowID+": no pending audit found")
+				continue
+			}
+			if auditID == "" {
+				errs = append(errs, cashflowID+": no pending audit found")
+				continue
+			}
+			if requestedBy == userEmail {
+				errs = append(errs, cashflowID+": maker-checker violation")
+				continue
+			}
+			if !strings.HasPrefix(status, "PENDING") {
+				skipped++
+				continue
+			}
+			// Try engine path
+			var instanceEyeID string
+			engineErr := pgxPool.QueryRow(ctx, `
+				SELECT ie.instance_eye_id
+				FROM uam.approval_instance i
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+				JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
+					AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
+					AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
+				WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
+				ORDER BY ie.position ASC LIMIT 1`, auditID, req.UserID,
+			).Scan(&instanceEyeID)
+
+			if engineErr == nil && instanceEyeID != "" {
+				_ = approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+					InstanceEyeID: instanceEyeID,
+					ActorUserID:   req.UserID,
+					ActorEmail:    userEmail,
+					ActionType:    approvalengine.ActionRejected,
+					Comment:       req.Comment,
+				})
+			}
+			_, _ = pgxPool.Exec(ctx,
+				`UPDATE investment.fd_audit_cashflow_schedule
+				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
+				 WHERE audit_id=$3`, userEmail, req.Comment, auditID)
+			rejected++
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"rejected": rejected, "skipped": skipped,
+			"errors": errs, "checker": userEmail,
+		})
+		api.LogInfo("[BulkRejectCashflow] rejected=%d skipped=%d errors=%d by=%s", rejected, skipped, len(errs), userEmail)
+	}
+}
+
+// ─── BulkDeleteCashflow ───────────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/bulk-delete
+// Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
+// Approves pending DELETE audit rows (actually soft-deletes the cashflow rows).
+func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string   `json:"user_id"`
+			CashflowIDs []string `json:"cashflow_ids"`
+			Comment     string   `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if len(req.CashflowIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "cashflow_ids are required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			"investment.fd_cashflow_schedule",
+			"investment.fd_cashflow",
+			"investment.fd_master_cashflow_schedule",
+		})
+
+		deleted, skipped, errs := 0, 0, []string{}
+
+		for _, cashflowID := range req.CashflowIDs {
+			var auditID, requestedBy, status, fdID string
+			if err := pgxPool.QueryRow(ctx,
+				`SELECT audit_id, COALESCE(requested_by,''), COALESCE(processing_status,''), COALESCE(fd_id,'')
+				 FROM investment.fd_audit_cashflow_schedule
+				 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'
+				 ORDER BY requested_at DESC LIMIT 1`,
+				cashflowID,
+			).Scan(&auditID, &requestedBy, &status, &fdID); err != nil {
+				errs = append(errs, cashflowID+": no pending audit found")
+				continue
+			}
+			if auditID == "" {
+				errs = append(errs, cashflowID+": no pending audit found")
+				continue
+			}
+			if requestedBy == userEmail {
+				errs = append(errs, cashflowID+": maker-checker violation")
+				continue
+			}
+			if !strings.HasPrefix(status, "PENDING") {
+				skipped++
+				continue
+			}
+			if table != "" {
+				if _, execErr := pgxPool.Exec(ctx,
+					fmt.Sprintf(`UPDATE %s SET is_deleted=true, is_active=false, updated_at=now(), updated_by=$1
+					             WHERE cashflow_id=$2 AND fd_id=$3`, table),
+					userEmail, cashflowID, fdID,
+				); execErr != nil {
+					api.LogError("[BulkDeleteCashflow] soft-delete failed cashflow=%s fd=%s: %v", cashflowID, fdID, execErr)
+				}
+			}
+			if _, execErr := pgxPool.Exec(ctx,
+				`UPDATE investment.fd_audit_cashflow_schedule
+				 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
+				 WHERE audit_id=$3`, userEmail, req.Comment, auditID,
+			); execErr != nil {
+				api.LogError("[BulkDeleteCashflow] audit stamp failed audit=%s: %v", auditID, execErr)
+			}
+			deleted++
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"deleted": deleted, "skipped": skipped,
+			"errors": errs, "checker": userEmail,
+		})
+		api.LogInfo("[BulkDeleteCashflow] deleted=%d skipped=%d errors=%d by=%s", deleted, skipped, len(errs), userEmail)
+	}
+}
 // ─── EditCashflowLineItem ─────────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/edit
 // Maker-checker edit of individual cashflow schedule line items.
@@ -1221,13 +1688,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		var userEmail string
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				userEmail = s.Email
-				break
-			}
-		}
+		userEmail := getUserEmail(req.UserID)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
@@ -1275,93 +1736,974 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"override_reason":      "notes",
 		}
 
-		var sets []string
-		var args []interface{}
-		pos := 1
-
-		for inputKey, inputVal := range req.Fields {
+		// Validate that at least one valid editable field was provided
+		validFieldCount := 0
+		for inputKey := range req.Fields {
 			colName, ok := allowedFields[strings.ToLower(inputKey)]
-			if !ok {
-				continue
+			if ok && cols[colName] {
+				validFieldCount++
 			}
-			if !cols[colName] {
-				continue
-			}
-			sets = append(sets, fmt.Sprintf("%s = $%d", colName, pos))
-			args = append(args, inputVal)
-			pos++
 		}
-
-		if len(sets) == 0 {
+		if validFieldCount == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "no valid editable fields found")
 			return
 		}
 
-		if cols["updated_at"] {
-			sets = append(sets, fmt.Sprintf("updated_at = $%d", pos))
-			args = append(args, time.Now())
-			pos++
-		}
-		if cols["updated_by"] {
-			sets = append(sets, fmt.Sprintf("updated_by = $%d", pos))
-			args = append(args, userEmail)
-			pos++
-		}
-		if cols["edit_reason"] {
-			sets = append(sets, fmt.Sprintf("edit_reason = $%d", pos))
-			args = append(args, req.Reason)
-			pos++
-		}
-
-		updateSQL := fmt.Sprintf(
-			"UPDATE %s SET %s WHERE %s = $%d AND %s = $%d",
-			table, strings.Join(sets, ", "),
-			cashflowIDCol, pos,
-			fdCol, pos+1,
-		)
-		args = append(args, req.CashflowID, req.FDID)
-
-		tag, err := pgxPool.Exec(ctx, updateSQL, args...)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "cashflow update failed: "+err.Error())
-			return
-		}
-		if tag.RowsAffected() == 0 {
+		// Verify the cashflow row exists before creating the audit entry
+		var existsCheck int
+		_ = pgxPool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s = $1 AND %s = $2`, table, cashflowIDCol, fdCol),
+			req.CashflowID, req.FDID,
+		).Scan(&existsCheck)
+		if existsCheck == 0 {
 			api.RespondWithError(w, http.StatusNotFound, "cashflow line item not found")
 			return
 		}
 
-		// Try writing audit entry.
-		auditTable := resolveFirstExistingTable(ctx, pgxPool, []string{
-			"investment.fd_cashflow_audit",
-			"investment.fd_cashflow_schedule_audit",
-		})
-		if auditTable != "" {
-			auditSName, auditTName := splitQualifiedTable(auditTable)
-			auditCols, _ := loadTableColumns(ctx, pgxPool, auditSName, auditTName)
-			if auditCols["cashflow_id"] && auditCols["fd_id"] {
-				auditData := map[string]interface{}{
-					"cashflow_id":   req.CashflowID,
-					"fd_id":         req.FDID,
-					"action_type":   "EDIT",
-					"changed_by":    userEmail,
-					"change_reason": req.Reason,
-					"changed_at":    time.Now(),
-				}
-				pref := []string{"cashflow_id", "fd_id", "action_type", "changed_by", "change_reason", "changed_at"}
-				insertSQL, auditArgs, _, ok := buildDynamicInsert(auditTable, auditCols, pref, auditData, nil)
-				if ok {
-					_, _ = pgxPool.Exec(ctx, insertSQL, auditArgs...)
-				}
-			}
+		// ── Block duplicate pending edits for the same cashflow_id ─────────────
+		var existingPending int
+		_ = pgxPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM investment.fd_audit_cashflow_schedule
+			 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'`,
+			req.CashflowID,
+		).Scan(&existingPending)
+		if existingPending > 0 {
+			api.RespondWithError(w, http.StatusConflict, "a pending edit already exists for this cashflow line — approve or reject it first")
+			return
 		}
 
-		api.LogInfo("[FDMaster] EditCashflowLineItem: fd=%s cashflow=%s by=%s", req.FDID, req.CashflowID, userEmail)
+		// ── Snapshot old values from the current cashflow row ───────────────
+		type oldSnapshot struct {
+			seqNumber    *int
+			eventType    *string
+			eventDate    *time.Time
+			periodStart  *time.Time
+			periodEnd    *time.Time
+			periodDays   *int
+			openingP     *float64
+			interestAcc  *float64
+			capAmt       *float64
+			closingP     *float64
+			tdsAmt       *float64
+			netCF        *float64
+			dayCountCode *string
+			divisor      *int
+			formulaUsed  *string
+			accrualRate  *float64
+			drAccCode    *string
+			drAccName    *string
+			crAccCode    *string
+			crAccName    *string
+			systemCalc   *bool
+			isEdited     *bool
+			bankConfirm  *bool
+			bankConfDate *time.Time
+			bankRef      *string
+			voucherGen   *bool
+			voucherNum   *string
+			postStatus   *string
+			remarks      *string
+			isActive     *bool
+			isDeleted    *bool
+			receiptID    *string
+			receiptClr   *bool
+		}
+		var snap oldSnapshot
+		_ = pgxPool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT
+				sequence_number, event_type, event_date, period_start_date, period_end_date, period_days,
+				opening_principal, interest_accrued, capitalized_amount, closing_principal, tds_amount, net_cash_flow,
+				day_count_code, divisor, formula_used, accrual_rate_per_day,
+				dr_account_code, dr_account_name, cr_account_code, cr_account_name,
+				system_calculated, is_edited,
+				bank_confirmed, bank_confirmed_date, bank_reference,
+				voucher_generated, voucher_number, posting_status,
+				remarks, is_active, is_deleted,
+				receipt_id, receipt_cleared
+			FROM %s WHERE %s = $1 AND %s = $2`, table, cashflowIDCol, fdCol),
+			req.CashflowID, req.FDID,
+		).Scan(
+			&snap.seqNumber, &snap.eventType, &snap.eventDate, &snap.periodStart, &snap.periodEnd, &snap.periodDays,
+			&snap.openingP, &snap.interestAcc, &snap.capAmt, &snap.closingP, &snap.tdsAmt, &snap.netCF,
+			&snap.dayCountCode, &snap.divisor, &snap.formulaUsed, &snap.accrualRate,
+			&snap.drAccCode, &snap.drAccName, &snap.crAccCode, &snap.crAccName,
+			&snap.systemCalc, &snap.isEdited,
+			&snap.bankConfirm, &snap.bankConfDate, &snap.bankRef,
+			&snap.voucherGen, &snap.voucherNum, &snap.postStatus,
+			&snap.remarks, &snap.isActive, &snap.isDeleted,
+			&snap.receiptID, &snap.receiptClr,
+		)
+
+		// ── Encode pending fields as JSON suffix in reason ───────────────────
+		reasonWithFields := req.Reason
+		if len(req.Fields) > 0 {
+			pfJSON, _ := json.Marshal(req.Fields)
+			reasonWithFields = req.Reason + " | pending_fields:" + string(pfJSON)
+		}
+
+		// ── Read entity_id + principal for the approval engine ───────────────
+		var entityID string
+		var principalAmount float64
+		_ = pgxPool.QueryRow(ctx,
+			`SELECT COALESCE(entity_id,''), COALESCE(principal_amount,0)
+			 FROM investment.fd_master WHERE fd_id = $1`, req.FDID,
+		).Scan(&entityID, &principalAmount)
+
+		// ── Insert audit row into fd_audit_cashflow_schedule ─────────────────
+		var auditID string
+		auditInsertErr := pgxPool.QueryRow(ctx, `
+			INSERT INTO investment.fd_audit_cashflow_schedule (
+				cashflow_id, fd_id,
+				action_type, processing_status,
+				reason,
+				requested_by, requested_at,
+				old_sequence_number, old_event_type, old_event_date,
+				old_period_start_date, old_period_end_date, old_period_days,
+				old_opening_principal, old_interest_accrued, old_capitalized_amount,
+				old_closing_principal, old_tds_amount, old_net_cash_flow,
+				old_day_count_code, old_divisor, old_formula_used, old_accrual_rate_per_day,
+				old_dr_account_code, old_dr_account_name, old_cr_account_code, old_cr_account_name,
+				old_system_calculated, old_is_edited,
+				old_bank_confirmed, old_bank_confirmed_date, old_bank_reference,
+				old_voucher_generated, old_voucher_number, old_posting_status,
+				old_remarks, old_is_active, old_is_deleted,
+				old_receipt_id, old_receipt_cleared
+			) VALUES (
+				$1,$2,'EDIT','PENDING_EDIT_APPROVAL',$3,
+				$4,now(),
+				$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+				$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+				$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+			) RETURNING audit_id`,
+			req.CashflowID, req.FDID,
+			reasonWithFields,
+			userEmail,
+			snap.seqNumber, snap.eventType, snap.eventDate,
+			snap.periodStart, snap.periodEnd, snap.periodDays,
+			snap.openingP, snap.interestAcc, snap.capAmt,
+			snap.closingP, snap.tdsAmt, snap.netCF,
+			snap.dayCountCode, snap.divisor, snap.formulaUsed, snap.accrualRate,
+			snap.drAccCode, snap.drAccName, snap.crAccCode, snap.crAccName,
+			snap.systemCalc, snap.isEdited,
+			snap.bankConfirm, snap.bankConfDate, snap.bankRef,
+			snap.voucherGen, snap.voucherNum, snap.postStatus,
+			snap.remarks, snap.isActive, snap.isDeleted,
+			snap.receiptID, snap.receiptClr,
+		).Scan(&auditID)
+
+		if auditInsertErr != nil {
+			api.LogError("[CashflowEdit] audit insert failed fd=%s cf=%s: %v", req.FDID, req.CashflowID, auditInsertErr)
+			// Non-fatal: continue without audit trail
+			auditID = ""
+		}
+
+		// ── Spawn approval engine goroutine ──────────────────────────────────
+		if auditID != "" {
+			go func(auditID, cashflowID, fdID, entityID, userID, email string, amount float64) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[CashflowEdit] engine goroutine panic for audit %s: %v", auditID, rec)
+					}
+				}()
+				bgCtx := context.Background()
+				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+					ModuleCode:       "FIXED_DEPOSIT",
+					EntityCode:       entityID,
+					TransactionType:  "FD_CASHFLOW_EDIT",
+					RecordID:         auditID,
+					RecordTable:      "investment.fd_audit_cashflow_schedule",
+					AuditTable:       "investment.fd_audit_cashflow_schedule",
+					AuditIDColumn:    "audit_id",
+					ActionType:       "EDIT",
+					Amount:           amount,
+					SubmittedBy:      userID,
+					SubmittedByEmail: email,
+				})
+				if err != nil {
+					api.LogError("[CashflowEdit] CreateInstance failed audit=%s: %v", auditID, err)
+					return
+				}
+				if instID != "" {
+					_, _ = pgxPool.Exec(bgCtx,
+						`UPDATE investment.fd_audit_cashflow_schedule
+						 SET processing_status='PENDING_EDIT_APPROVAL'
+						 WHERE audit_id=$1`, auditID)
+					api.LogInfo("[CashflowEdit] Engine instance %s created for audit %s", instID, auditID)
+				} else {
+					// No matrix configured — auto-approve immediately
+					api.LogInfo("[CashflowEdit] No matrix for FD_CASHFLOW_EDIT — auto-approving audit %s", auditID)
+					if applyErr := applyApprovedCashflowEdit(bgCtx, pgxPool, auditID, "system"); applyErr != nil {
+						api.LogError("[CashflowEdit] Auto-approve apply failed audit=%s: %v", auditID, applyErr)
+					}
+				}
+			}(auditID, req.CashflowID, req.FDID, entityID, req.UserID, userEmail, principalAmount)
+		}
+
+		api.LogInfo("[FDMaster] EditCashflowLineItem submitted: fd=%s cashflow=%s audit=%s by=%s", req.FDID, req.CashflowID, auditID, userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"fd_id":       req.FDID,
 			"cashflow_id": req.CashflowID,
-			"updated_by":  userEmail,
-			"fields":      req.Fields,
+			"audit_id":    auditID,
+			"status":      "PENDING_EDIT_APPROVAL",
+			"submitted_by": userEmail,
+			"message":     "Edit submitted for approval. It will be applied once approved.",
 		})
+	}
+}
+
+// ─── applyApprovedCashflowEdit ────────────────────────────────────────────────
+// Shared logic used by both ApproveCashflowEdit (checker path) and the
+// auto-approve path (no matrix configured).
+// It reads the audit row, applies the pending_fields to fd_cashflow_schedule,
+// marks the audit as APPROVED, and propagates downstream principal changes.
+func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID string, checkerEmail string) error {
+	// 1. Read audit row
+	var cashflowID, fdID, processingStatus, actionType, reasonRaw string
+	err := pool.QueryRow(ctx,
+		`SELECT cashflow_id, fd_id, processing_status, action_type, COALESCE(reason,'')
+		 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, auditID,
+	).Scan(&cashflowID, &fdID, &processingStatus, &actionType, &reasonRaw)
+	if err != nil {
+		return fmt.Errorf("applyApprovedCashflowEdit: read audit row: %w", err)
+	}
+
+	// 2. Parse pending_fields JSON from reason suffix " | pending_fields:{json}"
+	var pendingFields map[string]interface{}
+	humanReason := reasonRaw
+	const pfMarker = " | pending_fields:"
+	if idx := strings.Index(reasonRaw, pfMarker); idx >= 0 {
+		humanReason = reasonRaw[:idx]
+		pfJSON := reasonRaw[idx+len(pfMarker):]
+		if jErr := json.Unmarshal([]byte(pfJSON), &pendingFields); jErr != nil {
+			return fmt.Errorf("applyApprovedCashflowEdit: parse pending_fields: %w", jErr)
+		}
+	}
+	if len(pendingFields) == 0 {
+		// Nothing to apply — still mark approved
+		_, _ = pool.Exec(ctx,
+			`UPDATE investment.fd_audit_cashflow_schedule
+			 SET processing_status='APPROVED', checker_by=$1, checker_at=now()
+			 WHERE audit_id=$2`, checkerEmail, auditID)
+		return nil
+	}
+
+	// 3. Resolve cashflow table and columns
+	table := resolveFirstExistingTable(ctx, pool, []string{
+		"investment.fd_cashflow_schedule",
+		"investment.fd_cashflow",
+		"investment.fd_master_cashflow_schedule",
+	})
+	if table == "" {
+		return fmt.Errorf("applyApprovedCashflowEdit: cashflow table not found")
+	}
+	schemaName, tableName := splitQualifiedTable(table)
+	cols, err := loadTableColumns(ctx, pool, schemaName, tableName)
+	if err != nil {
+		return fmt.Errorf("applyApprovedCashflowEdit: load cols: %w", err)
+	}
+	fdCol := pickFirstExistingColumn(cols, "fd_id", "master_id")
+	cashflowIDCol := pickFirstExistingColumn(cols, "cashflow_id", "id")
+	if fdCol == "" || cashflowIDCol == "" {
+		return fmt.Errorf("applyApprovedCashflowEdit: required cols missing")
+	}
+
+	// 4. Build UPDATE SET from pending_fields
+	allowedFields := map[string]string{
+		"interest_accrued":     "interest_accrued",
+		"interest_amount":      "interest_accrued",
+		"tds_amount":           "tds_amount",
+		"net_cash_flow":        "net_cash_flow",
+		"net_cashflow":         "net_cash_flow",
+		"period_days":          "period_days",
+		"event_date":           "event_date",
+		"cashflow_date":        "event_date",
+		"formula_used":         "formula_used",
+		"accrual_rate_per_day": "accrual_rate_per_day",
+		"notes":                "notes",
+		"override_reason":      "notes",
+	}
+	var sets []string
+	var args []interface{}
+	pos := 1
+	for inputKey, inputVal := range pendingFields {
+		colName, ok := allowedFields[strings.ToLower(inputKey)]
+		if !ok || !cols[colName] {
+			continue
+		}
+		sets = append(sets, fmt.Sprintf("%s = $%d", colName, pos))
+		args = append(args, inputVal)
+		pos++
+	}
+	if len(sets) == 0 {
+		_, _ = pool.Exec(ctx,
+			`UPDATE investment.fd_audit_cashflow_schedule
+			 SET processing_status='APPROVED', checker_by=$1, checker_at=now()
+			 WHERE audit_id=$2`, checkerEmail, auditID)
+		return nil
+	}
+	// Always mark is_edited = true + set edit audit columns on approval
+	if cols["is_edited"] {
+		sets = append(sets, fmt.Sprintf("is_edited = $%d", pos))
+		args = append(args, true)
+		pos++
+	}
+	if cols["edited_by"] {
+		sets = append(sets, fmt.Sprintf("edited_by = $%d", pos))
+		args = append(args, checkerEmail)
+		pos++
+	}
+	if cols["edited_at"] {
+		sets = append(sets, fmt.Sprintf("edited_at = $%d", pos))
+		args = append(args, time.Now())
+		pos++
+	}
+	if cols["edit_reason"] {
+		sets = append(sets, fmt.Sprintf("edit_reason = $%d", pos))
+		args = append(args, humanReason)
+		pos++
+	}
+	if cols["last_modified_at"] {
+		sets = append(sets, fmt.Sprintf("last_modified_at = $%d", pos))
+		args = append(args, time.Now())
+		pos++
+	}
+	if cols["last_modified_by"] {
+		sets = append(sets, fmt.Sprintf("last_modified_by = $%d", pos))
+		args = append(args, checkerEmail)
+		pos++
+	}
+
+	updateSQL := fmt.Sprintf(
+		"UPDATE %s SET %s WHERE %s = $%d AND %s = $%d",
+		table, strings.Join(sets, ", "),
+		cashflowIDCol, pos,
+		fdCol, pos+1,
+	)
+	args = append(args, cashflowID, fdID)
+
+	if _, upErr := pool.Exec(ctx, updateSQL, args...); upErr != nil {
+		return fmt.Errorf("applyApprovedCashflowEdit: apply update: %w", upErr)
+	}
+
+	// 5. Mark audit row as APPROVED
+	_, _ = pool.Exec(ctx,
+		`UPDATE investment.fd_audit_cashflow_schedule
+		 SET processing_status='APPROVED', checker_by=$1, checker_at=now()
+		 WHERE audit_id=$2`, checkerEmail, auditID)
+
+	// 6. Propagate downstream principal changes
+	propagateCashflowDownstream(ctx, pool, table, fdCol, cashflowIDCol, cols, fdID, cashflowID, pendingFields)
+
+	return nil
+}
+
+// propagateCashflowDownstream re-reads all cashflow rows for an FD after an
+// edit was applied, then cascades opening/closing principal changes forward.
+func propagateCashflowDownstream(
+	ctx context.Context, pool *pgxpool.Pool,
+	table, fdCol, cashflowIDCol string, cols map[string]bool,
+	fdID, editedCashflowID string,
+	appliedFields map[string]interface{},
+) {
+	seqCol := pickFirstExistingColumn(cols, "sequence_number", "period_number")
+	openCol := pickFirstExistingColumn(cols, "opening_principal")
+	closeCol := pickFirstExistingColumn(cols, "closing_principal")
+	capCol := pickFirstExistingColumn(cols, "capitalized_amount")
+	intCol := pickFirstExistingColumn(cols, "interest_accrued", "interest_amount")
+	tdsCol := pickFirstExistingColumn(cols, "tds_amount")
+	ncfCol := pickFirstExistingColumn(cols, "net_cash_flow", "net_cashflow", "net_amount")
+	evtCol := pickFirstExistingColumn(cols, "event_type")
+	if seqCol == "" || openCol == "" || closeCol == "" || evtCol == "" {
+		return
+	}
+
+	cfRows, err := pool.Query(ctx,
+		fmt.Sprintf(`SELECT %s, %s, COALESCE(%s,0), COALESCE(%s,0), COALESCE(%s,0), COALESCE(%s,0), COALESCE(%s,0), COALESCE(%s,0), %s
+		             FROM %s WHERE %s = $1 ORDER BY %s`,
+			cashflowIDCol, evtCol, openCol, closeCol, capCol, intCol, tdsCol, ncfCol, seqCol,
+			table, fdCol, seqCol),
+		fdID)
+	if err != nil {
+		return
+	}
+	type cfRow struct {
+		id                                          string
+		eventType                                   string
+		openP, closeP, capAmt, intAmt, tdsAmt, ncf float64
+		seq                                         int
+	}
+	var allRows []cfRow
+	for cfRows.Next() {
+		var r cfRow
+		if scanErr := cfRows.Scan(&r.id, &r.eventType, &r.openP, &r.closeP, &r.capAmt, &r.intAmt, &r.tdsAmt, &r.ncf, &r.seq); scanErr != nil {
+			cfRows.Close()
+			return
+		}
+		allRows = append(allRows, r)
+	}
+	cfRows.Close()
+	if cfRows.Err() != nil || len(allRows) == 0 {
+		return
+	}
+
+	// Find the edited row and apply numeric overrides in-memory
+	editedIdx := -1
+	for i, r := range allRows {
+		if r.id == editedCashflowID {
+			editedIdx = i
+			for k, v := range appliedFields {
+				switch strings.ToLower(k) {
+				case "interest_accrued", "interest_amount":
+					if fv, ok2 := toFloat64(v); ok2 {
+						allRows[i].intAmt = fv
+					}
+				case "tds_amount":
+					if fv, ok2 := toFloat64(v); ok2 {
+						allRows[i].tdsAmt = fv
+					}
+				case "capitalized_amount":
+					if fv, ok2 := toFloat64(v); ok2 {
+						allRows[i].capAmt = fv
+					}
+				}
+			}
+			switch strings.ToUpper(r.eventType) {
+			case "CAPITALIZATION":
+				allRows[i].capAmt = allRows[i].intAmt - allRows[i].tdsAmt
+				allRows[i].closeP = allRows[i].openP + allRows[i].capAmt
+				allRows[i].ncf = 0
+			case "MATURITY":
+				allRows[i].closeP = 0
+				allRows[i].ncf = allRows[i].openP + allRows[i].intAmt - allRows[i].tdsAmt
+			case "ACCRUAL":
+				allRows[i].closeP = allRows[i].openP
+				allRows[i].ncf = 0
+			}
+			break
+		}
+	}
+	if editedIdx < 0 {
+		return
+	}
+
+	// Propagate forward
+	for i := editedIdx + 1; i < len(allRows); i++ {
+		prevClose := allRows[i-1].closeP
+		allRows[i].openP = prevClose
+		switch strings.ToUpper(allRows[i].eventType) {
+		case "CAPITALIZATION":
+			allRows[i].capAmt = allRows[i].intAmt - allRows[i].tdsAmt
+			allRows[i].closeP = prevClose + allRows[i].capAmt
+			allRows[i].ncf = 0
+		case "MATURITY":
+			allRows[i].closeP = 0
+			allRows[i].ncf = allRows[i].openP + allRows[i].intAmt - allRows[i].tdsAmt
+		case "ACCRUAL", "TDS_DEDUCTION", "INTEREST_RECEIPT":
+			allRows[i].closeP = prevClose
+		}
+	}
+
+	// Persist from editedIdx onward
+	for _, r := range allRows[editedIdx:] {
+		if _, execErr := pool.Exec(ctx,
+			fmt.Sprintf(`UPDATE %s SET %s=$1, %s=$2, %s=$3, %s=$4, %s=$5 WHERE %s=$6 AND %s=$7`,
+				table, openCol, closeCol, capCol, intCol, ncfCol, cashflowIDCol, fdCol),
+			r.openP, r.closeP, r.capAmt, r.intAmt, r.ncf, r.id, fdID,
+		); execErr != nil {
+			api.LogError("[CashflowPropagate] update failed cf=%s fd=%s: %v", r.id, fdID, execErr)
+		}
+	}
+}
+
+// ─── ApproveCashflowEdit ──────────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/approve
+// Checker approves a pending cashflow edit audit row.
+func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			AuditID  string `json:"audit_id"`
+			Comment  string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.AuditID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "audit_id is required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+
+		// Read audit row
+		var requestedBy, status, cashflowID, fdID string
+		err := pgxPool.QueryRow(ctx,
+			`SELECT requested_by, processing_status, cashflow_id, fd_id
+			 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, req.AuditID,
+		).Scan(&requestedBy, &status, &cashflowID, &fdID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "audit record not found")
+			return
+		}
+		// Same-person check
+		if requestedBy == userEmail {
+			api.RespondWithError(w, http.StatusBadRequest, "maker and checker cannot be the same person")
+			return
+		}
+		if !strings.HasPrefix(status, "PENDING") {
+			api.RespondWithError(w, http.StatusConflict, "audit record is not in a pending state (current: "+status+")")
+			return
+		}
+
+		// Try engine path
+		var instanceEyeID string
+		engineErr := pgxPool.QueryRow(ctx, `
+			SELECT ie.instance_eye_id
+			FROM uam.approval_instance i
+			JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+			JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
+				AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
+				AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
+			WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
+			ORDER BY ie.position ASC LIMIT 1`, req.AuditID, req.UserID,
+		).Scan(&instanceEyeID)
+
+		if engineErr == nil && instanceEyeID != "" {
+			// Engine path: record action
+			if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+				InstanceEyeID: instanceEyeID,
+				ActorUserID:   req.UserID,
+				ActorEmail:    userEmail,
+				ActionType:    approvalengine.ActionApproved,
+				Comment:       firstNonEmpty(req.Comment, "Cashflow edit approved"),
+			}); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+err.Error())
+				return
+			}
+			// Check if instance is now fully APPROVED
+			var instStatus string
+			_ = pgxPool.QueryRow(ctx, `
+				SELECT i.status FROM uam.approval_instance i
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+				WHERE ie.instance_eye_id = $1`, instanceEyeID,
+			).Scan(&instStatus)
+			if instStatus == "APPROVED" {
+				if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, req.AuditID, userEmail); applyErr != nil {
+					api.LogError("[CashflowApprove] apply failed audit=%s: %v", req.AuditID, applyErr)
+					api.RespondWithError(w, http.StatusInternalServerError, "apply edit failed: "+applyErr.Error())
+					return
+				}
+			}
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"audit_id": req.AuditID, "status": instStatus, "approved_by": userEmail,
+			})
+		} else {
+			// No engine instance — direct approval
+			if applyErr := applyApprovedCashflowEdit(ctx, pgxPool, req.AuditID, userEmail); applyErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "apply edit failed: "+applyErr.Error())
+				return
+			}
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"audit_id": req.AuditID, "status": "APPROVED", "approved_by": userEmail,
+			})
+		}
+		api.LogInfo("[CashflowApprove] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)
+	}
+}
+
+// ─── RejectCashflowEdit ───────────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/reject
+// Checker rejects a pending cashflow edit audit row.
+func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			AuditID string `json:"audit_id"`
+			Comment string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.AuditID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "audit_id is required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+
+		// Read audit row
+		var requestedBy, status, cashflowID, fdID string
+		err := pgxPool.QueryRow(ctx,
+			`SELECT requested_by, processing_status, cashflow_id, fd_id
+			 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, req.AuditID,
+		).Scan(&requestedBy, &status, &cashflowID, &fdID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "audit record not found")
+			return
+		}
+		// Same-person check
+		if requestedBy == userEmail {
+			api.RespondWithError(w, http.StatusBadRequest, "maker and checker cannot be the same person")
+			return
+		}
+		if !strings.HasPrefix(status, "PENDING") {
+			api.RespondWithError(w, http.StatusConflict, "audit record is not in a pending state (current: "+status+")")
+			return
+		}
+
+		// Try engine path
+		var instanceEyeID string
+		engineErr := pgxPool.QueryRow(ctx, `
+			SELECT ie.instance_eye_id
+			FROM uam.approval_instance i
+			JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id AND ie.status = 'ACTIVE'
+			JOIN uam.approval_matrix_eye_member m ON m.eye_id = ie.matrix_eye_id
+				AND m.member_type = 'APPROVER' AND m.is_active = true AND m.is_deleted = false
+				AND m.assignment_type IN ('USER_ONLY','ROLE_USER') AND m.user_id = $2
+			WHERE i.record_id = $1 AND i.module_code = 'FIXED_DEPOSIT' AND i.status = 'PENDING'
+			ORDER BY ie.position ASC LIMIT 1`, req.AuditID, req.UserID,
+		).Scan(&instanceEyeID)
+
+		if engineErr == nil && instanceEyeID != "" {
+			if err := approvalengine.RecordAction(ctx, pgxPool, approvalengine.ActionRequest{
+				InstanceEyeID: instanceEyeID,
+				ActorUserID:   req.UserID,
+				ActorEmail:    userEmail,
+				ActionType:    approvalengine.ActionRejected,
+				Comment:       req.Comment,
+			}); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "approval engine error: "+err.Error())
+				return
+			}
+			// Engine finalizer stamps audit row; also ensure our status is REJECTED
+			if _, execErr := pgxPool.Exec(ctx,
+				`UPDATE investment.fd_audit_cashflow_schedule
+				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
+				 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+			); execErr != nil {
+				api.LogError("[CashflowReject] audit stamp failed audit=%s: %v", req.AuditID, execErr)
+			}
+		} else {
+			// No engine — direct stamp
+			if _, execErr := pgxPool.Exec(ctx,
+				`UPDATE investment.fd_audit_cashflow_schedule
+				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
+				 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+			); execErr != nil {
+				api.LogError("[CashflowReject] audit stamp failed audit=%s: %v", req.AuditID, execErr)
+			}
+		}
+		api.LogInfo("[CashflowReject] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"audit_id": req.AuditID, "status": "REJECTED", "rejected_by": userEmail,
+		})
+	}
+}
+
+// ─── DeleteCashflowLineItem ───────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/delete
+// Soft-deletes a cashflow row (sets is_deleted=true) with maker-checker audit.
+func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string `json:"user_id"`
+			FDID       string `json:"fd_id"`
+			CashflowID string `json:"cashflow_id"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.FDID == "" || req.CashflowID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "fd_id and cashflow_id are required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+
+		// Block duplicate pending deletes
+		var existingPending int
+		_ = pgxPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM investment.fd_audit_cashflow_schedule
+			 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'`,
+			req.CashflowID,
+		).Scan(&existingPending)
+		if existingPending > 0 {
+			api.RespondWithError(w, http.StatusConflict, "a pending action already exists for this cashflow line")
+			return
+		}
+
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			"investment.fd_cashflow_schedule",
+			"investment.fd_cashflow",
+			"investment.fd_master_cashflow_schedule",
+		})
+		if table == "" {
+			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			return
+		}
+		schemaName, tableName := splitQualifiedTable(table)
+		cols, err := loadTableColumns(ctx, pgxPool, schemaName, tableName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to load table columns")
+			return
+		}
+		fdCol := pickFirstExistingColumn(cols, "fd_id", "master_id")
+		cashflowIDCol := pickFirstExistingColumn(cols, "cashflow_id", "id")
+		if fdCol == "" || cashflowIDCol == "" {
+			api.RespondWithError(w, http.StatusInternalServerError, "required columns not found")
+			return
+		}
+
+		// Snapshot old values for the audit row
+		type oldSnap struct {
+			seqNumber    *int
+			eventType    *string
+			eventDate    *time.Time
+			periodStart  *time.Time
+			periodEnd    *time.Time
+			periodDays   *int
+			openingP     *float64
+			interestAcc  *float64
+			capAmt       *float64
+			closingP     *float64
+			tdsAmt       *float64
+			netCF        *float64
+			dayCountCode *string
+			divisor      *int
+			formulaUsed  *string
+			accrualRate  *float64
+			drAccCode    *string
+			drAccName    *string
+			crAccCode    *string
+			crAccName    *string
+			systemCalc   *bool
+			isEdited     *bool
+			bankConfirm  *bool
+			bankConfDate *time.Time
+			bankRef      *string
+			voucherGen   *bool
+			voucherNum   *string
+			postStatus   *string
+			remarks      *string
+			isActive     *bool
+			isDeleted    *bool
+			receiptID    *string
+			receiptClr   *bool
+		}
+		var snap oldSnap
+		_ = pgxPool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT
+				sequence_number, event_type, event_date, period_start_date, period_end_date, period_days,
+				opening_principal, interest_accrued, capitalized_amount, closing_principal, tds_amount, net_cash_flow,
+				day_count_code, divisor, formula_used, accrual_rate_per_day,
+				dr_account_code, dr_account_name, cr_account_code, cr_account_name,
+				system_calculated, is_edited,
+				bank_confirmed, bank_confirmed_date, bank_reference,
+				voucher_generated, voucher_number, posting_status,
+				remarks, is_active, is_deleted,
+				receipt_id, receipt_cleared
+			FROM %s WHERE %s = $1 AND %s = $2`, table, cashflowIDCol, fdCol),
+			req.CashflowID, req.FDID,
+		).Scan(
+			&snap.seqNumber, &snap.eventType, &snap.eventDate, &snap.periodStart, &snap.periodEnd, &snap.periodDays,
+			&snap.openingP, &snap.interestAcc, &snap.capAmt, &snap.closingP, &snap.tdsAmt, &snap.netCF,
+			&snap.dayCountCode, &snap.divisor, &snap.formulaUsed, &snap.accrualRate,
+			&snap.drAccCode, &snap.drAccName, &snap.crAccCode, &snap.crAccName,
+			&snap.systemCalc, &snap.isEdited,
+			&snap.bankConfirm, &snap.bankConfDate, &snap.bankRef,
+			&snap.voucherGen, &snap.voucherNum, &snap.postStatus,
+			&snap.remarks, &snap.isActive, &snap.isDeleted,
+			&snap.receiptID, &snap.receiptClr,
+		)
+
+		// Insert audit row for delete request
+		var auditID string
+		_ = pgxPool.QueryRow(ctx, `
+			INSERT INTO investment.fd_audit_cashflow_schedule (
+				cashflow_id, fd_id,
+				action_type, processing_status,
+				reason,
+				requested_by, requested_at,
+				old_sequence_number, old_event_type, old_event_date,
+				old_period_start_date, old_period_end_date, old_period_days,
+				old_opening_principal, old_interest_accrued, old_capitalized_amount,
+				old_closing_principal, old_tds_amount, old_net_cash_flow,
+				old_day_count_code, old_divisor, old_formula_used, old_accrual_rate_per_day,
+				old_dr_account_code, old_dr_account_name, old_cr_account_code, old_cr_account_name,
+				old_system_calculated, old_is_edited,
+				old_bank_confirmed, old_bank_confirmed_date, old_bank_reference,
+				old_voucher_generated, old_voucher_number, old_posting_status,
+				old_remarks, old_is_active, old_is_deleted,
+				old_receipt_id, old_receipt_cleared
+			) VALUES (
+				$1,$2,'DELETE','PENDING_DELETE_APPROVAL',$3,
+				$4,now(),
+				$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+				$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+				$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+			) RETURNING audit_id`,
+			req.CashflowID, req.FDID,
+			req.Reason, userEmail,
+			snap.seqNumber, snap.eventType, snap.eventDate,
+			snap.periodStart, snap.periodEnd, snap.periodDays,
+			snap.openingP, snap.interestAcc, snap.capAmt,
+			snap.closingP, snap.tdsAmt, snap.netCF,
+			snap.dayCountCode, snap.divisor, snap.formulaUsed, snap.accrualRate,
+			snap.drAccCode, snap.drAccName, snap.crAccCode, snap.crAccName,
+			snap.systemCalc, snap.isEdited,
+			snap.bankConfirm, snap.bankConfDate, snap.bankRef,
+			snap.voucherGen, snap.voucherNum, snap.postStatus,
+			snap.remarks, snap.isActive, snap.isDeleted,
+			snap.receiptID, snap.receiptClr,
+		).Scan(&auditID)
+
+		api.LogInfo("[CashflowDelete] submitted fd=%s cf=%s audit=%s by=%s", req.FDID, req.CashflowID, auditID, userEmail)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"fd_id":       req.FDID,
+			"cashflow_id": req.CashflowID,
+			"audit_id":    auditID,
+			"status":      "PENDING_DELETE_APPROVAL",
+			"submitted_by": userEmail,
+			"message":     "Delete request submitted for approval.",
+		})
+	}
+}
+
+// ─── ApproveDeleteCashflow ────────────────────────────────────────────────────
+// POST /investment/fd/master/cashflow/approve-delete
+// Checker approves a pending delete request — actually soft-deletes the row.
+func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID  string `json:"user_id"`
+			AuditID string `json:"audit_id"`
+			Comment string `json:"comment"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.AuditID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "audit_id is required")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+
+		var requestedBy, status, cashflowID, fdID string
+		err := pgxPool.QueryRow(ctx,
+			`SELECT requested_by, processing_status, cashflow_id, fd_id
+			 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, req.AuditID,
+		).Scan(&requestedBy, &status, &cashflowID, &fdID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "audit record not found")
+			return
+		}
+		if requestedBy == userEmail {
+			api.RespondWithError(w, http.StatusBadRequest, "maker and checker cannot be the same person")
+			return
+		}
+		if !strings.HasPrefix(status, "PENDING") {
+			api.RespondWithError(w, http.StatusConflict, "audit record is not pending (current: "+status+")")
+			return
+		}
+
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			"investment.fd_cashflow_schedule",
+			"investment.fd_cashflow",
+			"investment.fd_master_cashflow_schedule",
+		})
+		if table == "" {
+			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			return
+		}
+
+		// Soft-delete the cashflow row
+		if _, execErr := pgxPool.Exec(ctx,
+			fmt.Sprintf(`UPDATE %s SET is_deleted=true, is_active=false, updated_at=now(), updated_by=$1
+			             WHERE cashflow_id=$2 AND fd_id=$3`, table),
+			userEmail, cashflowID, fdID,
+		); execErr != nil {
+			api.LogError("[CashflowApproveDelete] soft-delete failed audit=%s cf=%s: %v", req.AuditID, cashflowID, execErr)
+		}
+
+		// Stamp audit row
+		if _, execErr := pgxPool.Exec(ctx,
+			`UPDATE investment.fd_audit_cashflow_schedule
+			 SET processing_status='DELETED', checker_by=$1, checker_at=now(), checker_comment=$2
+			 WHERE audit_id=$3`, userEmail, req.Comment, req.AuditID,
+		); execErr != nil {
+			api.LogError("[CashflowApproveDelete] audit stamp failed audit=%s: %v", req.AuditID, execErr)
+		}
+
+		api.LogInfo("[CashflowApproveDelete] audit=%s cf=%s fd=%s by=%s", req.AuditID, cashflowID, fdID, userEmail)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"audit_id": req.AuditID, "cashflow_id": cashflowID, "status": "DELETED", "approved_by": userEmail,
+		})
+	}
+}
+
+// ─── GetCashflowAuditHistory ──────────────────────────────────────────────────
+// GET /investment/fd/master/cashflow/audit?fd_id=&cashflow_id=
+func GetCashflowAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
+		cashflowID := strings.TrimSpace(r.URL.Query().Get("cashflow_id"))
+		if fdID == "" && cashflowID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "fd_id or cashflow_id is required")
+			return
+		}
+
+		query := `SELECT * FROM investment.fd_audit_cashflow_schedule WHERE 1=1`
+		var args []interface{}
+		pos := 1
+		if fdID != "" {
+			query += fmt.Sprintf(" AND fd_id = $%d", pos)
+			args = append(args, fdID)
+			pos++
+		}
+		if cashflowID != "" {
+			query += fmt.Sprintf(" AND cashflow_id = $%d", pos)
+			args = append(args, cashflowID)
+			pos++
+		}
+		query += " ORDER BY requested_at DESC"
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			return
+		}
+		defer rows.Close()
+		payload, err := rowsToMaps(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+			return
+		}
+		if payload == nil {
+			payload = []map[string]interface{}{}
+		}
+		api.RespondWithPayload(w, true, "", payload)
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,6 +37,12 @@ type AccrualInput struct {
 	WeekendAccrual      bool // if false, exclude weekends from day count
 	HolidayAccrual      bool // if false, exclude holidays from day count
 	WeekendPattern      string // e.g. "Sat,Sun"
+	// Bank config: boundary and rounding conventions (STEP 3)
+	AccrualStartConvention string // INCLUDE / EXCLUDE / NEXT_WD
+	AccrualEndConvention   string // INCLUDE / EXCLUDE / PRECEDING_WD
+	BankRoundingMethod     string // ROUND / FLOOR / CEIL (bank config level)
+	BankRoundingFrequency  string // EACH_PERIOD / FINAL_ONLY
+	BrokenPeriodMethod     string // SIMPLE / COMPOUND / HYBRID / NONE
 }
 
 // AccrualRunParams controls what the engine calculates.
@@ -118,6 +126,7 @@ type CreateAccrualRunInput struct {
 	DayCountConvention string
 	RoundingRule       string
 	PrecisionDecimals  int
+	FDInclusionMethod  string
 	CreatedBy          string
 }
 
@@ -202,7 +211,12 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			COALESCE(bc.holiday_calendar_code, '')            AS holiday_calendar_code,
 			COALESCE(bc.weekend_accrual, true)                AS weekend_accrual,
 			COALESCE(bc.holiday_accrual, true)                AS holiday_accrual,
-			COALESCE(mc.weekend_pattern, 'Sat,Sun')           AS weekend_pattern
+			COALESCE(mc.weekend_pattern, 'Sat,Sun')           AS weekend_pattern,
+			COALESCE(bc.accrual_start_convention, 'INCLUDE')  AS accrual_start_convention,
+			COALESCE(bc.accrual_end_convention,   'EXCLUDE')  AS accrual_end_convention,
+			COALESCE(bc.rounding_method,          'ROUND')    AS bank_rounding_method,
+			COALESCE(bc.rounding_frequency,       'EACH_PERIOD') AS bank_rounding_frequency,
+			COALESCE(bc.broken_period_method,     'SIMPLE')   AS broken_period_method
 		FROM investment.fd_master f
 			LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = f.bank_config_id
 				AND COALESCE(bc.is_deleted, false) = false
@@ -247,6 +261,8 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			&fd.FdStartDate, &fd.FdMaturityDate,
 			&fd.BankConfigID, &fd.HolidayCalendarCode,
 			&fd.WeekendAccrual, &fd.HolidayAccrual, &fd.WeekendPattern,
+			&fd.AccrualStartConvention, &fd.AccrualEndConvention,
+			&fd.BankRoundingMethod, &fd.BankRoundingFrequency, &fd.BrokenPeriodMethod,
 		); err != nil {
 			return nil, fmt.Errorf("getFDsInScope scan: %w", err)
 		}
@@ -254,6 +270,11 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("getFDsInScope rows.Err: %w", err)
+	}
+	if len(results) == 0 {
+		api.LogInfo("[FDAccrual] getFDsInScope: 0 FDs matched scope (entity=%s status=%s period=%s→%s)",
+			params.EntityID, params.FDStatusFilter,
+			params.PeriodStart.Format("2006-01-02"), params.PeriodEnd.Format("2006-01-02"))
 	}
 	return results, nil
 }
@@ -694,9 +715,53 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		effectiveEnd = params.PeriodEnd
 	}
 
-	if !effectiveStart.Before(effectiveEnd) {
-		excluded.CalculationError = "effective period is zero or negative"
+	// Apply accrual start convention (STEP 3C)
+	switch strings.ToUpper(fd.AccrualStartConvention) {
+	case "EXCLUDE":
+		// Start date itself does not accrue — shift start forward by 1 day
+		effectiveStart = effectiveStart.AddDate(0, 0, 1)
+	default:
+		// INCLUDE or NEXT_WD → use start date as-is
+	}
+
+	// Apply accrual end convention (STEP 3C)
+	switch strings.ToUpper(fd.AccrualEndConvention) {
+	case "INCLUDE":
+		// End date accrues — extend by 1 day so day count includes it
+		effectiveEnd = effectiveEnd.AddDate(0, 0, 1)
+	default:
+		// EXCLUDE or PRECEDING_WD → no change (INCL_START_EXCL_END default)
+	}
+
+	// STEP 1: FD entirely outside the period window — truly exclude
+	if effectiveStart.After(effectiveEnd) {
+		excluded.CalculationError = fmt.Sprintf(
+			"FD period [%s, %s] does not overlap accrual window [%s, %s]",
+			fd.FdStartDate.Format("2006-01-02"),
+			fd.FdMaturityDate.Format("2006-01-02"),
+			params.PeriodStart.Format("2006-01-02"),
+			params.PeriodEnd.Format("2006-01-02"),
+		)
 		return excluded
+	}
+	// Same-day (effectiveStart == effectiveEnd): 0 accrual days — return zero-interest row, not EXCLUDED
+	if !effectiveStart.Before(effectiveEnd) {
+		return AccrualPeriodResult{
+			FDID: fd.FDID, FdRefNo: fd.FdRefNo, BankID: fd.BankID,
+			BankName: fd.BankName, EntityID: fd.EntityID, EntityName: fd.EntityName,
+			InterestTypeCode: fd.InterestTypeCode,
+			PrincipalAmount:  fd.PrincipalAmount, InterestRate: fd.InterestRate,
+			DayCountCode:   fd.DayCountCode,
+			FdStartDate:    fd.FdStartDate, FdMaturityDate: fd.FdMaturityDate,
+			AccrualPeriodStart: effectiveStart,
+			AccrualPeriodEnd:   effectiveEnd,
+			AccrualDays:        0,
+			OpeningPrincipal:   fd.PrincipalAmount,
+			LedgerRowStatus:    "CALCULATED",
+			FormulaUsed: fmt.Sprintf(
+				"0 accrual days: FD started %s on last day of period",
+				fd.FdStartDate.Format("2006-01-02")),
+		}
 	}
 
 	// Load holiday calendar (empty if no calendar code configured)
@@ -729,7 +794,13 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 
 	dailyRate := (fd.InterestRate / 100.0) / float64(divisor)
 	rawInterest := openingPrincipal * dailyRate * float64(accrualDays)
-	periodInterest := roundAccrual(rawInterest, decimals, params.RoundingRule)
+
+	// STEP 3D: bank config rounding takes precedence over run-level rounding
+	roundingRule := params.RoundingRule
+	if fd.BankRoundingMethod != "" {
+		roundingRule = fd.BankRoundingMethod
+	}
+	periodInterest := roundAccrual(rawInterest, decimals, roundingRule)
 
 	interestReceived, tdsDeducted, cashflowIDs := getCashflowDataForPeriod(
 		ctx, pool, fd.FDID, effectiveStart, effectiveEnd)
@@ -774,4 +845,70 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		FormulaUsed:     formula,
 		LedgerRowStatus: "CALCULATED",
 	}
+}
+
+// friendlyAccrualError maps known DB constraint violations and
+// common errors to human-readable messages.
+func friendlyAccrualError(err error, context string) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "fd_accrual_run_type_check"):
+		return "Invalid run_type. Allowed: MONTHLY, QUARTERLY, AD_HOC, MANUAL, SCHEDULED."
+	case strings.Contains(s, "fd_accrual_run_status_check"):
+		return "Invalid run_status transition. Check allowed statuses."
+	case strings.Contains(s, "fd_accrual_run_mode_check"):
+		return "Invalid run_mode. Must be SIMULATION or FINAL."
+	case strings.Contains(s, "fd_accrual_ledger_status_check"):
+		return "Invalid ledger_row_status. Allowed: CALCULATED, ERROR, OVERRIDDEN, EXCLUDED, PENDING_OVERRIDE, POSTED."
+	case strings.Contains(s, "fd_accrual_ledger_override_status_check"):
+		return "Invalid override_status. Allowed: PENDING, PROPOSED, APPROVED, REJECTED."
+	case strings.Contains(s, "fd_accrual_run_fd_unique"):
+		return "This FD already has a ledger entry for this run. Use /recompute to recalculate."
+	case strings.Contains(s, "fd_accrual_run_period_check"):
+		return "accrual_period_end must be >= accrual_period_start."
+	case strings.Contains(s, "fd_accrual_ledger_fd_fkey"):
+		return "FD not found in fd_master. Verify the fd_id is correct and the FD is not deleted."
+	case strings.Contains(s, "fd_accrual_ledger_run_fkey"):
+		return "Accrual run not found. Verify the run_id is correct."
+	case strings.Contains(s, "fd_accrual_exception_ledger_fkey"):
+		return "Ledger row not found. Cannot create exception — run execute first."
+	case strings.Contains(s, "fd_accrual_exception_run_fkey"):
+		return "Accrual run not found for this exception."
+	case strings.Contains(s, "duplicate key"), strings.Contains(s, "unique constraint"):
+		return "Duplicate entry: " + context + ". Record already exists."
+	case strings.Contains(s, "foreign key"), strings.Contains(s, "violates foreign key"):
+		return "Referenced record not found: " + context
+	case strings.Contains(s, "no rows in result set"), strings.Contains(s, "no rows"):
+		return "Record not found: " + context
+	case strings.Contains(s, "context canceled"), strings.Contains(s, "context deadline"):
+		return "Request timed out. The operation took too long. Try a smaller date range."
+	case strings.Contains(s, "connection"):
+		return "Database connection error. Please retry."
+	default:
+		return context + ": " + err.Error()
+	}
+}
+
+// toFloat64 converts numeric interface{} values (from JSON decode or DB scan) to float64.
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(n, 64)
+		return f, err == nil
+	}
+	return 0, false
 }

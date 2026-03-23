@@ -223,10 +223,16 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(cID, uID, uEmail, eID string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CaptureConfirmation engine goroutine panic for confirmation %s: %v", cID, rec)
+				}
+			}()
 			bgCtx := context.Background()
 			// Cancel any prior pending instance — re-capture resets the full approval chain.
 			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail); err != nil {
 				api.LogError("[FDBooking] CancelPendingInstances failed for confirmation %s: %v", cID, err)
+				return
 			}
 			if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
@@ -248,6 +254,11 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(confirmationID, req.UserID, userEmail, entityID, req.ConfirmedPrincipalAmount)
 
 		go func(cID, bID, eID, uEmail string, amount float64, hasVar bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CaptureConfirmation notification goroutine panic for confirmation %s: %v", cID, rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/capture", cID, map[string]interface{}{
 				"entity_id":    eID,
 				"record_id":    cID,
@@ -405,10 +416,16 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fire engine — always cancel the prior instance and create a fresh one.
 		// Even a non-threshold resolve may need approval tracking.
 		go func(cID, uID, uEmail, eID string, amount float64, breached bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] ResolveVariance engine goroutine panic for confirmation %s: %v", cID, rec)
+				}
+			}()
 			bgCtx := context.Background()
 			// Cancel the CONF_CREATE instance that was pending — resolve resets the chain.
 			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail); err != nil {
 				api.LogError("[FDBooking] CancelPendingInstances failed for confirmation %s: %v", cID, err)
+				return
 			}
 			if breached {
 				if _, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
@@ -451,6 +468,11 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(req.ConfirmationID, req.UserID, userEmail, entityID, oldConfPrincipal, thresholdBreached)
 
 		go func(cID, eID, uEmail, action string, breached bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] ResolveVariance notification goroutine panic for confirmation %s: %v", cID, rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/resolve-variance", cID, map[string]interface{}{
 				"entity_id":          eID,
 				"record_id":          cID,
@@ -541,19 +563,31 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
 					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
 				if instStatus == "APPROVED" {
-					_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_confirmation
-						SET confirmation_status = 'CONFIRMED'
-						WHERE confirmation_id = $1
-						  AND confirmation_status NOT IN ('VARIANCE_REJECTED','CONFIRMED')`, cID)
-					_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='CONFIRMED'
-						WHERE booking_id IN (SELECT booking_id FROM investment.fd_confirmation WHERE confirmation_id=$1)`, cID)
-					_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_confirmation SET is_deleted=true
-						WHERE confirmation_id IN (
-							SELECT DISTINCT a.confirmation_id FROM investment.fd_audit_confirmation a
-							WHERE a.confirmation_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
-						)`, cID)
+					if _, execErr := pgxPool.Exec(ctx,
+						`UPDATE investment.fd_confirmation
+						 SET confirmation_status = 'CONFIRMED'
+						 WHERE confirmation_id = $1
+						   AND confirmation_status NOT IN ('VARIANCE_REJECTED','CONFIRMED')`, cID,
+					); execErr != nil {
+						api.LogError("[FDConfirmation] confirmation_status→CONFIRMED failed for %s: %v", cID, execErr)
+					}
+					if _, execErr := pgxPool.Exec(ctx,
+						`UPDATE investment.fd_booking_request SET booking_status='CONFIRMED'
+						 WHERE booking_id IN (SELECT booking_id FROM investment.fd_confirmation WHERE confirmation_id=$1)`, cID,
+					); execErr != nil {
+						api.LogError("[FDConfirmation] booking_status→CONFIRMED failed for %s: %v", cID, execErr)
+					}
+					if _, execErr := pgxPool.Exec(ctx,
+						`UPDATE investment.fd_confirmation SET is_deleted=true
+						 WHERE confirmation_id IN (
+							 SELECT DISTINCT a.confirmation_id FROM investment.fd_audit_confirmation a
+							 WHERE a.confirmation_id=$1 AND a.action_type='DELETE' AND a.processing_status='APPROVED'
+						 )`, cID,
+					); execErr != nil {
+						api.LogError("[FDConfirmation] is_deleted flip failed for %s: %v", cID, execErr)
+					}
+					engineActed++
 				}
-				engineActed++
 			} else {
 				var anyInstance int
 				_ = pgxPool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance
@@ -603,6 +637,11 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, cID := range req.ConfirmationIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] BulkApproveConfirmation notification goroutine panic for confirmation %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_CONFIRMATION_APPROVED",
@@ -676,10 +715,18 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				// finalizeRecord already set processing_status=REJECTED; flip confirmation status.
-				_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_confirmation SET confirmation_status='REJECTED'
-					WHERE confirmation_id=$1 AND confirmation_status NOT IN ('CONFIRMED','VARIANCE_REJECTED')`, cID)
-				_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='SENT_TO_BANK'
-					WHERE booking_id IN (SELECT booking_id FROM investment.fd_confirmation WHERE confirmation_id=$1)`, cID)
+				if _, execErr := pgxPool.Exec(ctx,
+					`UPDATE investment.fd_confirmation SET confirmation_status='REJECTED'
+					 WHERE confirmation_id=$1 AND confirmation_status NOT IN ('CONFIRMED','VARIANCE_REJECTED')`, cID,
+				); execErr != nil {
+					api.LogError("[FDConfirmation] confirmation_status→REJECTED failed for %s: %v", cID, execErr)
+				}
+				if _, execErr := pgxPool.Exec(ctx,
+					`UPDATE investment.fd_booking_request SET booking_status='SENT_TO_BANK'
+					 WHERE booking_id IN (SELECT booking_id FROM investment.fd_confirmation WHERE confirmation_id=$1)`, cID,
+				); execErr != nil {
+					api.LogError("[FDConfirmation] booking_status→SENT_TO_BANK failed for %s: %v", cID, execErr)
+				}
 				engineActed++
 			} else {
 				var anyInstance int
@@ -724,6 +771,11 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, cID := range req.ConfirmationIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] BulkRejectConfirmation notification goroutine panic for confirmation %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_CONFIRMATION_REJECTED",
@@ -1419,10 +1471,16 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fire engine goroutines after commit — cancel prior instances first (like update/delete booking)
 		for _, cm := range validConfs {
 			go func(cID, uID, uEmail, eID string, amount float64) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] DeleteConfirmation engine goroutine panic for confirmation %s: %v", cID, rec)
+					}
+				}()
 				bgCtx := context.Background()
 				// Cancel any in-flight approval chain before submitting DELETE
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", cID, uEmail); err != nil {
 					api.LogError("[FDBooking] CancelPendingInstances(DELETE) failed for confirmation %s: %v", cID, err)
+					return
 				}
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
@@ -1447,6 +1505,11 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}(cm.id, req.UserID, userEmail, cm.entity, cm.amount)
 
 			go func(cID, eID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] DeleteConfirmation notification goroutine panic for confirmation %s: %v", cID, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/confirmation/delete", cID, map[string]interface{}{
 					"entity_id":   eID,
 					"record_id":   cID,

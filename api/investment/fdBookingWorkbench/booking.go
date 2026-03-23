@@ -197,6 +197,11 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(bID, uID, uEmail, entityID string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] CreateInstance goroutine panic for booking %s: %v", bID, rec)
+				}
+			}()
 			bgCtx := context.Background()
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode:       "FIXED_DEPOSIT",
@@ -230,6 +235,11 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(bookingID, req.UserID, userEmail, req.EntityID, req.PrincipalAmount)
 
 		go func(bID, eID, uEmail string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create", bID, map[string]interface{}{
 				"entity_id":   eID,
 				"record_id":   bID,
@@ -468,6 +478,11 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 
 			go func(bID, uID, uEmail, entityID string, amount float64) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] CreateInstance goroutine panic for booking %s: %v", bID, rec)
+					}
+				}()
 				bgCtx := context.Background()
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: entityID,
@@ -494,6 +509,11 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}(bookingID, req.UserID, userEmail, row.EntityID, row.PrincipalAmount)
 
 			go func(bID, eID, uEmail string, amount float64) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create-bulk", bID, map[string]interface{}{
 					"entity_id":   eID,
 					"record_id":   bID,
@@ -665,10 +685,16 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(bID, uID, uEmail, eID string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] UpdateBooking engine goroutine panic for booking %s: %v", bID, rec)
+				}
+			}()
 			bgCtx := context.Background()
 			// Cancel any in-flight approval so the edit resets all previous approvals.
 			if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", bID, uEmail); err != nil {
 				api.LogError("[FDBooking] CancelPendingInstances failed for booking %s: %v", bID, err)
+				return
 			}
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
@@ -693,6 +719,11 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}(req.BookingID, req.UserID, userEmail, entityID, oldPrincipal)
 
 		go func(bID, eID, uEmail string, amount float64) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/update", bID, map[string]interface{}{
 				"entity_id":   eID,
 				"record_id":   bID,
@@ -821,10 +852,16 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Fire engine goroutines after commit — cancel prior instances first (like update)
 		for _, bm := range validBookings {
 			go func(bID, uID, uEmail, eID string, amount float64) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] DeleteBooking engine goroutine panic for booking %s: %v", bID, rec)
+					}
+				}()
 				bgCtx := context.Background()
 				// Cancel any in-flight approval chain before submitting DELETE
 				if err := approvalengine.CancelPendingInstances(bgCtx, pgxPool, "FIXED_DEPOSIT", bID, uEmail); err != nil {
 					api.LogError("[FDBooking] CancelPendingInstances(DELETE) failed for booking %s: %v", bID, err)
+					return
 				}
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
@@ -849,6 +886,11 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}(bm.id, req.UserID, userEmail, bm.entity, bm.amount)
 
 			go func(bID, eID, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/delete", bID, map[string]interface{}{
 					"entity_id":   eID,
 					"record_id":   bID,
@@ -1162,18 +1204,24 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
 					WHERE ie.instance_eye_id = $1`, instanceEyeID).Scan(&instStatus)
 				if instStatus == "APPROVED" {
-					_, _ = pgxPool.Exec(ctx, `
-						UPDATE investment.fd_booking_request
-						SET booking_status = 'SENT_TO_BANK', approved_at = NOW(), sent_to_bank_at = NOW()
-						WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
-					_, _ = pgxPool.Exec(ctx, `
-						UPDATE investment.fd_booking_request SET is_deleted = true
-						WHERE booking_id IN (
-							SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
-							WHERE a.booking_id = $1 AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
-						)`, bID)
+					if _, execErr := pgxPool.Exec(ctx,
+						`UPDATE investment.fd_booking_request
+						 SET booking_status = 'SENT_TO_BANK'
+						 WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK')`, bID,
+					); execErr != nil {
+						api.LogError("[FDBooking] booking_status→SENT_TO_BANK failed for %s: %v", bID, execErr)
+					}
+					if _, execErr := pgxPool.Exec(ctx,
+						`UPDATE investment.fd_booking_request SET is_deleted = true
+						 WHERE booking_id IN (
+							 SELECT DISTINCT a.booking_id FROM investment.fd_audit_booking_request a
+							 WHERE a.booking_id = $1 AND a.action_type = 'DELETE' AND a.processing_status = 'APPROVED'
+						 )`, bID,
+					); execErr != nil {
+						api.LogError("[FDBooking] is_deleted flip failed for %s: %v", bID, execErr)
+					}
+					engineActed++
 				}
-				engineActed++
 			} else {
 				// No active eye for this user — check if any engine instance exists at all.
 				var anyInstance int
@@ -1222,6 +1270,11 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, bID := range req.BookingIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] approve notification goroutine panic for booking %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/approve", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_APPROVED",
@@ -1295,8 +1348,12 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				// finalizeRecord already set processing_status=REJECTED; flip booking status.
-				_, _ = pgxPool.Exec(ctx, `UPDATE investment.fd_booking_request SET booking_status='REJECTED'
-					WHERE booking_id=$1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID)
+				if _, execErr := pgxPool.Exec(ctx,
+					`UPDATE investment.fd_booking_request SET booking_status='REJECTED'
+					 WHERE booking_id = $1 AND booking_status NOT IN ('SENT_TO_BANK','APPROVED')`, bID,
+				); execErr != nil {
+					api.LogError("[FDBooking] booking_status→REJECTED failed for %s: %v", bID, execErr)
+				}
 				engineActed++
 			} else {
 				var anyInstance int
@@ -1336,6 +1393,11 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 		for _, bID := range req.BookingIDs {
 			go func(id, uEmail string) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						api.LogError("[FDBooking] reject notification goroutine panic for booking %s: %v", id, rec)
+					}
+				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/reject", id, map[string]interface{}{
 					"record_id":   id,
 					"event":       "FD_BOOKING_REJECTED",
@@ -2013,6 +2075,11 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		go func(uEmail string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDBooking] MarkAsSentToBank notification goroutine panic: %v", rec)
+				}
+			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/mark-sent-to-bank", "", map[string]interface{}{
 				"event":       "FD_BOOKING_SENT_TO_BANK",
 				"actor_email": uEmail,
