@@ -375,7 +375,7 @@ func GetRolePermissionsJson(db *sql.DB) http.HandlerFunc {
 				req.UserID = ctxUserID
 			}
 			if req.UserID == "" {
-				http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
+				http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
 				return
 			}
 
@@ -562,7 +562,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 			req.UserID = ctxUserID
 		}
 		if req.UserID == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id required")
+			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -607,7 +607,7 @@ func GetRolesStatus(db *sql.DB) http.HandlerFunc {
 // 			UserID string `json:"user_id"`
 // 		}
 // 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-// 			http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
+// 			http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
 // 			return
 // 		}
 // 		allPages := []string{
@@ -752,7 +752,7 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			UserID string `json:"user_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
-			http.Error(w, `{"success":false,"error":"user_id required"}`, http.StatusBadRequest)
+			http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
 			return
 		}
 

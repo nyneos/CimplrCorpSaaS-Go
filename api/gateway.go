@@ -7,13 +7,13 @@ import (
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -196,7 +196,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		http.Error(w, "user_id required", http.StatusBadRequest)
+		http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
 		return
 	}
 	if authService == nil {
@@ -656,6 +656,13 @@ func StartGateway() {
 			"ENABLE_ADMIN_OVERRIDE", "ADMIN_USER_IDS", "ADMIN_ROLES", "DEVEL_MODE",
 			"PAYLOAD_ENC_KEY", "RESPONSE_ENC_KEY", "CATEGORIZATION_SCHEDULE",
 			"CATEGORIZATION_BATCH_SIZE", "STREAM_ACCESS_KEYS",
+			// Browser push / VAPID
+			"VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT",
+			"BROWSER_PUSH_ENABLED", "BROWSER_PUSH_POLL_SECS", "BROWSER_PUSH_BATCH_SIZE",
+			"BROWSER_PUSH_DIGEST_MINS", "BROWSER_PUSH_DIGEST_THROTTLE", "BROWSER_PUSH_DIGEST_TOP_N",
+			// Outbox worker
+			"OUTBOX_WORKER_ENABLED", "OUTBOX_WORKER_POLL_SECS",
+			"OUTBOX_WORKER_BATCH_SIZE", "OUTBOX_WORKER_TIMEOUT_SECS",
 		}
 		envEntries := []map[string]string{}
 		for _, k := range envKeys {

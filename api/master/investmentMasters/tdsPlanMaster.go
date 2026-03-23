@@ -132,7 +132,7 @@ func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
 	if strings.Contains(errStr, "foreign key constraint") || strings.Contains(errStr, "violates foreign key") {
 		return "Referenced record not found or is invalid.", http.StatusOK
 	}
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		return "Invalid data format or value.", http.StatusOK
 	}
 	if strings.Contains(errStr, "not-null constraint") || strings.Contains(errStr, "null value") {
@@ -275,7 +275,7 @@ func CreateTDSPlanSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1508,7 +1508,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
-				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				args = append(args, v)
 				pos++
 			}

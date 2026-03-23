@@ -123,7 +123,7 @@ func CreateSweepInitiation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id required")
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 		// user_id must match middleware-authenticated user
@@ -1637,7 +1637,7 @@ func GetSweepInitiationsWithJoinedData(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithResult(w, false, "user_id required")
+			api.RespondWithResult(w, false, constants.ErrUserIDRequired)
 			return
 		}
 		// user_id must match middleware-authenticated user

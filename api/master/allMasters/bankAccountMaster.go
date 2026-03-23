@@ -387,7 +387,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 
 					if col, ok := simpleCols[k]; ok {
-						sets = append(sets, fmt.Sprintf("%s=$%d", col, pos))
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, col, pos))
 						args = append(args, fmt.Sprint(v))
 						pos += 1
 						continue

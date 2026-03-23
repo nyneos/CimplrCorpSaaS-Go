@@ -47,7 +47,7 @@ func getUserFriendlyDPError(err error, context string) (string, int) {
 	}
 
 	// Check constraint violations (HTTP 200 - user errors)
-	if strings.Contains(errMsg, "check constraint") {
+	if strings.Contains(errMsg, constants.CheckConstraint) {
 		if strings.Contains(errMsg, "status_check") || strings.Contains(errMsg, "masterdp_status_ck") {
 			return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
 		}

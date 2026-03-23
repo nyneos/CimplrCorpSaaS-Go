@@ -2,6 +2,7 @@ package projection
 
 import (
 	// "errors"
+	"CimplrCorpSaas/api/constants"
 	"strings"
 )
 
@@ -59,7 +60,7 @@ func parseConstraintError(err error) string {
 	}
 
 	// Handle check constraint violations
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "cashflow_type") {
 			return "Cashflow type must be either 'Inflow' or 'Outflow'. Please select a valid cashflow direction."
 		}

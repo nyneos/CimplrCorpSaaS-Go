@@ -1,6 +1,7 @@
 package ticker
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -255,7 +256,7 @@ func GetTickerHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// enforce POST at the HTTP entrypoint
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 		tickerHandler(w, r)

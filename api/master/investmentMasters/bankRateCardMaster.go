@@ -27,11 +27,11 @@ func getUserFriendlyRateCardError(err error, context string) (string, int) {
 	}
 
 	if strings.Contains(errStr, "inv_rate_card_deposit_type_chk") ||
-		(strings.Contains(errStr, "check constraint") && strings.Contains(errStr, "deposit_type")) {
+		(strings.Contains(errStr, constants.CheckConstraint) && strings.Contains(errStr, "deposit_type")) {
 		return "Invalid deposit_type. Must be one of: REGULAR, BULK, SENIOR_CITIZEN, SPECIAL.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "inv_rate_card_interest_rate_chk") ||
-		(strings.Contains(errStr, "check constraint") && strings.Contains(errStr, "interest_rate")) {
+		(strings.Contains(errStr, constants.CheckConstraint) && strings.Contains(errStr, "interest_rate")) {
 		return "interest_rate must be > 0 and <= 100.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "inv_rate_card_tenor_range_chk") {
@@ -44,7 +44,7 @@ func getUserFriendlyRateCardError(err error, context string) (string, int) {
 		return "effective_to must be >= effective_from when set.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "inv_rate_card_rate_source_chk") ||
-		(strings.Contains(errStr, "check constraint") && strings.Contains(errStr, "rate_source")) {
+		(strings.Contains(errStr, constants.CheckConstraint) && strings.Contains(errStr, "rate_source")) {
 		return "Invalid rate_source. Must be one of: WEBSITE, RM, EMAIL.", http.StatusBadRequest
 	}
 	if strings.Contains(errStr, "inv_rate_card_penalty_consistency_chk") {
@@ -74,7 +74,7 @@ func getUserFriendlyRateCardError(err error, context string) (string, int) {
 // NEVER scan DATE columns into time.Time; always use TO_CHAR(...) in SQL and scan into string.
 type BankRateCardInput struct {
 	BankCode                   string   `json:"bank_code"`
-	DepositType                string   `json:"deposit_type"`                 // REGULAR|BULK|SENIOR_CITIZEN|SPECIAL
+	DepositType                string   `json:"deposit_type"` // REGULAR|BULK|SENIOR_CITIZEN|SPECIAL
 	MinTenorDays               int      `json:"min_tenor_days"`
 	MaxTenorDays               int      `json:"max_tenor_days"`
 	InterestRate               float64  `json:"interest_rate"`
@@ -267,11 +267,11 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			input := BankRateCardInput{
-				BankCode:     getColumnValue(row, colMap, "bank_code"),
-				DepositType:  strings.ToUpper(getColumnValue(row, colMap, "deposit_type")),
-				MinTenorDays: minTenor,
-				MaxTenorDays: maxTenor,
-				InterestRate: interestRate,
+				BankCode:      getColumnValue(row, colMap, "bank_code"),
+				DepositType:   strings.ToUpper(getColumnValue(row, colMap, "deposit_type")),
+				MinTenorDays:  minTenor,
+				MaxTenorDays:  maxTenor,
+				InterestRate:  interestRate,
 				EffectiveFrom: getColumnValue(row, colMap, "effective_from"),
 			}
 
@@ -419,7 +419,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Commit failed")
+			msg, status := getUserFriendlyRateCardError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -465,7 +465,7 @@ func CreateBankRateCardSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyRateCardError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -743,7 +743,7 @@ func UpdateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if k == "effective_from" || k == "effective_to" {
 					sets = append(sets, fmt.Sprintf("%s=$%d::date", k, pos))
 				} else {
-					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				}
 				args = append(args, v)
 				pos++
@@ -951,7 +951,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if k == "effective_from" || k == "effective_to" {
 						sets = append(sets, fmt.Sprintf("%s=$%d::date", k, pos))
 					} else {
-						sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 					}
 					args = append(args, v)
 					pos++
@@ -1028,7 +1028,7 @@ func DeleteBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.RateCardIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rate_card_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRateCardIDsProvided)
 			return
 		}
 
@@ -1129,7 +1129,7 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.RateCardIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rate_card_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRateCardIDsProvided)
 			return
 		}
 
@@ -1148,7 +1148,7 @@ func BulkApproveBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyRateCardError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1211,7 +1211,7 @@ func BulkRejectBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.RateCardIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No rate_card_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRateCardIDsProvided)
 			return
 		}
 
@@ -1230,7 +1230,7 @@ func BulkRejectBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyRateCardError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

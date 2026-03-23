@@ -630,30 +630,20 @@ func findInnermostFunction(s string) (int, int, string, string, bool) {
 func evaluateFunction(name string, args []string, payload map[string]interface{}) (string, error) {
 	up := strings.ToUpper(name)
 	switch up {
-	case "SUM":
+	case "SUM", "AVERAGE", "AVG":
 		if len(args) != 1 {
-			return "", errors.New("SUM expects 1 argument: list variable name")
+			return "", fmt.Errorf("%s expects 1 argument: list variable name", up)
 		}
 		list, ok := getNumberList(args[0], payload)
-		if !ok {
+		if !ok || (up != "SUM" && len(list) == 0) {
 			return "0", nil
 		}
 		s := 0.0
 		for _, v := range list {
 			s += v
 		}
-		return toStringFloat(s), nil
-	case "AVERAGE", "AVG":
-		if len(args) != 1 {
-			return "", errors.New("AVERAGE expects 1 argument: list variable name")
-		}
-		list, ok := getNumberList(args[0], payload)
-		if !ok || len(list) == 0 {
-			return "0", nil
-		}
-		s := 0.0
-		for _, v := range list {
-			s += v
+		if up == "SUM" {
+			return toStringFloat(s), nil
 		}
 		return toStringFloat(s / float64(len(list))), nil
 	case "SUMPRODUCT":
@@ -671,22 +661,13 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			s += a[i] * b[i]
 		}
 		return toStringFloat(s), nil
-	case "FORMAT_NUMBER":
-		if len(args) != 1 {
-			return "", errors.New("FORMAT_NUMBER expects 1 numeric argument")
+	case "FORMAT_DATE", "FORMAT_DATE_TZ":
+		// FORMAT_DATE(date [, format [, tz]])
+		// FORMAT_DATE_TZ(date, format, tz)  — alias; tz is always the third arg
+		if len(args) < 1 || len(args) > 3 {
+			return "", errors.New("FORMAT_DATE expects 1–3 args: date [, format [, tz]]")
 		}
-		v, ok := resolveNumericArg(args[0], payload)
-		if !ok {
-			return "", nil
-		}
-		return formatCurrency(v), nil
-	case "FORMAT_DATE":
-		// FORMAT_DATE(dateVarOrLiteral [, format])
-		// format is optional — defaults to '02 Jan 2006'
-		if len(args) < 1 || len(args) > 2 {
-			return "", errors.New("FORMAT_DATE expects 1 or 2 args: date [, format]")
-		}
-		dateStr := ""
+		var dateStr string
 		if isQuoted(args[0]) {
 			dateStr = unquote(args[0])
 		} else {
@@ -696,40 +677,18 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			}
 			dateStr = toString(v)
 		}
-		format := "02 Jan 2006" // default human-readable layout
-		if len(args) == 2 {
+		format := "02 Jan 2006"
+		if len(args) >= 2 {
 			format = unquote(args[1])
 		}
-		// try parse common layouts
 		t, err := parseDate(dateStr)
 		if err != nil {
 			return "", nil
 		}
-		return t.Format(format), nil
-	case "FORMAT_DATE_TZ":
-		// FORMAT_DATE_TZ(dateVarOrLiteral, format, timezone)
-		if len(args) != 3 {
-			return "", errors.New("FORMAT_DATE_TZ expects 3 args: date, format, tz")
-		}
-		dateStr := ""
-		if isQuoted(args[0]) {
-			dateStr = unquote(args[0])
-		} else {
-			v, ok := lookupPayload(args[0], payload)
-			if !ok {
-				return "", nil
+		if len(args) == 3 {
+			if loc, lerr := time.LoadLocation(unquote(args[2])); lerr == nil {
+				t = t.In(loc)
 			}
-			dateStr = toString(v)
-		}
-		format := unquote(args[1])
-		tz := unquote(args[2])
-		t, err := parseDate(dateStr)
-		if err != nil {
-			return "", nil
-		}
-		loc, lerr := time.LoadLocation(tz)
-		if lerr == nil {
-			t = t.In(loc)
 		}
 		return t.Format(format), nil
 	case "ESCAPE_HTML":
@@ -766,30 +725,24 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			}
 		}
 		return out.String(), nil
-	case "UPPER":
+	case "UPPER", "LOWER":
 		if len(args) != 1 {
-			return "", errors.New("UPPER expects 1 argument")
+			return "", fmt.Errorf("%s expects 1 argument", up)
 		}
+		var s string
 		if isQuoted(args[0]) {
-			return strings.ToUpper(unquote(args[0])), nil
+			s = unquote(args[0])
+		} else {
+			v, ok := lookupPayload(args[0], payload)
+			if !ok {
+				return "", nil
+			}
+			s = toString(v)
 		}
-		v, ok := lookupPayload(args[0], payload)
-		if !ok {
-			return "", nil
+		if up == "UPPER" {
+			return strings.ToUpper(s), nil
 		}
-		return strings.ToUpper(toString(v)), nil
-	case "LOWER":
-		if len(args) != 1 {
-			return "", errors.New("LOWER expects 1 argument")
-		}
-		if isQuoted(args[0]) {
-			return strings.ToLower(unquote(args[0])), nil
-		}
-		v, ok := lookupPayload(args[0], payload)
-		if !ok {
-			return "", nil
-		}
-		return strings.ToLower(toString(v)), nil
+		return strings.ToLower(s), nil
 	case "SUBSTRING":
 		if len(args) < 2 {
 			return "", errors.New("SUBSTRING expects at least 2 args: var, start [, length]")
@@ -853,17 +806,18 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 
 	// ─── ADDITIONAL MATH & STRING UTIL FUNCTIONS ──────────────────────────────
-	case "MIN":
-		// MIN(listVar) or MIN(a,b,c...)
+	case "MIN", "MAX":
+		// MIN/MAX(listVar) or MIN/MAX(a,b,c...)
+		wantMax := up == "MAX"
 		if len(args) == 1 {
 			if list, ok := getNumberList(args[0], payload); ok && len(list) > 0 {
-				mn := list[0]
+				acc := list[0]
 				for _, v := range list[1:] {
-					if v < mn {
-						mn = v
+					if (wantMax && v > acc) || (!wantMax && v < acc) {
+						acc = v
 					}
 				}
-				return toStringFloat(mn), nil
+				return toStringFloat(acc), nil
 			}
 		}
 		vals := []float64{}
@@ -875,43 +829,13 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		if len(vals) == 0 {
 			return "0", nil
 		}
-		mn := vals[0]
+		acc := vals[0]
 		for _, v := range vals[1:] {
-			if v < mn {
-				mn = v
+			if (wantMax && v > acc) || (!wantMax && v < acc) {
+				acc = v
 			}
 		}
-		return toStringFloat(mn), nil
-
-	case "MAX":
-		// MAX(listVar) or MAX(a,b,c...)
-		if len(args) == 1 {
-			if list, ok := getNumberList(args[0], payload); ok && len(list) > 0 {
-				mx := list[0]
-				for _, v := range list[1:] {
-					if v > mx {
-						mx = v
-					}
-				}
-				return toStringFloat(mx), nil
-			}
-		}
-		vals := []float64{}
-		for _, a := range args {
-			if v, ok := resolveNumericArg(a, payload); ok {
-				vals = append(vals, v)
-			}
-		}
-		if len(vals) == 0 {
-			return "0", nil
-		}
-		mx := vals[0]
-		for _, v := range vals[1:] {
-			if v > mx {
-				mx = v
-			}
-		}
-		return toStringFloat(mx), nil
+		return toStringFloat(acc), nil
 
 	case "ROUND":
 		// ROUND(number [, places])
@@ -932,39 +856,38 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		pow := math.Pow(10, float64(places))
 		return toStringFloat(math.Round(v*pow) / pow), nil
 
-	case "CEIL":
+	case "CEIL", "FLOOR", "ABS":
 		if len(args) != 1 {
-			return "", errors.New("CEIL expects 1 arg")
+			return "", fmt.Errorf("%s expects 1 arg", up)
 		}
 		v, ok := resolveNumericArg(args[0], payload)
 		if !ok {
 			return "", nil
 		}
-		return toStringFloat(math.Ceil(v)), nil
+		switch up {
+		case "CEIL":
+			return toStringFloat(math.Ceil(v)), nil
+		case "FLOOR":
+			return toStringFloat(math.Floor(v)), nil
+		default: // ABS
+			return toStringFloat(math.Abs(v)), nil
+		}
 
-	case "FLOOR":
-		if len(args) != 1 {
-			return "", errors.New("FLOOR expects 1 arg")
-		}
-		v, ok := resolveNumericArg(args[0], payload)
-		if !ok {
-			return "", nil
-		}
-		return toStringFloat(math.Floor(v)), nil
-
-	case "ABS":
-		if len(args) != 1 {
-			return "", errors.New("ABS expects 1 arg")
-		}
-		v, ok := resolveNumericArg(args[0], payload)
-		if !ok {
-			return "", nil
-		}
-		return toStringFloat(math.Abs(v)), nil
-
-	case "TRIM":
-		if len(args) != 1 {
-			return "", errors.New("TRIM expects 1 arg")
+	case "TRIM", "LENGTH", "INDEX_OF", "REPLACE":
+		// Validate arg count per function
+		switch up {
+		case "INDEX_OF":
+			if len(args) != 2 {
+				return "", errors.New("INDEX_OF expects 2 args: subject, substr")
+			}
+		case "REPLACE":
+			if len(args) != 3 {
+				return "", errors.New("REPLACE expects 3 args: subject, old, new")
+			}
+		default: // TRIM, LENGTH
+			if len(args) != 1 {
+				return "", fmt.Errorf("%s expects 1 arg", up)
+			}
 		}
 		var s string
 		if isQuoted(args[0]) {
@@ -974,29 +897,21 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		} else {
 			s = args[0]
 		}
-		return strings.TrimSpace(s), nil
-
-	case "REPLACE":
-		// REPLACE(subject, old, new)
-		if len(args) != 3 {
-			return "", errors.New("REPLACE expects 3 args")
+		switch up {
+		case "TRIM":
+			return strings.TrimSpace(s), nil
+		case "LENGTH":
+			return strconv.Itoa(len([]rune(s))), nil
+		case "INDEX_OF":
+			return strconv.Itoa(strings.Index(s, unquote(args[1]))), nil
+		default: // REPLACE
+			return strings.ReplaceAll(s, unquote(args[1]), unquote(args[2])), nil
 		}
-		subj := args[0]
-		if !isQuoted(subj) {
-			if v, ok := lookupPayload(subj, payload); ok {
-				subj = toString(v)
-			}
-		} else {
-			subj = unquote(subj)
-		}
-		old := unquote(args[1])
-		new := unquote(args[2])
-		return strings.ReplaceAll(subj, old, new), nil
 
-	case "SPLIT":
-		// SPLIT(subject, sep [, idx]) -> returns element at idx if provided else joined by comma
-		if len(args) < 2 || len(args) > 3 {
-			return "", errors.New("SPLIT expects 2 or 3 args")
+	case "SPLIT", "JOIN":
+		// SPLIT(subject, sep [, idx]) / JOIN(listVar, sep)
+		if len(args) < 2 {
+			return "", fmt.Errorf("%s expects at least 2 args", up)
 		}
 		subj := args[0]
 		if !isQuoted(subj) {
@@ -1007,6 +922,28 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			subj = unquote(subj)
 		}
 		sep := unquote(args[1])
+		if up == "JOIN" {
+			// JOIN: subj is already a scalar; resolve as list if possible
+			if v, ok := lookupPayload(args[0], payload); ok {
+				switch t := v.(type) {
+				case []string:
+					return strings.Join(t, sep), nil
+				case []interface{}:
+					parts := make([]string, 0, len(t))
+					for _, e := range t {
+						parts = append(parts, toString(e))
+					}
+					return strings.Join(parts, sep), nil
+				default:
+					return toString(v), nil
+				}
+			}
+			return "", nil
+		}
+		// SPLIT
+		if len(args) > 3 {
+			return "", errors.New("SPLIT expects 2 or 3 args")
+		}
 		parts := strings.Split(subj, sep)
 		if len(args) == 3 {
 			idx, err := strconv.Atoi(strings.TrimSpace(args[2]))
@@ -1017,54 +954,9 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		}
 		return strings.Join(parts, ","), nil
 
-	case "JOIN":
-		// JOIN(listVar, sep)
+	case "CONTAINS", "STARTS_WITH", "ENDS_WITH":
 		if len(args) != 2 {
-			return "", errors.New("JOIN expects 2 args: listVar, sep")
-		}
-		v, ok := lookupPayload(args[0], payload)
-		if !ok {
-			return "", nil
-		}
-		sep := unquote(args[1])
-		switch t := v.(type) {
-		case []string:
-			return strings.Join(t, sep), nil
-		case []interface{}:
-			parts := make([]string, 0, len(t))
-			for _, e := range t {
-				parts = append(parts, toString(e))
-			}
-			return strings.Join(parts, sep), nil
-		default:
-			return toString(v), nil
-		}
-
-	case "LENGTH":
-		if len(args) != 1 {
-			return "", errors.New("LENGTH expects 1 arg")
-		}
-		// string or list
-		if isQuoted(args[0]) {
-			return strconv.Itoa(len(unquote(args[0]))), nil
-		}
-		if v, ok := lookupPayload(args[0], payload); ok {
-			switch t := v.(type) {
-			case string:
-				return strconv.Itoa(len(t)), nil
-			case []interface{}:
-				return strconv.Itoa(len(t)), nil
-			case []string:
-				return strconv.Itoa(len(t)), nil
-			case map[string]interface{}:
-				return strconv.Itoa(len(t)), nil
-			}
-		}
-		return "0", nil
-
-	case "CONTAINS":
-		if len(args) != 2 {
-			return "", errors.New("CONTAINS expects 2 args: subject, substr")
+			return "", fmt.Errorf("%s expects 2 args: subject, substr", up)
 		}
 		subj := args[0]
 		if !isQuoted(subj) {
@@ -1074,54 +966,15 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		} else {
 			subj = unquote(subj)
 		}
-		sub := unquote(args[1])
-		return strconv.FormatBool(strings.Contains(subj, sub)), nil
-
-	case "STARTS_WITH":
-		if len(args) != 2 {
-			return "", errors.New("STARTS_WITH expects 2 args")
+		operand := unquote(args[1])
+		switch up {
+		case "CONTAINS":
+			return strconv.FormatBool(strings.Contains(subj, operand)), nil
+		case "STARTS_WITH":
+			return strconv.FormatBool(strings.HasPrefix(subj, operand)), nil
+		default: // ENDS_WITH
+			return strconv.FormatBool(strings.HasSuffix(subj, operand)), nil
 		}
-		subj := args[0]
-		if !isQuoted(subj) {
-			if v, ok := lookupPayload(subj, payload); ok {
-				subj = toString(v)
-			}
-		} else {
-			subj = unquote(subj)
-		}
-		prefix := unquote(args[1])
-		return strconv.FormatBool(strings.HasPrefix(subj, prefix)), nil
-
-	case "ENDS_WITH":
-		if len(args) != 2 {
-			return "", errors.New("ENDS_WITH expects 2 args")
-		}
-		subj := args[0]
-		if !isQuoted(subj) {
-			if v, ok := lookupPayload(subj, payload); ok {
-				subj = toString(v)
-			}
-		} else {
-			subj = unquote(subj)
-		}
-		suffix := unquote(args[1])
-		return strconv.FormatBool(strings.HasSuffix(subj, suffix)), nil
-
-	case "INDEX_OF":
-		if len(args) != 2 {
-			return "", errors.New("INDEX_OF expects 2 args: subject, substr")
-		}
-		subj := args[0]
-		if !isQuoted(subj) {
-			if v, ok := lookupPayload(subj, payload); ok {
-				subj = toString(v)
-			}
-		} else {
-			subj = unquote(subj)
-		}
-		sub := unquote(args[1])
-		idx := strings.Index(subj, sub)
-		return strconv.Itoa(idx), nil
 
 	// ─── LIST / TABLE FUNCTIONS ────────────────────────────────────────────────
 	// All list functions work on a payload key that holds []map[string]interface{}
@@ -1159,89 +1012,45 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			return "0", nil
 		}
 
-	case "SUM_OF_FIELD":
-		// SUM_OF_FIELD(listVar, field) — field may be quoted or unquoted
+	case "SUM_OF_FIELD", "TOTAL_OF", "AVG_OF_FIELD":
+		// SUM_OF_FIELD / TOTAL_OF — sum a numeric field; AVG_OF_FIELD — average it
 		if len(args) != 2 {
-			return "", errors.New("SUM_OF_FIELD expects 2 args: listVar, field")
+			return "", fmt.Errorf("%s expects 2 args: listVar, field", up)
 		}
 		rows, ok := getRowList(args[0], payload)
-		if !ok {
+		if !ok || (up == "AVG_OF_FIELD" && len(rows) == 0) {
 			return "0", nil
 		}
 		field := resolveFieldArg(args[1])
 		total := 0.0
 		for _, row := range rows {
 			total += rowFloat(row, field)
+		}
+		if up == "AVG_OF_FIELD" {
+			return toStringFloat(total / float64(len(rows))), nil
 		}
 		return toStringFloat(total), nil
 
-	case "TOTAL_OF":
-		// TOTAL_OF(listVar, field) — alias for SUM_OF_FIELD
+	case "MAX_OF_FIELD", "MIN_OF_FIELD":
+		// MAX_OF_FIELD / MIN_OF_FIELD(listVar, field)
 		if len(args) != 2 {
-			return "", errors.New("TOTAL_OF expects 2 args: listVar, field")
-		}
-		rows, ok := getRowList(args[0], payload)
-		if !ok {
-			return "0", nil
-		}
-		field := resolveFieldArg(args[1])
-		total := 0.0
-		for _, row := range rows {
-			total += rowFloat(row, field)
-		}
-		return toStringFloat(total), nil
-
-	case "AVG_OF_FIELD":
-		// AVG_OF_FIELD(listVar, field)
-		if len(args) != 2 {
-			return "", errors.New("AVG_OF_FIELD expects 2 args: listVar, field")
+			return "", fmt.Errorf("%s expects 2 args: listVar, field", up)
 		}
 		rows, ok := getRowList(args[0], payload)
 		if !ok || len(rows) == 0 {
 			return "0", nil
 		}
 		field := resolveFieldArg(args[1])
-		total := 0.0
-		for _, row := range rows {
-			total += rowFloat(row, field)
-		}
-		return toStringFloat(total / float64(len(rows))), nil
-
-	case "MAX_OF_FIELD":
-		// MAX_OF_FIELD(listVar, field)
-		if len(args) != 2 {
-			return "", errors.New("MAX_OF_FIELD expects 2 args: listVar, field")
-		}
-		rows, ok := getRowList(args[0], payload)
-		if !ok || len(rows) == 0 {
-			return "0", nil
-		}
-		field := resolveFieldArg(args[1])
-		mx := rowFloat(rows[0], field)
+		acc := rowFloat(rows[0], field)
 		for _, row := range rows[1:] {
-			if v := rowFloat(row, field); v > mx {
-				mx = v
+			v := rowFloat(row, field)
+			if up == "MAX_OF_FIELD" && v > acc {
+				acc = v
+			} else if up == "MIN_OF_FIELD" && v < acc {
+				acc = v
 			}
 		}
-		return toStringFloat(mx), nil
-
-	case "MIN_OF_FIELD":
-		// MIN_OF_FIELD(listVar, field)
-		if len(args) != 2 {
-			return "", errors.New("MIN_OF_FIELD expects 2 args: listVar, field")
-		}
-		rows, ok := getRowList(args[0], payload)
-		if !ok || len(rows) == 0 {
-			return "0", nil
-		}
-		field := resolveFieldArg(args[1])
-		mn := rowFloat(rows[0], field)
-		for _, row := range rows[1:] {
-			if v := rowFloat(row, field); v < mn {
-				mn = v
-			}
-		}
-		return toStringFloat(mn), nil
+		return toStringFloat(acc), nil
 
 	case "FILTER":
 		// FILTER(listVar, 'field', 'value') → returns JSON key into payload for filtered rows
@@ -1634,17 +1443,20 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		sb.WriteString(`</div>`)
 		return sb.String(), nil
 
-	case "FORMAT_CURRENCY":
-		// FORMAT_CURRENCY(val) or FORMAT_CURRENCY(val, 'CurrencyCode')
-		// Output: '₹ 1,00,000.00' or 'INR ₹ 1,00,000.00'
-		if len(args) < 1 || len(args) > 2 {
-			return "", errors.New("FORMAT_CURRENCY expects 1 or 2 arguments: value [, 'currency_code']")
+	case "FORMAT_CURRENCY", "FORMAT_NUMBER":
+		// FORMAT_NUMBER(val)                          → formatted number (no prefix)
+		// FORMAT_CURRENCY(val [, 'CurrencyCode'])     → ₹ formatted, optional code prefix
+		if len(args) < 1 || (up == "FORMAT_CURRENCY" && len(args) > 2) || (up == "FORMAT_NUMBER" && len(args) != 1) {
+			return "", fmt.Errorf("%s: wrong number of arguments", up)
 		}
 		v, ok := resolveNumericArg(args[0], payload)
 		if !ok {
 			return "", nil
 		}
 		formatted := formatCurrency(v)
+		if up == "FORMAT_NUMBER" || len(args) < 2 {
+			return formatted, nil
+		}
 		if len(args) == 2 {
 			// second arg is a currency code literal like 'INR', '"INR"' or a payload var
 			raw := strings.TrimSpace(args[1])
@@ -1696,11 +1508,10 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 		return fmt.Sprintf(`<span style="background:%s;color:#fff;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">%s</span>`,
 			color, html.EscapeString(val)), nil
 
-	case "FIRST_OF":
-		// FIRST_OF(listVar, field) → value of field in the first row
-		// FIRST_OF(listVar)        → first scalar element of the list
+	case "FIRST_OF", "LAST_OF":
+		// FIRST_OF/LAST_OF(listVar [, field]) → first or last element/field value
 		if len(args) < 1 || len(args) > 2 {
-			return "", errors.New("FIRST_OF expects 1 or 2 args: listVar [, field]")
+			return "", fmt.Errorf("%s expects 1 or 2 args: listVar [, field]", up)
 		}
 		if len(args) == 1 {
 			v, ok := lookupPayload(args[0], payload)
@@ -1708,6 +1519,9 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 				return "", nil
 			}
 			if sl, ok := toAnySlice(v); ok && len(sl) > 0 {
+				if up == "LAST_OF" {
+					return toString(sl[len(sl)-1]), nil
+				}
 				return toString(sl[0]), nil
 			}
 			return toString(v), nil
@@ -1717,30 +1531,10 @@ func evaluateFunction(name string, args []string, payload map[string]interface{}
 			return "", nil
 		}
 		field := resolveFieldArg(args[1])
+		if up == "LAST_OF" {
+			return rowDisplayValue(rows[len(rows)-1], field), nil
+		}
 		return rowDisplayValue(rows[0], field), nil
-
-	case "LAST_OF":
-		// LAST_OF(listVar, field) → value of field in the last row
-		// LAST_OF(listVar)        → last scalar element of the list
-		if len(args) < 1 || len(args) > 2 {
-			return "", errors.New("LAST_OF expects 1 or 2 args: listVar [, field]")
-		}
-		if len(args) == 1 {
-			v, ok := lookupPayload(args[0], payload)
-			if !ok {
-				return "", nil
-			}
-			if sl, ok := toAnySlice(v); ok && len(sl) > 0 {
-				return toString(sl[len(sl)-1]), nil
-			}
-			return toString(v), nil
-		}
-		rows, ok := getRowList(args[0], payload)
-		if !ok || len(rows) == 0 {
-			return "", nil
-		}
-		field := resolveFieldArg(args[1])
-		return rowDisplayValue(rows[len(rows)-1], field), nil
 
 	case "ANY_OF":
 		// ANY_OF(listVar, field) → comma-separated list of all values for that field

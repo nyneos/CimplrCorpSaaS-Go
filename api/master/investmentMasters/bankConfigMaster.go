@@ -26,14 +26,14 @@ func parseMasterDate(s string) (string, error) {
 	}
 	// Fast-path: already YYYY-MM-DD
 	if len(s) == 10 && s[4] == '-' && s[7] == '-' {
-		if _, err := time.Parse("2006-01-02", s); err == nil {
+		if _, err := time.Parse(constants.DateFormat, s); err == nil {
 			return s, nil
 		}
 	}
 	// Prefer dd/mm/yyyy for Indian bank/master data before falling back
 	for _, layout := range []string{"02/01/2006", "2/1/2006"} {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.Format("2006-01-02"), nil
+			return t.Format(constants.DateFormat), nil
 		}
 	}
 	layouts := []string{
@@ -42,11 +42,11 @@ func parseMasterDate(s string) (string, error) {
 		// mm/dd/yyyy variants (American)
 		"01/02/2006", "01/02/06", "1/2/2006", "1/2/06",
 		// Named-month formats
-		constants.DateFormatSlash,   // 29/Aug/2025
-		constants.DateFormatDash,    // 29-Aug-2025
+		constants.DateFormatSlash, // 29/Aug/2025
+		constants.DateFormatDash,  // 29-Aug-2025
 		"2-Jan-2006", "1/Feb/2006",
 		// ISO and common variants
-		constants.DateFormat,        // 2006-01-02
+		constants.DateFormat, // 2006-01-02
 		"2006/01/02", "2006.01.02",
 		"01.02.2006", "1.2.2006",
 		"01-02-2006", "1-2-2006",
@@ -61,7 +61,7 @@ func parseMasterDate(s string) (string, error) {
 	}
 	for _, layout := range layouts {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.Format("2006-01-02"), nil
+			return t.Format(constants.DateFormat), nil
 		}
 	}
 	// 2-digit year fallback e.g. "13-Dec-25"
@@ -70,7 +70,7 @@ func parseMasterDate(s string) (string, error) {
 			if t.Year() < 100 {
 				t = t.AddDate(2000, 0, 0)
 			}
-			return t.Format("2006-01-02"), nil
+			return t.Format(constants.DateFormat), nil
 		}
 	}
 	return "", fmt.Errorf("cannot parse date %q — use YYYY-MM-DD or DD/MM/YYYY", s)
@@ -121,33 +121,33 @@ func getUserFriendlyBankConfigError(err error, context string) (string, int) {
 // BankConfigInput holds all fields for creating/uploading a bank config record.
 // effective_from / effective_to are DATE columns — always scan via TO_CHAR, pass as ::date.
 type BankConfigInput struct {
-	BankCode                       string   `json:"bank_code"`
-	ProductType                    *string  `json:"product_type"`
-	MinimumAmount                  *float64 `json:"minimum_amount"`
-	MaximumAmount                  *float64 `json:"maximum_amount"`
-	DayCountCode                   string   `json:"day_count_code"`
-	CapitalizationScheduleType     string   `json:"capitalization_schedule_type"`
-	CapitalizationDateAdjustment   string   `json:"capitalization_date_adjustment"`
-	AccrualStartConvention         string   `json:"accrual_start_convention"`
-	AccrualEndConvention           string   `json:"accrual_end_convention"`
-	PeriodBoundaryDefinition       string   `json:"period_boundary_definition"`
-	WeekendAccrual                 bool     `json:"weekend_accrual"`
-	HolidayAccrual                 bool     `json:"holiday_accrual"`
-	HolidayCalendarCode            string   `json:"holiday_calendar_code"`
-	BrokenPeriodMethod             string   `json:"broken_period_method"`
-	BrokenPeriodLocation           string   `json:"broken_period_location"`
-	InterestRoundingDecimals       int      `json:"interest_rounding_decimals"`
-	RoundingMethod                 string   `json:"rounding_method"`
-	RoundingFrequency              string   `json:"rounding_frequency"`
-	GracePeriodDays                *int     `json:"grace_period_days"`
-	GracePeriodRateType            *string  `json:"grace_period_rate_type"`
-	MinimumCompoundingPeriodDays   *int     `json:"minimum_compounding_period_days"`
-	QuarterDefinition              *string  `json:"quarter_definition"`
-	TdsDeductionTiming             string   `json:"tds_deduction_timing"`
-	EffectiveFrom                  string   `json:"effective_from"` // YYYY-MM-DD → DATE
-	EffectiveTo                    *string  `json:"effective_to"`   // nullable YYYY-MM-DD → DATE
-	ConfigNotes                    *string  `json:"config_notes"`
-	IsActive                       *bool    `json:"is_active"`
+	BankCode                     string   `json:"bank_code"`
+	ProductType                  *string  `json:"product_type"`
+	MinimumAmount                *float64 `json:"minimum_amount"`
+	MaximumAmount                *float64 `json:"maximum_amount"`
+	DayCountCode                 string   `json:"day_count_code"`
+	CapitalizationScheduleType   string   `json:"capitalization_schedule_type"`
+	CapitalizationDateAdjustment string   `json:"capitalization_date_adjustment"`
+	AccrualStartConvention       string   `json:"accrual_start_convention"`
+	AccrualEndConvention         string   `json:"accrual_end_convention"`
+	PeriodBoundaryDefinition     string   `json:"period_boundary_definition"`
+	WeekendAccrual               bool     `json:"weekend_accrual"`
+	HolidayAccrual               bool     `json:"holiday_accrual"`
+	HolidayCalendarCode          string   `json:"holiday_calendar_code"`
+	BrokenPeriodMethod           string   `json:"broken_period_method"`
+	BrokenPeriodLocation         string   `json:"broken_period_location"`
+	InterestRoundingDecimals     int      `json:"interest_rounding_decimals"`
+	RoundingMethod               string   `json:"rounding_method"`
+	RoundingFrequency            string   `json:"rounding_frequency"`
+	GracePeriodDays              *int     `json:"grace_period_days"`
+	GracePeriodRateType          *string  `json:"grace_period_rate_type"`
+	MinimumCompoundingPeriodDays *int     `json:"minimum_compounding_period_days"`
+	QuarterDefinition            *string  `json:"quarter_definition"`
+	TdsDeductionTiming           string   `json:"tds_deduction_timing"`
+	EffectiveFrom                string   `json:"effective_from"` // YYYY-MM-DD → DATE
+	EffectiveTo                  *string  `json:"effective_to"`   // nullable YYYY-MM-DD → DATE
+	ConfigNotes                  *string  `json:"config_notes"`
+	IsActive                     *bool    `json:"is_active"`
 }
 
 type CreateBankConfigSingleRequest struct {
@@ -169,33 +169,33 @@ type UpdateBankConfigRequest struct {
 
 // bankConfigFieldPairs maps JSON field names → scan position indices (0-based, mirrors SELECT order after config_id)
 var bankConfigFieldPairs = map[string]int{
-	"bank_code":                      0,
-	"product_type":                   1,
-	"minimum_amount":                 2,
-	"maximum_amount":                 3,
-	"day_count_code":                 4,
-	"capitalization_schedule_type":   5,
-	"capitalization_date_adjustment": 6,
-	"accrual_start_convention":       7,
-	"accrual_end_convention":         8,
-	"period_boundary_definition":     9,
-	"weekend_accrual":                10,
-	"holiday_accrual":                11,
-	"holiday_calendar_code":          12,
-	"broken_period_method":           13,
-	"broken_period_location":         14,
-	"interest_rounding_decimals":     15,
-	"rounding_method":                16,
-	"rounding_frequency":             17,
-	"grace_period_days":              18,
-	"grace_period_rate_type":         19,
+	"bank_code":                       0,
+	"product_type":                    1,
+	"minimum_amount":                  2,
+	"maximum_amount":                  3,
+	"day_count_code":                  4,
+	"capitalization_schedule_type":    5,
+	"capitalization_date_adjustment":  6,
+	"accrual_start_convention":        7,
+	"accrual_end_convention":          8,
+	"period_boundary_definition":      9,
+	"weekend_accrual":                 10,
+	"holiday_accrual":                 11,
+	"holiday_calendar_code":           12,
+	"broken_period_method":            13,
+	"broken_period_location":          14,
+	"interest_rounding_decimals":      15,
+	"rounding_method":                 16,
+	"rounding_frequency":              17,
+	"grace_period_days":               18,
+	"grace_period_rate_type":          19,
 	"minimum_compounding_period_days": 20,
-	"quarter_definition":             21,
-	"tds_deduction_timing":           22,
-	"effective_from":                 23,
-	"effective_to":                   24,
-	"config_notes":                   25,
-	"is_active":                      26,
+	"quarter_definition":              21,
+	"tds_deduction_timing":            22,
+	"effective_from":                  23,
+	"effective_to":                    24,
+	"config_notes":                    25,
+	"is_active":                       26,
 }
 
 func validateBankConfigFields(input BankConfigInput) error {
@@ -502,7 +502,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		batchInsertQuery := fmt.Sprintf(
-			"INSERT INTO investment.fd_bank_config_master (%s) VALUES %s RETURNING config_id",
+			constants.QuerryInsertBankConfig,
 			bankConfigInsertCols, strings.Join(valueStrings, ","),
 		)
 
@@ -549,7 +549,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyBankConfigError(err, "Commit failed")
+			msg, status := getUserFriendlyBankConfigError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -595,7 +595,7 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyBankConfigError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyBankConfigError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -604,7 +604,7 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var configID string
 		args := insertBankConfigArgs(req.BankConfigInput)
 		err = tx.QueryRow(ctx, fmt.Sprintf(
-			"INSERT INTO investment.fd_bank_config_master (%s) VALUES %s RETURNING config_id",
+			constants.QuerryInsertBankConfig,
 			bankConfigInsertCols, bankConfigRowPlaceholder(0),
 		), args...).Scan(&configID)
 		if err != nil {
@@ -625,7 +625,7 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			logBankConfigDBError(err, "CreateBankConfigSingle commit failed")
+			logBankConfigDBError(err, "CreateBankConfigSingle insert failed")
 			msg, status := getUserFriendlyBankConfigError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return
@@ -710,7 +710,7 @@ func CreateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		batchInsertQuery := fmt.Sprintf(
-			"INSERT INTO investment.fd_bank_config_master (%s) VALUES %s RETURNING config_id",
+			constants.QuerryInsertBankConfig,
 			bankConfigInsertCols, strings.Join(valueStrings, ","),
 		)
 
@@ -875,7 +875,7 @@ func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if k == "effective_from" || k == "effective_to" {
 					sets = append(sets, fmt.Sprintf("%s=$%d::date", k, pos))
 				} else {
-					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				}
 				args = append(args, v)
 				pos++
@@ -1047,26 +1047,26 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var id string
 			var rec oldRec
 			// 27 scan targets (indices 0-26)
-			var v0 string          // bank_code
-			var v1 *string         // product_type
-			var v2, v3 *float64    // minimum_amount, maximum_amount
-			var v4 string          // day_count_code
-			var v5, v6 string      // cap_sched, cap_date_adj
-			var v7, v8, v9 string  // accrual_start, end, period_boundary
-			var v10, v11 bool      // weekend_accrual, holiday_accrual
-			var v12 string         // holiday_calendar_code
-			var v13, v14 string    // broken_period_method, location
-			var v15 int            // interest_rounding_decimals
-			var v16, v17 string    // rounding_method, frequency
-			var v18 *int           // grace_period_days
-			var v19 *string        // grace_period_rate_type
-			var v20 *int           // minimum_compounding_period_days
-			var v21 *string        // quarter_definition
-			var v22 string         // tds_deduction_timing
-			var v23 string         // effective_from (TO_CHAR)
-			var v24 *string        // effective_to (TO_CHAR)
-			var v25 *string        // config_notes
-			var v26 bool           // is_active
+			var v0 string         // bank_code
+			var v1 *string        // product_type
+			var v2, v3 *float64   // minimum_amount, maximum_amount
+			var v4 string         // day_count_code
+			var v5, v6 string     // cap_sched, cap_date_adj
+			var v7, v8, v9 string // accrual_start, end, period_boundary
+			var v10, v11 bool     // weekend_accrual, holiday_accrual
+			var v12 string        // holiday_calendar_code
+			var v13, v14 string   // broken_period_method, location
+			var v15 int           // interest_rounding_decimals
+			var v16, v17 string   // rounding_method, frequency
+			var v18 *int          // grace_period_days
+			var v19 *string       // grace_period_rate_type
+			var v20 *int          // minimum_compounding_period_days
+			var v21 *string       // quarter_definition
+			var v22 string        // tds_deduction_timing
+			var v23 string        // effective_from (TO_CHAR)
+			var v24 *string       // effective_to (TO_CHAR)
+			var v25 *string       // config_notes
+			var v26 bool          // is_active
 
 			if err := oldRows.Scan(
 				&id, &v0, &v1, &v2, &v3, &v4, &v5, &v6, &v7, &v8, &v9,
@@ -1106,7 +1106,7 @@ func UpdateBankConfigBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if k == "effective_from" || k == "effective_to" {
 						sets = append(sets, fmt.Sprintf("%s=$%d::date", k, pos))
 					} else {
-						sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 					}
 					args = append(args, v)
 					pos++
@@ -1189,7 +1189,7 @@ func DeleteBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfigIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No config_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoConfigIDsProvided)
 			return
 		}
 
@@ -1292,7 +1292,7 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfigIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No config_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoConfigIDsProvided)
 			return
 		}
 
@@ -1311,7 +1311,7 @@ func BulkApproveBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyBankConfigError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyBankConfigError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1377,7 +1377,7 @@ func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfigIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No config_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoConfigIDsProvided)
 			return
 		}
 
@@ -1396,7 +1396,7 @@ func BulkRejectBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyBankConfigError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyBankConfigError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1502,36 +1502,36 @@ func GetBankConfigsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			out = append(out, map[string]interface{}{
-				"config_id":                        configID,
-				"bank_code":                        bankCode,
-				"bank_name":                        bankName,
-				"bank_short_name":                  bankShortName,
-				"product_type":                     productType,
-				"minimum_amount":                   minAmt,
-				"maximum_amount":                   maxAmt,
-				"day_count_code":                   dayCountCode,
-				"capitalization_schedule_type":     capSchedType,
-				"capitalization_date_adjustment":   capDateAdj,
-				"accrual_start_convention":         accrualStart,
-				"accrual_end_convention":           accrualEnd,
-				"period_boundary_definition":       periodBoundary,
-				"weekend_accrual":                  weekendAccrual,
-				"holiday_accrual":                  holidayAccrual,
-				"holiday_calendar_code":            holidayCalCode,
-				"broken_period_method":             brokenMethod,
-				"broken_period_location":           brokenLoc,
-				"interest_rounding_decimals":       roundingDecimals,
-				"rounding_method":                  roundingMethod,
-				"rounding_frequency":               roundingFreq,
-				"grace_period_days":                gracePeriodDays,
-				"grace_period_rate_type":           gracePeriodRateType,
-				"minimum_compounding_period_days":  minCompoundingPeriodDays,
-				"quarter_definition":               quarterDef,
-				"tds_deduction_timing":             tdsDeduction,
-				"effective_from":                   effectiveFrom,
-				"effective_to":                     effectiveTo,
-				"config_notes":                     configNotes,
-				"is_active":                        isActive,
+				"config_id":                       configID,
+				"bank_code":                       bankCode,
+				"bank_name":                       bankName,
+				"bank_short_name":                 bankShortName,
+				"product_type":                    productType,
+				"minimum_amount":                  minAmt,
+				"maximum_amount":                  maxAmt,
+				"day_count_code":                  dayCountCode,
+				"capitalization_schedule_type":    capSchedType,
+				"capitalization_date_adjustment":  capDateAdj,
+				"accrual_start_convention":        accrualStart,
+				"accrual_end_convention":          accrualEnd,
+				"period_boundary_definition":      periodBoundary,
+				"weekend_accrual":                 weekendAccrual,
+				"holiday_accrual":                 holidayAccrual,
+				"holiday_calendar_code":           holidayCalCode,
+				"broken_period_method":            brokenMethod,
+				"broken_period_location":          brokenLoc,
+				"interest_rounding_decimals":      roundingDecimals,
+				"rounding_method":                 roundingMethod,
+				"rounding_frequency":              roundingFreq,
+				"grace_period_days":               gracePeriodDays,
+				"grace_period_rate_type":          gracePeriodRateType,
+				"minimum_compounding_period_days": minCompoundingPeriodDays,
+				"quarter_definition":              quarterDef,
+				"tds_deduction_timing":            tdsDeduction,
+				"effective_from":                  effectiveFrom,
+				"effective_to":                    effectiveTo,
+				"config_notes":                    configNotes,
+				"is_active":                       isActive,
 			})
 		}
 		api.RespondWithPayload(w, true, "", out)

@@ -89,6 +89,7 @@ package limit
 //    {{TABLE_HTML(__ordered_Limits_sanctioned_amount_DESC, ['bank_name','sanctioned_amount'], ['Bank','Amount'], 5)}}
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,11 +114,11 @@ type KPIRow struct {
 // LimitNotifPayload is the top-level notification payload for limit events.
 type LimitNotifPayload struct {
 	// ── Scalar metadata ────────────────────────────────────────────────────────
-	Action          string    `json:"Action"`           // CREATE | UPDATE | DELETE | APPROVE | REJECT
-	RequestedBy     string    `json:"RequestedBy"`      // user who triggered
-	Count           int       `json:"Count"`            // number of limits
-	TotalSanctioned float64   `json:"TotalSanctioned"`  // sum of sanctioned_amount (mixed currency warning: sums INR+USD+CNY)
-	ActionAt        string    `json:"ActionAt"`         // ISO timestamp
+	Action          string  `json:"Action"`          // CREATE | UPDATE | DELETE | APPROVE | REJECT
+	RequestedBy     string  `json:"RequestedBy"`     // user who triggered
+	Count           int     `json:"Count"`           // number of limits
+	TotalSanctioned float64 `json:"TotalSanctioned"` // sum of sanctioned_amount (mixed currency warning: sums INR+USD+CNY)
+	ActionAt        string  `json:"ActionAt"`        // ISO timestamp
 
 	// ── List fields ────────────────────────────────────────────────────────────
 	Limits         []LimitRow `json:"Limits"`         // full records from GET
@@ -180,14 +181,16 @@ func limitIDsFromRows(rows []LimitRow) []string {
 // GetBankLimitUtilizationV2 query logic to fetch full limit records.
 //
 // Parameters:
-//   ctx         — request context
-//   pool        — pgx connection pool
-//   limitIDs    — slice of limit_id strings to include
-//   action      — "CREATE" | "UPDATE" | "DELETE" | "APPROVE" | "REJECT"
-//   requestedBy — user who triggered the action
+//
+//	ctx         — request context
+//	pool        — pgx connection pool
+//	limitIDs    — slice of limit_id strings to include
+//	action      — "CREATE" | "UPDATE" | "DELETE" | "APPROVE" | "REJECT"
+//	requestedBy — user who triggered the action
 //
 // Returns:
-//   *LimitNotifPayload with Limits[] populated from DB + computed KPIs
+//
+//	*LimitNotifPayload with Limits[] populated from DB + computed KPIs
 func BuildLimitNotifPayload(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -260,7 +263,6 @@ func BuildLimitNotifPayload(
 		p.TotalSanctioned += anyToFloat64(lim["limit_sanctioned_amount"])
 	}
 
-
 	return p
 }
 
@@ -268,14 +270,15 @@ func BuildLimitNotifPayload(
 // filtered to only the specified limit_ids.
 //
 // This query performs a complex LEFT JOIN across:
-//   • bank_limit
-//   • auditactionbanklimit (latest audit per limit)
-//   • limit_utilization (utilizations for this limit)
-//   • auditactionlimitutilization (latest audit per utilization)
+//   - bank_limit
+//   - auditactionbanklimit (latest audit per limit)
+//   - limit_utilization (utilizations for this limit)
+//   - auditactionlimitutilization (latest audit per utilization)
 //
 // The result set has ALL fields flattened with prefixes:
-//   limit_*       — from bank_limit + auditactionbanklimit
-//   (no prefix)   — from limit_utilization + auditactionlimitutilization
+//
+//	limit_*       — from bank_limit + auditactionbanklimit
+//	(no prefix)   — from limit_utilization + auditactionlimitutilization
 //
 // NOTE: This is a COPY of the query from GetBankLimitUtilizationV2.
 // If that query changes, update this copy to match.
@@ -405,7 +408,7 @@ func computeKPIs(limits []LimitRow, groupField string) []KPIRow {
 	for _, lim := range limits {
 		key, _ := lim[groupField].(string)
 		if key == "" {
-			key = "(unknown)"
+			key = constants.Unknown
 		}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &KPIRow{GroupName: key}
@@ -455,47 +458,47 @@ type UtilizationRow map[string]interface{}
 // UtilizationNotifPayload holds ALL utilization data for rich template rendering
 type UtilizationNotifPayload struct {
 	// Scalars
-	Action             string  // CREATE | UPDATE | DELETE | APPROVE | REJECT | UPLOAD
-	RequestedBy        string  // user who triggered action
-	Count              int     // number of utilizations affected
-	TotalUtilized      float64 // sum of utilized_amount
-	ActionAt           string  // ISO timestamp
-	FileName           string  // for UPLOAD action only
-	RowsUploaded       int     // for UPLOAD action only
+	Action        string  // CREATE | UPDATE | DELETE | APPROVE | REJECT | UPLOAD
+	RequestedBy   string  // user who triggered action
+	Count         int     // number of utilizations affected
+	TotalUtilized float64 // sum of utilized_amount
+	ActionAt      string  // ISO timestamp
+	FileName      string  // for UPLOAD action only
+	RowsUploaded  int     // for UPLOAD action only
 
 	// Lists (for TABLE_HTML, KPI_CARDS_HTML, FILTER, etc.)
-	Utilizations       []UtilizationRow // full records from GET response
-	UtilizationIDs     []string         // simple ID array for COUNT_OF() template function
-	ByEntityKPIs       []KPIRow         // grouped by limit_entity_name
-	ByBankKPIs         []KPIRow         // grouped by limit_bank_name
-	ByCurrencyKPIs     []KPIRow         // grouped by currency_code
+	Utilizations   []UtilizationRow // full records from GET response
+	UtilizationIDs []string         // simple ID array for COUNT_OF() template function
+	ByEntityKPIs   []KPIRow         // grouped by limit_entity_name
+	ByBankKPIs     []KPIRow         // grouped by limit_bank_name
+	ByCurrencyKPIs []KPIRow         // grouped by currency_code
 }
 
 // ToMap converts payload to map[string]interface{} for template engine
 func (p UtilizationNotifPayload) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"Action":           p.Action,
-		"RequestedBy":      p.RequestedBy,
-		"Count":            p.Count,
-		"TotalUtilized":    p.TotalUtilized,
-		"ActionAt":         p.ActionAt,
-		"FileName":         p.FileName,
-		"RowsUploaded":     p.RowsUploaded,
-		"Utilizations":     p.Utilizations,
-		"UtilizationIDs":   p.UtilizationIDs,
-		"ByEntityKPIs":     p.ByEntityKPIs,
-		"ByBankKPIs":       p.ByBankKPIs,
-		"ByCurrencyKPIs":   p.ByCurrencyKPIs,
+		"Action":         p.Action,
+		"RequestedBy":    p.RequestedBy,
+		"Count":          p.Count,
+		"TotalUtilized":  p.TotalUtilized,
+		"ActionAt":       p.ActionAt,
+		"FileName":       p.FileName,
+		"RowsUploaded":   p.RowsUploaded,
+		"Utilizations":   p.Utilizations,
+		"UtilizationIDs": p.UtilizationIDs,
+		"ByEntityKPIs":   p.ByEntityKPIs,
+		"ByBankKPIs":     p.ByBankKPIs,
+		"ByCurrencyKPIs": p.ByCurrencyKPIs,
 	}
 }
 
 // BuildUtilizationNotifPayload fetches FULL utilization records using the GetAllUtilizations query
 func BuildUtilizationNotifPayload(ctx context.Context, pool *pgxpool.Pool, utilizationIDs []string, action, requestedBy string) UtilizationNotifPayload {
 	p := UtilizationNotifPayload{
-		Action:      action,
-		RequestedBy: requestedBy,
-		Count:       len(utilizationIDs),
-		ActionAt:    time.Now().Format(time.RFC3339),
+		Action:       action,
+		RequestedBy:  requestedBy,
+		Count:        len(utilizationIDs),
+		ActionAt:     time.Now().Format(time.RFC3339),
 		Utilizations: make([]UtilizationRow, 0),
 	}
 
@@ -601,7 +604,7 @@ func computeUtilizationKPIs(utilizations []UtilizationRow, groupField string) []
 			groupVal = fmt.Sprintf("%v", v)
 		}
 		if groupVal == "" {
-			groupVal = "(unknown)"
+			groupVal = constants.Unknown
 		}
 
 		if _, exists := groups[groupVal]; !exists {

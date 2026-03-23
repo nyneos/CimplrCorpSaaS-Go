@@ -23,6 +23,7 @@ package sweepconfig
 //   3. Maintainability — changes to GET endpoint auto-flow to notifications
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"time"
@@ -39,49 +40,49 @@ type SweepConfigRow map[string]interface{}
 
 // KPIRow is a grouped aggregate (entity/bank/sweep_type summary)
 type KPIRow struct {
-	GroupName string  `json:"group_name"`
-	Count     int     `json:"count"`
+	GroupName   string  `json:"group_name"`
+	Count       int     `json:"count"`
 	TotalAmount float64 `json:"total_amount"` // sum of sweep_amount or buffer_amount
 }
 
 // SweepConfigNotifPayload holds ALL sweep config data for rich template rendering
 type SweepConfigNotifPayload struct {
 	// Scalars
-	Action             string  // CREATE | UPDATE | DELETE | APPROVE | REJECT
-	RequestedBy        string  // user who triggered action
-	Count              int     // number of sweep configs affected
-	TotalSweepAmount   float64 // sum of sweep_amount
-	TotalBufferAmount  float64 // sum of buffer_amount
-	ActionAt           string  // ISO timestamp
-	Reason             string  // for UPDATE/DELETE actions
-	CheckerComment     string  // for APPROVE/REJECT actions
+	Action            string  // CREATE | UPDATE | DELETE | APPROVE | REJECT
+	RequestedBy       string  // user who triggered action
+	Count             int     // number of sweep configs affected
+	TotalSweepAmount  float64 // sum of sweep_amount
+	TotalBufferAmount float64 // sum of buffer_amount
+	ActionAt          string  // ISO timestamp
+	Reason            string  // for UPDATE/DELETE actions
+	CheckerComment    string  // for APPROVE/REJECT actions
 
 	// Lists (for TABLE_HTML, KPI_CARDS_HTML, FILTER, etc.)
-	SweepConfigs       []SweepConfigRow // full records from GET response
-	SweepConfigIDs     []string         // simple ID array for COUNT_OF() template function
-	ByEntityKPIs       []KPIRow         // grouped by entity_name
-	BySweepTypeKPIs    []KPIRow         // grouped by sweep_type
-	BySourceBankKPIs   []KPIRow         // grouped by source_bank_name
-	ByTargetBankKPIs   []KPIRow         // grouped by target_bank_name
+	SweepConfigs     []SweepConfigRow // full records from GET response
+	SweepConfigIDs   []string         // simple ID array for COUNT_OF() template function
+	ByEntityKPIs     []KPIRow         // grouped by entity_name
+	BySweepTypeKPIs  []KPIRow         // grouped by sweep_type
+	BySourceBankKPIs []KPIRow         // grouped by source_bank_name
+	ByTargetBankKPIs []KPIRow         // grouped by target_bank_name
 }
 
 // ToMap converts payload to map[string]interface{} for template engine
 func (p SweepConfigNotifPayload) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"Action":             p.Action,
-		"RequestedBy":        p.RequestedBy,
-		"Count":              p.Count,
-		"TotalSweepAmount":   p.TotalSweepAmount,
-		"TotalBufferAmount":  p.TotalBufferAmount,
-		"ActionAt":           p.ActionAt,
-		"Reason":             p.Reason,
-		"CheckerComment":     p.CheckerComment,
-		"SweepConfigs":       p.SweepConfigs,
-		"SweepConfigIDs":     p.SweepConfigIDs,
-		"ByEntityKPIs":       p.ByEntityKPIs,
-		"BySweepTypeKPIs":    p.BySweepTypeKPIs,
-		"BySourceBankKPIs":   p.BySourceBankKPIs,
-		"ByTargetBankKPIs":   p.ByTargetBankKPIs,
+		"Action":            p.Action,
+		"RequestedBy":       p.RequestedBy,
+		"Count":             p.Count,
+		"TotalSweepAmount":  p.TotalSweepAmount,
+		"TotalBufferAmount": p.TotalBufferAmount,
+		"ActionAt":          p.ActionAt,
+		"Reason":            p.Reason,
+		"CheckerComment":    p.CheckerComment,
+		"SweepConfigs":      p.SweepConfigs,
+		"SweepConfigIDs":    p.SweepConfigIDs,
+		"ByEntityKPIs":      p.ByEntityKPIs,
+		"BySweepTypeKPIs":   p.BySweepTypeKPIs,
+		"BySourceBankKPIs":  p.BySourceBankKPIs,
+		"ByTargetBankKPIs":  p.ByTargetBankKPIs,
 	}
 }
 
@@ -195,7 +196,7 @@ func computeSweepConfigKPIs(configs []SweepConfigRow, groupField string) []KPIRo
 			groupVal = fmt.Sprintf("%v", v)
 		}
 		if groupVal == "" {
-			groupVal = "(unknown)"
+			groupVal = constants.Unknown
 		}
 
 		if _, exists := groups[groupVal]; !exists {
@@ -237,44 +238,44 @@ type SweepInitiationRow map[string]interface{}
 // SweepInitiationNotifPayload holds ALL sweep initiation data for rich template rendering
 type SweepInitiationNotifPayload struct {
 	// Scalars
-	Action             string  // CREATE | APPROVE | REJECT
-	RequestedBy        string  // user who triggered action
-	Count              int     // number of initiations affected
+	Action               string  // CREATE | APPROVE | REJECT
+	RequestedBy          string  // user who triggered action
+	Count                int     // number of initiations affected
 	TotalInitiatedAmount float64 // sum of initiated amounts
-	ActionAt           string  // ISO timestamp
-	CheckerComment     string  // for APPROVE/REJECT actions
+	ActionAt             string  // ISO timestamp
+	CheckerComment       string  // for APPROVE/REJECT actions
 
 	// Lists
-	Initiations        []SweepInitiationRow // full initiation records
-	InitiationIDs      []string             // simple ID array for COUNT_OF() template function
-	ByEntityKPIs       []KPIRow             // grouped by entity_name
-	BySweepTypeKPIs    []KPIRow             // grouped by sweep_type
+	Initiations     []SweepInitiationRow // full initiation records
+	InitiationIDs   []string             // simple ID array for COUNT_OF() template function
+	ByEntityKPIs    []KPIRow             // grouped by entity_name
+	BySweepTypeKPIs []KPIRow             // grouped by sweep_type
 }
 
 // ToMap converts payload to map[string]interface{} for template engine
 func (p SweepInitiationNotifPayload) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"Action":                 p.Action,
-		"RequestedBy":            p.RequestedBy,
-		"Count":                  p.Count,
-		"TotalInitiatedAmount":   p.TotalInitiatedAmount,
-		"ActionAt":               p.ActionAt,
-		"CheckerComment":         p.CheckerComment,
-		"Initiations":            p.Initiations,
-		"InitiationIDs":          p.InitiationIDs,
-		"ByEntityKPIs":           p.ByEntityKPIs,
-		"BySweepTypeKPIs":        p.BySweepTypeKPIs,
+		"Action":               p.Action,
+		"RequestedBy":          p.RequestedBy,
+		"Count":                p.Count,
+		"TotalInitiatedAmount": p.TotalInitiatedAmount,
+		"ActionAt":             p.ActionAt,
+		"CheckerComment":       p.CheckerComment,
+		"Initiations":          p.Initiations,
+		"InitiationIDs":        p.InitiationIDs,
+		"ByEntityKPIs":         p.ByEntityKPIs,
+		"BySweepTypeKPIs":      p.BySweepTypeKPIs,
 	}
 }
 
 // BuildSweepInitiationNotifPayload fetches FULL sweep initiation records
 func BuildSweepInitiationNotifPayload(ctx context.Context, pool *pgxpool.Pool, initiationIDs []string, action, requestedBy string) SweepInitiationNotifPayload {
 	p := SweepInitiationNotifPayload{
-		Action:       action,
-		RequestedBy:  requestedBy,
-		Count:        len(initiationIDs),
-		ActionAt:     time.Now().Format(time.RFC3339),
-		Initiations:  make([]SweepInitiationRow, 0),
+		Action:      action,
+		RequestedBy: requestedBy,
+		Count:       len(initiationIDs),
+		ActionAt:    time.Now().Format(time.RFC3339),
+		Initiations: make([]SweepInitiationRow, 0),
 	}
 
 	if len(initiationIDs) == 0 {
@@ -336,7 +337,7 @@ func computeSweepInitiationKPIs(initiations []SweepInitiationRow, groupField str
 			groupVal = fmt.Sprintf("%v", v)
 		}
 		if groupVal == "" {
-			groupVal = "(unknown)"
+			groupVal = constants.Unknown
 		}
 
 		if _, exists := groups[groupVal]; !exists {
@@ -378,37 +379,37 @@ type SweepExecutionRow map[string]interface{}
 // SweepExecutionNotifPayload holds sweep execution data for template rendering
 type SweepExecutionNotifPayload struct {
 	// Scalars
-	Action             string  // MANUAL_TRIGGER | SCHEDULED_TRIGGER
-	RequestedBy        string  // user who triggered (for manual) or "SYSTEM" for scheduled
-	SweepID            string  // sweep_id that was executed
-	ExecutionStatus    string  // SUCCESS | FAILED
+	Action              string  // MANUAL_TRIGGER | SCHEDULED_TRIGGER
+	RequestedBy         string  // user who triggered (for manual) or "SYSTEM" for scheduled
+	SweepID             string  // sweep_id that was executed
+	ExecutionStatus     string  // SUCCESS | FAILED
 	TotalExecutedAmount float64 // amount swept
-	ActionAt           string  // ISO timestamp
+	ActionAt            string  // ISO timestamp
 
 	// Execution details
-	ExecutionResult    map[string]interface{} // full execution result object
-	
+	ExecutionResult map[string]interface{} // full execution result object
+
 	// Config context (for reference)
-	EntityName         string
-	SourceBankName     string
-	TargetBankName     string
-	SweepType          string
+	EntityName     string
+	SourceBankName string
+	TargetBankName string
+	SweepType      string
 }
 
 // ToMap converts payload to map[string]interface{} for template engine
 func (p SweepExecutionNotifPayload) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"Action":                p.Action,
-		"RequestedBy":           p.RequestedBy,
-		"SweepID":               p.SweepID,
-		"ExecutionStatus":       p.ExecutionStatus,
-		"TotalExecutedAmount":   p.TotalExecutedAmount,
-		"ActionAt":              p.ActionAt,
-		"ExecutionResult":       p.ExecutionResult,
-		"EntityName":            p.EntityName,
-		"SourceBankName":        p.SourceBankName,
-		"TargetBankName":        p.TargetBankName,
-		"SweepType":             p.SweepType,
+		"Action":              p.Action,
+		"RequestedBy":         p.RequestedBy,
+		"SweepID":             p.SweepID,
+		"ExecutionStatus":     p.ExecutionStatus,
+		"TotalExecutedAmount": p.TotalExecutedAmount,
+		"ActionAt":            p.ActionAt,
+		"ExecutionResult":     p.ExecutionResult,
+		"EntityName":          p.EntityName,
+		"SourceBankName":      p.SourceBankName,
+		"TargetBankName":      p.TargetBankName,
+		"SweepType":           p.SweepType,
 	}
 }
 

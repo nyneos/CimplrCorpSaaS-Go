@@ -55,7 +55,7 @@ func getUserFriendlyDematError(err error, context string) (string, int) {
 	}
 
 	// Check constraints
-	if strings.Contains(lower, "check constraint") || strings.Contains(lower, "_ck") {
+	if strings.Contains(lower, constants.CheckConstraint) || strings.Contains(lower, "_ck") {
 		if strings.Contains(lower, "status") || strings.Contains(lower, "masterdemat_status_ck") {
 			return "Invalid status. Must be one of: Active, Inactive, Closed.", http.StatusOK
 		}

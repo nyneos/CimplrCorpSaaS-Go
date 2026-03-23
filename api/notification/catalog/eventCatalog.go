@@ -688,7 +688,7 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if !allowed[k] {
 					continue
 				}
-				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				args = append(args, v)
 				pos++
 			}
@@ -798,7 +798,7 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
 			api.LogError("GetEventsWithAudit query failed: %v", err)
-			respondWithError(w, http.StatusInternalServerError, "query failed: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()

@@ -188,7 +188,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -468,8 +468,8 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		// Fetch existing row for old values
-		 // Cast date columns to text (YYYY-MM-DD) to avoid binary-date scan errors
-		 sel := `
+		// Cast date columns to text (YYYY-MM-DD) to avoid binary-date scan errors
+		sel := `
 		     SELECT bank_code, min_amount_range, max_amount_range, min_tenor_days,
 			     max_tenor_days, min_held_days, max_held_days, penalty_type,
 			     penalty_value, calculation_method, no_interest_if_withdrawn_before,
@@ -544,7 +544,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// Cast via text to allow Postgres to coerce into the enum type
 					sets = append(sets, fmt.Sprintf("%s=$%d::text", k, pos))
 				} else {
-					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				}
 				args = append(args, v)
 				pos++
@@ -860,7 +860,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -879,7 +879,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -965,7 +965,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -984,7 +984,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1076,7 +1076,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -1095,7 +1095,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1267,12 +1267,7 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}
 
 		// Add ordering + pagination
-		if len(args) == 0 {
-			baseQuery += fmt.Sprintf(" ORDER BY effective_from DESC LIMIT %d OFFSET %d", limit, offset)
-		} else {
-			// param position for limit/offset is safe to inline as integers
-			baseQuery += fmt.Sprintf(" ORDER BY effective_from DESC LIMIT %d OFFSET %d", limit, offset)
-		}
+		baseQuery += fmt.Sprintf(" ORDER BY effective_from DESC LIMIT %d OFFSET %d", limit, offset)
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
@@ -2017,27 +2012,27 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
         `, req.PenaltyID)
 
 		var (
-			pid        string
-			bank       string
-			bankName   string
+			pid           string
+			bank          string
+			bankName      string
 			bankShortName string
-			minAmt     *float64
-			maxAmt     *float64
-			minTenor   int
-			maxTenor   int
-			minHeld    *int
-			maxHeld    *int
-			pType      string
-			pValue     float64
-			calcMethod string
-			noInterest *int
-			desc       *string
-			effFrom    string
-			effTo      *string
-			isActive   *bool
-			isDeleted  *bool
-			createdAt  interface{}
-			updatedAt  interface{}
+			minAmt        *float64
+			maxAmt        *float64
+			minTenor      int
+			maxTenor      int
+			minHeld       *int
+			maxHeld       *int
+			pType         string
+			pValue        float64
+			calcMethod    string
+			noInterest    *int
+			desc          *string
+			effFrom       string
+			effTo         *string
+			isActive      *bool
+			isDeleted     *bool
+			createdAt     interface{}
+			updatedAt     interface{}
 		)
 
 		err := row.Scan(&pid, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive, &isDeleted, &createdAt, &updatedAt)

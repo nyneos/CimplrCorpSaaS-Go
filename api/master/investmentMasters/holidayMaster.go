@@ -1642,7 +1642,7 @@ func BulkRejectCalendarActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, 500, "commit failed")
+			api.RespondWithError(w, 500, constants.ErrCommitFailedUser)
 			return
 		}
 

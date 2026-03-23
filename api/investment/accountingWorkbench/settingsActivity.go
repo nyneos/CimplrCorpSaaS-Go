@@ -190,7 +190,7 @@ func UpdateSetting(pool *pgxpool.Pool) http.HandlerFunc {
 			argCount++
 		}
 
-		updateFields = append(updateFields, "updated_at = NOW()")
+		updateFields = append(updateFields, constants.FormatUpdatedAt)
 
 		if len(updateFields) == 1 { // Only updated_at
 			http.Error(w, "No fields to update", http.StatusBadRequest)

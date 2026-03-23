@@ -54,7 +54,7 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	}
 
 	// Check constraint violations - Known error, return 200
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "actiontype_check") {
 			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
 		}

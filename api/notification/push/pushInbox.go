@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/dashboard"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -94,20 +95,20 @@ type inboxItem struct {
 	ReadAt        *time.Time `json:"read_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 	// Added metadata
-	ModuleCode    string     `json:"module_code"`
-	SubModuleCode string     `json:"sub_module_code"`
-	EventCode     string     `json:"event_code"`
-	EventName     string     `json:"event_name"`
-	SenderID      string     `json:"sender_id"`
-	SenderName    string     `json:"sender_name"`
-	SenderEmail   string     `json:"sender_email"`
+	ModuleCode    string `json:"module_code"`
+	SubModuleCode string `json:"sub_module_code"`
+	EventCode     string `json:"event_code"`
+	EventName     string `json:"event_name"`
+	SenderID      string `json:"sender_id"`
+	SenderName    string `json:"sender_name"`
+	SenderEmail   string `json:"sender_email"`
 }
 
 // handleGetInbox — POST /notification/inbox/list
 func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		// Parse optional body fields (user_id, limit, offset)
@@ -125,7 +126,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 			userID = userIDFromCtx(r)
 		}
 		if userID == "" {
-			writeErr(w, http.StatusUnauthorized, "user_id required")
+			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
 		}
 
@@ -145,7 +146,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 			offset = 0
 		}
 
-				q := `
+		q := `
 						SELECT i.id, i.outbox_id, i.correlation_id, i.event_id,
 									 COALESCE(i.subject,''), COALESCE(i.body,''),
 									 COALESCE(i.priority_level,3), i.is_read, i.read_at, i.created_at,
@@ -161,7 +162,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 				`
 		rows, err := pool.Query(r.Context(), q, userID, limit, offset)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db error")
+			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			fmt.Printf("[PUSH] handleGetInbox query error: %v\n", err)
 			return
 		}
@@ -206,7 +207,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 			items = append(items, it)
 		}
 		if rows.Err() != nil {
-			writeErr(w, http.StatusInternalServerError, "db error")
+			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		if items == nil {
@@ -224,7 +225,7 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 func handleGetCount(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var req struct {
@@ -236,7 +237,7 @@ func handleGetCount(pool *pgxpool.Pool) http.HandlerFunc {
 			userID = userIDFromCtx(r)
 		}
 		if userID == "" {
-			writeErr(w, http.StatusUnauthorized, "user_id required")
+			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
 		}
 		var count int
@@ -246,7 +247,7 @@ func handleGetCount(pool *pgxpool.Pool) http.HandlerFunc {
 			userID,
 		).Scan(&count)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db error")
+			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		writeOK(w, map[string]interface{}{
@@ -259,7 +260,7 @@ func handleGetCount(pool *pgxpool.Pool) http.HandlerFunc {
 func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -275,7 +276,7 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 			userID = userIDFromCtx(r)
 		}
 		if userID == "" {
-			writeErr(w, http.StatusUnauthorized, "user_id required")
+			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
 		}
 		tag, err := pool.Exec(r.Context(),
@@ -288,7 +289,7 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 			body.ID, userID,
 		)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db error")
+			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		if tag.RowsAffected() == 0 {
@@ -304,7 +305,7 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -316,7 +317,7 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 			userID = userIDFromCtx(r)
 		}
 		if userID == "" {
-			writeErr(w, http.StatusUnauthorized, "user_id required")
+			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
 		}
 		tag, err := pool.Exec(r.Context(),
@@ -328,7 +329,7 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 			userID,
 		)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db error")
+			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		go pushCountSSE(r.Context(), pool, userID)
@@ -343,7 +344,7 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 		var body struct {
@@ -359,7 +360,7 @@ func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			userID = userIDFromCtx(r)
 		}
 		if userID == "" {
-			writeErr(w, http.StatusUnauthorized, "user_id required")
+			writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 			return
 		}
 		tag, err := pool.Exec(r.Context(),
@@ -371,7 +372,7 @@ func handleDelete(pool *pgxpool.Pool) http.HandlerFunc {
 			body.ID, userID,
 		)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "db error")
+			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
 		if tag.RowsAffected() == 0 {

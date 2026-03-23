@@ -32,7 +32,7 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 	}
 
 	if strings.Contains(errStr, "inv_day_count_convention_type_chk") ||
-		(strings.Contains(errStr, "check constraint") && strings.Contains(errStr, "convention_type")) {
+		(strings.Contains(errStr, constants.CheckConstraint) && strings.Contains(errStr, "convention_type")) {
 		return "Invalid convention_type. Must be one of: ACT_365, ACT_360, ACT_ACT, 30_360.", http.StatusBadRequest
 	}
 
@@ -346,7 +346,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Commit failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -394,7 +394,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -418,7 +418,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			bmValues := make([]string, len(req.UsedByBanks))
 			bmArgs := make([]interface{}, 0, len(req.UsedByBanks)*2)
 			for i, bc := range req.UsedByBanks {
-				bmValues[i] = fmt.Sprintf("($%d,$%d)", i*2+1, i*2+2)
+				bmValues[i] = fmt.Sprintf(constants.FormatTuple, i*2+1, i*2+2)
 				bmArgs = append(bmArgs, dayCountCode, bc)
 			}
 			_, err = tx.Exec(ctx, fmt.Sprintf(`
@@ -599,7 +599,7 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bmValues := make([]string, len(finalValid[codeIdx].UsedByBanks))
 				bmArgs := make([]interface{}, 0, len(finalValid[codeIdx].UsedByBanks)*2)
 				for j, bc := range finalValid[codeIdx].UsedByBanks {
-					bmValues[j] = fmt.Sprintf("($%d,$%d)", j*2+1, j*2+2)
+					bmValues[j] = fmt.Sprintf(constants.FormatTuple, j*2+1, j*2+2)
 					bmArgs = append(bmArgs, code, bc)
 				}
 				_, bmerr := tx.Exec(ctx, fmt.Sprintf(`
@@ -719,7 +719,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for k, v := range req.Fields {
 				k = strings.ToLower(k)
 				if _, ok := fieldPairs[k]; ok {
-					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 					args = append(args, v)
 					pos++
 				}
@@ -749,7 +749,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				bmValues := make([]string, len(*req.UsedByBanks))
 				bmArgs := make([]interface{}, 0, len(*req.UsedByBanks)*2)
 				for i, bc := range *req.UsedByBanks {
-					bmValues[i] = fmt.Sprintf("($%d,$%d)", i*2+1, i*2+2)
+					bmValues[i] = fmt.Sprintf(constants.FormatTuple, i*2+1, i*2+2)
 					bmArgs = append(bmArgs, req.DayCountCode, bc)
 				}
 				_, err = tx.Exec(ctx, fmt.Sprintf(`
@@ -897,9 +897,9 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer oldRows.Close()
 
 		type oldRecord struct {
-			Name, Type         string
-			Desc, Formula      *string
-			IsActive           bool
+			Name, Type    string
+			Desc, Formula *string
+			IsActive      bool
 		}
 		oldMap := make(map[string]oldRecord)
 		for oldRows.Next() {
@@ -943,7 +943,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				for k, v := range update.Fields {
 					k = strings.ToLower(k)
 					if _, ok := fieldPairs[k]; ok {
-						sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 						args = append(args, v)
 						pos++
 					}
@@ -976,7 +976,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					bmValues := make([]string, len(*update.UsedByBanks))
 					bmArgs := make([]interface{}, 0, len(*update.UsedByBanks)*2)
 					for i, bc := range *update.UsedByBanks {
-						bmValues[i] = fmt.Sprintf("($%d,$%d)", i*2+1, i*2+2)
+						bmValues[i] = fmt.Sprintf(constants.FormatTuple, i*2+1, i*2+2)
 						bmArgs = append(bmArgs, update.DayCountCode, bc)
 					}
 					_, err = tx.Exec(ctx, fmt.Sprintf(`
@@ -1050,7 +1050,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No day_count_codes provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1151,7 +1151,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No day_count_codes provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1170,7 +1170,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1233,7 +1233,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No day_count_codes provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1252,7 +1252,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1328,13 +1328,13 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 				usedByBankNames = []string{}
 			}
 			out = append(out, map[string]interface{}{
-				"day_count_code":    code,
-				"day_count_name":    name,
-				"convention_type":   convType,
-				"description":       desc,
-				"formula_example":   formula,
-				"is_active":         isActive,
-				"used_by_banks":     usedByBanks,
+				"day_count_code":     code,
+				"day_count_name":     name,
+				"convention_type":    convType,
+				"description":        desc,
+				"formula_example":    formula,
+				"is_active":          isActive,
+				"used_by_banks":      usedByBanks,
 				"used_by_bank_names": usedByBankNames,
 			})
 		}
