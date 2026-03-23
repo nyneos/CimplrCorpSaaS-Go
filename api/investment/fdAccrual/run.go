@@ -325,8 +325,6 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", payload)
-
-		api.RespondWithPayload(w, true, "", payload)
 		api.LogInfo("[FDAccrual] ValidateScope: run_id=%s eligible=%d blockers=%d status=%s",
 			req.RunID, eligible, blockers, newStatus)
 	}
