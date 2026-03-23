@@ -1441,13 +1441,29 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		}(runID, req.EntityID, userEmail)
 
 		go func(rID string) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					api.LogError("[FDReceipt] Reconciliation goroutine panic run=%s: %v", rID, rec)
+					if _, upErr := pool.Exec(context.Background(),
+						`UPDATE investment.fd_receipt_reconcile_run
+						 SET run_status='FAILED', error_message=$1, completed_at=now()
+						 WHERE reconcile_run_id=$2`,
+						fmt.Sprintf("panic: %v", rec), rID,
+					); upErr != nil {
+						api.LogError("[FDReceipt] Could not mark run FAILED after panic: %v", upErr)
+					}
+				}
+			}()
 			bgCtx := context.Background()
 			if rErr := runReconciliation(bgCtx, pool, rID); rErr != nil {
 				api.LogError("[FDReceipt] Reconciliation failed run=%s: %v", rID, rErr)
-				pool.Exec(bgCtx, //nolint:errcheck
+				if _, upErr := pool.Exec(bgCtx,
 					`UPDATE investment.fd_receipt_reconcile_run
 					 SET run_status='FAILED', error_message=$1, completed_at=now()
-					 WHERE reconcile_run_id=$2`, rErr.Error(), rID)
+					 WHERE reconcile_run_id=$2`, rErr.Error(), rID,
+				); upErr != nil {
+					api.LogError("[FDReceipt] Could not mark run FAILED for run=%s: %v", rID, upErr)
+				}
 			}
 		}(runID)
 
@@ -1465,17 +1481,18 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 
 func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID         string `json:"user_id"`
-			ReconcileRunID string `json:"reconcile_run_id"`
+		runID := r.URL.Query().Get("reconcile_run_id")
+		if runID == "" {
+			var req struct {
+				UserID         string `json:"user_id"`
+				ReconcileRunID string `json:"reconcile_run_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+				runID = req.ReconcileRunID
+			}
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		userEmail := resolveUserEmail(req.UserID)
-		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+		if runID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id is required")
 			return
 		}
 
@@ -1488,7 +1505,7 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			       total_expected_tds, total_received_tds, total_tds_variance,
 			       triggered_by, triggered_at, completed_at, error_message
 			FROM investment.fd_receipt_reconcile_run 
-			WHERE reconcile_run_id=$1`, req.ReconcileRunID)
+			WHERE reconcile_run_id=$1`, runID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
 			return

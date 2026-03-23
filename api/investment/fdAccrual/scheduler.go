@@ -29,6 +29,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DefaultFDStatusFilter string `json:"default_fd_status_filter"`
 			DefaultRunMode        string `json:"default_run_mode"`
 			AutoSubmitForApproval bool   `json:"auto_submit_for_approval"`
+			AcrualGranularity     string `json:"accrual_granularity"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -47,6 +48,9 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		if req.DefaultFDStatusFilter == "" {
 			req.DefaultFDStatusFilter = "ACTIVE"
+		}
+		if req.AcrualGranularity == "" {
+			req.AcrualGranularity = "MONTHLY"
 		}
 
 		userEmail := getUserEmail(req.UserID)
@@ -68,14 +72,15 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				default_bank_id_filter, default_fd_status_filter,
 				default_run_mode, auto_submit_for_approval,
 				is_active, next_run_at,
+				accrual_granularity,
 				created_by, created_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,now())
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$11,$10,now())
 			RETURNING config_id`,
 			req.EntityID, nullIfEmpty(req.EntityName),
 			req.ScheduleFrequency, req.RunDayOfMonth,
 			nullIfEmpty(req.DefaultBankIDFilter), req.DefaultFDStatusFilter,
 			req.DefaultRunMode, req.AutoSubmitForApproval,
-			nextRun, userEmail,
+			nextRun, userEmail, req.AcrualGranularity,
 		).Scan(&configID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Create schedule config failed: "+err.Error())
@@ -622,7 +627,9 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 		       COALESCE(default_bank_id_filter,''),
 		       COALESCE(default_fd_status_filter,'ACTIVE'),
 		       default_run_mode,
-		       auto_submit_for_approval
+		       auto_submit_for_approval,
+		       COALESCE(accrual_granularity,'MONTHLY') AS accrual_granularity,
+		       COALESCE(next_run_at, now()) AS next_run_at
 		FROM investment.fd_accrual_schedule_config
 		WHERE is_active = true
 		  AND next_run_at <= now()
@@ -634,11 +641,13 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 	defer rows.Close()
 
 	type dueConfig struct {
-		ConfigID, EntityID, EntityName           string
-		ScheduleFrequency, BankFilter, FDStatus  string
-		DefaultRunMode                           string
-		RunDayOfMonth                            int
-		AutoSubmit                               bool
+		ConfigID, EntityID, EntityName          string
+		ScheduleFrequency, BankFilter, FDStatus string
+		DefaultRunMode                          string
+		RunDayOfMonth                           int
+		AutoSubmit                              bool
+		Granularity                             string
+		NextRunAt                               time.Time
 	}
 	var due []dueConfig
 	for rows.Next() {
@@ -648,6 +657,7 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 			&c.ScheduleFrequency, &c.RunDayOfMonth,
 			&c.BankFilter, &c.FDStatus,
 			&c.DefaultRunMode, &c.AutoSubmit,
+			&c.Granularity, &c.NextRunAt,
 		); err != nil {
 			api.LogError("[FDAccrual] checkAndFireDueSchedules scan: %v", err)
 			continue
@@ -659,7 +669,8 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 	for _, c := range due {
 		fireScheduledRun(ctx, pool, c.ConfigID, c.EntityID, c.EntityName,
 			c.ScheduleFrequency, c.BankFilter, c.FDStatus,
-			c.DefaultRunMode, c.RunDayOfMonth, c.AutoSubmit)
+			c.DefaultRunMode, c.RunDayOfMonth, c.AutoSubmit,
+			c.Granularity, c.NextRunAt)
 	}
 }
 
@@ -672,14 +683,60 @@ func fireScheduledRun(
 	runMode string,
 	runDay int,
 	autoSubmit bool,
+	granularity string,
+	scheduledAt time.Time,
 ) {
-	now := time.Now()
-	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	periodEnd := periodStart.AddDate(0, 1, -1) // last day of month
+	// Derive period from scheduledAt (the config's next_run_at), not from now()
+	var periodStart, periodEnd time.Time
+	switch scheduleFreq {
+	case "QUARTERLY":
+		// Quarter that contains scheduledAt
+		qMonth := ((int(scheduledAt.Month())-1)/3)*3 + 1
+		periodStart = time.Date(scheduledAt.Year(), time.Month(qMonth), 1, 0, 0, 0, 0, time.UTC)
+		periodEnd = periodStart.AddDate(0, 3, -1)
+	case "YEARLY":
+		periodStart = time.Date(scheduledAt.Year(), 1, 1, 0, 0, 0, 0, time.UTC)
+		periodEnd = time.Date(scheduledAt.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
+	default: // MONTHLY
+		periodStart = time.Date(scheduledAt.Year(), scheduledAt.Month(), 1, 0, 0, 0, 0, time.UTC)
+		periodEnd = periodStart.AddDate(0, 1, -1)
+	}
 	financialPeriod := buildAccrualPeriod(periodStart)
 
+	// Dynamic run_type reflects schedule frequency
+	runType := "SCHEDULED_MONTHLY"
+	switch scheduleFreq {
+	case "QUARTERLY":
+		runType = "SCHEDULED_QUARTERLY"
+	case "YEARLY":
+		runType = "SCHEDULED_YEARLY"
+	}
+
+	// Skip if a FINAL run already exists for this entity+period
+	var existingFinalRun string
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
+		WHERE entity_id=$1
+		  AND accrual_period_start=$2
+		  AND accrual_period_end=$3
+		  AND run_mode='FINAL'
+		  AND run_status NOT IN ('FAILED','VALIDATION_FAILED')
+		LIMIT 1`,
+		entityID, periodStart, periodEnd,
+	).Scan(&existingFinalRun)
+	if existingFinalRun != "" {
+		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s — FINAL run %s already exists",
+			entityID, periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02"), existingFinalRun)
+		updateLastRunStatus(ctx, pool, configID, existingFinalRun, "SKIPPED_DUPLICATE", scheduleFreq, runDay)
+		return
+	}
+
+	if granularity == "" {
+		granularity = "MONTHLY"
+	}
+
 	input := CreateAccrualRunInput{
-		RunType:            "SCHEDULED",
+		RunType:            runType,
 		RunMode:            runMode,
 		EntityID:           entityID,
 		EntityName:         entityName,
@@ -691,13 +748,14 @@ func fireScheduledRun(
 		DayCountConvention: "ACT_365",
 		RoundingRule:       "ROUND",
 		PrecisionDecimals:  2,
+		Granularity:        granularity,
 		CreatedBy:          "SCHEDULER",
 	}
 
 	runID, err := createAccrualRunInternal(ctx, pool, input)
 	if err != nil {
 		api.LogError("[FDAccrual] Scheduler createRun failed entity=%s: %v", entityID, err)
-		updateLastRunStatus(ctx, pool, configID, "", "CREATE_FAILED")
+		updateLastRunStatus(ctx, pool, configID, "", "CREATE_FAILED", scheduleFreq, runDay)
 		return
 	}
 	api.LogInfo("[FDAccrual] Scheduler created run_id=%s entity=%s period=%s→%s",
@@ -707,7 +765,7 @@ func fireScheduledRun(
 	eligible, blockers, vErr := validateAndPersistFindings(ctx, pool, runID)
 	if vErr != nil {
 		api.LogError("[FDAccrual] Scheduler validate run=%s: %v", runID, vErr)
-		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATE_FAILED")
+		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATE_FAILED", scheduleFreq, runDay)
 		return
 	}
 	newStatus := "VALIDATED"
@@ -720,7 +778,7 @@ func fireScheduledRun(
 
 	if blockers > 0 {
 		api.LogInfo("[FDAccrual] Scheduler run=%s has %d blockers — skipping execution", runID, blockers)
-		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATION_FAILED")
+		updateLastRunStatus(ctx, pool, configID, runID, "VALIDATION_FAILED", scheduleFreq, runDay)
 		return
 	}
 
@@ -728,7 +786,7 @@ func fireScheduledRun(
 	calculated, failed, exErr := executeAccrualRun(ctx, pool, runID, "SCHEDULER")
 	if exErr != nil {
 		api.LogError("[FDAccrual] Scheduler execute run=%s: %v", runID, exErr)
-		updateLastRunStatus(ctx, pool, configID, runID, "EXECUTE_FAILED")
+		updateLastRunStatus(ctx, pool, configID, runID, "EXECUTE_FAILED", scheduleFreq, runDay)
 		return
 	}
 	api.LogInfo("[FDAccrual] Scheduler run=%s calculated=%d failed=%d", runID, calculated, failed)
@@ -743,27 +801,22 @@ func fireScheduledRun(
 		}
 	}
 
-	// Advance next_run_at
-	nextRun := computeNextRunForConfig(scheduleFreq, runDay, now)
-	_, _ = pool.Exec(ctx, `
-		UPDATE investment.fd_accrual_schedule_config
-		SET last_run_at=$1, last_run_id=$2, last_run_status=$3, next_run_at=$4,
-		    updated_at=now()
-		WHERE config_id=$5`,
-		now, runID, finalStatus, nextRun, configID)
+	updateLastRunStatus(ctx, pool, configID, runID, finalStatus, scheduleFreq, runDay)
 }
 
-// updateLastRunStatus bumps last_run_status on the config (for error cases).
-func updateLastRunStatus(ctx context.Context, pool *pgxpool.Pool, configID, runID, status string) {
+// updateLastRunStatus bumps last_run_status and always advances next_run_at.
+func updateLastRunStatus(ctx context.Context, pool *pgxpool.Pool, configID, runID, status, scheduleFreq string, runDay int) {
 	var runIDArg interface{} = nil
 	if runID != "" {
 		runIDArg = runID
 	}
+	nextRun := computeNextRunForConfig(scheduleFreq, runDay, time.Now())
 	_, _ = pool.Exec(ctx, `
 		UPDATE investment.fd_accrual_schedule_config
-		SET last_run_at=now(), last_run_id=$1, last_run_status=$2, updated_at=now()
-		WHERE config_id=$3`,
-		runIDArg, status, configID)
+		SET last_run_at=now(), last_run_id=$1, last_run_status=$2,
+		    next_run_at=$3, updated_at=now()
+		WHERE config_id=$4`,
+		runIDArg, status, nextRun, configID)
 }
 
 // computeNextRunForConfig calculates the next fire time from the current time.

@@ -58,6 +58,7 @@ type AccrualRunParams struct {
 	FDStatusFilter     string   // ACTIVE default
 	FDInclusionMethod  string   // ALL / SELECT_LIST
 	FDInclusionList    []string
+	Granularity        string   // DAILY / MONTHLY / QUARTERLY / RUN
 }
 
 // AccrualPeriodResult holds the engine output for one FD x one period.
@@ -118,6 +119,7 @@ type CreateAccrualRunInput struct {
 	RunMode            string
 	EntityID           string
 	EntityName         string
+	Granularity        string   // DAILY / MONTHLY / QUARTERLY / RUN
 	BankIDFilter       string
 	FDStatusFilter     string
 	AccrualPeriodStart time.Time
@@ -609,6 +611,54 @@ func hasBlockers(findings []ValidationFinding) bool {
 		}
 	}
 	return false
+}
+
+// generateSubPeriods splits [start, end) into consecutive sub-periods
+// of the requested granularity. RUN returns the whole range as one chunk.
+// Each element is [subStart, subEnd) where subEnd is exclusive.
+func generateSubPeriods(start, end time.Time, granularity string) [][2]time.Time {
+	var periods [][2]time.Time
+	cur := start.Truncate(24 * time.Hour)
+	e := end.Truncate(24 * time.Hour)
+	if !cur.Before(e) {
+		return periods
+	}
+	switch strings.ToUpper(granularity) {
+	case "DAILY":
+		for cur.Before(e) {
+			next := cur.AddDate(0, 0, 1)
+			if next.After(e) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	case "MONTHLY":
+		for cur.Before(e) {
+			// advance to first day of next month
+			next := time.Date(cur.Year(), cur.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+			if next.After(e) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	case "QUARTERLY":
+		for cur.Before(e) {
+			next := cur.AddDate(0, 3, 0)
+			// snap to quarter start (Jan/Apr/Jul/Oct)
+			qMonth := ((int(next.Month())-1)/3)*3 + 1
+			next = time.Date(next.Year(), time.Month(qMonth), 1, 0, 0, 0, 0, time.UTC)
+			if next.After(e) || next.Equal(cur) {
+				next = e
+			}
+			periods = append(periods, [2]time.Time{cur, next})
+			cur = next
+		}
+	default: // RUN — whole period as one chunk
+		periods = append(periods, [2]time.Time{cur, e})
+	}
+	return periods
 }
 
 // ─── DB-backed calculation helpers ───────────────────────────────────────────

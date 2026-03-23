@@ -62,6 +62,19 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 		return fmt.Errorf("receipts scan error: %w", rows.Err())
 	}
 
+	if len(receipts) == 0 {
+		var totalCount, approvedCount int
+		pool.QueryRow(ctx, `
+			SELECT COUNT(*), COUNT(*) FILTER (WHERE receipt_status IN ('APPROVED','POSTED'))
+			FROM investment.fd_interest_receipt
+			WHERE entity_id=$1 AND receipt_date BETWEEN $2::date AND $3::date
+			  AND is_deleted=false`,
+			entityID, periodStart, periodEnd,
+		).Scan(&totalCount, &approvedCount)
+		return fmt.Errorf("no receipts to reconcile for entity=%s period=%s to %s: total=%d approved=%d",
+			entityID, periodStart, periodEnd, totalCount, approvedCount)
+	}
+
 	// Step 3: Process each receipt
 	matched, unmatched, exceptions := 0, 0, 0
 	for _, rec := range receipts {
@@ -87,20 +100,34 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 
 		// Step 6: Mark cashflow cleared and update receipt reconcile status
 		if cashflowID != "" {
-			pool.Exec(ctx, `UPDATE investment.fd_cashflow_schedule SET receipt_cleared=true WHERE cashflow_id=$1`, cashflowID) //nolint:errcheck
+			if _, execErr := pool.Exec(ctx,
+				`UPDATE investment.fd_cashflow_schedule SET receipt_cleared=true WHERE cashflow_id=$1`,
+				cashflowID,
+			); execErr != nil {
+				fmt.Printf("[Reconcile] WARN: cashflow cleared update failed run=%s cf=%s: %v\n", runID, cashflowID, execErr)
+			}
 		}
 		reconcileStatus := "MATCHED"
 		if matchStatus != "MATCHED" {
 			reconcileStatus = "UNMATCHED"
 		}
-		pool.Exec(ctx, `UPDATE investment.fd_interest_receipt SET reconcile_status=$1, reconcile_run_id=$2 WHERE receipt_id=$3`, //nolint:errcheck
-			reconcileStatus, runID, rec.ReceiptID)
+		if _, execErr := pool.Exec(ctx,
+			`UPDATE investment.fd_interest_receipt SET reconcile_status=$1, reconcile_run_id=$2 WHERE receipt_id=$3`,
+			reconcileStatus, runID, rec.ReceiptID,
+		); execErr != nil {
+			fmt.Printf("[Reconcile] WARN: receipt reconcile_status update failed run=%s receipt=%s: %v\n", runID, rec.ReceiptID, execErr)
+		}
 
 		// Step 7: Insert exception if needed
 		if hasException {
 			exID, _ := insertException(ctx, pool, rec, runID, resultID, matchStatus, cashflowAmt, rec.Gross, triggeredBy)
 			if exID != "" {
-				pool.Exec(ctx, `UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`, exID, resultID) //nolint:errcheck
+				if _, execErr := pool.Exec(ctx,
+					`UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`,
+					exID, resultID,
+				); execErr != nil {
+					fmt.Printf("[Reconcile] WARN: exception_id update failed run=%s result=%s: %v\n", runID, resultID, execErr)
+				}
 			}
 			exceptions++
 		}
@@ -114,28 +141,40 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 
 	// Step 8: Handle missing receipts (cashflows with no receipt)
 	missingRows, mErr := pool.Query(ctx, `
-		SELECT cashflow_id, fd_id, COALESCE(fd_ref_no,''), entity_id, net_cash_flow
-		FROM investment.fd_cashflow_schedule
-		JOIN investment.fd_master fm ON fm.fd_id = fd_cashflow_schedule.fd_id
-		WHERE entity_id=$1
-		  AND event_type='INTEREST_RECEIPT'
-		  AND COALESCE(receipt_cleared,false)=false
-		  AND event_date BETWEEN $2::date AND $3::date
-		  AND COALESCE(fd_cashflow_schedule.is_deleted,false)=false`, entityID, periodStart, periodEnd)
+		SELECT cs.cashflow_id, cs.fd_id,
+		       COALESCE(fm.bank_fd_ref_no, '') AS fd_ref_no,
+		       fm.entity_id,
+		       cs.net_cash_flow,
+		       cs.event_date
+		FROM investment.fd_cashflow_schedule cs
+		JOIN investment.fd_master fm ON fm.fd_id = cs.fd_id
+		WHERE fm.entity_id = $1
+		  AND cs.event_type IN ('INTEREST_RECEIPT', 'MATURITY')
+		  AND COALESCE(cs.receipt_cleared, false) = false
+		  AND cs.event_date BETWEEN $2::date AND $3::date
+		  AND COALESCE(cs.is_deleted, false) = false
+		  AND COALESCE(fm.is_deleted, false) = false`,
+		entityID, periodStart, periodEnd)
 	if mErr == nil {
 		defer missingRows.Close()
 		for missingRows.Next() {
 			var cfID, fdID, fdRef, entID string
 			var schAmt float64
-			if sErr := missingRows.Scan(&cfID, &fdID, &fdRef, &entID, &schAmt); sErr != nil {
+			var eventDate time.Time
+			if sErr := missingRows.Scan(&cfID, &fdID, &fdRef, &entID, &schAmt, &eventDate); sErr != nil {
 				continue
 			}
-			rec := ReceiptRow{FDID: fdID, FdRefNo: fdRef, EntityID: entID, Gross: schAmt}
+			rec := ReceiptRow{FDID: fdID, FdRefNo: fdRef, EntityID: entID, Gross: schAmt, ReceiptDate: eventDate}
 			resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, "UNMATCHED", matchingBasis, schAmt, 100.0, true, cfID, "", schAmt, 0)
 			if rErr == nil {
 				exID, _ := insertException(ctx, pool, rec, runID, resultID, "MISSING_RECEIPT", schAmt, 0, triggeredBy)
 				if exID != "" {
-					pool.Exec(ctx, `UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`, exID, resultID) //nolint:errcheck
+					if _, execErr := pool.Exec(ctx,
+						`UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`,
+						exID, resultID,
+					); execErr != nil {
+						fmt.Printf("[Reconcile] WARN: missing-receipt exception_id update failed run=%s result=%s: %v\n", runID, resultID, execErr)
+					}
 				}
 				exceptions++
 			}
@@ -158,22 +197,62 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 }
 
 // findMatchingCashflow attempts to match a receipt to a cashflow schedule row.
+// It tries three strategies in order:
+//  1. INTEREST_RECEIPT row closest to receipt date (periodic payout FDs)
+//  2. Sum of ACCRUAL rows whose period_end is within 45 days before receipt date (cumulative FDs)
+//  3. MATURITY row within 7 days of receipt date
 func findMatchingCashflow(ctx context.Context, pool *pgxpool.Pool, rec ReceiptRow) (float64, string) {
+	// Strategy 1: Look for an INTEREST_RECEIPT cashflow row close to receipt date
 	var cfID string
 	var schAmt float64
 	err := pool.QueryRow(ctx, `
 		SELECT cashflow_id, net_cash_flow
 		FROM investment.fd_cashflow_schedule
-		WHERE fd_id=$1
-		  AND event_type='INTEREST_RECEIPT'
-		  AND COALESCE(receipt_cleared,false)=false
-		  AND is_deleted=false
+		WHERE fd_id = $1
+		  AND event_type = 'INTEREST_RECEIPT'
+		  AND COALESCE(receipt_cleared, false) = false
+		  AND COALESCE(is_deleted, false) = false
 		ORDER BY ABS(EXTRACT(EPOCH FROM (event_date - $2::date)))
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&cfID, &schAmt)
-	if err != nil {
-		return 0, ""
+	if err == nil && cfID != "" {
+		return schAmt, cfID
 	}
-	return schAmt, cfID
+
+	// Strategy 2: For cumulative FDs — sum ACCRUAL rows whose period_end falls
+	// within 45 days before the receipt date.
+	var accrualSum float64
+	var latestCFID string
+	err = pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(interest_accrued), 0),
+		       COALESCE(MAX(cashflow_id), '')
+		FROM investment.fd_cashflow_schedule
+		WHERE fd_id = $1
+		  AND event_type = 'ACCRUAL'
+		  AND period_end BETWEEN ($2::date - INTERVAL '45 days') AND $2::date
+		  AND COALESCE(is_deleted, false) = false
+		  AND COALESCE(receipt_cleared, false) = false`,
+		rec.FDID, rec.ReceiptDate).Scan(&accrualSum, &latestCFID)
+	if err == nil && accrualSum > 0 {
+		return accrualSum, latestCFID
+	}
+
+	// Strategy 3: Check if receipt date matches a MATURITY row
+	var maturityCFID string
+	var maturityAmt float64
+	err = pool.QueryRow(ctx, `
+		SELECT cashflow_id, net_cash_flow
+		FROM investment.fd_cashflow_schedule
+		WHERE fd_id = $1
+		  AND event_type = 'MATURITY'
+		  AND ABS(EXTRACT(EPOCH FROM (event_date - $2::date))) < 86400 * 7
+		  AND COALESCE(is_deleted, false) = false
+		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&maturityCFID, &maturityAmt)
+	if err == nil && maturityCFID != "" {
+		return maturityAmt, maturityCFID
+	}
+
+	// No match found
+	return 0, ""
 }
 
 // findMatchingAccrualLedger finds the corresponding accrual ledger entry.
