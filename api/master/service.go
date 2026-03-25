@@ -19,7 +19,7 @@ func (s *MasterService) Name() string {
 }
 
 func (s *MasterService) Start() error {
-	go StartMasterService(s.db)
+	// go StartMasterService(s.db)
 	return nil
 }
 

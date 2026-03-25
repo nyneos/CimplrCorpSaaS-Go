@@ -4,30 +4,29 @@ import (
 	allMaster "CimplrCorpSaas/api/master/allMasters"
 	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"context"
 	"database/sql"
-	"fmt"
-	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartMasterService(db *sql.DB) {
-	mux := http.NewServeMux()
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
-	}
+func RegisterMasterRoutes(mux *http.ServeMux, db *sql.DB, pgxPool *pgxpool.Pool) {
+	// mux := http.NewServeMux()
+	/*
+		old local pgx pool creation (replaced by shared pool from cmd/main.go):
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+		host := os.Getenv("DB_HOST")
+		port := os.Getenv("DB_PORT")
+		name := os.Getenv("DB_NAME")
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+		pgxPool, err := pgxpool .New(context.Background(), dsn)
+		if err != nil {
+			log.Fatalf("failed to connect to pgxpool DB: %v", err)
+		}
+	*/
 	// ensure pool is closed when service exits
-	defer pgxPool.Close()
+	// defer pgxPool.Close()
 
 	mux.HandleFunc("/master/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Masters Service is healthy"))
@@ -342,8 +341,20 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/bank-rate-card/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankRateCardSimple(pgxPool)))
 	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
 
-	err = http.ListenAndServe(":2143", mux)
-	if err != nil {
-		log.Fatalf("Master Service failed: %v", err)
-	}
+	// portEnv := os.Getenv("MASTER_PORT")
+	// if portEnv == "" {
+	// 	portEnv = "2143"
+	// }
+	// log.Printf("Master Service starting on :%s", portEnv)
+	// err = http.ListenAndServe(":"+portEnv, mux)
+	// if err != nil {
+	// 	log.Fatalf("Master Service failed: %v", err)
+	// }
 }
+
+/*
+func StartMasterService(db *sql.DB) {
+	mux := http.NewServeMux()
+	RegisterMasterRoutes(mux, db, nil)
+}
+*/

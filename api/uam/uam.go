@@ -8,34 +8,32 @@ import (
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
-	"context"
 	"database/sql"
-	"fmt"
-	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartUAMService(db *sql.DB) {
-	mux := http.NewServeMux()
+func RegisterUAMRoutes(mux *http.ServeMux, db *sql.DB, pgxPool *pgxpool.Pool) {
+	// mux := http.NewServeMux()
 
-	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
-	pgxPool := func() *pgxpool.Pool {
-		user := os.Getenv("DB_USER")
-		pass := os.Getenv("DB_PASSWORD")
-		host := os.Getenv("DB_HOST")
-		port := os.Getenv("DB_PORT")
-		name := os.Getenv("DB_NAME")
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
-		pool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
-		}
-		return pool
-	}()
-	defer pgxPool.Close()
+	/*
+		old local pgx pool creation (replaced by shared pool from cmd/main.go):
+		pgxPool := func() *pgxpool.Pool {
+			user := os.Getenv("DB_USER")
+			pass := os.Getenv("DB_PASSWORD")
+			host := os.Getenv("DB_HOST")
+			port := os.Getenv("DB_PORT")
+			name := os.Getenv("DB_NAME")
+			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+			pool, err := pgxpool .New(context.Background(), dsn)
+			if err != nil {
+				log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
+			}
+			return pool
+		}()
+	*/
+	// defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
@@ -87,9 +85,20 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/permissions/get-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
-	log.Println("UAM Service started on :5143")
-	err := http.ListenAndServe(":5143", mux)
-	if err != nil {
-		log.Fatalf("UAM Service failed: %v", err)
-	}
+	// portEnv := os.Getenv("UAM_PORT")
+	// if portEnv == "" {
+	// 	portEnv = "5143"
+	// }
+	// log.Printf("UAM Service starting on :%s", portEnv)
+	// err := http.ListenAndServe(":"+portEnv, mux)
+	// if err != nil {
+	// 	log.Fatalf("UAM Service failed: %v", err)
+	// }
 }
+
+/*
+func StartUAMService(db *sql.DB) {
+	mux := http.NewServeMux()
+	RegisterUAMRoutes(mux, db, nil)
+}
+*/

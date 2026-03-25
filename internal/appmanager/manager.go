@@ -19,7 +19,6 @@ import (
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/resource"
 	"CimplrCorpSaas/internal/serviceiface"
-
 	"database/sql"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,6 +29,10 @@ var AuthDB *sql.DB
 var db *sql.DB
 var pgxPool *pgxpool.Pool
 
+var (
+	redisClient interface{} 
+)
+
 func SetDB(database *sql.DB) {
 	db = database
 	AuthDB = database
@@ -38,6 +41,14 @@ func SetDB(database *sql.DB) {
 func SetPgxPool(pool *pgxpool.Pool) {
 	pgxPool = pool
 	api.SetGatewayPool(pool)
+}
+
+func SetRedisClient(client interface{}) {
+	redisClient = client
+}
+
+func GetRedisClient() interface{} {
+	return redisClient
 }
 
 // GetDB returns the database connection

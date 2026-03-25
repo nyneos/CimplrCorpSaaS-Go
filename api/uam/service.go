@@ -19,7 +19,7 @@ func (s *UAMService) Name() string {
 }
 
 func (s *UAMService) Start() error {
-	go StartUAMService(s.db)
+	// go StartUAMService(s.db)
 	return nil
 }
 

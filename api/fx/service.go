@@ -19,7 +19,7 @@ func (s *FXService) Name() string {
 }
 
 func (s *FXService) Start() error {
-	go StartFXService(s.db)
+	// go StartFXService(s.db)
 	return nil
 }
 

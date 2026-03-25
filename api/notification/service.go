@@ -22,7 +22,7 @@ func (s *NotificationService) Name() string {
 }
 
 func (s *NotificationService) Start() error {
-	go StartNotificationService(s.pool, s.db)
+	// go StartNotificationService(s.pool, s.db)
 	return nil
 }
 

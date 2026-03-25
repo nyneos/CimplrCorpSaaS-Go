@@ -1,14 +1,17 @@
 package auth
 
 import (
-	"CimplrCorpSaas/internal/dashboard"
+
 	"CimplrCorpSaas/internal/logger"
 	"CimplrCorpSaas/internal/serviceiface"
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type UserSession struct {
@@ -31,52 +34,39 @@ type failedAttempt struct {
 }
 
 type AuthService struct {
-	db                   *sql.DB
-	maxUsers             int
-	users                map[string]*UserSession
-	SessionTimeout       int
-	MaxLoginAttempts     int
-	AccountLockDuration  int
-	SessionCleanerPeriod int
-	userPointers         map[string]*UserSession
-	mu                   sync.Mutex
-	stopCh               chan struct{}
-	failedAttempts       map[string]*failedAttempt
+	db                  *sql.DB
+	maxUsers            int
+	SessionTimeout      int
+	MaxLoginAttempts    int
+	AccountLockDuration int
+	redisClient         *redis.Client
 }
 
 func NewAuthService(db *sql.DB, maxUsers int, SessionTimeout int, MaxLoginAttempts int, AccountLockDuration int, SessionCleanerPeriod int) serviceiface.Service {
 	return &AuthService{
-		db:                   db,
-		maxUsers:             maxUsers,
-		SessionTimeout:       SessionTimeout,
-		MaxLoginAttempts:     MaxLoginAttempts,
-		AccountLockDuration:  AccountLockDuration,
-		SessionCleanerPeriod: SessionCleanerPeriod,
-		users:                make(map[string]*UserSession),
-		userPointers:         make(map[string]*UserSession),
-		stopCh:               make(chan struct{}),
-		failedAttempts:       make(map[string]*failedAttempt),
+		db:                  db,
+		maxUsers:            maxUsers,
+		SessionTimeout:      SessionTimeout,
+		MaxLoginAttempts:    MaxLoginAttempts,
+		AccountLockDuration: AccountLockDuration,
 	}
 }
 
 func (a *AuthService) Name() string { return "auth" }
 
 func (a *AuthService) Start() error {
-	if a.SessionCleanerPeriod > 0 {
-		go a.sessionCleaner()
-	}
 	return nil
 }
 
 func (a *AuthService) Stop() error {
-	close(a.stopCh)
 	return nil
 }
 
-func (a *AuthService) Login(username, password string, clientIP string) (*UserSession, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *AuthService) SetRedisClient(client *redis.Client) {
+	a.redisClient = client
+}
 
+func (a *AuthService) Login(username, password string, clientIP string) (*UserSession, error) {
 	var dbUserID string
 	var dbName string
 	var dbEmail string
@@ -94,74 +84,58 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		}
 		if logger.GlobalLogger != nil {
 			logger.GlobalLogger.LogAudit(fmt.Sprintf("Login DB error for %s: %v", username, err))
-		} else {
-			fmt.Println("Login DB error:", err)
 		}
 		return nil, errors.New("internal error")
 	}
 
-	// Check if user is already logged in - force logout from all sessions
-	for sid, session := range a.users {
-		if session.IsLoggedIn && session.UserID == dbUserID {
-			if logger.GlobalLogger != nil {
-				if session.ClientIP == clientIP {
-					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s logging in again from same IP - validating credentials", dbEmail))
-				} else {
-					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s is logging in from another device/IP", dbEmail))
+	// Check failed login attempts from Redis
+	if a.MaxLoginAttempts > 0 {
+		ctx := context.Background()
+		faKey := fmt.Sprintf("failed:%s", dbUserID)
+		faData, _ := a.redisClient.Get(ctx, faKey).Result()
+		if faData != "" {
+			var fa failedAttempt
+			if err := json.Unmarshal([]byte(faData), &fa); err == nil {
+				if fa.isLocked && time.Now().Before(fa.unlockAt) {
+					return nil, errors.New("Account has been locked due to multiple failed login attempts")
 				}
 			}
-
-			go func(oldUserID string, reason string) {
-
-				dashboard.SendToUser(oldUserID, []byte(`{"type":"force_logout","reason":"login_from_other_ip"}`))
-
-			}(session.UserID, "re_login")
-
-			delete(a.users, sid)
-			delete(a.userPointers, session.UserID)
-			break
 		}
 	}
 
-	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
-		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit("[ERROR] maximum concurrent users reached for login attempt: " + dbEmail)
-		}
-		return nil, errors.New("maximum concurrent users reached")
-	}
-
-	if a.MaxLoginAttempts > 0 {
-		if fa, ok := a.failedAttempts[dbUserID]; ok {
-			if fa.isLocked && time.Now().Before(fa.unlockAt) {
-				return nil, errors.New("Account has been locked due to multiple failed login attempts")
-			}
-
-			if fa.isLocked && time.Now().After(fa.unlockAt) {
-				fa.isLocked = false
-				fa.count = 0
-			}
-		}
-	}
-
+	// Check password
 	if !dbPassword.Valid || dbPassword.String != password {
 		if a.MaxLoginAttempts > 0 {
-			fa, ok := a.failedAttempts[dbUserID]
-			if !ok {
-				fa = &failedAttempt{count: 0}
-				a.failedAttempts[dbUserID] = fa
+			ctx := context.Background()
+			faKey := fmt.Sprintf("failed:%s", dbUserID)
+			faData, _ := a.redisClient.Get(ctx, faKey).Result()
+			
+			var fa failedAttempt
+			if faData != "" {
+				json.Unmarshal([]byte(faData), &fa)
+			} else {
+				fa = failedAttempt{count: 0}
 			}
+
 			fa.count++
 			fa.lastTry = time.Now()
+			
 			if fa.count >= a.MaxLoginAttempts {
 				fa.isLocked = true
-				if a.AccountLockDuration > 0 {
-					fa.unlockAt = time.Now().Add(time.Duration(a.AccountLockDuration) * time.Minute)
-				} else {
-
-					fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
+				lockDuration := time.Duration(a.AccountLockDuration) * time.Minute
+				if lockDuration <= 0 {
+					lockDuration = 100 * 365 * 24 * time.Hour
 				}
+				fa.unlockAt = time.Now().Add(lockDuration)
+				
+				faJSON, _ := json.Marshal(fa)
+				a.redisClient.Set(ctx, faKey, string(faJSON), lockDuration)
 				return nil, errors.New("Account has been locked due to multiple failed login attempts")
 			}
+
+			faJSON, _ := json.Marshal(fa)
+			a.redisClient.Set(ctx, faKey, string(faJSON), 30*time.Minute)
+			
 			attemptsLeft := a.MaxLoginAttempts - fa.count
 			if attemptsLeft < 0 {
 				attemptsLeft = 0
@@ -171,6 +145,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		return nil, errors.New("Invalid credentials")
 	}
 
+	// Password OK - get role and create session
 	var roleID, roleName, roleCode sql.NullString
 	_ = a.db.QueryRow(`SELECT r.id, r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`, dbUserID).
 		Scan(&roleID, &roleName, &roleCode)
@@ -188,11 +163,20 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		IsLoggedIn:    true,
 	}
 
-	a.users[sessionID] = session
-	a.userPointers[dbUserID] = session
+	// Store session in Redis
+	if a.redisClient != nil {
+		ctx := context.Background()
+		sessionJSON, _ := json.Marshal(session)
+		ttl := time.Duration(a.SessionTimeout) * time.Minute
+		if ttl <= 0 {
+			ttl = 60 * time.Minute
+		}
+		a.redisClient.Set(ctx, fmt.Sprintf("session:%s", sessionID), string(sessionJSON), ttl)
 
-	if a.MaxLoginAttempts > 0 {
-		delete(a.failedAttempts, dbUserID)
+		// Clear failed attempts
+		if a.MaxLoginAttempts > 0 {
+			a.redisClient.Del(ctx, fmt.Sprintf("failed:%s", dbUserID))
+		}
 	}
 
 	if logger.GlobalLogger != nil {
@@ -203,23 +187,27 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 }
 
 func (a *AuthService) Logout(UserID string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	found := false
-	for sessionID, session := range a.users {
-		if session.UserID == UserID {
-
-			delete(a.users, sessionID)
-			delete(a.userPointers, session.UserID)
-			found = true
-			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged out: %s (%s)", session.UserID, session.Email))
+	if a.redisClient == nil {
+		return errors.New("Redis not available")
+	}
+	ctx := context.Background()
+	// Scan all session keys for this userID and delete them
+	iter := a.redisClient.Scan(ctx, 0, "session:*", 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		data, err := a.redisClient.Get(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		var session UserSession
+		if err := json.Unmarshal([]byte(data), &session); err == nil {
+			if session.UserID == UserID {
+				a.redisClient.Del(ctx, key)
+				if logger.GlobalLogger != nil {
+					logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged out: %s (%s)", session.UserID, session.Email))
+				}
 			}
 		}
-	}
-	if !found {
-		return errors.New("no active session found for user")
 	}
 	return nil
 }
@@ -237,52 +225,24 @@ func GetActiveSessions() []*UserSession {
 }
 
 func (a *AuthService) GetActiveSessions() []*UserSession {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	sessions := make([]*UserSession, 0, len(a.users))
-	for _, s := range a.users {
-		sessions = append(sessions, s)
+	if a.redisClient == nil {
+		return nil
 	}
-	return sessions
-}
-
-func (a *AuthService) sessionCleaner() {
-	period := time.Duration(a.SessionCleanerPeriod) * time.Minute
-	if period <= 0 {
-		return
-	}
-	ticker := time.NewTicker(period)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-a.stopCh:
-			return
-		case <-ticker.C:
-			if a.SessionTimeout > 0 {
-				cutoff := time.Now().Add(-time.Duration(a.SessionTimeout) * time.Minute)
-				a.mu.Lock()
-				for sid, sess := range a.users {
-					if sess.LastLoginTime != "" {
-						if t, err := time.Parse(time.RFC3339, sess.LastLoginTime); err == nil {
-							if t.Before(cutoff) {
-								// Send SSE notification before removing session
-								go func(userID string) {
-									dashboard.SendToUser(userID, []byte(`{"type":"session_expired","reason":"session_expired"}`))
-								}(sess.UserID)
-
-								delete(a.users, sid)
-								delete(a.userPointers, sess.UserID)
-								if logger.GlobalLogger != nil {
-									logger.GlobalLogger.LogAudit(fmt.Sprintf("Session expired and removed: %s (user: %s)", sid, sess.Email))
-								}
-							}
-						}
-					}
-				}
-				a.mu.Unlock()
-			}
+	ctx := context.Background()
+	var sessions []*UserSession
+	iter := a.redisClient.Scan(ctx, 0, "session:*", 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		data, err := a.redisClient.Get(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		var session UserSession
+		if err := json.Unmarshal([]byte(data), &session); err == nil {
+			sessions = append(sessions, &session)
 		}
 	}
+	return sessions
 }
 
 func generateSessionID() string {
@@ -290,17 +250,27 @@ func generateSessionID() string {
 }
 
 func (a *AuthService) LogDifferentIPRequest(userID string, clientIP string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	for _, s := range a.users {
-		if s.UserID == userID && s.IsLoggedIn {
-			if s.ClientIP != clientIP {
-				if logger.GlobalLogger != nil {
-					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s made a request from different IP: %s (session IP: %s)", userID, clientIP, s.ClientIP))
+	if a.redisClient == nil {
+		return
+	}
+	ctx := context.Background()
+	iter := a.redisClient.Scan(ctx, 0, "session:*", 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		data, err := a.redisClient.Get(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		var session UserSession
+		if err := json.Unmarshal([]byte(data), &session); err == nil {
+			if session.UserID == userID && session.IsLoggedIn {
+				if session.ClientIP != clientIP {
+					if logger.GlobalLogger != nil {
+						logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s made a request from different IP: %s (session IP: %s)", userID, clientIP, session.ClientIP))
+					}
 				}
+				break
 			}
-			break
 		}
 	}
 }

@@ -12,28 +12,27 @@ import (
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/travel"
-	"context"
 	"database/sql"
-	"fmt"
-	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartCashService(db *sql.DB) {
-	mux := http.NewServeMux()
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
-	}
+func RegisterCashRoutes(mux *http.ServeMux, db *sql.DB, pgxPool *pgxpool.Pool) {
+	// mux := http.NewServeMux()
+	/*
+		old local pgx pool creation (replaced by shared pool from cmd/main.go):
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+		host := os.Getenv("DB_HOST")
+		dbPort := os.Getenv("DB_PORT")
+		name := os.Getenv("DB_NAME")
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
+		pgxPool, err := pgxpool .New(context.Background(), dsn)
+		if err != nil {
+			log.Fatalf("failed to connect to pgxpool DB: %v", err)
+		}
+	*/
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db, pgxPool)))
 	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db, pgxPool)))
 
@@ -200,9 +199,20 @@ func StartCashService(db *sql.DB) {
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))
 	})
-	log.Println("Cash Service started on :6143")
-	err = http.ListenAndServe(":6143", mux)
-	if err != nil {
-		log.Fatalf("Cash Service failed: %v", err)
-	}
+	// servicePort := os.Getenv("CASH_PORT")
+	// if servicePort == "" {
+	// 	servicePort = "6143"
+	// }
+	// log.Printf("Cash Service starting on :%s", servicePort)
+	// err = http.ListenAndServe(":"+servicePort, mux)
+	// if err != nil {
+	// 	log.Fatalf("Cash Service failed: %v", err)
+	// }
 }
+
+/*
+func StartCashService(db *sql.DB) {
+	mux := http.NewServeMux()
+	RegisterCashRoutes(mux, db, nil)
+}
+*/

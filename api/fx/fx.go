@@ -1,41 +1,43 @@
 package fx
 
 import (
-	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/fx/exposures"
 	"CimplrCorpSaas/api/fx/forwards"
 	v91 "CimplrCorpSaas/api/fx/v91"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartFXService(db *sql.DB) {
-	mux := http.NewServeMux()
+func RegisterFXRoutes(mux *http.ServeMux, db *sql.DB, pgxPool *pgxpool.Pool) {
+	// mux := http.NewServeMux()
 	mux.HandleFunc("/fx/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("FX Service is active"))
 	})
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
 
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	if user != "" && pass != "" && host != "" && port != "" && name != "" {
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	/*
+		old local pgx pool creation (replaced by shared pool from cmd/main.go):
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+		host := os.Getenv("DB_HOST")
+		port := os.Getenv("DB_PORT")
+		name := os.Getenv("DB_NAME")
+		if user != "" && pass != "" && host != "" && port != "" && name != "" {
+			dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
 
-		// create a shared pgx pool once for the v91 and prevalidation middleware
-		pgxPool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			log.Fatalf("failed to connect to pgxpool DB: %v", err)
+			// create a shared pgx pool once for the v91 and prevalidation middleware
+			pgxPool, err := pgxpool .New(context.Background(), dsn)
+			if err != nil {
+				log.Fatalf("failed to connect to pgxpool DB: %v", err)
+			}
 		}
+	*/
+
+	if pgxPool != nil {
 
 		// wrapper calls the v91 handler using the shared pool
 		v91Wrapper := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,101 +45,133 @@ func StartFXService(db *sql.DB) {
 			h.ServeHTTP(w, r)
 		})
 
-		// dashboard wrappers: create per-request pool and call the v91 dashboard handlers
+		// dashboard wrappers now reuse the shared injected pool
 		v91DashAll := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.GetAllExposures(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.GetAllExposures(pool)
+			*/
+			h := v91.GetAllExposures(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
 		v91DashByYear := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.GetExposuresByYear(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 dashboard: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.GetExposuresByYear(pool)
+			*/
+			h := v91.GetExposuresByYear(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
 		v91BulkUpdate := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 bulk-update: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.BulkUpdateValueDates(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 bulk-update: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.BulkUpdateValueDates(pool)
+			*/
+			h := v91.BulkUpdateValueDates(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
 		v91BulkApprove := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 bulk-approve: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.BulkApproveExposures(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 bulk-approve: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.BulkApproveExposures(pool)
+			*/
+			h := v91.BulkApproveExposures(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
 		v91BulkReject := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 bulk-reject: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.BulkRejectExposures(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 bulk-reject: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.BulkRejectExposures(pool)
+			*/
+			h := v91.BulkRejectExposures(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
 		v91BulkDelete := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 bulk-delete: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.BulkDeleteExposures(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 bulk-delete: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.BulkDeleteExposures(pool)
+			*/
+			h := v91.BulkDeleteExposures(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
 		v91BatchesMinimal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 batches minimal: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.GetExposureUploadBatchesMinimal(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 batches minimal: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.GetExposureUploadBatchesMinimal(pool)
+			*/
+			h := v91.GetExposureUploadBatchesMinimal(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
-		// per-request wrapper for EditAllocationHandler (v91)
+		// wrapper for EditAllocationHandler (v91) now reuses the shared pool
 		v91EditAllocation := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			pool, err := pgxpool.New(context.Background(), dsn)
-			if err != nil {
-				log.Printf("v91 edit-allocation: failed to create pgx pool: %v", err)
-				http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
-				return
-			}
-			defer pool.Close()
-			h := v91.EditAllocationsHandler(pool)
+			/*
+				old per-request pool creation:
+				pool, err := pgxpool .New(context.Background(), dsn)
+				if err != nil {
+					log.Printf("v91 edit-allocation: failed to create pgx pool: %v", err)
+					http.Error(w, constants.ErrDBConnection, http.StatusInternalServerError)
+					return
+				}
+				defer pool.Close()
+				h := v91.EditAllocationsHandler(pool)
+			*/
+			h := v91.EditAllocationsHandler(pgxPool)
 			h.ServeHTTP(w, r)
 		})
 
@@ -205,7 +239,7 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/forwards/upload-bank-multi", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
 
 	} else {
-		log.Println("v91 uploader route not registered: DB env vars not set")
+		log.Println("v91 uploader route not registered: shared pgxPool is nil")
 	}
 	/*-------------     exposures    ;)      --------------------*/
 	// /*upload */
@@ -262,9 +296,20 @@ func StartFXService(db *sql.DB) {
 	// mux.Handle("/fx/forwards/upload-confirmations-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadForwardConfirmationsMulti(db)))
 	// mux.Handle("/fx/forwards/upload-bank-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
 
-	log.Println("FX Service started on :3143")
-	err := http.ListenAndServe(":3143", mux)
-	if err != nil {
-		log.Fatalf("FX Service failed: %v", err)
-	}
+	// portEnv := os.Getenv("FX_PORT")
+	// if portEnv == "" {
+	// 	portEnv = "3143"
+	// }
+	// log.Printf("FX Service starting on :%s", portEnv)
+	// err := http.ListenAndServe(":"+portEnv, mux)
+	// if err != nil {
+	// 	log.Fatalf("FX Service failed: %v", err)
+	// }
 }
+
+/*
+func StartFXService(db *sql.DB) {
+	mux := http.NewServeMux()
+	RegisterFXRoutes(mux, db, nil)
+}
+*/

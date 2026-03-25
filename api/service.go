@@ -15,7 +15,7 @@ func (s *GatewayService) Name() string {
 }
 
 func (s *GatewayService) Start() error {
-	go StartGateway()
+	// go StartGateway()
 	return nil
 }
 

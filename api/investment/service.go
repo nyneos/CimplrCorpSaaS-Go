@@ -24,7 +24,7 @@ func (s *InvestmentService) Name() string {
 }
 
 func (s *InvestmentService) Start() error {
-	go StartInvestmentService(s.pool, s.db)
+	// go StartInvestmentService(s.pool, s.db)
 	return nil
 }
 

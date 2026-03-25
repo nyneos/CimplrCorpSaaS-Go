@@ -24,28 +24,27 @@ import (
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
 	ticker "CimplrCorpSaas/api/dash/ticker"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"context"
 	"database/sql"
-	"fmt"
-	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartDashService(db *sql.DB) {
-	mux := http.NewServeMux()
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
-	}
+func RegisterDashRoutes(mux *http.ServeMux, db *sql.DB, pgxPool *pgxpool.Pool) {
+	// mux := http.NewServeMux()
+	/*
+		old local pgx pool creation (replaced by shared pool from cmd/main.go):
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+		host := os.Getenv("DB_HOST")
+		port := os.Getenv("DB_PORT")
+		name := os.Getenv("DB_NAME")
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+		pgxPool, err := pgxpool .New(context.Background(), dsn)
+		if err != nil {
+			log.Fatalf("failed to connect to pgxpool DB: %v", err)
+		}
+	*/
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", middlewares.PreValidationMiddleware(pgxPool)(statementstatus.GetStatementStatusHandler(pgxPool)))
 	mux.Handle("/dash/transaction-pool", middlewares.PreValidationMiddleware(pgxPool)(commonpool.GetTransactionPoolHandler(db)))
@@ -197,21 +196,33 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/planned-inflow-outflow", middlewares.PreValidationMiddleware(pgxPool)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
 
 	// ── Notification Dashboard ────────────────────────────────────────────────
-	mux.Handle("/dash/notification/kpi",               middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetKPI(pgxPool)))
-	mux.Handle("/dash/notification/logs",              middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetLogs(pgxPool)))
+	mux.Handle("/dash/notification/kpi", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetKPI(pgxPool)))
+	mux.Handle("/dash/notification/logs", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetLogs(pgxPool)))
 	mux.Handle("/dash/notification/channel-breakdown", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetChannelBreakdown(pgxPool)))
-	mux.Handle("/dash/notification/hourly-trend",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetHourlyTrend(pgxPool)))
-	mux.Handle("/dash/notification/top-events",        middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTopEvents(pgxPool)))
-	mux.Handle("/dash/notification/timeline",          middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTimeline(pgxPool)))
-	mux.Handle("/dash/notification/retry-stats",       middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetRetryStats(pgxPool)))
-	mux.Handle("/dash/notification/send-history",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetSendHistory(pgxPool)))
-	mux.Handle("/dash/notification/provider-stats",    middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetProviderStats(pgxPool)))
-	mux.Handle("/dash/notification/event-config",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetEventConfig(pgxPool)))
-	mux.Handle("/dash/notification/overview",          middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
+	mux.Handle("/dash/notification/hourly-trend", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetHourlyTrend(pgxPool)))
+	mux.Handle("/dash/notification/top-events", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTopEvents(pgxPool)))
+	mux.Handle("/dash/notification/timeline", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTimeline(pgxPool)))
+	mux.Handle("/dash/notification/retry-stats", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetRetryStats(pgxPool)))
+	mux.Handle("/dash/notification/send-history", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetSendHistory(pgxPool)))
+	mux.Handle("/dash/notification/provider-stats", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetProviderStats(pgxPool)))
+	mux.Handle("/dash/notification/event-config", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetEventConfig(pgxPool)))
+	mux.Handle("/dash/notification/overview", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
-	log.Println("Dashboard Service started on :4143")
-	err = http.ListenAndServe(":4143", mux)
-	if err != nil {
-		log.Fatalf("Dashboard Service failed: %v", err)
-	}
+	// port = os.Getenv("DASH_PORT")
+	// if port == "" {
+	// 	port = "4143"
+	// }
+	//
+	// log.Printf("Dashboard Service started on :%s", port)
+	// err = http.ListenAndServe(":"+port, mux)
+	// if err != nil {
+	// 	log.Fatalf("Dashboard Service failed: %v", err)
+	// }
 }
+
+/*
+func StartDashService(db *sql.DB) {
+	mux := http.NewServeMux()
+	RegisterDashRoutes(mux, db, nil)
+}
+*/

@@ -20,7 +20,7 @@ func (s *DashService) Name() string {
 }
 
 func (s *DashService) Start() error {
-	go StartDashService(s.db)
+	// go StartDashService(s.db)
 	return nil
 }
 

@@ -19,7 +19,7 @@ func (s *CashService) Name() string {
 }
 
 func (s *CashService) Start() error {
-	go StartCashService(s.db)
+	// go StartCashService(s.db)
 	return nil
 }
 

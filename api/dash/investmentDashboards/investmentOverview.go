@@ -3,6 +3,7 @@ package investmentdashboards
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
 )
 
 // TransactionDetail is the common structure for transaction-related data
@@ -756,37 +758,40 @@ func getFinancialYearStart(t time.Time) time.Time {
 
 // MFAPI cache to reduce external HTTP requests
 type mfapiCacheEntry struct {
-	Name      string
-	NAV       float64
-	PrevNAV   float64
-	FetchedAt time.Time
+	Name    string  `json:"name"`
+	NAV     float64 `json:"nav"`
+	PrevNAV float64 `json:"prev_nav"`
 }
 
 var (
-	mfapiCacheMu  sync.RWMutex
-	mfapiCache    = make(map[string]mfapiCacheEntry)
 	mfapiCacheTTL = 90 * time.Second
 )
 
 // shared HTTP client with timeout
 var httpClient = &http.Client{Timeout: 5 * time.Second}
 
-// getMFAPIData fetches latest and previous NAV from MFAPI with caching.
+// getMFAPIData fetches latest and previous NAV from MFAPI with Redis caching.
 // Returns scheme name (if available), nav and prevNav (0 if not found).
-// getMFAPIData fetches latest and previous NAV from MFAPI with caching and returns
-// (schemeName, latestNav, prevNav, latestDate, prevDate)
 func getMFAPIData(code string) (string, float64, float64, string, string) {
 	if code == "" {
 		return "", 0, 0, "", ""
 	}
 
-	// Check cache
-	mfapiCacheMu.RLock()
-	entry, ok := mfapiCache[code]
-	mfapiCacheMu.RUnlock()
-	if ok && time.Since(entry.FetchedAt) < mfapiCacheTTL {
-		return entry.Name, entry.NAV, entry.PrevNAV, "", ""
+	redisClient := api.GetRedisClient()
+
+	// Try Redis cache first
+	if redisClient != nil {
+		ctx := context.Background()
+		cacheKey := fmt.Sprintf("mfapi_cache:%s", code)
+		data, err := redisClient.Get(ctx, cacheKey).Result()
+		if err == nil {
+			var entry mfapiCacheEntry
+			if json.Unmarshal([]byte(data), &entry) == nil {
+				return entry.Name, entry.NAV, entry.PrevNAV, "", ""
+			}
+		}
 	}
+
 	apiURL := fmt.Sprintf("https://api.mfapi.in/mf/%s", code)
 	var body []byte
 	var respErr error
@@ -841,10 +846,15 @@ func getMFAPIData(code string) (string, float64, float64, string, string) {
 		}
 	}
 
-	// Store in cache
-	mfapiCacheMu.Lock()
-	mfapiCache[code] = mfapiCacheEntry{Name: name, NAV: nav, PrevNAV: prev, FetchedAt: time.Now()}
-	mfapiCacheMu.Unlock()
+	// Store in Redis cache
+	if redisClient != nil {
+		ctx := context.Background()
+		cacheKey := fmt.Sprintf("mfapi_cache:%s", code)
+		entry := mfapiCacheEntry{Name: name, NAV: nav, PrevNAV: prev}
+		if entryJSON, err := json.Marshal(entry); err == nil {
+			redisClient.Set(ctx, cacheKey, string(entryJSON), mfapiCacheTTL)
+		}
+	}
 
 	return name, nav, prev, navDate, prevDate
 }

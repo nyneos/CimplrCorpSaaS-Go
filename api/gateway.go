@@ -24,17 +24,28 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // gatewayPool is the pgxpool used by the SSE server for in-app notifications.
 // Set before calling StartGateway via SetGatewayPool.
 var gatewayPool *pgxpool.Pool
+var redisClient *redis.Client
 
 // SetGatewayPool stores the pgxpool so that StartGateway can pass it to NewSSEServer.
 func SetGatewayPool(pool *pgxpool.Pool) {
 	gatewayPool = pool
+}
+
+// SetRedisClient stores the Redis client for SSE and other services.
+func SetRedisClient(client *redis.Client) {
+	redisClient = client
+}
+
+// GetRedisClient returns the stored Redis client.
+func GetRedisClient() *redis.Client {
+	return redisClient
 }
 
 // CORS and common header constants
@@ -527,12 +538,15 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// StartGateway starts the API gateway server
-func StartGateway() {
-	mux := http.NewServeMux()
+// RegisterGatewayRoutes registers gateway-owned routes on the shared mux.
+func RegisterGatewayRoutes(mux *http.ServeMux) {
+	// mux := http.NewServeMux()
 
 	// Initialize and register the SSE server at /events
 	sseServer := dashboard.NewSSEServer(gatewayPool)
+	if redisClient != nil {
+		sseServer.SetRedisClient(redisClient)
+	}
 	if gatewayPool != nil {
 		sseServer.OnConnect = func(userID string) {
 			if err := dinojobs.PushUnreadCountToUser(context.Background(), gatewayPool, userID); err != nil {
@@ -698,13 +712,13 @@ func StartGateway() {
 	mux.HandleFunc("/auth/logout", withCORS(LogoutHandler))
 	mux.HandleFunc("/get-sessions", withCORS(GetSessionsHandler))
 	mux.HandleFunc("/auth/session", withCORS(GetSessionByUserIDHandler))
-	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
-	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
-	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
-	mux.HandleFunc("/cash/", createReverseProxy("http://localhost:6143"))
-	mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
-	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
-	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
+	// mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
+	// mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
+	// mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
+	// mux.HandleFunc("/cash/", createReverseProxy("http://localhost:6143"))
+	// mux.HandleFunc("/master/", createReverseProxy("http://localhost:2143"))
+	// mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
+	// mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -723,7 +737,29 @@ func StartGateway() {
 		w.Write([]byte("404 - Route not found"))
 	})
 
-	log.Println("API Gateway started on :8081")
+	// log.Println("API Gateway starting...")
+	// port := os.Getenv("PORT")
+	// if port == "" {
+	// 	port = "8081"
+	// }
+	// log.Printf("API Gateway listening on :%s", port)
+	// handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
+	// cert := os.Getenv("TLS_CERT")
+	// key := os.Getenv("TLS_KEY")
+	// var err error
+	// if cert != "" && key != "" {
+	// 	err = http.ListenAndServeTLS(":"+port, cert, key, handler)
+	// } else {
+	// 	log.Printf("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
+	// 	err = http.ListenAndServe(":"+port, handler)
+	// }
+	// if err != nil {
+	// 	log.Fatalf("Gateway server failed: %v", err)
+	// }
+}
+
+func ServeGateway(mux *http.ServeMux) error {
+	log.Println("API Gateway starting...")
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8081"
@@ -732,14 +768,18 @@ func StartGateway() {
 	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
-	var err error
 	if cert != "" && key != "" {
-		err = http.ListenAndServeTLS(":"+port, cert, key, handler)
-	} else {
-		log.Printf("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
-		err = http.ListenAndServe(":"+port, handler)
+		return http.ListenAndServeTLS(":"+port, cert, key, handler)
 	}
-	if err != nil {
+	log.Printf("TLS_CERT or TLS_KEY not set; starting HTTP on :%s", port)
+	return http.ListenAndServe(":"+port, handler)
+}
+
+// StartGateway starts the API gateway server
+func StartGateway() {
+	mux := http.NewServeMux()
+	RegisterGatewayRoutes(mux)
+	if err := ServeGateway(mux); err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
 	}
 }

@@ -3,13 +3,16 @@ package dashboard
 import (
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 type SSEClient struct {
@@ -21,13 +24,12 @@ type SSEClient struct {
 }
 
 type SSEServer struct {
-	mu         sync.RWMutex
-	clients    map[string]*SSEClient
-	pingTicker *time.Ticker
-	stopCh     chan struct{}
-	// OnConnect is called in a goroutine after a user connects.
-	// Typically wired to jobs.PushUnreadCountToUser to avoid an import cycle.
-	OnConnect func(userID string)
+	mu          sync.RWMutex
+	clients     map[string]*SSEClient
+	pingTicker  *time.Ticker
+	stopCh      chan struct{}
+	redisClient *redis.Client
+	OnConnect   func(userID string)
 }
 
 var globalSSEServer *SSEServer
@@ -44,6 +46,14 @@ func NewSSEServer(pool *pgxpool.Pool) *SSEServer {
 	go s.pingClients()
 
 	return s
+}
+
+func (s *SSEServer) SetRedisClient(client *redis.Client) {
+	s.redisClient = client
+	// Start Redis subscriber goroutine
+	if client != nil {
+		go s.subscribeToRedisEvents()
+	}
 }
 
 func GetSSEServer() *SSEServer {
@@ -184,7 +194,43 @@ func (s *SSEServer) Stop() {
 	s.mu.Unlock()
 }
 
-// SendToUser sends a message to a specific user via SSE
+func (s *SSEServer) subscribeToRedisEvents() {
+	if s.redisClient == nil {
+		return
+	}
+	pubsub := s.redisClient.Subscribe(context.Background(), "sse")
+	defer pubsub.Close()
+
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case msg := <-pubsub.Channel():
+			if msg == nil {
+				continue
+			}
+			var msgObj map[string]interface{}
+			if err := json.Unmarshal([]byte(msg.Payload), &msgObj); err != nil {
+				continue
+			}
+
+			userID, ok := msgObj["userID"].(string)
+			if !ok {
+				continue
+			}
+
+			s.mu.RLock()
+			client, exists := s.clients[userID]
+			s.mu.RUnlock()
+
+			if exists {
+				s.sendToClient(client, msgObj["data"])
+			}
+		}
+	}
+}
+
+// SendToUser sends a message to a specific user via SSE (via Redis Pub/Sub)
 func SendToUser(userID string, message []byte) {
 	if globalSSEServer == nil {
 		return
@@ -192,7 +238,6 @@ func SendToUser(userID string, message []byte) {
 
 	var data interface{}
 	if err := json.Unmarshal(message, &data); err != nil {
-		// If message is not JSON, wrap it
 		data = map[string]interface{}{
 			"type":    "message",
 			"content": string(message),
@@ -200,25 +245,36 @@ func SendToUser(userID string, message []byte) {
 		}
 	}
 
-	globalSSEServer.mu.RLock()
-	client, exists := globalSSEServer.clients[userID]
-	globalSSEServer.mu.RUnlock()
-
-	if !exists {
-		fmt.Printf("[SSE] User %s not connected\n", userID)
-		return
-	}
-
-	err := globalSSEServer.sendToClient(client, data)
-	if err != nil {
-		fmt.Printf("[SSE] Failed to send message to user %s: %v\n", userID, err)
-		// Remove failed client
-		globalSSEServer.mu.Lock()
-		if globalSSEServer.clients[userID] == client {
-			delete(globalSSEServer.clients, userID)
-			close(client.done)
+	// Publish to Redis Pub/Sub for all instances
+	if globalSSEServer.redisClient != nil {
+		ctx := context.Background()
+		msgObj := map[string]interface{}{
+			"userID": userID,
+			"data":   data,
 		}
-		globalSSEServer.mu.Unlock()
+		msgJSON, _ := json.Marshal(msgObj)
+		globalSSEServer.redisClient.Publish(ctx, "sse", string(msgJSON))
+	} else {
+		// Fallback to local delivery if Redis not available
+		globalSSEServer.mu.RLock()
+		client, exists := globalSSEServer.clients[userID]
+		globalSSEServer.mu.RUnlock()
+
+		if !exists {
+			fmt.Printf("[SSE] User %s not connected\n", userID)
+			return
+		}
+
+		err := globalSSEServer.sendToClient(client, data)
+		if err != nil {
+			fmt.Printf("[SSE] Failed to send message to user %s: %v\n", userID, err)
+			globalSSEServer.mu.Lock()
+			if globalSSEServer.clients[userID] == client {
+				delete(globalSSEServer.clients, userID)
+				close(client.done)
+			}
+			globalSSEServer.mu.Unlock()
+		}
 	}
 }
 

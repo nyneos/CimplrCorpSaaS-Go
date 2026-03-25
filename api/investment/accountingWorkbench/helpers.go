@@ -1,31 +1,28 @@
 package accountingworkbench
 
 import (
+	"CimplrCorpSaas/api"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-)
-
-// Global settings cache
-var (
-	globalSettings *SettingsCache
-	settingsMux    sync.RWMutex
+	// "github.com/redis/go-redis/v9"
 )
 
 // SettingsCache holds frequently used settings
 type SettingsCache struct {
-	UnitsPrecision    int
-	NAVPrecision      int
-	CurrencyPrecision int
-	RoundingMode      string
+	UnitsPrecision    int    `json:"units_precision"`
+	NAVPrecision      int    `json:"nav_precision"`
+	CurrencyPrecision int    `json:"currency_precision"`
+	RoundingMode      string `json:"rounding_mode"`
 }
 
-// LoadSettings fetches settings from the single-row accounting_setting table  
+// LoadSettings fetches settings from the single-row accounting_setting table and stores in Redis
 func LoadSettings(ctx context.Context, pool *pgxpool.Pool) (*SettingsCache, error) {
 	query := `
 		SELECT units_precision, nav_precision, currency_precision, rounding_mode
@@ -44,29 +41,39 @@ func LoadSettings(ctx context.Context, pool *pgxpool.Pool) (*SettingsCache, erro
 		return nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	// Update global cache
-	settingsMux.Lock()
-	globalSettings = &cache
-	settingsMux.Unlock()
+	// Store in Redis with 1 hour TTL
+	redisClient := api.GetRedisClient()
+	if redisClient != nil {
+		cacheJSON, _ := json.Marshal(cache)
+		redisClient.Set(ctx, "settings:cache", string(cacheJSON), 1*time.Hour)
+	}
 
 	return &cache, nil
 }
 
-// GetCachedSettings returns the cached settings (or loads if not cached)
+// GetCachedSettings returns cached settings from Redis (or loads from DB if miss)
 func GetCachedSettings() *SettingsCache {
-	settingsMux.RLock()
-	defer settingsMux.RUnlock()
-	
-	if globalSettings == nil {
-		// Return default values if not loaded
-		return &SettingsCache{
-			UnitsPrecision:    3,
-			NAVPrecision:      4,
-			CurrencyPrecision: 2,
-			RoundingMode:      "BANKERS",
+	ctx := context.Background()
+	redisClient := api.GetRedisClient()
+
+	// Try Redis first
+	if redisClient != nil {
+		data, err := redisClient.Get(ctx, "settings:cache").Result()
+		if err == nil {
+			var cache SettingsCache
+			if json.Unmarshal([]byte(data), &cache) == nil {
+				return &cache
+			}
 		}
 	}
-	return globalSettings
+
+	// Return defaults if not found
+	return &SettingsCache{
+		UnitsPrecision:    3,
+		NAVPrecision:      4,
+		CurrencyPrecision: 2,
+		RoundingMode:      "BANKERS",
+	}
 }
 
 // RoundUnits rounds units based on precision and rounding mode
