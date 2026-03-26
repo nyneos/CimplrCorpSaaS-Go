@@ -222,6 +222,111 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			records = append(records, row)
 		}
 
+		// If no records found, and no entity/bank filter was provided, return all ACTIVE FDs (ignore date window).
+		if len(records) == 0 && req.EntityID == "" && req.BankID == "" {
+			// Query without the date condition to return all active FDs
+			allWhere := "m.is_deleted = false AND m.fd_status IN ('ACTIVE','MATURED')"
+			var totalAll int
+			_ = pool.QueryRow(ctx,
+				"SELECT COUNT(DISTINCT m.fd_id) FROM investment.fd_master m LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id WHERE "+allWhere).Scan(&totalAll)
+
+			allSQL := `
+				SELECT
+				  m.fd_id, m.booking_id, m.confirmation_id,
+				  COALESCE(m.bank_id,'') AS bank_id,
+				  COALESCE(m.bank_name,'') AS bank_name,
+				  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
+				  m.fd_status, m.principal_amount, m.interest_rate, m.interest_type_code,
+				  m.tenure_days, m.start_date, m.maturity_date,
+				  COALESCE(m.maturity_instructions,'PENDING') AS maturity_instructions,
+				  COALESCE(m.auto_renewal, false) AS auto_renewal,
+				  COALESCE(m.day_count_code,'') AS day_count_convention,
+				  (m.maturity_date - CURRENT_DATE) AS days_to_maturity,
+				  COALESCE(b.entity_id,'') AS entity_id,
+				  COALESCE(b.entity_name,'') AS entity_name,
+				  COALESCE(b.frequency_id,'') AS frequency_id,
+				  COALESCE(b.source_account_id,'') AS source_account_id,
+				  COALESCE(b.tds_plan_id,'') AS tds_plan_id,
+				  COALESCE(c.confirmation_status,'') AS confirmation_status,
+				  COALESCE(c.confirmation_received_date::text,'') AS confirmation_date,
+				  COALESCE(c.bank_fd_ref_no,'') AS bank_fd_reference,
+				  COALESCE(al.total_interest_accrued, 0) AS total_interest_accrued,
+				  COALESCE(al.total_tds_accrued, 0) AS total_tds_accrued,
+				  COALESCE(p.penalty_value, 0) AS penalty_value,
+				  COALESCE(p.penalty_type,'NONE') AS penalty_type,
+				  COALESCE(p.no_interest_if_withdrawn_before, 0) AS no_interest_min_days,
+				  COALESCE(cr.closure_request_id,'') AS closure_request_id,
+				  COALESCE(cr.closure_type,'') AS closure_type,
+				  COALESCE(cr.closure_status,'') AS closure_status,
+				  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
+				  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event
+				FROM investment.fd_master m
+				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+				LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = m.confirmation_id
+				LEFT JOIN LATERAL (
+				  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued,
+						 SUM(COALESCE(tds_deducted_in_period,0)) AS total_tds_accrued
+				  FROM investment.fd_accrual_ledger
+				  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
+				) al ON true
+				LEFT JOIN LATERAL (
+				  SELECT penalty_value, penalty_type, no_interest_if_withdrawn_before
+				  FROM investment.fd_penalty_structure_master ps
+				  WHERE ps.bank_code = m.bank_id AND COALESCE(ps.is_deleted,false)=false
+				  ORDER BY ps.penalty_value DESC LIMIT 1
+				) p ON true
+				LEFT JOIN LATERAL (
+				  SELECT closure_request_id, closure_type, closure_status
+				  FROM investment.fd_closure_request
+				  WHERE fd_id = m.fd_id AND is_deleted=false
+				  ORDER BY created_at DESC LIMIT 1
+				) cr ON true
+				LEFT JOIN LATERAL (
+				  SELECT COUNT(*) AS total_periods, MAX(event_date) AS last_event_date
+				  FROM investment.fd_cashflow_schedule WHERE fd_id = m.fd_id
+				) cf ON true
+				WHERE ` + allWhere + `
+				ORDER BY m.maturity_date ASC
+				LIMIT $1 OFFSET $2`
+
+			rowsAll, err := pool.Query(ctx, allSQL, req.PageSize, offset)
+			if err != nil {
+				api.LogError("[FDClosure] GetFDsNearMaturity (all) query error: %v", err)
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch maturity dashboard")
+				return
+			}
+			defer rowsAll.Close()
+
+			records = []map[string]interface{}{}
+			for rowsAll.Next() {
+				vals, _ := rowsAll.Values()
+				colDescs := rowsAll.FieldDescriptions()
+				row := make(map[string]interface{}, len(colDescs))
+				for i, col := range colDescs {
+					row[string(col.Name)] = vals[i]
+				}
+				records = append(records, row)
+			}
+
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"records": records, "total": totalAll, "page": req.Page,
+				"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+			})
+			api.LogInfo("[FDClosure] GetFDsNearMaturity (all active) returned %d/%d by %s", len(records), totalAll, userEmail)
+			return
+		}
+
+		if len(records) == 0 {
+			// No results for the provided filters / window — return clear human-readable message
+			msg := fmt.Sprintf("No FDs found in the maturity window of %d day(s) for entity=%s bank=%s", req.DaysAhead, firstNonEmpty(req.EntityID, "ALL"), firstNonEmpty(req.BankID, "ALL"))
+			api.RespondWithPayload(w, false, msg, map[string]interface{}{
+				"records": records, "total": totalCount, "page": req.Page,
+				"page_size": req.PageSize, "days_ahead": req.DaysAhead,
+			})
+			api.LogInfo("[FDClosure] GetFDsNearMaturity: no records for %s — by %s", msg, userEmail)
+			return
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"records": records, "total": totalCount, "page": req.Page,
 			"page_size": req.PageSize, "days_ahead": req.DaysAhead,
