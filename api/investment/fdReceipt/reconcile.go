@@ -93,7 +93,7 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 		}
 
 		// Step 5: Insert result
-		resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, matchStatus, matchingBasis, variance, variancePct, hasException, cashflowID, accrualID, cashflowAmt, accrualAmt)
+		resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, matchStatus, matchingBasis, variance, variancePct, hasException, cashflowID, accrualID, cashflowAmt, rec.Gross)
 		if rErr != nil {
 			continue
 		}
@@ -212,7 +212,7 @@ func findMatchingCashflow(ctx context.Context, pool *pgxpool.Pool, rec ReceiptRo
 		  AND event_type = 'INTEREST_RECEIPT'
 		  AND COALESCE(receipt_cleared, false) = false
 		  AND COALESCE(is_deleted, false) = false
-		ORDER BY ABS(EXTRACT(EPOCH FROM (event_date - $2::date)))
+		ORDER BY ABS((event_date - $2::date))
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&cfID, &schAmt)
 	if err == nil && cfID != "" {
 		return schAmt, cfID
@@ -244,7 +244,7 @@ func findMatchingCashflow(ctx context.Context, pool *pgxpool.Pool, rec ReceiptRo
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id = $1
 		  AND event_type = 'MATURITY'
-		  AND ABS(EXTRACT(EPOCH FROM (event_date - $2::date))) < 86400 * 7
+		  AND ABS((event_date - $2::date)) < 7
 		  AND COALESCE(is_deleted, false) = false
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&maturityCFID, &maturityAmt)
 	if err == nil && maturityCFID != "" {
@@ -265,7 +265,7 @@ func findMatchingAccrualLedger(ctx context.Context, pool *pgxpool.Pool, rec Rece
 		WHERE fd_id=$1
 		  AND ledger_row_status='CALCULATED'
 		  AND is_deleted=false
-		ORDER BY ABS(EXTRACT(EPOCH FROM (accrual_period_end - $2::date)))
+		ORDER BY ABS((accrual_period_end - $2::date))
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&ledgerID, &accrualAmt)
 	if err != nil {
 		return 0, ""
