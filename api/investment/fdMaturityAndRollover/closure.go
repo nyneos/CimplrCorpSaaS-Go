@@ -182,7 +182,12 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.closure_type,'') AS closure_type,
 			  COALESCE(cr.closure_status,'') AS closure_status,
 			  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
-			  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event
+			  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event,
+			  ROUND((
+			    m.principal_amount
+			    + COALESCE(al.total_interest_accrued, 0)
+			    - COALESCE(al.total_tds_accrued, 0)
+			  )::numeric, 4) AS expected_maturity_amount
 			FROM investment.fd_master m
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 			LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = m.confirmation_id
@@ -274,7 +279,12 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(cr.closure_type,'') AS closure_type,
 				  COALESCE(cr.closure_status,'') AS closure_status,
 				  COALESCE(cf.total_periods,0) AS total_cashflow_periods,
-				  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event
+				  COALESCE(cf.last_event_date::text,'') AS last_cashflow_event,
+				  ROUND((
+				    m.principal_amount
+				    + COALESCE(al.total_interest_accrued, 0)
+				    - COALESCE(al.total_tds_accrued, 0)
+				  )::numeric, 4) AS expected_maturity_amount
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = m.confirmation_id
@@ -1297,18 +1307,17 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			closureRequestID, fdID, closureType, closureStatus                         string
 			bookingID, confirmationID, entityID, entityName                            string
 			initiationDate, effectiveClosureDate, maturityDate                         string
-			settlementAccountID, maturityInstructions, closureReason, closureNotes     string
+			settlementAccountID, settlementBankName, closureReason, closureNotes       string
 			varianceRemark, approvalInstanceID, submittedBy, submittedByEmail          string
-			rolloverType, bankFDRefNo                                                  string
+			rolloverFDID                                                               string
 			createdAt, updatedAt                                                       string
 			principalAmount, accruedInterest, tdsDeducted, penaltyAmount               float64
-			penaltyRate, netPayoutAmount, rolloverAmount, rolloverInterestRate          float64
-			partialWithdrawal                                                          float64
+			netPayoutAmount, rolloverAmount, rolloverInterestRate                      float64
 			rolloverTenorDays                                                          int
 			hasUnresolvedVariance                                                      bool
 			// enriched from fd_master
 			fdReferenceNumber, bankName, bankIDEnriched, interestTypeCode              string
-			fdStartDate, fdMaturityDate, fdStatus                                      string
+			fdStartDate, fdMaturityDate, fdStatus, fdMaturityInstructions              string
 			originalPrincipal, fdInterestRate                                          float64
 			tenureDays                                                                 int
 			// enriched from booking / confirmation / approval engine
@@ -1334,15 +1343,13 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(cr.accrued_interest,0),
 			  COALESCE(cr.tds_deducted,0),
 			  COALESCE(cr.penalty_amount,0),
-			  COALESCE(cr.penalty_rate,0),
 			  COALESCE(cr.net_payout_amount,0),
 			  COALESCE(cr.rollover_amount,0),
 			  COALESCE(cr.rollover_tenor_days,0),
-			  COALESCE(cr.rollover_type,''),
 			  COALESCE(cr.rollover_interest_rate,0),
-			  COALESCE(cr.partial_withdrawal,0),
+			  COALESCE(cr.rollover_fd_id,''),
 			  COALESCE(cr.settlement_account_id,''),
-			  COALESCE(cr.maturity_instructions,''),
+			  COALESCE(cr.settlement_bank_name,''),
 			  COALESCE(cr.closure_reason,''),
 			  COALESCE(cr.closure_notes,''),
 			  COALESCE(cr.variance_remark,''),
@@ -1363,6 +1370,7 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(m.maturity_date::text,''),
 			  COALESCE(m.principal_amount,0),
 			  COALESCE(m.fd_status,''),
+			  COALESCE(m.maturity_instructions,''),
 			  -- enriched: booking
 			  COALESCE(b.entity_name,''),
 			  COALESCE(b.entity_id,''),
@@ -1382,14 +1390,14 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			&closureRequestID, &fdID, &bookingID, &confirmationID, &entityID, &entityName,
 			&closureType, &closureStatus,
 			&initiationDate, &effectiveClosureDate, &maturityDate,
-			&principalAmount, &accruedInterest, &tdsDeducted, &penaltyAmount, &penaltyRate, &netPayoutAmount,
-			&rolloverAmount, &rolloverTenorDays, &rolloverType, &rolloverInterestRate, &partialWithdrawal,
-			&settlementAccountID, &maturityInstructions, &closureReason, &closureNotes,
+			&principalAmount, &accruedInterest, &tdsDeducted, &penaltyAmount, &netPayoutAmount,
+			&rolloverAmount, &rolloverTenorDays, &rolloverInterestRate, &rolloverFDID,
+			&settlementAccountID, &settlementBankName, &closureReason, &closureNotes,
 			&varianceRemark, &approvalInstanceID, &hasUnresolvedVariance,
 			&submittedBy, &submittedByEmail, &createdAt, &updatedAt,
 			&fdReferenceNumber, &bankName, &bankIDEnriched,
 			&fdInterestRate, &interestTypeCode, &tenureDays, &fdStartDate, &fdMaturityDate,
-			&originalPrincipal, &fdStatus,
+			&originalPrincipal, &fdStatus, &fdMaturityInstructions,
 			&bookingEntityName, &bookingEntityID,
 			&bankFDReference, &confirmationStatus,
 			&approvalEngineStatus, &approvalSubmittedAt,
@@ -1419,15 +1427,13 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"accrued_interest":       accruedInterest,
 			"tds_deducted":           tdsDeducted,
 			"penalty_amount":         penaltyAmount,
-			"penalty_rate":           penaltyRate,
 			"net_payout_amount":      netPayoutAmount,
 			"rollover_amount":        rolloverAmount,
 			"rollover_tenor_days":    rolloverTenorDays,
-			"rollover_type":          rolloverType,
 			"rollover_interest_rate": rolloverInterestRate,
-			"partial_withdrawal":     partialWithdrawal,
-			"settlement_account_id": settlementAccountID,
-			"maturity_instructions": maturityInstructions,
+			"rollover_fd_id":         rolloverFDID,
+			"settlement_account_id":  settlementAccountID,
+			"settlement_bank_name":   settlementBankName,
 			"closure_reason":         closureReason,
 			"closure_notes":          closureNotes,
 			"variance_remark":        varianceRemark,
@@ -1448,13 +1454,13 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"fd_maturity_date":       fdMaturityDate,
 			"original_principal":     originalPrincipal,
 			"fd_status":              fdStatus,
+			"maturity_instructions":  fdMaturityInstructions,
 			"booking_entity_name":    bookingEntityName,
 			"booking_entity_id":      bookingEntityID,
 			"bank_fd_reference":      bankFDReference,
 			"confirmation_status":    confirmationStatus,
 			"approval_engine_status": approvalEngineStatus,
 			"approval_submitted_at":  approvalSubmittedAt,
-			"bank_fd_ref_no":         bankFDRefNo,
 		}
 
 		fetchSub := func(sql string) []map[string]interface{} {
@@ -1506,111 +1512,26 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// ── Approval matrix enrichment ────────────────────────────────────────
-		// Fetch the full approval-eye chain for the instance attached to this
-		// closure request, plus per-eye member list and viewer_can_act flag.
-		approvalMatrix := map[string]interface{}{
-			"instance_id":       approvalInstanceID,
-			"instance_status":   approvalEngineStatus,
-			"submitted_at":      approvalSubmittedAt,
-			"eyes":              []interface{}{},
-			"viewer_can_act":    false,
-			"viewer_active_eye": "",
-		}
+		// ── Approval workflow (rich — same shape as booking/confirmation detail) ─
+		viewerUserID := req.UserID
+		var approvalWorkflow interface{}
 		if approvalInstanceID != "" {
-			// Fetch all eyes with their member list
-			eyeRows, eyeErr := pool.Query(ctx, `
-				SELECT
-				  ie.instance_eye_id,
-				  ie.matrix_eye_id,
-				  ie.position,
-				  ie.status,
-				  ie.approvals_required,
-				  ie.approvals_received,
-				  COALESCE(ie.activated_at::text,'') AS activated_at,
-				  COALESCE(ie.resolved_at::text,'')  AS resolved_at,
-				  COALESCE(
-				    (SELECT json_agg(json_build_object(
-				        'user_id',         m.user_id,
-				        'assignment_type', m.assignment_type,
-				        'member_type',     m.member_type,
-				        'is_active',       m.is_active
-				    ) ORDER BY m.user_id)
-				     FROM uam.approval_matrix_eye_member m
-				     WHERE m.eye_id = ie.matrix_eye_id
-				       AND m.is_active = true AND m.is_deleted = false
-				    )::text,
-				  '[]') AS members
-				FROM uam.approval_instance_eye ie
-				WHERE ie.instance_id = $1
-				ORDER BY ie.position ASC`, approvalInstanceID)
-			if eyeErr == nil {
-				defer eyeRows.Close()
-				var eyes []interface{}
-				for eyeRows.Next() {
-					v, _ := eyeRows.Values()
-					cd := eyeRows.FieldDescriptions()
-					eyeRow := make(map[string]interface{}, len(cd))
-					for i, c := range cd { eyeRow[string(c.Name)] = v[i] }
-					eyes = append(eyes, eyeRow)
-				}
-				if eyes == nil { eyes = []interface{}{} }
-				approvalMatrix["eyes"] = eyes
+			richDetail, richErr := approvalengine.GetRichInstanceDetail(ctx, pool, approvalInstanceID, viewerUserID)
+			if richErr != nil {
+				api.LogError("[FDClosure] GetRichInstanceDetail failed instance=%s closure=%s: %v", approvalInstanceID, req.ClosureRequestID, richErr)
+			} else {
+				approvalWorkflow = richDetail
 			}
-
-			// Check whether the requesting user can act on the current active eye
-			var viewerActiveEyeID string
-			_ = pool.QueryRow(ctx, `
-				SELECT ie.instance_eye_id
-				FROM uam.approval_instance_eye ie
-				JOIN uam.approval_matrix_eye_member m
-				  ON m.eye_id = ie.matrix_eye_id
-				 AND m.member_type = 'APPROVER'
-				 AND m.is_active = true AND m.is_deleted = false
-				 AND m.assignment_type IN ('USER_ONLY','ROLE_USER')
-				 AND m.user_id = $2
-				WHERE ie.instance_id = $1 AND ie.status = 'ACTIVE'
-				LIMIT 1`, approvalInstanceID, req.UserID,
-			).Scan(&viewerActiveEyeID)
-			approvalMatrix["viewer_can_act"] = viewerActiveEyeID != ""
-			approvalMatrix["viewer_active_eye"] = viewerActiveEyeID
-
-			// Fetch action log for this instance
-			actionRows, actErr := pool.Query(ctx, `
-				SELECT
-				  ia.action_id,
-				  COALESCE(ia.actor_email,'')          AS actor_email,
-				  COALESCE(ia.action_type,'')           AS action_type,
-				  COALESCE(ia.comment,'')               AS comment,
-				  COALESCE(ia.created_at::text,'')      AS acted_at,
-				  COALESCE(ie.position,0)               AS eye_position
-				FROM uam.approval_instance_action ia
-				JOIN uam.approval_instance_eye ie ON ie.instance_eye_id = ia.instance_eye_id
-				WHERE ie.instance_id = $1
-				ORDER BY ia.created_at ASC`, approvalInstanceID)
-			var actionLog []interface{}
-			if actErr == nil {
-				defer actionRows.Close()
-				for actionRows.Next() {
-					v, _ := actionRows.Values()
-					cd := actionRows.FieldDescriptions()
-					ar2 := make(map[string]interface{}, len(cd))
-					for i, c := range cd { ar2[string(c.Name)] = v[i] }
-					actionLog = append(actionLog, ar2)
-				}
-			}
-			if actionLog == nil { actionLog = []interface{}{} }
-			approvalMatrix["action_log"] = actionLog
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"closure_request":  closureRow,
-			"maturity_payouts": fetchSub("SELECT * FROM investment.fd_closure_maturity_payout WHERE closure_request_id=$1"),
-			"premature_detail": fetchSub("SELECT * FROM investment.fd_closure_premature WHERE closure_request_id=$1"),
-			"rollover_detail":  fetchSub("SELECT * FROM investment.fd_closure_rollover WHERE closure_request_id=$1"),
-			"audit_trail":      auditTrail,
-			"variances":        fetchVariances(ctx, pool, req.ClosureRequestID),
-			"approval_matrix":  approvalMatrix,
+			"closure_request":   closureRow,
+			"maturity_payouts":  fetchSub("SELECT * FROM investment.fd_closure_maturity_payout WHERE closure_request_id=$1"),
+			"premature_detail":  fetchSub("SELECT * FROM investment.fd_closure_premature WHERE closure_request_id=$1"),
+			"rollover_detail":   fetchSub("SELECT * FROM investment.fd_closure_rollover WHERE closure_request_id=$1"),
+			"audit_trail":       auditTrail,
+			"variances":         fetchVariances(ctx, pool, req.ClosureRequestID),
+			"approval_workflow": approvalWorkflow,
 		})
 		_ = userEmail
 	}
@@ -2243,7 +2164,105 @@ func postClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureRequest
 	switch closureType {
 	case "MATURITY":  _, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_maturity_payout SET journal_entry_id=$1,payment_status='COMPLETED' WHERE closure_request_id=$2`, entryID, closureRequestID)
 	case "PREMATURE": _, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_premature SET journal_entry_id=$1 WHERE closure_request_id=$2`, entryID, closureRequestID)
-	case "ROLLOVER":  _, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_rollover SET journal_entry_id=$1 WHERE closure_request_id=$2`, entryID, closureRequestID)
+	case "ROLLOVER":
+		_, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_rollover SET journal_entry_id=$1 WHERE closure_request_id=$2`, entryID, closureRequestID)
+
+		// ── ROLLOVER: create the new fd_booking_request only.
+		//
+		// We do NOT create fd_master here. The normal pipeline is:
+		//   fd_booking_request (SENT_TO_BANK)
+		//       → ops captures confirmation  (CaptureConfirmation)
+		//       → confirmation approved      (BulkApproveConfirmation)
+		//       → ActivateFD inserts fd_master + cashflows
+		//
+		// The 6pm fd_rollover_reconcile_worker watches for confirmed-but-
+		// not-yet-activated rollover bookings and auto-activates them so
+		// nothing is orphaned if ops misses the manual step.
+
+		// 1. Fetch source FD details to mirror onto the new booking.
+		var (
+			srcBankID, srcBankName, srcEntityID, srcEntityName      string
+			srcFrequencyID, srcTDSPlanID, srcDayCountCode            string
+			srcBankConfigID, srcSourceAccountID, srcInterestTypeCode string
+			srcInterestRate                                           float64
+			srcTenureDays                                             int
+		)
+		_ = tx.QueryRow(ctx, `
+			SELECT
+			  COALESCE(m.bank_id,''),   COALESCE(m.bank_name,''),
+			  COALESCE(b.entity_id,''), COALESCE(b.entity_name,''),
+			  COALESCE(b.frequency_id,''), COALESCE(b.tds_plan_id,''),
+			  COALESCE(m.day_count_code,''), COALESCE(b.bank_config_id,''),
+			  COALESCE(b.source_account_id,''), COALESCE(m.interest_type_code,''),
+			  COALESCE(m.interest_rate,0), COALESCE(m.tenure_days,0)
+			FROM investment.fd_master m
+			LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+			WHERE m.fd_id = $1 LIMIT 1`, fdID,
+		).Scan(
+			&srcBankID, &srcBankName,
+			&srcEntityID, &srcEntityName,
+			&srcFrequencyID, &srcTDSPlanID,
+			&srcDayCountCode, &srcBankConfigID,
+			&srcSourceAccountID, &srcInterestTypeCode,
+			&srcInterestRate, &srcTenureDays,
+		)
+		if entityID != "" { srcEntityID = entityID }
+		if entityName != "" { srcEntityName = entityName }
+
+		// 2. Read the confirmed rollover amounts persisted on fd_closure_rollover.
+		var rolloverAmt, rolloverInterestRate float64
+		var newTenorDays int
+		_ = tx.QueryRow(ctx, `
+			SELECT COALESCE(rollover_amount,0), COALESCE(new_tenor_days,0), COALESCE(rollover_interest_rate,0)
+			FROM investment.fd_closure_rollover WHERE closure_request_id=$1 LIMIT 1`, closureRequestID,
+		).Scan(&rolloverAmt, &newTenorDays, &rolloverInterestRate)
+		if rolloverAmt <= 0 {
+			rolloverAmt = roundToFour(principalAmt + accruedInterest - tdsAmt)
+		}
+		if newTenorDays <= 0 { newTenorDays = srcTenureDays }
+		if rolloverInterestRate <= 0 { rolloverInterestRate = srcInterestRate }
+
+		// 3. INSERT fd_booking_request with status SENT_TO_BANK.
+		//    The bank already has the instruction; we just need ops to
+		//    capture the confirmation slip and activate.
+		var newBookingID string
+		bookingErr := tx.QueryRow(ctx, `
+			INSERT INTO investment.fd_booking_request (
+			  entity_id, entity_name,
+			  bank_id, bank_name,
+			  bank_config_id, source_account_id,
+			  principal_amount, interest_rate, tenure_days,
+			  interest_type_code, frequency_id, day_count_code, tds_plan_id,
+			  booking_status, booking_remarks, created_by
+			) VALUES (
+			  $1,$2,$3,$4,
+			  NULLIF($5,''), NULLIF($6,''),
+			  $7,$8,$9,
+			  NULLIF($10,''), NULLIF($11,''), NULLIF($12,''), NULLIF($13,''),
+			  'SENT_TO_BANK',
+			  $14, $15
+			) RETURNING booking_id`,
+			srcEntityID, srcEntityName,
+			srcBankID, srcBankName,
+			srcBankConfigID, srcSourceAccountID,
+			rolloverAmt, rolloverInterestRate, newTenorDays,
+			srcInterestTypeCode, srcFrequencyID, srcDayCountCode, srcTDSPlanID,
+			fmt.Sprintf("Rollover booking — source closure %s source FD %s", closureRequestID, fdID),
+			approvedByEmail,
+		).Scan(&newBookingID)
+		if bookingErr != nil {
+			// Non-fatal: journals are posted; log and let the reconcile worker retry.
+			api.LogError("[FDClosure] ROLLOVER: failed to create booking for closure %s: %v", closureRequestID, bookingErr)
+		}
+
+		// 4. Link new booking back onto fd_closure_rollover so the
+		//    reconcile worker and the UI can find it.
+		if newBookingID != "" {
+			_, _ = tx.Exec(ctx,
+				`UPDATE investment.fd_closure_rollover SET new_booking_id=$1 WHERE closure_request_id=$2`,
+				newBookingID, closureRequestID)
+			api.LogInfo("[FDClosure] ROLLOVER: new booking=%s created for closure=%s (fd_master will be created after confirmation)", newBookingID, closureRequestID)
+		}
 	}
 
 	postSnap := map[string]interface{}{
