@@ -10,8 +10,14 @@ import (
 )
 
 // StartAutoRenewalWorker runs daily and processes FDs with auto_renewal=true
-// whose maturity_date has passed. It creates an AUTO_RENEWAL closure request and
-// logs the result in fd_auto_renewal_log.
+// whose maturity_date has passed. It creates a ROLLOVER closure request (type
+// FD_CLOSURE_AUTO_RENEWAL) and logs the result in fd_auto_renewal_log.
+//
+// Fixed bugs (vs original):
+//   1. closure_type is now 'ROLLOVER' (was 'AUTO_RENEWAL' which had no approval hook).
+//   2. Reads accrued_interest and tds_deducted from fd_accrual_ledger so accounting
+//      entries reflect what was actually earned (was hardcoded 0, 0).
+//   3. rollover_amount = principal + net_interest (was just principal).
 func StartAutoRenewalWorker(db *pgxpool.Pool) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
@@ -32,25 +38,39 @@ func runAutoRenewal(db *pgxpool.Pool) {
 
 	// Fetch all ACTIVE FDs with auto_renewal=true and maturity_date <= today
 	// that don't already have a non-rejected / non-cancelled closure request.
+	// Also pull accrued interest and TDS from fd_accrual_ledger so we can
+	// create an accurate closure record (not zeroed-out).
 	rows, err := db.Query(ctx, `
 		SELECT
-		  m.fd_id, m.booking_id, m.confirmation_id,
-		  COALESCE(b.entity_id,''::text) AS entity_id,
-		  COALESCE(b.entity_name,''::text) AS entity_name,
-		  m.principal_amount, m.maturity_date,
-		  m.principal_amount AS rollover_amount,
-		  COALESCE(m.tenure_days, 365) AS tenor_days
+		  m.fd_id,
+		  COALESCE(m.booking_id,'')         AS booking_id,
+		  COALESCE(m.confirmation_id,'')    AS confirmation_id,
+		  COALESCE(b.entity_id,'')          AS entity_id,
+		  COALESCE(b.entity_name,'')        AS entity_name,
+		  m.principal_amount,
+		  m.maturity_date,
+		  COALESCE(m.tenure_days, 365)      AS tenor_days,
+		  COALESCE(al.total_accrued, 0)     AS accrued_interest,
+		  COALESCE(al.total_tds, 0)         AS tds_deducted
 		FROM investment.fd_master m
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		LEFT JOIN LATERAL (
+		  SELECT
+		    SUM(COALESCE(period_interest_accrued,0)) AS total_accrued,
+		    SUM(COALESCE(tds_deducted_in_period,0))  AS total_tds
+		  FROM investment.fd_accrual_ledger
+		  WHERE fd_id = m.fd_id
+		    AND COALESCE(is_deleted, false) = false
+		) al ON true
 		WHERE m.fd_status = 'ACTIVE'
 		  AND m.auto_renewal = true
 		  AND m.maturity_date <= CURRENT_DATE
 		  AND m.is_deleted = false
 		  AND NOT EXISTS (
-			SELECT 1 FROM investment.fd_closure_request cr
-			WHERE cr.fd_id = m.fd_id
-			  AND cr.is_deleted = false
-			  AND cr.closure_status NOT IN ('REJECTED','CANCELLED')
+		    SELECT 1 FROM investment.fd_closure_request cr
+		    WHERE cr.fd_id = m.fd_id
+		      AND cr.is_deleted = false
+		      AND cr.closure_status NOT IN ('REJECTED','CANCELLED')
 		  )
 	`)
 	if err != nil {
@@ -61,19 +81,23 @@ func runAutoRenewal(db *pgxpool.Pool) {
 
 	type fdRow struct {
 		FDID, BookingID, ConfirmationID string
-		EntityID, EntityName           string
-		PrincipalAmount, RolloverAmount float64
+		EntityID, EntityName            string
+		PrincipalAmount                 float64
 		MaturityDate                    time.Time
 		TenorDays                       int
+		AccruedInterest                 float64
+		TDSDeducted                     float64
 	}
 
 	var fds []fdRow
 	for rows.Next() {
 		var f fdRow
-		if sErr := rows.Scan(&f.FDID, &f.BookingID, &f.ConfirmationID,
+		if sErr := rows.Scan(
+			&f.FDID, &f.BookingID, &f.ConfirmationID,
 			&f.EntityID, &f.EntityName,
-			&f.PrincipalAmount, &f.MaturityDate,
-			&f.RolloverAmount, &f.TenorDays); sErr != nil {
+			&f.PrincipalAmount, &f.MaturityDate, &f.TenorDays,
+			&f.AccruedInterest, &f.TDSDeducted,
+		); sErr != nil {
 			log.Printf("[AutoRenewal] Scan error: %v", sErr)
 			continue
 		}
@@ -83,17 +107,27 @@ func runAutoRenewal(db *pgxpool.Pool) {
 
 	processed, failed := 0, 0
 	for _, fd := range fds {
-		if processErr := processAutoRenewalFD(ctx, db, fd.FDID, fd.BookingID, fd.ConfirmationID,
-			fd.EntityID, fd.EntityName, fd.PrincipalAmount, fd.RolloverAmount,
-			fd.MaturityDate, fd.TenorDays); processErr != nil {
+		// rollover_amount = full reinvestment: principal + net interest (after TDS)
+		rolloverAmount := fd.PrincipalAmount + fd.AccruedInterest - fd.TDSDeducted
+		if rolloverAmount < fd.PrincipalAmount {
+			// Safety: never roll over less than principal (e.g. negative interest edge case)
+			rolloverAmount = fd.PrincipalAmount
+		}
+
+		if processErr := processAutoRenewalFD(
+			ctx, db,
+			fd.FDID, fd.BookingID, fd.ConfirmationID,
+			fd.EntityID, fd.EntityName,
+			fd.PrincipalAmount, fd.AccruedInterest, fd.TDSDeducted, rolloverAmount,
+			fd.MaturityDate, fd.TenorDays,
+		); processErr != nil {
 			log.Printf("[AutoRenewal] Failed for FD %s: %v", fd.FDID, processErr)
-			// Log failure in fd_auto_renewal_log
 			_, _ = db.Exec(ctx, `
 				INSERT INTO investment.fd_auto_renewal_log (
 				  fd_id, renewal_date, renewal_status, new_tenor_days,
 				  rollover_amount, failure_reason, created_at
 				) VALUES ($1, CURRENT_DATE, 'FAILED', $2, $3, $4, NOW())`,
-				fd.FDID, fd.TenorDays, fd.RolloverAmount, processErr.Error())
+				fd.FDID, fd.TenorDays, rolloverAmount, processErr.Error())
 			failed++
 			continue
 		}
@@ -104,10 +138,14 @@ func runAutoRenewal(db *pgxpool.Pool) {
 		processed, failed, len(fds), time.Now().Format(time.RFC3339))
 }
 
-func processAutoRenewalFD(ctx context.Context, db *pgxpool.Pool,
+func processAutoRenewalFD(
+	ctx context.Context, db *pgxpool.Pool,
 	fdID, bookingID, confirmationID, entityID, entityName string,
-	principalAmount, rolloverAmount float64,
-	maturityDate time.Time, tenorDays int) error {
+	principalAmount, accruedInterest, tdsDeducted, rolloverAmount float64,
+	maturityDate time.Time, tenorDays int,
+) error {
+	// net_payout_amount = full rollover amount (principal + net interest)
+	netPayout := rolloverAmount
 
 	var closureRequestID string
 	err := db.QueryRow(ctx, `
@@ -126,10 +164,10 @@ func processAutoRenewalFD(ctx context.Context, db *pgxpool.Pool,
 		  $1,
 		  NULLIF($2,''), NULLIF($3,''),
 		  NULLIF($4,''), NULLIF($5,''),
-		  'AUTO_RENEWAL','PENDING_APPROVAL',
+		  'ROLLOVER','PENDING_APPROVAL',
 		  CURRENT_DATE, $6::date, $6::date,
-		  $7, 0, 0, 0, $8,
-		  $8, $9,
+		  $7, $8, $9, 0, $10,
+		  $11, $12,
 		  'RENEW', 'System auto-renewal triggered at maturity',
 		  'SYSTEM', 'system@cimplr.in',
 		  false, false,
@@ -137,19 +175,32 @@ func processAutoRenewalFD(ctx context.Context, db *pgxpool.Pool,
 		) RETURNING closure_request_id`,
 		fdID, bookingID, confirmationID, entityID, entityName,
 		maturityDate.Format("2006-01-02"),
-		principalAmount, rolloverAmount, tenorDays,
+		principalAmount, accruedInterest, tdsDeducted, netPayout,
+		rolloverAmount, tenorDays,
 	).Scan(&closureRequestID)
 	if err != nil {
 		return fmt.Errorf("insert fd_closure_request: %w", err)
 	}
 
-	// Update fd_master with the closure request link
-	_, err = db.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=$1,updated_at=NOW() WHERE fd_id=$2`, closureRequestID, fdID)
+	// Insert sub-table row for rollover detail
+	_, _ = db.Exec(ctx, `
+		INSERT INTO investment.fd_closure_rollover (
+		  closure_request_id, source_fd_id, rollover_date,
+		  rollover_amount, rollover_principal, interest_credited, tds_deducted,
+		  new_tenor_days, rollover_type, created_by
+		) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'FULL','SYSTEM')`,
+		closureRequestID, fdID, maturityDate.Format("2006-01-02"),
+		rolloverAmount, principalAmount, accruedInterest, tdsDeducted, tenorDays)
+
+	// Link closure request on fd_master
+	_, err = db.Exec(ctx,
+		`UPDATE investment.fd_master SET closure_request_id=$1, updated_at=NOW() WHERE fd_id=$2`,
+		closureRequestID, fdID)
 	if err != nil {
 		return fmt.Errorf("update fd_master closure_request_id: %w", err)
 	}
 
-	// Record in fd_auto_renewal_log
+	// Log the auto-renewal
 	_, err = db.Exec(ctx, `
 		INSERT INTO investment.fd_auto_renewal_log (
 		  fd_id, closure_request_id, renewal_date, renewal_status,
@@ -157,11 +208,10 @@ func processAutoRenewalFD(ctx context.Context, db *pgxpool.Pool,
 		) VALUES ($1,$2,CURRENT_DATE,'INITIATED',$3,$4,NOW())`,
 		fdID, closureRequestID, tenorDays, rolloverAmount)
 	if err != nil {
-		// Non-fatal — closure request was already created
 		log.Printf("[AutoRenewal] fd_auto_renewal_log insert failed for FD %s: %v", fdID, err)
 	}
 
-	log.Printf("[AutoRenewal] Created closure %s for FD %s (AUTO_RENEWAL, rollover=%.2f, tenor=%d days)",
-		closureRequestID, fdID, rolloverAmount, tenorDays)
+	log.Printf("[AutoRenewal] Created closure %s for FD %s (ROLLOVER/auto-renewal, principal=%.2f accrued=%.2f tds=%.2f rollover=%.2f tenor=%d days)",
+		closureRequestID, fdID, principalAmount, accruedInterest, tdsDeducted, rolloverAmount, tenorDays)
 	return nil
 }
