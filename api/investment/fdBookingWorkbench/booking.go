@@ -1196,6 +1196,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": "+err.Error())
 					continue
 				}
+				engineActed++ // action was recorded regardless of whether this was the final eye
 				// If the engine fully approved (last eye done), flip booking status.
 				// Check if instance is now APPROVED.
 				var instStatus string
@@ -1220,7 +1221,6 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					); execErr != nil {
 						api.LogError("[FDBooking] is_deleted flip failed for %s: %v", bID, execErr)
 					}
-					engineActed++
 				}
 			} else {
 				// No active eye for this user — check if any engine instance exists at all.
@@ -1240,7 +1240,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": tx begin failed")
 					continue
 				}
-				_, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
+				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
 					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2
 					WHERE booking_id=$3 AND processing_status LIKE '%PENDING%'`,
 					userEmail, req.Comment, bID)
@@ -1256,6 +1256,11 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": direct stamp failed")
 					continue
 				}
+				if tag1.RowsAffected() == 0 {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, bID+": no pending audit action found (already approved or not found)")
+					continue
+				}
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, bID+": commit failed")
 					continue
@@ -1264,7 +1269,13 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No bookings were approved"
+		}
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
@@ -1368,7 +1379,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": tx begin failed")
 					continue
 				}
-				_, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
+				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_booking_request
 					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 					WHERE booking_id=$3 AND processing_status LIKE '%PENDING%'`,
 					userEmail, req.Comment, bID)
@@ -1379,6 +1390,11 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": direct stamp failed")
 					continue
 				}
+				if tag1.RowsAffected() == 0 {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, bID+": no pending audit action found (already rejected or not found)")
+					continue
+				}
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, bID+": commit failed")
 					continue
@@ -1387,7 +1403,13 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No bookings were rejected"
+		}
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})

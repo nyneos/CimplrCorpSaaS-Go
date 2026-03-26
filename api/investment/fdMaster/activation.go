@@ -836,7 +836,13 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No FDs were activated"
+		}
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
@@ -962,7 +968,13 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No FDs were rejected"
+		}
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})

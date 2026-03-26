@@ -557,6 +557,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, cID+": "+err.Error())
 					continue
 				}
+				engineActed++ // action recorded regardless of whether this is the final eye
 				// If the instance is now fully APPROVED, flip statuses.
 				var instStatus string
 				_ = pgxPool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i
@@ -586,7 +587,6 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					); execErr != nil {
 						api.LogError("[FDConfirmation] is_deleted flip failed for %s: %v", cID, execErr)
 					}
-					engineActed++
 				}
 			} else {
 				var anyInstance int
@@ -602,7 +602,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, cID+": tx begin failed")
 					continue
 				}
-				_, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_confirmation a
+				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_confirmation a
 					SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2,
 					    old_confirmation_status=c.confirmation_status
 					FROM investment.fd_confirmation c
@@ -623,6 +623,11 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, cID+": direct stamp failed")
 					continue
 				}
+				if tag1.RowsAffected() == 0 {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, cID+": no pending audit action found (already approved or not found)")
+					continue
+				}
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, cID+": commit failed")
 					continue
@@ -631,7 +636,13 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No confirmations were approved"
+		}
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})
@@ -741,7 +752,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, cID+": tx begin failed")
 					continue
 				}
-				_, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_confirmation a
+				tag1, err1 := tx.Exec(ctx, `UPDATE investment.fd_audit_confirmation a
 					SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2,
 					    old_confirmation_status=c.confirmation_status
 					FROM investment.fd_confirmation c
@@ -757,6 +768,11 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, cID+": direct stamp failed")
 					continue
 				}
+				if tag1.RowsAffected() == 0 {
+					_ = tx.Rollback(ctx)
+					errors = append(errors, cID+": no pending audit action found (already rejected or not found)")
+					continue
+				}
 				if cerr := tx.Commit(ctx); cerr != nil {
 					errors = append(errors, cID+": commit failed")
 					continue
@@ -765,7 +781,13 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No confirmations were rejected"
+		}
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
 			"errors": errors, "checker": userEmail,
 		})

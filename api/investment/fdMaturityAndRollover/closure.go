@@ -18,11 +18,13 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	notifcatalog "CimplrCorpSaas/api/notification/catalog"
+	"CimplrCorpSaas/api/varianceengine"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,22 +149,21 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			  m.fd_id, m.booking_id, m.confirmation_id,
 			  COALESCE(m.bank_id,'') AS bank_id,
 			  COALESCE(m.bank_name,'') AS bank_name,
-			  COALESCE(m.fd_reference_number,'') AS fd_reference_number,
+			  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
 			  m.fd_status, m.principal_amount, m.interest_rate, m.interest_type_code,
-			  m.tenor_days, m.start_date, m.maturity_date,
-			  COALESCE(m.maturity_amount, 0) AS maturity_amount,
+			  m.tenure_days, m.start_date, m.maturity_date,
 			  COALESCE(m.maturity_instructions,'PENDING') AS maturity_instructions,
 			  COALESCE(m.auto_renewal, false) AS auto_renewal,
-			  COALESCE(m.day_count_convention,'') AS day_count_convention,
+			  COALESCE(m.day_count_code,'') AS day_count_convention,
 			  (m.maturity_date - CURRENT_DATE) AS days_to_maturity,
 			  COALESCE(b.entity_id,'') AS entity_id,
 			  COALESCE(b.entity_name,'') AS entity_name,
 			  COALESCE(b.frequency_id,'') AS frequency_id,
-			  COALESCE(b.bank_account_id,'') AS source_account_id,
+			  COALESCE(b.source_account_id,'') AS source_account_id,
 			  COALESCE(b.tds_plan_id,'') AS tds_plan_id,
 			  COALESCE(c.confirmation_status,'') AS confirmation_status,
-			  COALESCE(c.confirmation_date::text,'') AS confirmation_date,
-			  COALESCE(c.bank_fd_reference,'') AS bank_fd_reference,
+			  COALESCE(c.confirmation_received_date::text,'') AS confirmation_date,
+			  COALESCE(c.bank_fd_ref_no,'') AS bank_fd_reference,
 			  COALESCE(al.total_interest_accrued, 0) AS total_interest_accrued,
 			  COALESCE(al.total_tds_accrued, 0) AS total_tds_accrued,
 			  COALESCE(p.penalty_value, 0) AS penalty_value,
@@ -177,16 +178,15 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 			LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = m.confirmation_id
 			LEFT JOIN LATERAL (
-			  SELECT SUM(COALESCE(interest_accrued,0)) AS total_interest_accrued,
-			         SUM(COALESCE(tds_amount,0)) AS total_tds_accrued
+			  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued,
+			         SUM(COALESCE(tds_deducted_in_period,0)) AS total_tds_accrued
 			  FROM investment.fd_accrual_ledger
 			  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 			) al ON true
 			LEFT JOIN LATERAL (
 			  SELECT penalty_value, penalty_type, no_interest_if_withdrawn_before
 			  FROM investment.fd_penalty_structure_master ps
-			  JOIN investment.fd_bank_config_master bc ON bc.bank_code = ps.bank_code
-			  WHERE bc.bank_id = m.bank_id AND COALESCE(ps.is_deleted,false)=false
+			  WHERE ps.bank_code = m.bank_id AND COALESCE(ps.is_deleted,false)=false
 			  ORDER BY ps.penalty_value DESC LIMIT 1
 			) p ON true
 			LEFT JOIN LATERAL (
@@ -233,6 +233,7 @@ func GetFDsNearMaturity(pool *pgxpool.Pool) http.HandlerFunc {
 // Handler 2 — InitiateClosure
 
 type initiateClosureRequest struct {
+	// Core fields
 	UserID               string  `json:"user_id"`
 	FDID                 string  `json:"fd_id"`
 	ClosureType          string  `json:"closure_type"`
@@ -243,6 +244,27 @@ type initiateClosureRequest struct {
 	RolloverTenorDays    int     `json:"rollover_tenor_days"`
 	ClosureReason        string  `json:"closure_reason"`
 	ClosureNotes         string  `json:"closure_notes"`
+
+	// Overrides from UI pre-population (used by variance engine when exception=true)
+	// If user changed a value vs what the system computed, these carry the user value.
+	OverridePrincipalAmount  float64 `json:"override_principal_amount"`
+	OverrideAccruedInterest  float64 `json:"override_accrued_interest"`
+	OverrideTDSDeducted      float64 `json:"override_tds_deducted"`
+	OverridePenaltyAmount    float64 `json:"override_penalty_amount"`
+	OverrideNetPayout        float64 `json:"override_net_payout"`
+	OverrideMaturityDate     string  `json:"override_maturity_date"`
+	OverrideTenureDays       int     `json:"override_tenure_days"`
+	OverrideInterestRate     float64 `json:"override_interest_rate"`
+	OverrideBankName         string  `json:"override_bank_name"`
+	OverrideBankID           string  `json:"override_bank_id"`
+
+	// Variance / exception controls
+	// HasVariance: UI tells us variance was detected on last validate call
+	HasVariance          bool   `json:"has_variance"`
+	// ProceedWithException: true = user chose to treat all open variances as EXCEPTION and proceed
+	ProceedWithException bool   `json:"proceed_with_exception"`
+	// LastValidatedRunID: run_id from the last /validate call (must be present if HasVariance=true)
+	LastValidatedRunID   string `json:"last_validated_run_id"`
 }
 
 func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
@@ -300,6 +322,44 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Variance guard ─────────────────────────────────────────────────
+		// If the last /validate run detected open variances, block initiation
+		// unless the user explicitly passes proceed_with_exception=true.
+		if req.HasVariance && req.LastValidatedRunID != "" {
+			// Count OPEN variances for this FD from the last validate run
+			var openCount int
+			_ = pool.QueryRow(ctx,
+				`SELECT COUNT(*) FROM public.variance_log
+				 WHERE record_id=$1 AND run_id=$2 AND status='OPEN'`,
+				req.FDID, req.LastValidatedRunID).Scan(&openCount)
+			// Also check any OPEN row regardless of run — covers re-use of old run IDs
+			if openCount == 0 {
+				_ = pool.QueryRow(ctx,
+					`SELECT COUNT(*) FROM public.variance_log
+					 WHERE record_id=$1 AND status='OPEN'`,
+					req.FDID).Scan(&openCount)
+			}
+			if openCount > 0 {
+				if !req.ProceedWithException {
+					// Block — tell the UI exactly how many are still open
+					api.RespondWithError(w, http.StatusConflict,
+						fmt.Sprintf("Cannot initiate: %d open variance(s) detected. Correct values via /validate or set proceed_with_exception=true to proceed with exception.", openCount))
+					return
+				}
+				// proceed_with_exception=true → mark all OPEN as EXCEPTION and continue
+				_, _ = pool.Exec(ctx, `
+					UPDATE public.variance_log SET
+					  status='EXCEPTION', is_exception=true,
+					  resolution_reason='Proceeded with exception on initiation',
+					  resolved_by=$1, resolved_by_email=$2,
+					  resolved_at=NOW(), updated_at=NOW()
+					WHERE record_id=$3 AND status='OPEN'`,
+					req.UserID, userEmail, req.FDID)
+				api.LogInfo("[FDClosure] InitiateClosure: proceed_with_exception — %d variances marked EXCEPTION by=%s fd=%s",
+					openCount, userEmail, req.FDID)
+			}
+		}
+
 		var existingOpenCount int
 		_ = pool.QueryRow(ctx, `
 			SELECT COUNT(*) FROM investment.fd_closure_request
@@ -313,7 +373,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 
 		var accruedInterest, tdsDeducted float64
 		_ = pool.QueryRow(ctx, `
-			SELECT COALESCE(SUM(interest_accrued),0), COALESCE(SUM(tds_amount),0)
+			SELECT COALESCE(SUM(period_interest_accrued),0), COALESCE(SUM(tds_deducted_in_period),0)
 			FROM investment.fd_accrual_ledger
 			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false`, req.FDID,
 		).Scan(&accruedInterest, &tdsDeducted)
@@ -325,15 +385,14 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COALESCE(ps.penalty_value,0),
 				       COALESCE(ps.no_interest_if_withdrawn_before,0) > 0
 				FROM investment.fd_penalty_structure_master ps
-				JOIN investment.fd_bank_config_master bc ON bc.bank_code = ps.bank_code
-				WHERE bc.bank_id=$1 AND COALESCE(ps.is_deleted,false)=false
+				WHERE ps.bank_code=$1 AND COALESCE(ps.is_deleted,false)=false
 				ORDER BY ps.penalty_value DESC LIMIT 1`, bankID,
 			).Scan(&penaltyRate, &noInterestFlag)
 
 			if noInterestFlag {
 				var daysHeld, minDays int
 				_ = pool.QueryRow(ctx, `SELECT COALESCE((CURRENT_DATE - start_date)::int,0) FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&daysHeld)
-				_ = pool.QueryRow(ctx, `SELECT COALESCE(no_interest_if_withdrawn_before,0) FROM investment.fd_penalty_structure_master ps JOIN investment.fd_bank_config_master bc ON bc.bank_code=ps.bank_code WHERE bc.bank_id=$1 ORDER BY penalty_value DESC LIMIT 1`, bankID).Scan(&minDays)
+				_ = pool.QueryRow(ctx, `SELECT COALESCE(no_interest_if_withdrawn_before,0) FROM investment.fd_penalty_structure_master ps WHERE ps.bank_code=$1 ORDER BY penalty_value DESC LIMIT 1`, bankID).Scan(&minDays)
 				if daysHeld < minDays {
 					accruedInterest = 0
 					tdsDeducted = 0
@@ -429,7 +488,7 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			var daysHeld int
 			_ = tx.QueryRow(ctx, `SELECT COALESCE((CURRENT_DATE - start_date)::int,0) FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&daysHeld)
 			var contractedRate float64
-			_ = tx.QueryRow(ctx, `SELECT interest_rate FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&contractedRate)
+			_ = tx.QueryRow(ctx, `SELECT COALESCE(interest_rate,0) FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&contractedRate)
 			_, _ = tx.Exec(ctx, `INSERT INTO investment.fd_closure_premature (closure_request_id,fd_id,premature_closure_date,days_held,contracted_rate,applicable_rate,gross_interest_earned,penalty_rate,penalty_amount,no_interest_flag,tds_on_interest,net_payout,created_by) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 				closureRequestID, req.FDID, effectiveDateStr, daysHeld, contractedRate, roundToFour(contractedRate-penaltyRate),
 				roundToFour(accruedInterest), penaltyRate, roundToFour(penaltyAmount), noInterestFlag, roundToFour(tdsDeducted), netPayout, userEmail)
@@ -670,9 +729,9 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  cr.approved_at, cr.rejected_at,
 			  COALESCE(cr.rejection_reason,'') AS rejection_reason,
 			  cr.accounting_posted, cr.created_at, cr.updated_at,
-			  COALESCE(m.fd_reference_number,'') AS fd_reference_number,
+			  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
 			  COALESCE(m.bank_name,'') AS bank_name,
-			  m.interest_rate, m.tenor_days, m.fd_status,
+			  m.interest_rate, m.tenure_days, m.fd_status,
 			  COALESCE(ai.status,'') AS approval_status
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
@@ -731,12 +790,12 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		closureRow := map[string]interface{}{}
 
 		rows, err := pool.Query(ctx, `
-			SELECT cr.*, COALESCE(m.fd_reference_number,'') AS fd_reference_number,
+			SELECT cr.*, COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
 			  COALESCE(m.bank_name,'') AS bank_name, COALESCE(m.bank_id,'') AS bank_id_enriched,
-			  m.interest_rate, m.interest_type_code, m.tenor_days, m.start_date,
+			  m.interest_rate, m.interest_type_code, m.tenure_days, m.start_date,
 			  m.principal_amount AS original_principal, m.fd_status,
 			  COALESCE(b.entity_name,'') AS booking_entity_name, COALESCE(b.entity_id,'') AS booking_entity_id,
-			  COALESCE(c.bank_fd_reference,'') AS bank_fd_reference, COALESCE(c.confirmation_status,'') AS confirmation_status,
+			  COALESCE(c.bank_fd_ref_no,'') AS bank_fd_reference, COALESCE(c.confirmation_status,'') AS confirmation_status,
 			  COALESCE(ai.status,'') AS approval_engine_status, COALESCE(ai.submitted_at::text,'') AS approval_submitted_at
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
@@ -795,8 +854,28 @@ func GetClosureDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			"premature_detail": fetchSub("SELECT * FROM investment.fd_closure_premature WHERE closure_request_id=$1"),
 			"rollover_detail":  fetchSub("SELECT * FROM investment.fd_closure_rollover WHERE closure_request_id=$1"),
 			"audit_trail":      auditTrail,
+			"variances":        fetchVariances(ctx, pool, req.ClosureRequestID),
 		})
 		_ = userEmail
+	}
+}
+
+// fetchVariances loads variance_log rows for a closure and returns open_count + rows.
+func fetchVariances(ctx context.Context, pool *pgxpool.Pool, closureRequestID string) map[string]interface{} {
+	rows, err := varianceengine.GetVariances(ctx, pool, closureRequestID)
+	if err != nil || rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	openCount := 0
+	for _, v := range rows {
+		if s, ok := v["status"].(string); ok && s == "OPEN" {
+			openCount++
+		}
+	}
+	return map[string]interface{}{
+		"items":      rows,
+		"total":      len(rows),
+		"open_count": openCount,
 	}
 }
 
@@ -826,15 +905,21 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			var fdID, closureType, closureStatus string
 			var principalAmt, accruedInt, tdsAmt, penaltyAmt, netPayout float64
 			var entityID, entityName string
+			var hasUnresolved bool
 			loadErr := pool.QueryRow(ctx, `
 				SELECT fd_id,closure_type,closure_status,
 				       principal_amount,accrued_interest,tds_deducted,penalty_amount,net_payout_amount,
-				       COALESCE(entity_id,''),COALESCE(entity_name,'')
+				       COALESCE(entity_id,''),COALESCE(entity_name,''),
+				       COALESCE(has_unresolved_variance,false)
 				FROM investment.fd_closure_request
 				WHERE closure_request_id=$1 AND is_deleted=false`, crID,
-			).Scan(&fdID,&closureType,&closureStatus,&principalAmt,&accruedInt,&tdsAmt,&penaltyAmt,&netPayout,&entityID,&entityName)
+			).Scan(&fdID,&closureType,&closureStatus,&principalAmt,&accruedInt,&tdsAmt,&penaltyAmt,&netPayout,&entityID,&entityName,&hasUnresolved)
 			if loadErr != nil { errors = append(errors, crID+": not found"); continue }
 			if closureStatus != "PENDING_APPROVAL" { errors = append(errors, crID+": status is "+closureStatus); continue }
+			if hasUnresolved {
+				errors = append(errors, crID+": has unresolved variances — resolve or raise as exception before approving")
+				continue
+			}
 
 			var instanceEyeID string
 			engineErr := pool.QueryRow(ctx, `
@@ -857,6 +942,7 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, crID+": "+err.Error())
 					continue
 				}
+				engineActed++ // action recorded; count regardless of whether this is the final eye
 				var instStatus string
 				_ = pool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i JOIN uam.approval_instance_eye ie ON ie.instance_id=i.instance_id WHERE ie.instance_eye_id=$1`, instanceEyeID).Scan(&instStatus)
 				if instStatus == "APPROVED" {
@@ -865,7 +951,6 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 						errors = append(errors, crID+": journal posting failed: "+postErr.Error())
 					}
 				}
-				engineActed++
 			} else {
 				var anyInstance int
 				_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM uam.approval_instance WHERE record_id=$1 AND module_code='FIXED_DEPOSIT' AND status='PENDING'`, crID).Scan(&anyInstance)
@@ -888,8 +973,14 @@ func BulkApproveClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			}(crID, userEmail)
 		}
 
+		totalActed := engineActed + directActed
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No closures were approved"
+		}
 		api.LogInfo("[FDClosure] BulkApproveClosureRequest: engine=%d direct=%d errors=%d by=%s", engineActed, directActed, len(errors), userEmail)
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed, "errors": errors, "checker": userEmail,
 		})
 	}
@@ -971,8 +1062,14 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			}(crID, userEmail)
 		}
 
+		totalActed := acted
+		success := totalActed > 0 || len(errors) == 0
+		msg := ""
+		if !success {
+			msg = "No closures were rejected"
+		}
 		api.LogInfo("[FDClosure] BulkRejectClosureRequest: acted=%d errors=%d by=%s", acted, len(errors), userEmail)
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
+		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"acted": acted, "errors": errors, "checker": userEmail,
 		})
 	}
@@ -1082,7 +1179,7 @@ func postClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureRequest
 
 	var bankAccountNumber, bankAccountName string
 	if settleAcctID != "" {
-		_ = tx.QueryRow(ctx, `SELECT COALESCE(account_number,''), COALESCE(account_nickname,'') FROM public.masterbankaccount WHERE account_id=$1 OR account_number=$1 LIMIT 1`, settleAcctID).Scan(&bankAccountNumber, &bankAccountName)
+		_ = tx.QueryRow(ctx, `SELECT COALESCE(account_number,''), COALESCE(account_nickname,'') FROM public.masterbankaccount WHERE account_id=$1 LIMIT 1`, settleAcctID).Scan(&bankAccountNumber, &bankAccountName)
 	}
 	if bankAccountName == "" { bankAccountName = firstNonEmpty(bankName, "Settlement Account") }
 	if bankAccountNumber == "" { bankAccountNumber = firstNonEmpty(settleAcctID, "SETTLEMENT") }
@@ -1096,6 +1193,7 @@ func postClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureRequest
 	var activityID string
 	err = tx.QueryRow(ctx, `INSERT INTO investment.accounting_activity (activity_type,activity_subtype,effective_date,accounting_period,data_source,status) VALUES ('FIXED_DEPOSIT',$1,CURRENT_DATE,$2,'FD_CLOSURE','APPROVED') RETURNING activity_id`, activitySubtype, accountingPeriod).Scan(&activityID)
 	if err != nil { return fmt.Errorf("postClosureJournals create activity: %w", err) }
+
 
 	var entryID string
 	description := fmt.Sprintf("FD %s closure — %s", closureType, fdID)
@@ -1139,10 +1237,10 @@ func postClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureRequest
 	case "ROLLOVER":  newFDStatus = "ROLLED_OVER"
 	}
 
-	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1,closed_at=NOW(),closed_by=$2,accounting_posted=true,closure_request_id=$3,updated_by=$2,updated_at=NOW() WHERE fd_id=$4`, newFDStatus, approvedByEmail, closureRequestID, fdID)
+	_, err = tx.Exec(ctx, `UPDATE investment.fd_master SET fd_status=$1,closed_at=NOW(),closed_by=$2,accounting_posted=true,closure_request_id=$3,updated_by=$4,updated_at=NOW() WHERE fd_id=$5`, newFDStatus, approvedByEmail, closureRequestID, approvedByEmail, fdID)
 	if err != nil { return fmt.Errorf("postClosureJournals update fd_master: %w", err) }
 
-	_, err = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET closure_status='POSTED',approved_by=$1,approved_by_email=$2,approved_at=NOW(),accounting_posted=true,accounting_posted_at=NOW(),updated_by=$2,updated_at=NOW() WHERE closure_request_id=$3`, approvedBy, approvedByEmail, closureRequestID)
+	_, err = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET closure_status='POSTED',approved_by=$1,approved_by_email=$2,approved_at=NOW(),accounting_posted=true,accounting_posted_at=NOW(),updated_by=$3,updated_at=NOW() WHERE closure_request_id=$4`, approvedBy, approvedByEmail, approvedByEmail, closureRequestID)
 	if err != nil { return fmt.Errorf("postClosureJournals update closure request: %w", err) }
 
 	switch closureType {
@@ -1161,4 +1259,574 @@ func postClosureJournals(ctx context.Context, pool *pgxpool.Pool, closureRequest
 
 	api.LogInfo("[FDClosure] postClosureJournals: closureID=%s fdID=%s type=%s entryID=%s by=%s", closureRequestID, fdID, closureType, entryID, approvedByEmail)
 	return nil
+}
+
+// ─── Handler: ValidateClosure ─────────────────────────────────────────────────
+//
+// POST /investment/fd/closure/validate
+//
+// Single validation entrypoint for ALL closure types (MATURITY, PREMATURE, ROLLOVER).
+// Hit repeatedly — each call re-runs the variance engine.
+//
+// Behaviour:
+//   1. Loads DB source-of-truth for the FD.
+//   2. Computes system-expected values (interest, penalty, payout …).
+//   3. Compares EVERY user-submitted field against system values.
+//   4. If closure_request_id is given (re-validate): persists / updates variance rows.
+//      Any field whose delta is now 0 gets auto-marked RESOLVED (AutoResolveCleared).
+//   5. Returns system_values for UI pre-population + full variances[] array.
+//
+// Only two endpoints:
+//   POST /validate  — call until all variances resolved (no separate resolve API)
+//   POST /initiate  — blocked if OPEN variances exist (unless proceed_with_exception=true)
+
+// validateClosureRequest covers ALL fields for MATURITY, PREMATURE and ROLLOVER.
+// The UI pre-populates from maturity-dashboard; user edits; we compare every field.
+type validateClosureRequest struct {
+	UserID           string `json:"user_id"`
+	ClosureRequestID string `json:"closure_request_id"` // empty on first call; set on re-validate
+
+	// ── FD identity ────────────────────────────────────────────────────────
+	FDID             string `json:"fd_id"`
+	ClosureType      string `json:"closure_type"` // MATURITY | PREMATURE | ROLLOVER
+	BankID           string `json:"bank_id"`
+	BankName         string `json:"bank_name"`
+	BankFDRefNo      string `json:"bank_fd_ref_no"`
+	EntityID         string `json:"entity_id"`
+	EntityName       string `json:"entity_name"`
+
+	// ── Core FD economics ──────────────────────────────────────────────────
+	PrincipalAmount  float64 `json:"principal_amount"`
+	InterestRate     float64 `json:"interest_rate"`
+	TenureDays       int     `json:"tenure_days"`
+	StartDate        string  `json:"start_date"`
+	MaturityDate     string  `json:"maturity_date"`
+	InterestTypeCode string  `json:"interest_type_code"` // SIMPLE | COMPOUND
+
+	// ── Accrual & TDS ──────────────────────────────────────────────────────
+	AccruedInterest float64 `json:"accrued_interest"`
+	TDSDeducted     float64 `json:"tds_deducted"`
+	TDSRate         float64 `json:"tds_rate"`
+
+	// ── Penalty (PREMATURE) ────────────────────────────────────────────────
+	PenaltyRate    float64 `json:"penalty_rate"`
+	PenaltyAmount  float64 `json:"penalty_amount"`
+	NoInterestFlag bool    `json:"no_interest_flag"`
+	DaysHeld       int     `json:"days_held"`
+
+	// ── Net payout / settlement ────────────────────────────────────────────
+	NetPayoutAmount      float64 `json:"net_payout_amount"`
+	SettlementAccountID  string  `json:"settlement_account_id"`
+	SettlementBankName   string  `json:"settlement_bank_name"`
+	SettlementAccountNo  string  `json:"settlement_account_number"`
+	PaymentMode          string  `json:"payment_mode"`
+	EffectiveClosureDate string  `json:"effective_closure_date"`
+	MaturityInstructions string  `json:"maturity_instructions"` // LIQUIDATE | ROLLOVER | TRANSFER
+
+	// ── Maturity payout specific ───────────────────────────────────────────
+	PrincipalReturned float64 `json:"principal_returned"`
+	GrossInterest     float64 `json:"gross_interest"`
+	PayoutDate        string  `json:"payout_date"`
+
+	// ── Premature specific ─────────────────────────────────────────────────
+	ContractedRate       float64 `json:"contracted_rate"`
+	ApplicableRate       float64 `json:"applicable_rate"` // contracted_rate - penalty_rate
+	GrossInterestEarned  float64 `json:"gross_interest_earned"`
+	TDSOnInterest        float64 `json:"tds_on_interest"`
+	PenaltyStructureID   string  `json:"penalty_structure_id"`
+	PrematureClosureDate string  `json:"premature_closure_date"`
+
+	// ── Rollover specific ──────────────────────────────────────────────────
+	RolloverType         string  `json:"rollover_type"`        // FULL | PARTIAL | PRINCIPAL_ONLY
+	RolloverAmount       float64 `json:"rollover_amount"`
+	RolloverPrincipal    float64 `json:"rollover_principal"`
+	InterestCredited     float64 `json:"interest_credited"`
+	RolloverTenorDays    int     `json:"rollover_tenor_days"`
+	RolloverInterestRate float64 `json:"rollover_interest_rate"`
+	NewMaturityDate      string  `json:"new_maturity_date"`
+	PartialWithdrawal    float64 `json:"partial_withdrawal"`
+	NewFDID              string  `json:"new_fd_id"`
+
+	// ── Closure metadata ──────────────────────────────────────────────────
+	ClosureReason string `json:"closure_reason"`
+	ClosureNotes  string `json:"closure_notes"`
+}
+
+func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req validateClosureRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.FDID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
+			return
+		}
+		validTypes := map[string]bool{"MATURITY": true, "PREMATURE": true, "ROLLOVER": true}
+		if req.ClosureType != "" && !validTypes[req.ClosureType] {
+			api.RespondWithError(w, http.StatusBadRequest, "closure_type must be MATURITY, PREMATURE or ROLLOVER")
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		ctx := r.Context()
+
+		// ── 1. Load DB source-of-truth ─────────────────────────────────────
+		var (
+			dbBankID, dbBankName, dbBankFDRef string
+			dbEntityID, dbEntityName          string
+			dbPrincipal, dbInterestRate        float64
+			dbMaturityDate, dbStartDate        time.Time
+			dbTenureDays                       int
+			dbFDStatus, dbInterestTypeCode     string
+		)
+		err := pool.QueryRow(ctx, `
+			SELECT COALESCE(m.bank_id,''), COALESCE(m.bank_name,''), COALESCE(m.bank_fd_ref_no,''),
+			       m.principal_amount, m.interest_rate,
+			       m.maturity_date, m.start_date, m.tenure_days,
+			       m.fd_status, COALESCE(m.interest_type_code,'SIMPLE'),
+			       COALESCE(b.entity_id,''), COALESCE(b.entity_name,'')
+			FROM investment.fd_master m
+			LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+			WHERE m.fd_id=$1 AND m.is_deleted=false`, req.FDID,
+		).Scan(&dbBankID, &dbBankName, &dbBankFDRef, &dbPrincipal, &dbInterestRate,
+			&dbMaturityDate, &dbStartDate, &dbTenureDays, &dbFDStatus, &dbInterestTypeCode,
+			&dbEntityID, &dbEntityName)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "FD not found")
+			return
+		}
+
+		fmtDate := func(t time.Time) string { return t.Format("2006-01-02") }
+		fmtF := func(v float64) string { return strconv.FormatFloat(v, 'f', 4, 64) }
+		fmtI := func(v int) string { return strconv.Itoa(v) }
+
+		// ── 2. System accrual ──────────────────────────────────────────────
+		var dbAccruedInterest, dbTDSDeducted float64
+		_ = pool.QueryRow(ctx, `
+			SELECT COALESCE(SUM(period_interest_accrued),0), COALESCE(SUM(tds_deducted_in_period),0)
+			FROM investment.fd_accrual_ledger
+			WHERE fd_id=$1 AND COALESCE(is_deleted,false)=false`, req.FDID,
+		).Scan(&dbAccruedInterest, &dbTDSDeducted)
+
+		// ── 3. Penalty (PREMATURE) ─────────────────────────────────────────
+		var dbPenaltyRate, dbPenaltyAmount float64
+		var dbNoInterestFlag bool
+		var dbDaysHeld, dbMinDays int
+		var dbPenaltyStructureID string
+		if req.ClosureType == "PREMATURE" {
+			_ = pool.QueryRow(ctx, `
+				SELECT COALESCE(ps.penalty_structure_id,''),
+				       COALESCE(ps.penalty_value,0),
+				       COALESCE(ps.no_interest_if_withdrawn_before,0) > 0,
+				       COALESCE(ps.no_interest_if_withdrawn_before,0)
+				FROM investment.fd_penalty_structure_master ps
+				WHERE ps.bank_code=$1 AND COALESCE(ps.is_deleted,false)=false
+				ORDER BY ps.penalty_value DESC LIMIT 1`, dbBankID,
+			).Scan(&dbPenaltyStructureID, &dbPenaltyRate, &dbNoInterestFlag, &dbMinDays)
+			_ = pool.QueryRow(ctx,
+				`SELECT COALESCE((CURRENT_DATE - start_date)::int,0) FROM investment.fd_master WHERE fd_id=$1`,
+				req.FDID).Scan(&dbDaysHeld)
+			intForPenalty := dbAccruedInterest
+			if dbNoInterestFlag && dbDaysHeld < dbMinDays {
+				intForPenalty = 0
+			}
+			dbPenaltyAmount = roundToFour(intForPenalty * dbPenaltyRate / 100.0)
+		}
+		dbApplicableRate := roundToFour(dbInterestRate - dbPenaltyRate)
+
+		// ── 4. System net payout per type ──────────────────────────────────
+		var dbNetPayout float64
+		switch req.ClosureType {
+		case "MATURITY":
+			dbNetPayout = roundToFour(dbPrincipal + dbAccruedInterest - dbTDSDeducted)
+		case "PREMATURE":
+			dbNetPayout = roundToFour(dbPrincipal + dbAccruedInterest - dbTDSDeducted - dbPenaltyAmount)
+		case "ROLLOVER":
+			if req.RolloverType == "PARTIAL" && req.PartialWithdrawal > 0 {
+				dbNetPayout = roundToFour(dbPrincipal - req.PartialWithdrawal)
+			} else {
+				dbNetPayout = roundToFour(dbPrincipal)
+			}
+		default:
+			dbNetPayout = roundToFour(dbPrincipal + dbAccruedInterest - dbTDSDeducted)
+		}
+
+		// ── 5. Build variance rules ────────────────────────────────────────
+		runID := varianceengine.NewRunID()
+		entityID := firstNonEmpty(req.EntityID, dbEntityID)
+
+		// Common rules — apply to ALL closure types
+		rules := []varianceengine.Rule{
+			{FieldName: "bank_id",            VarianceType: varianceengine.TypeIdentity, ExpectedValue: dbBankID,                       ActualValue: req.BankID,              Priority: varianceengine.PriorityHigh,   SystemComment: "Bank does not match FD master"},
+			{FieldName: "bank_name",          VarianceType: varianceengine.TypeIdentity, ExpectedValue: dbBankName,                     ActualValue: req.BankName,            Priority: varianceengine.PriorityLow},
+			{FieldName: "bank_fd_ref_no",     VarianceType: varianceengine.TypeIdentity, ExpectedValue: dbBankFDRef,                    ActualValue: req.BankFDRefNo,         Priority: varianceengine.PriorityMedium},
+			{FieldName: "entity_id",          VarianceType: varianceengine.TypeIdentity, ExpectedValue: dbEntityID,                     ActualValue: req.EntityID,            Priority: varianceengine.PriorityHigh,   SystemComment: "Entity mismatch"},
+			{FieldName: "entity_name",        VarianceType: varianceengine.TypeIdentity, ExpectedValue: dbEntityName,                   ActualValue: req.EntityName,          Priority: varianceengine.PriorityLow},
+			{FieldName: "principal_amount",   VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbPrincipal),              ActualValue: fmtF(req.PrincipalAmount), Priority: varianceengine.PriorityHigh,   Tolerance: 0.01},
+			{FieldName: "interest_rate",      VarianceType: varianceengine.TypeRate,     ExpectedValue: fmtF(dbInterestRate),           ActualValue: fmtF(req.InterestRate),  Priority: varianceengine.PriorityHigh,   Tolerance: 0.001},
+			{FieldName: "interest_type_code", VarianceType: varianceengine.TypeIdentity, ExpectedValue: dbInterestTypeCode,             ActualValue: req.InterestTypeCode,    Priority: varianceengine.PriorityMedium},
+			{FieldName: "tenure_days",        VarianceType: varianceengine.TypeDays,     ExpectedValue: fmtI(dbTenureDays),             ActualValue: fmtI(req.TenureDays),    Priority: varianceengine.PriorityHigh,   Tolerance: 0},
+			{FieldName: "start_date",         VarianceType: varianceengine.TypeDate,     ExpectedValue: fmtDate(dbStartDate),           ActualValue: req.StartDate,           Priority: varianceengine.PriorityHigh,   Tolerance: 0},
+			{FieldName: "maturity_date",      VarianceType: varianceengine.TypeDate,     ExpectedValue: fmtDate(dbMaturityDate),        ActualValue: req.MaturityDate,        Priority: varianceengine.PriorityHigh,   Tolerance: 0},
+			{FieldName: "accrued_interest",   VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbAccruedInterest),        ActualValue: fmtF(req.AccruedInterest), Priority: varianceengine.PriorityMedium, Tolerance: 1.0},
+			{FieldName: "tds_deducted",       VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbTDSDeducted),            ActualValue: fmtF(req.TDSDeducted),   Priority: varianceengine.PriorityMedium, Tolerance: 0.5},
+			{FieldName: "net_payout_amount",  VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbNetPayout),              ActualValue: fmtF(req.NetPayoutAmount), Priority: varianceengine.PriorityHigh,   Tolerance: 1.0},
+		}
+
+		// MATURITY-specific rules
+		if req.ClosureType == "MATURITY" || req.ClosureType == "" {
+			rules = append(rules,
+				varianceengine.Rule{FieldName: "principal_returned", VarianceType: varianceengine.TypeAmount, ExpectedValue: fmtF(dbPrincipal),       ActualValue: fmtF(req.PrincipalReturned), Priority: varianceengine.PriorityHigh, Tolerance: 0.01},
+				varianceengine.Rule{FieldName: "gross_interest",      VarianceType: varianceengine.TypeAmount, ExpectedValue: fmtF(dbAccruedInterest), ActualValue: fmtF(req.GrossInterest),     Priority: varianceengine.PriorityMedium, Tolerance: 1.0},
+			)
+		}
+
+		// PREMATURE-specific rules
+		if req.ClosureType == "PREMATURE" {
+			rules = append(rules,
+				varianceengine.Rule{FieldName: "days_held",             VarianceType: varianceengine.TypeDays,     ExpectedValue: fmtI(dbDaysHeld),              ActualValue: fmtI(req.DaysHeld),             Priority: varianceengine.PriorityHigh, Tolerance: 0},
+				varianceengine.Rule{FieldName: "contracted_rate",       VarianceType: varianceengine.TypeRate,     ExpectedValue: fmtF(dbInterestRate),          ActualValue: fmtF(req.ContractedRate),       Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
+				varianceengine.Rule{FieldName: "applicable_rate",       VarianceType: varianceengine.TypeRate,     ExpectedValue: fmtF(dbApplicableRate),        ActualValue: fmtF(req.ApplicableRate),       Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
+				varianceengine.Rule{FieldName: "gross_interest_earned", VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbAccruedInterest),       ActualValue: fmtF(req.GrossInterestEarned),  Priority: varianceengine.PriorityMedium, Tolerance: 1.0},
+				varianceengine.Rule{FieldName: "penalty_rate",          VarianceType: varianceengine.TypeRate,     ExpectedValue: fmtF(dbPenaltyRate),           ActualValue: fmtF(req.PenaltyRate),          Priority: varianceengine.PriorityHigh, Tolerance: 0.001},
+				varianceengine.Rule{FieldName: "penalty_amount",        VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbPenaltyAmount),         ActualValue: fmtF(req.PenaltyAmount),        Priority: varianceengine.PriorityHigh, Tolerance: 0.01},
+				varianceengine.Rule{FieldName: "no_interest_flag",      VarianceType: varianceengine.TypeIdentity, ExpectedValue: strconv.FormatBool(dbNoInterestFlag), ActualValue: strconv.FormatBool(req.NoInterestFlag), Priority: varianceengine.PriorityMedium},
+				varianceengine.Rule{FieldName: "tds_on_interest",       VarianceType: varianceengine.TypeAmount,   ExpectedValue: fmtF(dbTDSDeducted),           ActualValue: fmtF(req.TDSOnInterest),        Priority: varianceengine.PriorityMedium, Tolerance: 0.5},
+			)
+		}
+
+		// ROLLOVER-specific rules
+		if req.ClosureType == "ROLLOVER" {
+			rules = append(rules,
+				varianceengine.Rule{FieldName: "rollover_principal",     VarianceType: varianceengine.TypeAmount, ExpectedValue: fmtF(dbPrincipal),       ActualValue: fmtF(req.RolloverPrincipal),    Priority: varianceengine.PriorityHigh,   Tolerance: 0.01},
+				varianceengine.Rule{FieldName: "rollover_amount",        VarianceType: varianceengine.TypeAmount, ExpectedValue: fmtF(dbNetPayout),       ActualValue: fmtF(req.RolloverAmount),       Priority: varianceengine.PriorityHigh,   Tolerance: 1.0},
+				varianceengine.Rule{FieldName: "interest_credited",      VarianceType: varianceengine.TypeAmount, ExpectedValue: fmtF(dbAccruedInterest), ActualValue: fmtF(req.InterestCredited),     Priority: varianceengine.PriorityMedium, Tolerance: 1.0},
+				varianceengine.Rule{FieldName: "rollover_interest_rate", VarianceType: varianceengine.TypeRate,   ExpectedValue: fmtF(dbInterestRate),    ActualValue: fmtF(req.RolloverInterestRate), Priority: varianceengine.PriorityHigh,   Tolerance: 0.001, SystemComment: "Rollover rate vs current contracted rate"},
+				varianceengine.Rule{FieldName: "partial_withdrawal",     VarianceType: varianceengine.TypeAmount, ExpectedValue: "0.0000",                ActualValue: fmtF(req.PartialWithdrawal),    Priority: varianceengine.PriorityHigh,   Tolerance: 0.01,  SystemComment: "Non-zero only for PARTIAL rollover"},
+			)
+		}
+
+		// ── 6. Run engine ──────────────────────────────────────────────────
+		items := varianceengine.Compare("FD_CLOSURE", req.ClosureRequestID, entityID, runID, rules)
+
+		// ── 7. Persist if re-validating ────────────────────────────────────
+		if req.ClosureRequestID != "" {
+			// Auto-resolve any field whose value now matches system expectation
+			_ = varianceengine.AutoResolveCleared(ctx, pool, req.ClosureRequestID, items, req.UserID, userEmail)
+			// Persist / update rows that still have a variance
+			_ = varianceengine.PersistVariances(ctx, pool, items)
+			// Stamp flags on the closure request record
+			_ = varianceengine.UpdateRecordFlags(ctx, pool,
+				"investment.fd_closure_request", "closure_request_id",
+				req.ClosureRequestID, runID, items)
+		}
+
+		// ── 8. Build variance response ─────────────────────────────────────
+		openCount := 0
+		variances := make([]map[string]interface{}, 0, len(items))
+		for _, item := range items {
+			if item.HasVariance && item.Status == varianceengine.StatusOpen {
+				openCount++
+			}
+			variances = append(variances, map[string]interface{}{
+				"field_name":     item.FieldName,
+				"variance_type":  item.VarianceType,
+				"expected_value": item.ExpectedValue,
+				"actual_value":   item.ActualValue,
+				"delta":          item.VarianceDelta,
+				"priority":       item.Priority,
+				"has_variance":   item.HasVariance,
+				"status":         item.Status,
+				"system_comment": item.SystemComment,
+				"variance_id":    item.VarianceID,
+			})
+		}
+
+		api.LogInfo("[FDClosure] ValidateClosure: fd=%s type=%s run=%s total_variances=%d open=%d by=%s",
+			req.FDID, req.ClosureType, runID, countVariances(items), openCount, userEmail)
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"fd_id":          req.FDID,
+			"closure_type":   req.ClosureType,
+			"run_id":         runID,
+			"has_variance":   openCount > 0,
+			"variance_count": countVariances(items),
+			"open_count":     openCount,
+			"variances":      variances,
+			// System-computed values — for UI pre-population / confirmation
+			"system_values": map[string]interface{}{
+				// Identity
+				"bank_id":            dbBankID,
+				"bank_name":          dbBankName,
+				"bank_fd_ref_no":     dbBankFDRef,
+				"entity_id":          dbEntityID,
+				"entity_name":        dbEntityName,
+				// Core FD
+				"principal_amount":    dbPrincipal,
+				"interest_rate":       dbInterestRate,
+				"interest_type_code":  dbInterestTypeCode,
+				"tenure_days":         dbTenureDays,
+				"start_date":          fmtDate(dbStartDate),
+				"maturity_date":       fmtDate(dbMaturityDate),
+				"fd_status":           dbFDStatus,
+				// Accrual
+				"accrued_interest":    roundToFour(dbAccruedInterest),
+				"tds_deducted":        roundToFour(dbTDSDeducted),
+				// Net payout
+				"net_payout_amount":   dbNetPayout,
+				// Maturity-specific system values
+				"principal_returned":  dbPrincipal,
+				"gross_interest":      roundToFour(dbAccruedInterest),
+				// Premature-specific system values
+				"days_held":               dbDaysHeld,
+				"contracted_rate":         dbInterestRate,
+				"applicable_rate":         dbApplicableRate,
+				"penalty_rate":            dbPenaltyRate,
+				"penalty_amount":          dbPenaltyAmount,
+				"no_interest_flag":        dbNoInterestFlag,
+				"min_days_for_interest":   dbMinDays,
+				"penalty_structure_id":    dbPenaltyStructureID,
+				// Rollover-specific system values
+				"rollover_principal":  dbPrincipal,
+				"rollover_amount":     dbNetPayout,
+				"interest_credited":   roundToFour(dbAccruedInterest),
+			},
+		})
+	}
+}
+
+func countVariances(items []varianceengine.VarianceItem) int {
+	n := 0
+	for _, item := range items {
+		if item.HasVariance {
+			n++
+		}
+	}
+	return n
+}
+
+// ─── Approval post-finalize hook ──────────────────────────────────────────────
+//
+// Registered at startup: when the approval engine finalises any FD_CLOSURE_*
+// instance, this hook updates fd_closure_request.closure_status to match the
+// approval outcome (APPROVED → triggers journal posting; REJECTED → resets FD).
+
+func init() {
+	for _, txType := range []string{"FD_CLOSURE_MATURITY", "FD_CLOSURE_PREMATURE", "FD_CLOSURE_ROLLOVER"} {
+		t := txType
+		approvalengine.RegisterPostFinalizeHook(t, func(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string) {
+			if finalStatus == "APPROVED" {
+				// Load closure data and post journals.
+				var fdID, closureType, entityID, entityName string
+				var principalAmt, accruedInterest, tdsAmt, penaltyAmt, netPayout float64
+				err := pool.QueryRow(ctx, `
+					SELECT fd_id, closure_type,
+					       COALESCE(entity_id,''), COALESCE(entity_name,''),
+					       principal_amount, accrued_interest, tds_deducted,
+					       penalty_amount, net_payout_amount
+					FROM investment.fd_closure_request
+					WHERE closure_request_id = $1`, recordID,
+				).Scan(&fdID, &closureType, &entityID, &entityName,
+					&principalAmt, &accruedInterest, &tdsAmt, &penaltyAmt, &netPayout)
+				if err != nil {
+					api.LogError("[FDClosure] postFinalizeHook load error for %s: %v", recordID, err)
+					return
+				}
+				// Derive approvedBy from email (best-effort userID lookup).
+				approvedBy := ""
+				for _, s := range auth.GetActiveSessions() {
+					if s.Email == actorEmail {
+						approvedBy = s.UserID
+						break
+					}
+				}
+				if postErr := postClosureJournals(ctx, pool, recordID, fdID, closureType,
+					entityID, entityName, principalAmt, accruedInterest, tdsAmt, penaltyAmt, netPayout,
+					approvedBy, actorEmail); postErr != nil {
+					api.LogError("[FDClosure] postFinalizeHook journal posting failed for %s: %v", recordID, postErr)
+				}
+			} else if finalStatus == "REJECTED" {
+				_, _ = pool.Exec(ctx,
+					`UPDATE investment.fd_closure_request
+					 SET closure_status='REJECTED', rejected_at=NOW(),
+					     rejected_by=$1, rejection_reason=$2,
+					     updated_by=$1, updated_at=NOW()
+					 WHERE closure_request_id=$3`,
+					actorEmail, comment, recordID)
+				_, _ = pool.Exec(ctx,
+					`UPDATE investment.fd_master
+					 SET closure_request_id=NULL, updated_at=NOW()
+					 WHERE closure_request_id=$1`, recordID)
+			}
+			api.LogInfo("[FDClosure] postFinalizeHook: closureID=%s type=%s status=%s by=%s", recordID, t, finalStatus, actorEmail)
+		})
+	}
+}
+
+// ─── Handler 9 — GetClosureApprovalList ──────────────────────────────────────
+//
+// POST /investment/fd/closure/approval-list
+//
+// Returns closure requests enriched with approval instance status, current
+// active eye, and pending approvers — for building an approval-queue screen.
+
+type closureApprovalListRequest struct {
+	UserID      string `json:"user_id"`
+	EntityID    string `json:"entity_id"`
+	ClosureType string `json:"closure_type"` // optional filter
+	Status      string `json:"status"`       // optional: PENDING_APPROVAL | APPROVED | REJECTED | POSTED
+	Page        int    `json:"page"`
+	PageSize    int    `json:"page_size"`
+}
+
+func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req closureApprovalListRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		userEmail := getUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		if req.Page <= 0 {
+			req.Page = 1
+		}
+		if req.PageSize <= 0 || req.PageSize > 200 {
+			req.PageSize = 50
+		}
+		offset := (req.Page - 1) * req.PageSize
+		ctx := r.Context()
+
+		// Build WHERE clause
+		conditions := []string{"cr.is_deleted = false"}
+		args := []interface{}{}
+		argIdx := 1
+
+		if req.EntityID != "" {
+			args = append(args, req.EntityID)
+			conditions = append(conditions, fmt.Sprintf("cr.entity_id = $%d", argIdx))
+			argIdx++
+		}
+		if req.ClosureType != "" {
+			args = append(args, req.ClosureType)
+			conditions = append(conditions, fmt.Sprintf("cr.closure_type = $%d", argIdx))
+			argIdx++
+		}
+		if req.Status != "" {
+			args = append(args, req.Status)
+			conditions = append(conditions, fmt.Sprintf("cr.closure_status = $%d", argIdx))
+			argIdx++
+		}
+		where := strings.Join(conditions, " AND ")
+
+		// Count
+		var totalCount int
+		_ = pool.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COUNT(*) FROM investment.fd_closure_request cr WHERE %s", where), args...).Scan(&totalCount)
+
+		// Paginated list with approval engine enrichment
+		listArgs := append(args, req.PageSize, offset)
+		dataSQL := fmt.Sprintf(`
+			SELECT
+			  cr.closure_request_id,
+			  cr.fd_id,
+			  COALESCE(cr.entity_id,'')           AS entity_id,
+			  COALESCE(cr.entity_name,'')          AS entity_name,
+			  cr.closure_type,
+			  cr.closure_status,
+			  cr.principal_amount,
+			  cr.accrued_interest,
+			  cr.tds_deducted,
+			  cr.penalty_amount,
+			  cr.net_payout_amount,
+			  cr.initiation_date,
+			  cr.effective_closure_date,
+			  cr.maturity_date,
+			  cr.submitted_by_email,
+			  cr.created_at,
+			  cr.updated_at,
+			  COALESCE(m.bank_name,'')             AS bank_name,
+			  COALESCE(m.bank_fd_ref_no,'')        AS bank_fd_ref_no,
+			  m.interest_rate,
+			  m.tenure_days,
+			  COALESCE(ai.instance_id,'')          AS instance_id,
+			  COALESCE(ai.status,'')               AS approval_instance_status,
+			  COALESCE(ai.submitted_at::text,'')   AS approval_submitted_at,
+			  COALESCE(ai.resolved_at::text,'')    AS approval_resolved_at,
+			  COALESCE(ai.resolved_by_email,'')    AS approval_resolved_by,
+			  COALESCE(
+			    (SELECT json_agg(json_build_object(
+			        'instance_eye_id', ie.instance_eye_id,
+			        'position',        ie.position,
+			        'status',          ie.status,
+			        'approvals_required', ie.approvals_required,
+			        'approvals_received', ie.approvals_received,
+			        'activated_at',    ie.activated_at
+			    ) ORDER BY ie.position)
+			     FROM uam.approval_instance_eye ie
+			     WHERE ie.instance_id = ai.instance_id
+			    )::text,
+			  '[]') AS eye_summary,
+			  COALESCE(
+			    (SELECT json_agg(json_build_object(
+			        'user_id',    m2.user_id,
+			        'eye_id',     ie2.matrix_eye_id,
+			        'eye_status', ie2.status
+			    ))
+			     FROM uam.approval_instance_eye ie2
+			     JOIN uam.approval_matrix_eye_member m2
+			       ON m2.eye_id = ie2.matrix_eye_id
+			      AND m2.member_type = 'APPROVER'
+			      AND m2.is_active = true
+			      AND m2.is_deleted = false
+			     WHERE ie2.instance_id = ai.instance_id
+			       AND ie2.status = 'ACTIVE'
+			    )::text,
+			  '[]') AS pending_approvers,
+			  COALESCE(
+			    (SELECT COUNT(*) FROM public.variance_log vl
+			     WHERE vl.record_id = cr.fd_id AND vl.status = 'OPEN')
+			  , 0) AS open_variance_count
+			FROM investment.fd_closure_request cr
+			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
+			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
+			WHERE %s
+			ORDER BY cr.created_at DESC
+			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
+
+		rows, err := pool.Query(ctx, dataSQL, listArgs...)
+		if err != nil {
+			api.LogError("[FDClosure] GetClosureApprovalList query error: %v", err)
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch approval list")
+			return
+		}
+		defer rows.Close()
+
+		var records []map[string]interface{}
+		for rows.Next() {
+			vals, _ := rows.Values()
+			colDescs := rows.FieldDescriptions()
+			row := make(map[string]interface{}, len(colDescs))
+			for i, col := range colDescs {
+				row[string(col.Name)] = vals[i]
+			}
+			records = append(records, row)
+		}
+
+		api.LogInfo("[FDClosure] GetClosureApprovalList: %d/%d page=%d by=%s", len(records), totalCount, req.Page, userEmail)
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"records":   records,
+			"total":     totalCount,
+			"page":      req.Page,
+			"page_size": req.PageSize,
+		})
+	}
 }

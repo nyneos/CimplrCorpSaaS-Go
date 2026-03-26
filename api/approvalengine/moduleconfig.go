@@ -1,5 +1,11 @@
 package approvalengine
 
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
 // txTableConfig holds the audit table and primary-key column name for a given
 // transaction type. These values cannot be stored in uam.approval_instance
 // (the DB schema does not have those columns), so they are looked up at
@@ -35,6 +41,11 @@ var txTypeRegistry = map[string]txTableConfig{
 	"FD_RECEIPT_EDIT":    {AuditTable: "investment.fd_interest_receipt_audit", AuditIDColumn: "receipt_id"},
 	"FD_RECEIPT_DELETE":  {AuditTable: "investment.fd_interest_receipt_audit", AuditIDColumn: "receipt_id"},
 
+	// ── FD Closure ───────────────────────────────────────────────────────
+	"FD_CLOSURE_MATURITY":  {AuditTable: "investment.fd_audit_closure_request", AuditIDColumn: "closure_request_id"},
+	"FD_CLOSURE_PREMATURE": {AuditTable: "investment.fd_audit_closure_request", AuditIDColumn: "closure_request_id"},
+	"FD_CLOSURE_ROLLOVER":  {AuditTable: "investment.fd_audit_closure_request", AuditIDColumn: "closure_request_id"},
+
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up)
 }
@@ -46,4 +57,27 @@ func LookupTxTableConfig(transactionType string) (auditTable, auditIDColumn stri
 		return cfg.AuditTable, cfg.AuditIDColumn
 	}
 	return "", ""
+}
+
+// ─── Post-finalize hooks ──────────────────────────────────────────────────────
+
+// PostFinalizeFunc is called by RecordAction after an instance is fully resolved
+// (all eyes approved, or one rejected). Runs OUTSIDE the approval engine
+// transaction so modules can do their own DB work (e.g. updating closure_status).
+type PostFinalizeFunc func(ctx context.Context, pool *pgxpool.Pool, recordID, transactionType, finalStatus, actorEmail, comment string)
+
+// postFinalizeRegistry maps transaction_type → hook.
+var postFinalizeRegistry = map[string]PostFinalizeFunc{}
+
+// RegisterPostFinalizeHook lets a module register a callback to be invoked
+// after the engine fully resolves an instance of the given transactionType.
+func RegisterPostFinalizeHook(transactionType string, fn PostFinalizeFunc) {
+	postFinalizeRegistry[transactionType] = fn
+}
+
+// RunPostFinalizeHook executes the registered hook (if any) for transactionType.
+func RunPostFinalizeHook(ctx context.Context, pool *pgxpool.Pool, transactionType, recordID, finalStatus, actorEmail, comment string) {
+	if fn, ok := postFinalizeRegistry[transactionType]; ok {
+		fn(ctx, pool, recordID, transactionType, finalStatus, actorEmail, comment)
+	}
 }

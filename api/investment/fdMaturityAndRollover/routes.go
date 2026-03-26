@@ -14,6 +14,8 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 
 	mux.Handle("/investment/fd/closure/maturity-dashboard",
 		mid(http.HandlerFunc(GetFDsNearMaturity(pool))))
+	mux.Handle("/investment/fd/closure/validate",
+		mid(http.HandlerFunc(ValidateClosure(pool))))
 	mux.Handle("/investment/fd/closure/initiate",
 		mid(http.HandlerFunc(InitiateClosure(pool))))
 	mux.Handle("/investment/fd/closure/update",
@@ -28,4 +30,6 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(BulkRejectClosureRequest(pool))))
 	mux.Handle("/investment/fd/closure/delete",
 		mid(http.HandlerFunc(DeleteClosureRequest(pool))))
+	mux.Handle("/investment/fd/closure/approval-list",
+		mid(http.HandlerFunc(GetClosureApprovalList(pool))))
 }

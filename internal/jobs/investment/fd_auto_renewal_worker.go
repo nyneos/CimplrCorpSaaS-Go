@@ -38,8 +38,8 @@ func runAutoRenewal(db *pgxpool.Pool) {
 		  COALESCE(b.entity_id,''::text) AS entity_id,
 		  COALESCE(b.entity_name,''::text) AS entity_name,
 		  m.principal_amount, m.maturity_date,
-		  COALESCE(m.maturity_amount, m.principal_amount) AS rollover_amount,
-		  COALESCE(m.tenor_days, 365) AS tenor_days
+		  m.principal_amount AS rollover_amount,
+		  COALESCE(m.tenure_days, 365) AS tenor_days
 		FROM investment.fd_master m
 		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 		WHERE m.fd_status = 'ACTIVE'

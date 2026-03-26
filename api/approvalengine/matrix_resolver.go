@@ -58,11 +58,39 @@ func ResolveMatrix(
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			api.LogInfo("[ApprovalEngine] No matrix for %s/%s/%s amount=%.2f",
-				moduleCode, entityCode, transactionType, amount)
-			return nil, nil
+			// No entity-specific matrix — try DEFAULT fallback.
+			if entityCode != "DEFAULT" {
+				err2 := pool.QueryRow(ctx, `
+					SELECT matrix_id, approval_order, sla_hours
+					FROM uam.approval_matrix_master
+					WHERE module_code      = $1
+					  AND entity_code      = 'DEFAULT'
+					  AND transaction_type = $2
+					  AND is_active        = true
+					  AND is_deleted       = false
+					  AND (min_amount IS NULL OR min_amount <= $3)
+					  AND (max_amount IS NULL OR max_amount >= $3)
+					ORDER BY COALESCE(min_amount,-1) DESC, COALESCE(max_amount,999999999) ASC
+					LIMIT 1`,
+					moduleCode, transactionType, amount,
+				).Scan(&matrixID, &approvalOrder, &slaHours)
+				if err2 != nil {
+					if err2 == pgx.ErrNoRows {
+						api.LogInfo("[ApprovalEngine] No matrix (entity or DEFAULT) for %s/%s/%s amount=%.2f",
+							moduleCode, entityCode, transactionType, amount)
+						return nil, nil
+					}
+					return nil, fmt.Errorf("ResolveMatrix DEFAULT fallback query: %w", err2)
+				}
+				api.LogInfo("[ApprovalEngine] Using DEFAULT matrix for %s/%s/%s", moduleCode, entityCode, transactionType)
+			} else {
+				api.LogInfo("[ApprovalEngine] No matrix for %s/%s/%s amount=%.2f",
+					moduleCode, entityCode, transactionType, amount)
+				return nil, nil
+			}
+		} else {
+			return nil, fmt.Errorf("ResolveMatrix query: %w", err)
 		}
-		return nil, fmt.Errorf("ResolveMatrix query: %w", err)
 	}
 
 	// Step 2: Load all active eyes for this matrix.

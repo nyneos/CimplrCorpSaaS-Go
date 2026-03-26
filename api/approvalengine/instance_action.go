@@ -211,6 +211,7 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		}
 		api.LogInfo("[ApprovalEngine] Instance %s REJECTED at eye=%s by %s",
 			instanceID, req.InstanceEyeID, req.ActorEmail)
+		go RunPostFinalizeHook(context.Background(), pool, transactionType, recordID, InstStatusRejected, req.ActorEmail, req.Comment)
 		return nil
 	}
 
@@ -325,5 +326,6 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 
 	api.LogInfo("[ApprovalEngine] Instance %s FULLY APPROVED: module=%s record=%s by=%s",
 		instanceID, actionType, recordID, req.ActorEmail)
+	go RunPostFinalizeHook(context.Background(), pool, transactionType, recordID, InstStatusApproved, req.ActorEmail, req.Comment)
 	return nil
 }
