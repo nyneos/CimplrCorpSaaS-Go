@@ -71,23 +71,25 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		case "CUSTOM", "Custom":
 			startDate = req.StartDate
 			endDate = req.EndDate
-	case "This Week":
-		startDate = periodStartDate("This Week", now).Format("2006-01-02")
-		endDate = now.Format("2006-01-02")
-	case "This Month":
-		startDate = periodStartDate("This Month", now).Format("2006-01-02")
-		endDate = now.Format("2006-01-02")
-		default: // "Today" + anything else
+		case "Today":
 			startDate = now.Format("2006-01-02")
+			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+		case "This Week":
+			startDate = periodStartDate("This Week", now).Format("2006-01-02")
+			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+		case "This Month":
+			startDate = periodStartDate("This Month", now).Format("2006-01-02")
+			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+		default: // blank / "Last 30 Days" / anything unrecognised → last 30 days
+			startDate = now.AddDate(0, 0, -30).Format("2006-01-02")
 			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
 		}
 		if startDate == "" {
-			startDate = now.AddDate(-1, 0, 0).Format("2006-01-02") // default 1 year back
+			startDate = now.AddDate(0, 0, -30).Format("2006-01-02")
 		}
 		if endDate == "" {
 			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
 		}
-
 		ctx := r.Context()
 
 		type subResult struct {
@@ -112,12 +114,12 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── 1. Audit summary counts ───────────────────────────────────────────
 		run("audit_summary", func(ctx context.Context) (interface{}, error) {
 			type summaryRow struct {
-				Source          string `json:"source"`
-				Total           int64  `json:"total"`
-				Pending         int64  `json:"pending"`
-				Approved        int64  `json:"approved"`
-				Rejected        int64  `json:"rejected"`
-				Checked         int64  `json:"checked"` // checker_by IS NOT NULL
+				Source  string `json:"source"`
+				Total   int64  `json:"total"`
+				Pending int64  `json:"pending"`
+				Approved int64 `json:"approved"`
+				Rejected int64 `json:"rejected"`
+				Checked  int64 `json:"checked"` // checker_by IS NOT NULL
 			}
 
 			queries := []struct {
@@ -127,43 +129,116 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				{"MASTER", `
 					SELECT 'MASTER',
 					  COUNT(*),
-					  SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END)
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_master
 					WHERE requested_at >= $1::date AND requested_at < $2::date
 					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_master.fd_id AND fm.entity_id=$3))`},
 				{"BOOKING", `
 					SELECT 'BOOKING',
 					  COUNT(*),
-					  SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END)
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_booking_request
 					WHERE requested_at >= $1::date AND requested_at < $2::date
 					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=fd_audit_booking_request.booking_id AND b.entity_id=$3))`},
 				{"CONFIRMATION", `
 					SELECT 'CONFIRMATION',
 					  COUNT(*),
-					  SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END)
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_confirmation
 					WHERE requested_at >= $1::date AND requested_at < $2::date
 					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_confirmation cf WHERE cf.confirmation_id=fd_audit_confirmation.confirmation_id AND EXISTS(SELECT 1 FROM investment.fd_booking_request b WHERE b.booking_id=cf.booking_id AND b.entity_id=$3)))`},
 				{"CASHFLOW", `
 					SELECT 'CASHFLOW',
 					  COUNT(*),
-					  SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),
-					  SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END)
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_cashflow_schedule
 					WHERE requested_at >= $1::date AND requested_at < $2::date
 					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_master fm WHERE fm.fd_id=fd_audit_cashflow_schedule.fd_id AND fm.entity_id=$3))`},
+				{"CLOSURE", `
+					SELECT 'CLOSURE',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_closure_request
+					WHERE created_at >= $1::date AND created_at < $2::date
+					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id=$3))`},
+				{"BANK_CONFIG", `
+					SELECT 'BANK_CONFIG',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_bank_config
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"BANK_RATE_CARD", `
+					SELECT 'BANK_RATE_CARD',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_bank_rate_card
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"TDS_PLAN", `
+					SELECT 'TDS_PLAN',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_tds_plan
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"PENALTY_STRUCTURE", `
+					SELECT 'PENALTY_STRUCTURE',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_penalty_structure
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"INTEREST_TYPE", `
+					SELECT 'INTEREST_TYPE',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_interest_type
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"DAY_COUNT_CONVENTION", `
+					SELECT 'DAY_COUNT_CONVENTION',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_day_count_convention
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"COMPOUNDING_FREQUENCY", `
+					SELECT 'COMPOUNDING_FREQUENCY',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_audit_compounding_frequency
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
 			}
 
 			out := []summaryRow{}
@@ -199,7 +274,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			var checked, total int64
 			err := pool.QueryRow(ctx, `
 				SELECT
-				  SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END) AS checked,
+				  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0) AS checked,
 				  COUNT(*) AS total
 				FROM (
 				  SELECT checker_by, requested_at FROM investment.fd_audit_master
@@ -209,6 +284,22 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SELECT checker_by, requested_at FROM investment.fd_audit_confirmation
 				  UNION ALL
 				  SELECT checker_by, requested_at FROM investment.fd_audit_cashflow_schedule
+				  UNION ALL
+				  SELECT checker_by, created_at AS requested_at FROM investment.fd_audit_closure_request
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_bank_config
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_bank_rate_card
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_tds_plan
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_penalty_structure
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_interest_type
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_day_count_convention
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_audit_compounding_frequency
 				) t
 				WHERE requested_at >= $1::date AND requested_at < $2::date`, startDate, endDate).Scan(&checked, &total)
 			if err != nil {
@@ -318,9 +409,178 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
 				    AND ($4::text='' OR action_type=$4)
 				    AND ($5::text='' OR fd_id=$5)
+
+				  UNION ALL
+
+				  SELECT
+				    'CLOSURE',
+				    audit_id::text,
+				    closure_request_id,
+				    action_type,
+				    processing_status,
+				    COALESCE(action_reason,''),
+				    COALESCE(performed_by_email,''),
+				    COALESCE(TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    COALESCE(old_closure_status,''),
+				    '',
+				    created_at
+				  FROM investment.fd_audit_closure_request
+				  WHERE created_at >= $1::date AND created_at < $2::date
+				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id=$3))
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'BANK_CONFIG',
+				    audit_id::text,
+				    config_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_bank_config
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'BANK_RATE_CARD',
+				    audit_id::text,
+				    rate_card_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_bank_rate_card
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'TDS_PLAN',
+				    audit_id::text,
+				    tds_plan_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_tds_plan
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'PENALTY_STRUCTURE',
+				    audit_id::text,
+				    penalty_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_penalty_structure
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'INTEREST_TYPE',
+				    audit_id::text,
+				    interest_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_interest_type
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'DAY_COUNT_CONVENTION',
+				    audit_id::text,
+				    day_count_code,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_day_count_convention
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'COMPOUNDING_FREQUENCY',
+				    audit_id::text,
+				    frequency_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_audit_compounding_frequency
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
 				) combined
 				ORDER BY sort_ts DESC
-				LIMIT 200`, startDate, endDate, entityFilter, actionFilter, fdFilter)
+				LIMIT 500`, startDate, endDate, entityFilter, actionFilter, fdFilter)
 			if err != nil {
 				api.LogError("[AuditDash] audit_log query error: %v", err)
 				return []interface{}{}, nil
@@ -513,12 +773,13 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── 7. Approvals register ─────────────────────────────────────────────
 		run("approvals_register", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
-				SELECT audit_id_text, ref_id, approval_type, submitted_by, approved_by,
+				SELECT audit_id_text, ref_id, source, approval_type, submitted_by, approved_by,
 				       decision, requested_at, checker_at, checker_comment
 				FROM (
 				  SELECT
 				    audit_id::text AS audit_id_text,
 				    booking_id AS ref_id,
+				    'BOOKING' AS source,
 				    action_type AS approval_type,
 				    COALESCE(requested_by,'') AS submitted_by,
 				    COALESCE(checker_by,'') AS approved_by,
@@ -536,6 +797,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SELECT
 				    audit_id::text,
 				    fd_id,
+				    'MASTER',
 				    action_type,
 				    COALESCE(requested_by,''),
 				    COALESCE(checker_by,''),
@@ -553,6 +815,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SELECT
 				    audit_id::text,
 				    confirmation_id,
+				    'CONFIRMATION',
 				    action_type,
 				    COALESCE(requested_by,''),
 				    COALESCE(checker_by,''),
@@ -563,9 +826,163 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_audit_confirmation
 				  WHERE checker_by IS NOT NULL
 				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    closure_request_id,
+				    'CLOSURE',
+				    action_type,
+				    COALESCE(performed_by_email,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    created_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_closure_request
+				  WHERE checker_by IS NOT NULL
+				    AND created_at >= $1::date AND created_at < $2::date
+				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_closure_request cr WHERE cr.closure_request_id=fd_audit_closure_request.closure_request_id AND cr.entity_id=$3))
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    config_id,
+				    'BANK_CONFIG',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_bank_config
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    rate_card_id,
+				    'BANK_RATE_CARD',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_bank_rate_card
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    tds_plan_id,
+				    'TDS_PLAN',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_tds_plan
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    penalty_id,
+				    'PENALTY_STRUCTURE',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_penalty_structure
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    interest_id,
+				    'INTEREST_TYPE',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_interest_type
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    day_count_code,
+				    'DAY_COUNT_CONVENTION',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_day_count_convention
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    frequency_id,
+				    'COMPOUNDING_FREQUENCY',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_compounding_frequency
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    fd_id,
+				    'CASHFLOW',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_audit_cashflow_schedule
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
 				) combined
 				ORDER BY requested_at DESC
-				LIMIT 100`, startDate, endDate, entityFilter)
+				LIMIT 200`, startDate, endDate, entityFilter)
 			if err != nil {
 				api.LogError("[AuditDash] approvals_register query error: %v", err)
 				return []interface{}{}, nil
@@ -575,6 +992,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			type approvalRow struct {
 				AuditID        string `json:"audit_id"`
 				RefID          string `json:"ref_id"`
+				Source         string `json:"source"`
 				ApprovalType   string `json:"approval_type"`
 				SubmittedBy    string `json:"submitted_by"`
 				ApprovedBy     string `json:"approved_by"`
@@ -588,7 +1006,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				var ar approvalRow
 				var reqAt, chkAt *time.Time
 				if err2 := rows.Scan(
-					&ar.AuditID, &ar.RefID, &ar.ApprovalType,
+					&ar.AuditID, &ar.RefID, &ar.Source, &ar.ApprovalType,
 					&ar.SubmittedBy, &ar.ApprovedBy, &ar.Decision,
 					&reqAt, &chkAt, &ar.CheckerComment,
 				); err2 != nil {
@@ -679,7 +1097,186 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 10. Transaction trace for a specific FD (optional) ────────────────
+		// ── 10. Approval matrix instances for FD records ──────────────────────
+		run("approval_matrix", func(ctx context.Context) (interface{}, error) {
+			// Fetch recent approval instances for FD-related transaction types,
+			// with per-eye status and all actions taken (who approved, when, comment).
+			// Links: approval_instance.record_id = booking_id | fd_id | confirmation_id | closure_request_id
+			instRows, err := pool.Query(ctx, `
+				SELECT
+				  i.instance_id,
+				  i.module_code,
+				  i.transaction_type,
+				  i.record_id,
+				  i.action_type,
+				  i.status              AS instance_status,
+				  i.submitted_by_email,
+				  i.submitted_at,
+				  COALESCE(i.resolved_by_email,'') AS resolved_by_email,
+				  i.resolved_at,
+				  ie.instance_eye_id,
+				  ie.position           AS eye_position,
+				  ie.eye_count,
+				  ie.approvals_required,
+				  ie.approvals_received,
+				  ie.status             AS eye_status,
+				  ie.activated_at       AS eye_activated_at,
+				  ie.sla_deadline,
+				  ie.is_escalated,
+				  COALESCE(ia.action_id::text,'')    AS action_id,
+				  COALESCE(ia.actor_email,'')         AS actor_email,
+				  COALESCE(ia.action_type,'')         AS action_taken,
+				  COALESCE(ia.comment,'')             AS action_comment,
+				  ia.acted_at,
+				  COALESCE(ia.is_system_action, false) AS is_system
+				FROM uam.approval_instance i
+				JOIN uam.approval_instance_eye ie ON ie.instance_id = i.instance_id
+				LEFT JOIN uam.approval_instance_action ia ON ia.instance_eye_id = ie.instance_eye_id
+				WHERE i.is_deleted = false
+				  AND i.module_code = 'FIXED_DEPOSIT'
+				  AND i.submitted_at >= $1::timestamptz AND i.submitted_at < $2::timestamptz
+				  AND ($3::text='' OR i.entity_code=$3)
+				  AND ($4::text='' OR i.record_id=$4)
+				ORDER BY i.submitted_at DESC, ie.position ASC, ia.acted_at ASC
+				LIMIT 500`, startDate, endDate, entityFilter, fdFilter)
+			if err != nil {
+				api.LogError("[AuditDash] approval_matrix query error: %v", err)
+				return map[string]interface{}{"instances": []interface{}{}, "total": 0}, nil
+			}
+			defer instRows.Close()
+
+			type eyeActionRow struct {
+				ActionID      string     `json:"action_id,omitempty"`
+				ActorEmail    string     `json:"actor_email,omitempty"`
+				ActionTaken   string     `json:"action_taken,omitempty"`
+				ActionComment string     `json:"action_comment,omitempty"`
+				ActedAt       *time.Time `json:"acted_at,omitempty"`
+				IsSystem      bool       `json:"is_system,omitempty"`
+			}
+			type eyeRow struct {
+				InstanceEyeID     string         `json:"instance_eye_id"`
+				Position          int            `json:"position"`
+				EyeCount          int            `json:"eye_count"`
+				ApprovalsRequired int            `json:"approvals_required"`
+				ApprovalsReceived int            `json:"approvals_received"`
+				EyeStatus         string         `json:"eye_status"`
+				EyeActivatedAt    *time.Time     `json:"eye_activated_at,omitempty"`
+				SlaDeadline       *time.Time     `json:"sla_deadline,omitempty"`
+				IsEscalated       bool           `json:"is_escalated"`
+				Actions           []eyeActionRow `json:"actions"`
+			}
+			type instanceRow struct {
+				InstanceID      string    `json:"instance_id"`
+				ModuleCode      string    `json:"module_code"`
+				TransactionType string    `json:"transaction_type"`
+				RecordID        string    `json:"record_id"`
+				ActionType      string    `json:"action_type"`
+				InstanceStatus  string    `json:"instance_status"`
+				SubmittedBy     string    `json:"submitted_by"`
+				SubmittedAt     time.Time `json:"submitted_at"`
+				ResolvedBy      string    `json:"resolved_by,omitempty"`
+				ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
+				Eyes            []eyeRow  `json:"eyes"`
+			}
+
+			// Build nested map: instance_id → instanceRow, eye_id → eyeRow
+			instanceMap := make(map[string]*instanceRow)
+			instanceOrder := []string{}
+			eyeMap := make(map[string]*eyeRow) // key: instance_eye_id
+
+			for instRows.Next() {
+				var (
+					instID, moduleCode, txType, recordID, actionType, instStatus string
+					submittedByEmail, resolvedByEmail string
+					submittedAt time.Time
+					resolvedAt  *time.Time
+					eyeID string
+					eyePos, eyeCount, appReq, appRcvd int
+					eyeStatus string
+					eyeActivatedAt, slaDeadline *time.Time
+					isEscalated bool
+					actionID, actorEmail, actionTaken, actionComment string
+					actedAt *time.Time
+					isSystem bool
+				)
+				if err2 := instRows.Scan(
+					&instID, &moduleCode, &txType, &recordID, &actionType, &instStatus,
+					&submittedByEmail, &submittedAt,
+					&resolvedByEmail, &resolvedAt,
+					&eyeID, &eyePos, &eyeCount, &appReq, &appRcvd,
+					&eyeStatus, &eyeActivatedAt, &slaDeadline, &isEscalated,
+					&actionID, &actorEmail, &actionTaken, &actionComment, &actedAt, &isSystem,
+				); err2 != nil {
+					api.LogError("[AuditDash] approval_matrix scan error: %v", err2)
+					continue
+				}
+
+				if _, ok := instanceMap[instID]; !ok {
+					instanceMap[instID] = &instanceRow{
+						InstanceID:      instID,
+						ModuleCode:      moduleCode,
+						TransactionType: txType,
+						RecordID:        recordID,
+						ActionType:      actionType,
+						InstanceStatus:  instStatus,
+						SubmittedBy:     submittedByEmail,
+						SubmittedAt:     submittedAt,
+						ResolvedBy:      resolvedByEmail,
+						ResolvedAt:      resolvedAt,
+						Eyes:            []eyeRow{},
+					}
+					instanceOrder = append(instanceOrder, instID)
+				}
+
+				eyeMapKey := instID + ":" + eyeID
+				if _, ok := eyeMap[eyeMapKey]; !ok {
+					er := &eyeRow{
+						InstanceEyeID:     eyeID,
+						Position:          eyePos,
+						EyeCount:          eyeCount,
+						ApprovalsRequired: appReq,
+						ApprovalsReceived: appRcvd,
+						EyeStatus:         eyeStatus,
+						EyeActivatedAt:    eyeActivatedAt,
+						SlaDeadline:       slaDeadline,
+						IsEscalated:       isEscalated,
+						Actions:           []eyeActionRow{},
+					}
+					eyeMap[eyeMapKey] = er
+					instanceMap[instID].Eyes = append(instanceMap[instID].Eyes, *er)
+				}
+
+				if actionID != "" && actedAt != nil {
+					act := eyeActionRow{
+						ActionID:      actionID,
+						ActorEmail:    actorEmail,
+						ActionTaken:   actionTaken,
+						ActionComment: actionComment,
+						ActedAt:       actedAt,
+						IsSystem:      isSystem,
+					}
+					// append action to the correct eye in the instance
+					inst := instanceMap[instID]
+					for i := range inst.Eyes {
+						if inst.Eyes[i].InstanceEyeID == eyeID {
+							inst.Eyes[i].Actions = append(inst.Eyes[i].Actions, act)
+							break
+						}
+					}
+				}
+			}
+
+			out := make([]instanceRow, 0, len(instanceOrder))
+			for _, id := range instanceOrder {
+				out = append(out, *instanceMap[id])
+			}
+			return map[string]interface{}{
+				"instances": out,
+				"total":     len(out),
+			}, nil
+		})
+
+		// ── 11. Transaction trace for a specific FD (optional) ────────────────
 		if fdFilter != "" {
 			run("transaction_trace", func(ctx context.Context) (interface{}, error) {
 				// A. Master FD state
@@ -896,6 +1493,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"approvals_register":  get("approvals_register"),
 			"evidence_packs":      get("evidence_packs"),
 			"policy_exceptions":   get("policy_exceptions"),
+			"approval_matrix":     get("approval_matrix"),
 			"transaction_trace":   get("transaction_trace"),
 		}
 
