@@ -3,6 +3,7 @@ package fdMaster
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strconv"
@@ -919,18 +920,29 @@ func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 
 	var dates []time.Time
 	current := fd.ValueDate
+	const maxPeriods = 1200 // 100 years of monthly — hard guard against infinite loops
 
-	for current.Before(fd.MaturityDate) {
+	for iter := 0; iter < maxPeriods && current.Before(fd.MaturityDate); iter++ {
 		var next time.Time
 
 		switch capType {
 		case "CALENDAR_QTR_END":
-			next = nextCalendarQuarterEnd(current)
-			if !next.After(current) {
-				next = nextCalendarQuarterEnd(current.AddDate(0, 1, 0))
+			// Find the next unadjusted quarter-end strictly after current.
+			raw := nextCalendarQuarterEnd(current)
+			if !raw.After(current) {
+				raw = nextCalendarQuarterEnd(current.AddDate(0, 1, 0))
 			}
-			// adjust to working day if needed
-			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+			next = adjustToWorkingDay(raw, cfg.CapitalizationDateAdjustment, cfg, cal)
+			// Guard: if adjustment moved next backwards to <= current (e.g. PRECEDING on a
+			// weekend quarter-end), bump past the raw quarter-end and try the next one.
+			if !next.After(current) {
+				raw = nextCalendarQuarterEnd(raw.AddDate(0, 1, 0))
+				next = adjustToWorkingDay(raw, cfg.CapitalizationDateAdjustment, cfg, cal)
+			}
+			// Last-resort safety — if still stuck, skip forward one quarter.
+			if !next.After(current) {
+				next = current.AddDate(0, 3, 1)
+			}
 		case "ANNIVERSARY":
 			// Use DaysPerPeriod from freq when available, otherwise fall back to
 			// configured 90-day behaviour or compute from periods-per-year.
@@ -944,8 +956,11 @@ func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 			}
 			next = current.AddDate(0, 0, offsetDays)
 			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+			if !next.After(current) {
+				next = current.AddDate(0, 0, offsetDays+1)
+			}
 		case "MONTH_END":
-			// Next month-end after current
+			// Next month-end strictly after current.
 			y, m, _ := current.Date()
 			next = lastDayOfMonth(y, m)
 			if !next.After(current) {
@@ -957,13 +972,22 @@ func buildCapitalizationDates(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 				next = lastDayOfMonth(y, m)
 			}
 			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+			if !next.After(current) {
+				next = current.AddDate(0, 1, 1)
+			}
 		case "FIXED_DAY":
 			// Not implemented in v1 — treat same as ANNIVERSARY (quarterly)
 			next = current.AddDate(0, 3, 0)
 			next = adjustToWorkingDay(next, cfg.CapitalizationDateAdjustment, cfg, cal)
+			if !next.After(current) {
+				next = current.AddDate(0, 3, 1)
+			}
 		default:
 			// Fallback: quarterly anniversary.
 			next = current.AddDate(0, 3, 0)
+			if !next.After(current) {
+				next = current.AddDate(0, 3, 1)
+			}
 		}
 
 		if !next.Before(fd.MaturityDate) {
@@ -1528,26 +1552,101 @@ func GenerateCashflowForFD(ctx context.Context, exec queryExecutor, fdID string,
 	if err != nil {
 		return nil, nil, err
 	}
+	return GenerateCashflowFromRecord(ctx, exec, fd)
+}
+
+// GenerateCashflowFromRecord generates cashflow rows from an already-loaded FDRecord,
+// skipping the DB load step. Use this when the record is already in memory (e.g. ActivateFD)
+// to avoid a redundant DB round-trip inside an open transaction.
+func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDRecord) ([]CashflowRow, *FDRecord, error) {
+	if fd == nil {
+		return nil, nil, fmt.Errorf("GenerateCashflowFromRecord: nil FDRecord")
+	}
+
+	tg := time.Now()
+	log.Printf("[CFGEN][%s] ► start bankConfigID=%q tdsID=%q freqID=%q itCode=%q dcCode=%q",
+		fd.ConfirmationID, fd.BankConfigID, fd.TDSPlanID,
+		firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID),
+		fd.InterestTypeCode, fd.DayCountConvention)
 
 	cfg, _ := loadBankConfig(ctx, exec, fd.BankConfigID)
+	log.Printf("[CFGEN][%s] ✓ loadBankConfig (+%s) calCode=%q dcCode=%q", fd.ConfirmationID, time.Since(tg).Round(time.Millisecond), cfg.HolidayCalendarCode, cfg.DayCountCode)
+
+	t1 := time.Now()
 	freq, _ := loadCompoundingFreq(ctx, exec, firstNonEmpty(fd.CompoundingFrequency, fd.InterestPayoutFrequency, fd.FrequencyID))
+	log.Printf("[CFGEN][%s] ✓ loadCompoundingFreq (+%s)", fd.ConfirmationID, time.Since(t1).Round(time.Millisecond))
+
+	t2 := time.Now()
 	tds, _ := loadTDSConfig(ctx, exec, fd.TDSPlanID)
+	log.Printf("[CFGEN][%s] ✓ loadTDSConfig (+%s)", fd.ConfirmationID, time.Since(t2).Round(time.Millisecond))
 
 	// Resolve day count convention from master — prefer fd's day_count_code, fall back to bank config's.
 	dcRef := firstNonEmpty(fd.DayCountConvention, cfg.DayCountCode)
+	t3 := time.Now()
 	dcInfo := loadDayCountConvention(ctx, exec, dcRef)
+	log.Printf("[CFGEN][%s] ✓ loadDayCountConvention (+%s)", fd.ConfirmationID, time.Since(t3).Round(time.Millisecond))
 
 	// Resolve interest type calculation method from master.
+	t4 := time.Now()
 	itInfo := loadInterestType(ctx, exec, fd.InterestTypeCode)
+	log.Printf("[CFGEN][%s] ✓ loadInterestType (+%s)", fd.ConfirmationID, time.Since(t4).Round(time.Millisecond))
 
 	// Load holiday calendar from bank config's holiday_calendar_code.
+	t5 := time.Now()
 	calInfo := loadHolidayCalendar(ctx, exec, cfg.HolidayCalendarCode, fd.ValueDate, fd.MaturityDate)
+	log.Printf("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
 
-	return generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo, calInfo), fd, nil
+	rows := generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo, calInfo)
+	log.Printf("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
+	return rows, fd, nil
 }
 
 func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow) error {
 	return SaveCashflowScheduleWithCreator(ctx, exec, fdID, rows, "system")
+}
+
+// SaveCashflowScheduleWithRecord is like SaveCashflowScheduleWithCreator but accepts
+// an already-loaded FDRecord so it can skip the two extra in-tx DB queries
+// (FOR UPDATE lock + SELECT master fields) that would otherwise run inside the transaction.
+// Use this from ActivateFD where rec is already in memory and the FD was just inserted
+// (no concurrent regeneration possible).
+func SaveCashflowScheduleWithRecord(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string, rec *FDRecord) error {
+	if strings.TrimSpace(fdID) == "" || len(rows) == 0 {
+		return nil
+	}
+	if createdBy == "" {
+		createdBy = "system"
+	}
+
+	table := resolveFirstExistingTable(ctx, exec, []string{
+		"investment.fd_cashflow_schedule",
+		"investment.fd_cashflow",
+		"investment.fd_master_cashflow_schedule",
+	})
+	if table == "" {
+		return nil
+	}
+
+	schemaName, tableName := splitQualifiedTable(table)
+	cols, err := loadTableColumns(ctx, exec, schemaName, tableName)
+	if err != nil {
+		return err
+	}
+	fdCol := pickFirstExistingColumn(cols, "fd_id", "master_id")
+	if fdCol == "" {
+		return nil
+	}
+
+	// Use master fields from the pre-loaded record — no extra DB query needed.
+	var masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount string
+	if rec != nil {
+		masterEntityID = rec.EntityID
+		masterBankID = rec.BankID
+		masterSourceAccount = rec.BankAccountID
+	}
+
+	return saveCashflowBatch(ctx, exec, table, fdCol, cols, fdID, rows, createdBy,
+		masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount)
 }
 
 func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
@@ -1591,87 +1690,142 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 	var masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount string
 	_ = exec.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(entity_name,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(source_account_id,'') FROM investment.fd_master WHERE fd_id = $1 LIMIT 1`, fdID).Scan(&masterEntityID, &masterEntityName, &masterBankID, &masterBankName, &masterSourceAccount)
 
-	// Delete existing rows first (clean regeneration).
+	return saveCashflowBatch(ctx, exec, table, fdCol, cols, fdID, rows, createdBy,
+		masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount)
+}
+
+// saveCashflowBatch is the shared batch-INSERT engine used by both
+// SaveCashflowScheduleWithCreator and SaveCashflowScheduleWithRecord.
+func saveCashflowBatch(ctx context.Context, exec queryExecutor, table, fdCol string, cols map[string]bool, fdID string, rows []CashflowRow, createdBy string,
+	masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount string,
+) error {
 	_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
 
-	for _, row := range rows {
-		valueMap := map[string]interface{}{
-			fdCol:                     fdID,
-			"sequence_number":         row.PeriodNumber,
-			"period_number":           row.PeriodNumber,
-			"event_type":              row.EventType,
-			"event_date":              row.EventDate,
-			"cashflow_date":           row.EventDate,
-			"period_start_date":       nilIfZero(row.PeriodStartDate),
-			"period_end_date":         nilIfZero(row.PeriodEndDate),
-			"period_days":             nilIfZero(row.PeriodDays),
-			"opening_principal":       row.OpeningPrincipal,
-			"interest_accrued":        row.InterestAccrued,
-			"interest_amount":         row.InterestAccrued,
-			"capitalized_amount":      row.CapitalizedAmount,
-			"closing_principal":       row.ClosingPrincipal,
-			"tds_amount":              row.TDSAmount,
-			"net_cash_flow":           row.NetCashFlow,
-			"net_cashflow":            row.NetCashFlow,
-			"net_amount":              row.NetCashFlow,
-			"day_count_code":          nilIfEmpty(row.DayCountCode),
-			"divisor":                 nilIfZero(row.Divisor),
-			"formula_used":            nilIfEmpty(row.FormulaUsed),
-			"accrual_rate_per_day":    row.AccrualRatePerDay,
-			"dr_account_code":         nilIfEmpty(row.DrAccountCode),
-			"dr_account_name":         nilIfEmpty(row.DrAccountName),
-			"cr_account_code":         nilIfEmpty(row.CrAccountCode),
-			"cr_account_name":         nilIfEmpty(row.CrAccountName),
-			"created_by":              createdBy,
-			"created_at":              time.Now(),
+	// ── Determine the fixed column list for the batch INSERT ───────────────
+	// We resolve which columns exist ONCE here, then reuse for every row.
+	// This avoids the old per-row pattern of N separate INSERT round-trips.
+	preferredCols := []string{
+		fdCol,
+		"sequence_number", "period_number",
+		"event_type",
+		"event_date", "cashflow_date",
+		"period_start_date", "period_end_date", "period_days",
+		"opening_principal",
+		"interest_accrued", "interest_amount",
+		"capitalized_amount", "closing_principal",
+		"tds_amount",
+		"net_cash_flow", "net_cashflow", "net_amount",
+		"day_count_code", "divisor", "formula_used", "accrual_rate_per_day",
+		"dr_account_code", "dr_account_name",
+		"cr_account_code", "cr_account_name",
+		"created_by", "created_at",
+	}
+	// Optional cosmetic columns — only include if they exist in the schema.
+	optionalCols := []string{"bank_id", "bank_name", "entity_id", "entity_name", "source_account_id", "posting_status", "bank_confirmed", "bank_reference"}
+	for _, oc := range optionalCols {
+		if cols[oc] {
+			preferredCols = append(preferredCols, oc)
 		}
-		// Populate cosmetic/master fields if the target table has them.
-		if cols["bank_id"] {
-			valueMap["bank_id"] = masterBankID
+	}
+
+	// Build the final ordered insert column list using the first row as a probe.
+	// We call buildDynamicInsert on row[0] just to get the canonical insertCols
+	// order, then reuse that order for all subsequent rows in the batch.
+	now := time.Now()
+	makeValueMap := func(row CashflowRow) map[string]interface{} {
+		vm := map[string]interface{}{
+			fdCol:                  fdID,
+			"sequence_number":     row.PeriodNumber,
+			"period_number":       row.PeriodNumber,
+			"event_type":         row.EventType,
+			"event_date":         row.EventDate,
+			"cashflow_date":      row.EventDate,
+			"period_start_date":  nilIfZero(row.PeriodStartDate),
+			"period_end_date":    nilIfZero(row.PeriodEndDate),
+			"period_days":        nilIfZero(row.PeriodDays),
+			"opening_principal":  row.OpeningPrincipal,
+			"interest_accrued":   row.InterestAccrued,
+			"interest_amount":    row.InterestAccrued,
+			"capitalized_amount": row.CapitalizedAmount,
+			"closing_principal":  row.ClosingPrincipal,
+			"tds_amount":         row.TDSAmount,
+			"net_cash_flow":      row.NetCashFlow,
+			"net_cashflow":       row.NetCashFlow,
+			"net_amount":         row.NetCashFlow,
+			"day_count_code":     nilIfEmpty(row.DayCountCode),
+			"divisor":            nilIfZero(row.Divisor),
+			"formula_used":       nilIfEmpty(row.FormulaUsed),
+			"accrual_rate_per_day": row.AccrualRatePerDay,
+			"dr_account_code":    nilIfEmpty(row.DrAccountCode),
+			"dr_account_name":    nilIfEmpty(row.DrAccountName),
+			"cr_account_code":    nilIfEmpty(row.CrAccountCode),
+			"cr_account_name":    nilIfEmpty(row.CrAccountName),
+			"created_by":         createdBy,
+			"created_at":         now,
 		}
-		if cols["bank_name"] {
-			valueMap["bank_name"] = masterBankName
+		if cols["bank_id"] { vm["bank_id"] = masterBankID }
+		if cols["bank_name"] { vm["bank_name"] = masterBankName }
+		if cols["entity_id"] { vm["entity_id"] = masterEntityID }
+		if cols["entity_name"] { vm["entity_name"] = masterEntityName }
+		if cols["source_account_id"] { vm["source_account_id"] = masterSourceAccount }
+		if cols["posting_status"] { vm["posting_status"] = "NOT_POSTED" }
+		if cols["bank_confirmed"] { vm["bank_confirmed"] = false }
+		if cols["bank_reference"] { vm["bank_reference"] = "" }
+		return vm
+	}
+
+	// ── Batch INSERT: collect all row value-sets and fire ONE query ────────
+	// Postgres supports: INSERT INTO t (c1,c2,...) VALUES ($1,$2,...),($3,$4,...)
+	// We build the column list from the first row, then append value-tuples for each.
+	// Postgres limit is ~65535 bind parameters; for safety batch at 500 params / insert.
+	const maxParams = 60000
+
+	// Determine column list once.
+	var insertCols []string
+	for _, col := range preferredCols {
+		if cols[col] {
+			insertCols = append(insertCols, col)
 		}
-		if cols["entity_id"] {
-			valueMap["entity_id"] = masterEntityID
+	}
+	if len(insertCols) == 0 {
+		return fmt.Errorf("save cashflow schedule: no valid columns found")
+	}
+	colsPerRow := len(insertCols)
+	maxRowsPerBatch := maxParams / colsPerRow
+	if maxRowsPerBatch < 1 {
+		maxRowsPerBatch = 1
+	}
+
+	for batchStart := 0; batchStart < len(rows); batchStart += maxRowsPerBatch {
+		batchEnd := batchStart + maxRowsPerBatch
+		if batchEnd > len(rows) {
+			batchEnd = len(rows)
 		}
-		if cols["entity_name"] {
-			valueMap["entity_name"] = masterEntityName
+		batch := rows[batchStart:batchEnd]
+
+		var valueTuples []string
+		var batchArgs []interface{}
+		paramIdx := 1
+
+		for _, row := range batch {
+			vm := makeValueMap(row)
+			placeholders := make([]string, 0, colsPerRow)
+			for _, col := range insertCols {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", paramIdx))
+				batchArgs = append(batchArgs, vm[col])
+				paramIdx++
+			}
+			valueTuples = append(valueTuples, "("+strings.Join(placeholders, ",")+")")
 		}
-		if cols["source_account_id"] {
-			valueMap["source_account_id"] = masterSourceAccount
-		}
-		if cols["posting_status"] {
-			valueMap["posting_status"] = "NOT_POSTED"
-		}
-		if cols["bank_confirmed"] {
-			valueMap["bank_confirmed"] = false
-		}
-		if cols["bank_reference"] {
-			valueMap["bank_reference"] = ""
-		}
-		preferredCols := []string{
-			fdCol,
-			"sequence_number", "period_number",
-			"event_type",
-			"event_date", "cashflow_date",
-			"period_start_date", "period_end_date", "period_days",
-			"opening_principal",
-			"interest_accrued", "interest_amount",
-			"capitalized_amount", "closing_principal",
-			"tds_amount",
-			"net_cash_flow", "net_cashflow", "net_amount",
-			"day_count_code", "divisor", "formula_used", "accrual_rate_per_day",
-			"dr_account_code", "dr_account_name",
-			"cr_account_code", "cr_account_name",
-			"created_by", "created_at",
-		}
-		insertSQL, args, _, ok := buildDynamicInsert(table, cols, preferredCols, valueMap, nil)
-		if !ok {
-			continue
-		}
-		if _, err := exec.Exec(ctx, insertSQL, args...); err != nil {
-			return fmt.Errorf("save cashflow schedule: %w", err)
+
+		batchSQL := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES %s",
+			table,
+			strings.Join(insertCols, ","),
+			strings.Join(valueTuples, ","),
+		)
+		if _, err := exec.Exec(ctx, batchSQL, batchArgs...); err != nil {
+			return fmt.Errorf("save cashflow schedule batch [%d-%d]: %w", batchStart, batchEnd-1, err)
 		}
 	}
 

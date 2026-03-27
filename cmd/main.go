@@ -15,6 +15,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
 )
 
@@ -60,8 +61,10 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
+	// Supabase pooler (aws-1) requires SSL. Also set connect_timeout and
+	// statement_timeout so a hung connection fails fast rather than blocking forever.
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		"postgres://%s:%s@%s:%s/%s?sslmode=require&connect_timeout=10&pool_max_conns=10&statement_timeout=20000",
 		user, pass, host, port, name,
 	)
 
@@ -100,6 +103,10 @@ func main() {
 	}
 	api.SetAuthService(realAuthSvc)
 
+	// Register logout hook: clear in-memory system notifications when a user logs out
+	// so stale pipeline-error alerts don't persist across sessions.
+	auth.OnLogoutHook = catalog.ClearSystemNotifications
+
 	// Graceful shutdown handling
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -115,4 +122,3 @@ func main() {
 		appmanager.GetPgxPool().Close()
 	}
 }
-

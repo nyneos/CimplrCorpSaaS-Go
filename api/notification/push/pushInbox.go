@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/dashboard"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -213,8 +214,25 @@ func handleGetInbox(pool *pgxpool.Pool) http.HandlerFunc {
 		if items == nil {
 			items = []inboxItem{}
 		}
+
+		// Blend in-memory system notifications at the top (newest first).
+		// These are pipeline error alerts stored in RAM — same shape as inboxItem
+		// with is_system=true so the UI can style them differently if desired.
+		// We only blend them on the first page (offset==0) to avoid duplication.
+		var combined []interface{}
+		if offset == 0 {
+			for _, si := range catalog.GetSystemNotificationsAsInboxItems(userID) {
+				combined = append(combined, si)
+			}
+		}
+		for _, it := range items {
+			combined = append(combined, it)
+		}
+		if combined == nil {
+			combined = []interface{}{}
+		}
 		writeOK(w, map[string]interface{}{
-			"items":  items,
+			"items":  combined,
 			"limit":  limit,
 			"offset": offset,
 		})
@@ -250,6 +268,8 @@ func handleGetCount(pool *pgxpool.Pool) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
+		// Add unread system (in-memory) notifications to the badge count
+		count += catalog.GetUnreadSystemNotifCount(userID)
 		writeOK(w, map[string]interface{}{
 			"unread": count,
 		})
@@ -293,8 +313,8 @@ func handleMarkRead(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if tag.RowsAffected() == 0 {
-			writeErr(w, http.StatusNotFound, "notification not found or already read")
-			return
+			// May be a system (in-memory) notification — try marking it there
+			catalog.MarkSystemNotifRead(userID, body.ID)
 		}
 		go pushCountSSE(r.Context(), pool, userID)
 		writeOK(w, map[string]interface{}{"message": "notification marked as read"})
@@ -332,6 +352,8 @@ func handleMarkAllRead(pool *pgxpool.Pool) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, constants.ErrDB)
 			return
 		}
+		// Also mark all in-memory system notifications as read
+		catalog.MarkSystemNotifsRead(userID)
 		go pushCountSSE(r.Context(), pool, userID)
 		writeOK(w, map[string]interface{}{
 			"message": "all notifications marked as read",

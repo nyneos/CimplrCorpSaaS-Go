@@ -221,10 +221,19 @@ func (a *AuthService) Logout(UserID string) error {
 	if !found {
 		return errors.New("no active session found for user")
 	}
+	// Notify registered hooks (e.g. clear in-memory system notifications)
+	if OnLogoutHook != nil {
+		OnLogoutHook(UserID)
+	}
 	return nil
 }
 
 var globalAuthService *AuthService
+
+// OnLogoutHook, if set, is called after a user session is removed.
+// Register from outside this package (e.g. catalog.ClearSystemNotifications)
+// to avoid circular imports.  It is called with the departing UserID.
+var OnLogoutHook func(userID string)
 
 func SetGlobalAuthService(svc *AuthService) {
 	globalAuthService = svc

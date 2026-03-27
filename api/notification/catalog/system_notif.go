@@ -2,42 +2,58 @@ package catalog
 
 // system_notif.go — In-memory System Notification Store + SSE broadcast
 //
-// PURPOSE
-// ───────
-// When the normal notification pipeline encounters any error (no event configured,
-// no approved template, actor entity unresolved, DB insert error, etc.) every user
-// currently in the active session needs to see a diagnostic in-app notification —
-// identical in shape to a DB-generated in-app notification, so the frontend needs
-// zero changes.
+// DESIGN SUMMARY
+// ──────────────
+// When the notification pipeline hits any error (no event, no template, bad actor,
+// DB failure, etc.) we create a "system notification" and:
 //
-// DESIGN
-// ──────
-// • Same JSON shape as inboxItem (id, outbox_id, correlation_id, event_id,
-//   subject, body, priority_level, is_read, created_at, module_code,
-//   sub_module_code, event_code, event_name, sender_id, sender_name, sender_email).
-//   Extra field: "is_system": true — lets the UI optionally style it differently.
-// • Stored in RAM per-user ring buffer (maxPerUser=50, maxAge=8h).
-//   Lives until the server restarts or the user logs out (ClearSystemNotifications).
-// • On push: ALL active sessions receive a "notification_count" SSE update (the
-//   same event the inbox counter already listens to) so no frontend changes needed.
-//   Additionally each session user gets the full item as "in_app_item" SSE type
-//   so live-loaded inboxes update without a refresh.
-// • The actor (who triggered the pipeline) is recorded as sender_id/sender_name/
-//   sender_email so the receiving users see who caused the event.
+//  1. Store it in an in-memory ring buffer keyed by the RECIPIENT user ID.
+//     Survives until: server restart OR user logs out (ClearSystemNotifications).
 //
-// LIFECYCLE
-// ─────────
-// • Notifications are cleared when the user logs out (call ClearSystemNotifications).
-// • Cleanup worker drops entries older than maxAgeDuration every cleanupInterval.
+//  2. Deliver it to EVERY user currently in active sessions via SSE using two
+//     complementary messages:
+//       a. "in_app_item"         — the full notification item (same inboxItem
+//                                  JSON shape as DB-generated notifications,
+//                                  plus is_system=true).  Live inboxes append it.
+//       b. "notification_count"  — refreshes the badge counter.  No frontend
+//                                  changes needed; the existing handler already
+//                                  listens for this type.
 //
-// FRONTEND INTEGRATION
-// ─────────────────────
-// No changes needed — system notifs are blended into POST /notification/inbox
-// alongside regular DB notifications. They arrive with is_system=true.
-// The existing "notification_count" SSE handler already refreshes the badge.
+//  3. The actor (who caused the action) is recorded as sender_id / sender_name /
+//     sender_email so every recipient can see who triggered the event.
+//
+// INBOX BLENDING (pushInbox.go)
+// ──────────────────────────────
+//  GetSystemNotificationsAsInboxItems(userID) returns []*SysInboxItem.
+//  handleGetInbox prepends these BEFORE the DB rows so they appear at the top.
+//  handleGetCount adds GetUnreadSystemNotifCount(userID) to the DB count.
+//
+// SHAPE — SysInboxItem matches push.inboxItem exactly, with is_system=true:
+//  {
+//    "id":             "SN-<userID>-<nano>",
+//    "outbox_id":      "",
+//    "correlation_id": "LIMIT_BULK_CREATE/...",
+//    "event_id":       "",
+//    "subject":        "Notification not configured",
+//    "body":           "No active approved notification event found ...",
+//    "priority_level": 1,
+//    "is_read":        false,
+//    "created_at":     "2026-03-27T10:00:00Z",
+//    "module_code":    "SYS",
+//    "sub_module_code":"NOTIFICATION_PIPELINE",
+//    "event_code":     "PIPELINE_ERROR",
+//    "event_name":     "System Alert",
+//    "sender_id":      "CIMPLR00...",
+//    "sender_name":    "Hardik Mishra",
+//    "sender_email":   "hardik@co.com",
+//    "level":          "warn",   ← extra field; UI can use for badge colour
+//    "source":         "notification_pipeline",
+//    "route":          "/cash/limit/bulk-create",
+//    "is_system":      true
+//  }
 
 import (
-	// "CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/internal/dashboard"
 	"encoding/json"
 	"fmt"
@@ -51,7 +67,7 @@ import (
 
 const (
 	maxPerUser      = 50            // max system notifications stored per user
-	maxAgeDuration  = 8 * time.Hour // drop entries older than this on cleanup
+	maxAgeDuration  = 8 * time.Hour // entries expire after this
 	cleanupInterval = 30 * time.Minute
 )
 
@@ -59,7 +75,7 @@ const (
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-// SysNotifLevel controls the visual severity displayed in the frontend.
+// SysNotifLevel controls visual severity.
 type SysNotifLevel string
 
 const (
@@ -68,38 +84,38 @@ const (
 	LevelInfo  SysNotifLevel = "info"
 )
 
-// SystemNotification is one system-generated alert stored in memory.
-type SystemNotification struct {
-	ID            string        `json:"id"`
-	Level         SysNotifLevel `json:"level"`
-	Subject       string        `json:"subject"`
-	Body          string        `json:"body"`
-	Source        string        `json:"source"`         // "notification_pipeline" | "auth" | …
-	Route         string        `json:"route"`          // originating HTTP route if applicable
-	CorrelationID string        `json:"correlation_id"` // domain correlation if applicable
-	CreatedAt     time.Time     `json:"created_at"`
-	IsRead        bool          `json:"is_read"`
+// SysInboxItem is the exact shape returned by the inbox list API for system
+// notifications.  It mirrors push.inboxItem field-for-field so the frontend
+// renders it identically, with three extra discriminator fields.
+type SysInboxItem struct {
+	// ── Standard inboxItem fields ─────────────────────────────────────────
+	ID            string     `json:"id"`
+	OutboxID      string     `json:"outbox_id"`
+	CorrelationID string     `json:"correlation_id"`
+	EventID       string     `json:"event_id"`
+	Subject       string     `json:"subject"`
+	Body          string     `json:"body"`
+	PriorityLevel int        `json:"priority_level"`
+	IsRead        bool       `json:"is_read"`
+	ReadAt        *time.Time `json:"read_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ModuleCode    string     `json:"module_code"`
+	SubModuleCode string     `json:"sub_module_code"`
+	EventCode     string     `json:"event_code"`
+	EventName     string     `json:"event_name"`
+	SenderID      string     `json:"sender_id"`
+	SenderName    string     `json:"sender_name"`
+	SenderEmail   string     `json:"sender_email"`
+	// ── System-only extras ────────────────────────────────────────────────
+	Level    SysNotifLevel `json:"level"`    // "error" | "warn" | "info"
+	Source   string        `json:"source"`   // "notification_pipeline"
+	Route    string        `json:"route"`    // originating HTTP route
+	IsSystem bool          `json:"is_system"` // always true
 }
 
-// MarshalJSON adds the SSE type discriminator and formats the time.
-func (n SystemNotification) ssePayload() map[string]interface{} {
-	return map[string]interface{}{
-		"type":           "system_notification",
-		"id":             n.ID,
-		"level":          string(n.Level),
-		"subject":        n.Subject,
-		"body":           n.Body,
-		"source":         n.Source,
-		"route":          n.Route,
-		"correlation_id": n.CorrelationID,
-		"created_at":     n.CreatedAt.Format(time.RFC3339),
-		"is_read":        n.IsRead,
-	}
-}
-
-// SystemNotifParams is the caller-facing input to PushSystemNotification.
+// SystemNotifParams is the caller input to PushSystemNotification.
 type SystemNotifParams struct {
-	Level         SysNotifLevel // defaults to LevelError if empty
+	Level         SysNotifLevel // defaults to LevelError
 	Subject       string
 	Body          string
 	Source        string // e.g. "notification_pipeline"
@@ -113,11 +129,10 @@ type SystemNotifParams struct {
 
 type userNotifStore struct {
 	mu    sync.RWMutex
-	items []*SystemNotification // ring buffer, newest last
+	items []*SysInboxItem // ring buffer, oldest first
 }
 
-// systemNotifStore is the global registry: userID → per-user store.
-var systemNotifStore = struct {
+var sysNotifRegistry = struct {
 	mu    sync.RWMutex
 	users map[string]*userNotifStore
 	once  sync.Once
@@ -125,65 +140,56 @@ var systemNotifStore = struct {
 	users: make(map[string]*userNotifStore),
 }
 
-// startCleanupWorker is called once on first push; drops stale entries periodically.
 func startCleanupWorker() {
 	go func() {
 		ticker := time.NewTicker(cleanupInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			cutoff := time.Now().Add(-maxAgeDuration)
-			systemNotifStore.mu.RLock()
-			stores := make([]*userNotifStore, 0, len(systemNotifStore.users))
-			for _, s := range systemNotifStore.users {
+			sysNotifRegistry.mu.RLock()
+			stores := make([]*userNotifStore, 0, len(sysNotifRegistry.users))
+			for _, s := range sysNotifRegistry.users {
 				stores = append(stores, s)
 			}
-			systemNotifStore.mu.RUnlock()
-
+			sysNotifRegistry.mu.RUnlock()
 			for _, s := range stores {
 				s.mu.Lock()
-				fresh := s.items[:0]
-				for _, item := range s.items {
-					if item.CreatedAt.After(cutoff) {
-						fresh = append(fresh, item)
+				kept := s.items[:0]
+				for _, it := range s.items {
+					if it.CreatedAt.After(cutoff) {
+						kept = append(kept, it)
 					}
 				}
-				s.items = fresh
+				s.items = kept
 				s.mu.Unlock()
 			}
 		}
 	}()
 }
 
-// getOrCreateUserStore returns (creating if needed) the per-user store.
 func getOrCreateUserStore(userID string) *userNotifStore {
-	// Fast path: read lock
-	systemNotifStore.mu.RLock()
-	if s, ok := systemNotifStore.users[userID]; ok {
-		systemNotifStore.mu.RUnlock()
+	sysNotifRegistry.mu.RLock()
+	if s, ok := sysNotifRegistry.users[userID]; ok {
+		sysNotifRegistry.mu.RUnlock()
 		return s
 	}
-	systemNotifStore.mu.RUnlock()
+	sysNotifRegistry.mu.RUnlock()
 
-	// Slow path: write lock
-	systemNotifStore.mu.Lock()
-	defer systemNotifStore.mu.Unlock()
-	if s, ok := systemNotifStore.users[userID]; ok {
+	sysNotifRegistry.mu.Lock()
+	defer sysNotifRegistry.mu.Unlock()
+	if s, ok := sysNotifRegistry.users[userID]; ok {
 		return s
 	}
-	// First write ever — start the cleanup worker
-	systemNotifStore.once.Do(startCleanupWorker)
-
+	sysNotifRegistry.once.Do(startCleanupWorker)
 	s := &userNotifStore{}
-	systemNotifStore.users[userID] = s
+	sysNotifRegistry.users[userID] = s
 	return s
 }
 
-// store adds one notification to the user's ring buffer.
-func (us *userNotifStore) store(n *SystemNotification) {
+func (us *userNotifStore) push(item *SysInboxItem) {
 	us.mu.Lock()
 	defer us.mu.Unlock()
-	us.items = append(us.items, n)
-	// Enforce ring cap: drop oldest
+	us.items = append(us.items, item)
 	if len(us.items) > maxPerUser {
 		us.items = us.items[len(us.items)-maxPerUser:]
 	}
@@ -193,21 +199,19 @@ func (us *userNotifStore) store(n *SystemNotification) {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-// PushSystemNotification stores a system notification in memory for the resolved
-// actor user AND immediately sends it over their live SSE connection (if open).
+// PushSystemNotification creates a system notification and:
+//  1. Stores it in the in-memory ring buffer for every active session user
+//     (so they see it when they next load the inbox or on reconnect).
+//  2. Immediately broadcasts two SSE messages to every active session:
+//       • "in_app_item"        — the full item payload (live inbox append)
+//       • "notification_count" — badge refresh (uses the same SSE type as
+//                                DB-driven pushCountSSE; no frontend change needed)
 //
-// Pass the actorResolution from resolveActorEntity so we always have a userID to
-// address the notification to.  If userID is empty (completely unresolvable actor)
-// the notification is silently dropped — there is no recipient to address it to.
+// The actor (who caused the pipeline action) is set as sender so recipients
+// can see who triggered it.
 //
-// This function is non-blocking (SSE send is best-effort) and never returns an error
-// so it is safe to call from any error path without wrapping.
+// Non-blocking, best-effort — never returns an error.
 func PushSystemNotification(actor actorResolution, params SystemNotifParams) {
-	if actor.UserID == "" {
-		// We have no address — nothing we can do; error is already logged by resolver.
-		return
-	}
-
 	if params.Level == "" {
 		params.Level = LevelError
 	}
@@ -215,83 +219,170 @@ func PushSystemNotification(actor actorResolution, params SystemNotifParams) {
 		params.Source = "notification_pipeline"
 	}
 
-	notif := &SystemNotification{
-		ID:            fmt.Sprintf("SN-%s-%d", actor.UserID, time.Now().UnixNano()),
-		Level:         params.Level,
-		Subject:       params.Subject,
-		Body:          params.Body,
-		Source:        params.Source,
-		Route:         params.Route,
-		CorrelationID: params.CorrelationID,
-		CreatedAt:     time.Now(),
-		IsRead:        false,
+	// Collect all active session users to broadcast to.
+	// The actor themselves is always included even if they have no session slot
+	// (e.g. API key call) — we fall back to actor.UserID as sole recipient.
+	sessions := auth.GetActiveSessions()
+
+	// Build recipient list: all active sessions + actor (if not already covered)
+	type recipient struct {
+		userID string
+		name   string
+		email  string
+	}
+	var recipients []recipient
+	actorFound := false
+	for _, s := range sessions {
+		if s.UserID == "" {
+			continue
+		}
+		if s.UserID == actor.UserID {
+			actorFound = true
+		}
+		recipients = append(recipients, recipient{userID: s.UserID, name: s.Name, email: s.Email})
+	}
+	// Always include the actor themselves even if they have no active SSE session
+	if !actorFound && actor.UserID != "" {
+		recipients = append(recipients, recipient{userID: actor.UserID, name: actor.Name, email: actor.Email})
+	}
+	// If there are no sessions at all and no actor, nothing to do
+	if len(recipients) == 0 {
+		return
 	}
 
-	// 1 — Persist to memory store (always, even if SSE is not connected)
-	getOrCreateUserStore(actor.UserID).store(notif)
+	now := time.Now()
+	// Use a single nano-second timestamp as base; suffix with recipient index for uniqueness
+	baseNano := now.UnixNano()
 
-	// 2 — Push over SSE immediately (best-effort; user may not be connected)
-	payload, err := json.Marshal(notif.ssePayload())
-	if err == nil {
-		dashboard.SendToUser(actor.UserID, payload)
+	for i, r := range recipients {
+		item := &SysInboxItem{
+			ID:            fmt.Sprintf("SN-%s-%d-%d", r.userID, baseNano, i),
+			OutboxID:      "",
+			CorrelationID: params.CorrelationID,
+			EventID:       "",
+			Subject:       params.Subject,
+			Body:          params.Body,
+			PriorityLevel: 1, // highest priority — system alerts always at top
+			IsRead:        false,
+			CreatedAt:     now,
+			ModuleCode:    "SYS",
+			SubModuleCode: "NOTIFICATION_PIPELINE",
+			EventCode:     "PIPELINE_ERROR",
+			EventName:     "System Alert",
+			SenderID:      actor.UserID,
+			SenderName:    actor.Name,
+			SenderEmail:   actor.Email,
+			Level:         params.Level,
+			Source:        params.Source,
+			Route:         params.Route,
+			IsSystem:      true,
+		}
+
+		// 1 — Store in ring buffer for this recipient
+		getOrCreateUserStore(r.userID).push(item)
+
+		// 2a — Push the full item over SSE so live-loaded inboxes append it immediately
+		if raw, err := json.Marshal(map[string]interface{}{
+			"type": "in_app_item",
+			"item": item,
+		}); err == nil {
+			dashboard.SendToUser(r.userID, raw)
+		}
+
+		// 2b — Push updated unread count so the badge refreshes
+		// We compute the count from memory only (no DB round-trip needed here)
+		unread := GetUnreadSystemNotifCount(r.userID)
+		if raw, err := json.Marshal(map[string]interface{}{
+			"type":   "notification_count",
+			"unread": unread,
+		}); err == nil {
+			dashboard.SendToUser(r.userID, raw)
+		}
 	}
 }
 
-// GetSystemNotifications returns a copy of all non-expired system notifications
-// for the given user, newest first.  Read-flag is NOT mutated here — the frontend
-// should call MarkSystemNotificationsRead when the user views them.
-func GetSystemNotifications(userID string) []*SystemNotification {
-	systemNotifStore.mu.RLock()
-	store, ok := systemNotifStore.users[userID]
-	systemNotifStore.mu.RUnlock()
+// GetSystemNotificationsAsInboxItems returns the stored system notifications for
+// the given user as a slice of *SysInboxItem, newest first.
+// Called by pushInbox.go handleGetInbox to prepend system items to the DB results.
+func GetSystemNotificationsAsInboxItems(userID string) []*SysInboxItem {
+	sysNotifRegistry.mu.RLock()
+	store, ok := sysNotifRegistry.users[userID]
+	sysNotifRegistry.mu.RUnlock()
 	if !ok {
 		return nil
 	}
-
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-
+	if len(store.items) == 0 {
+		return nil
+	}
 	// Return newest-first copy
-	out := make([]*SystemNotification, len(store.items))
+	out := make([]*SysInboxItem, len(store.items))
 	for i, item := range store.items {
 		out[len(store.items)-1-i] = item
 	}
 	return out
 }
 
-// GetUnreadSystemNotificationCount returns the count of unread system notifications.
-func GetUnreadSystemNotificationCount(userID string) int {
-	systemNotifStore.mu.RLock()
-	store, ok := systemNotifStore.users[userID]
-	systemNotifStore.mu.RUnlock()
+// GetUnreadSystemNotifCount returns the number of unread system notifications for a user.
+// Used by handleGetCount to include system alerts in the badge total.
+func GetUnreadSystemNotifCount(userID string) int {
+	sysNotifRegistry.mu.RLock()
+	store, ok := sysNotifRegistry.users[userID]
+	sysNotifRegistry.mu.RUnlock()
 	if !ok {
 		return 0
 	}
-
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	count := 0
-	for _, item := range store.items {
-		if !item.IsRead {
-			count++
+	n := 0
+	for _, it := range store.items {
+		if !it.IsRead {
+			n++
 		}
 	}
-	return count
+	return n
 }
 
-// MarkSystemNotificationsRead marks all notifications as read for a user.
-// Call this when the user opens the system-alerts panel.
-func MarkSystemNotificationsRead(userID string) {
-	systemNotifStore.mu.RLock()
-	store, ok := systemNotifStore.users[userID]
-	systemNotifStore.mu.RUnlock()
+// MarkSystemNotifsRead marks all in-memory system notifications as read for a user.
+// Called by handleMarkAllRead so the badge goes to zero for system items too.
+func MarkSystemNotifsRead(userID string) {
+	sysNotifRegistry.mu.RLock()
+	store, ok := sysNotifRegistry.users[userID]
+	sysNotifRegistry.mu.RUnlock()
 	if !ok {
 		return
 	}
-
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	for _, item := range store.items {
-		item.IsRead = true
+	for _, it := range store.items {
+		it.IsRead = true
 	}
+}
+
+// MarkSystemNotifRead marks a single system notification as read by its ID.
+// Called by handleMarkRead when the user reads one item.
+func MarkSystemNotifRead(userID, notifID string) {
+	sysNotifRegistry.mu.RLock()
+	store, ok := sysNotifRegistry.users[userID]
+	sysNotifRegistry.mu.RUnlock()
+	if !ok {
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, it := range store.items {
+		if it.ID == notifID {
+			it.IsRead = true
+			return
+		}
+	}
+}
+
+// ClearSystemNotifications removes all stored system notifications for a user.
+// Call this from Logout() so memory is freed and no stale items linger.
+func ClearSystemNotifications(userID string) {
+	sysNotifRegistry.mu.Lock()
+	delete(sysNotifRegistry.users, userID)
+	sysNotifRegistry.mu.Unlock()
 }

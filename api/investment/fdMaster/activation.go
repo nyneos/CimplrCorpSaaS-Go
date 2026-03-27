@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -69,7 +70,32 @@ func splitQualifiedTable(name string) (string, string) {
 	return parts[0], parts[1]
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Schema-discovery cache
+// ─────────────────────────────────────────────────────────────────────────────
+// information_schema queries are expensive (each one is a separate network
+// round-trip to Supabase/Postgres).  ActivateFD previously made 10-13 of these
+// per request, adding 0.5–2.5 s of latency.
+//
+// Tables and columns never change at runtime, so we cache every result in a
+// sync.Map keyed by "schema.table" (column map) and "schema.table:exists"
+// (bool).  First call populates; all subsequent calls hit RAM — zero DB cost.
+// ─────────────────────────────────────────────────────────────────────────────
+
+var (
+	schemaColCache   sync.Map // "schema.table" → map[string]bool
+	schemaExistCache sync.Map // "schema.table" → bool
+)
+
 func loadTableColumns(ctx context.Context, exec queryExecutor, schemaName string, tableName string) (map[string]bool, error) {
+	cacheKey := schemaName + "." + tableName
+
+	// Fast path — already cached
+	if cached, ok := schemaColCache.Load(cacheKey); ok {
+		return cached.(map[string]bool), nil
+	}
+
+	// Slow path — query information_schema once
 	rows, err := exec.Query(ctx, `
 		SELECT column_name
 		FROM information_schema.columns
@@ -88,12 +114,31 @@ func loadTableColumns(ctx context.Context, exec queryExecutor, schemaName string
 		}
 		cols[col] = true
 	}
-	return cols, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Only cache non-empty results so a transient error doesn't poison the cache
+	if len(cols) > 0 {
+		schemaColCache.Store(cacheKey, cols)
+	}
+	return cols, nil
 }
 
 func resolveFirstExistingTable(ctx context.Context, exec queryExecutor, candidates []string) string {
 	for _, candidate := range candidates {
 		schemaName, tableName := splitQualifiedTable(candidate)
+		cacheKey := schemaName + "." + tableName + ":exists"
+
+		// Fast path — already cached
+		if cached, ok := schemaExistCache.Load(cacheKey); ok {
+			if cached.(bool) {
+				return candidate
+			}
+			continue
+		}
+
+		// Slow path — query information_schema once
 		var exists bool
 		err := exec.QueryRow(ctx, `
 			SELECT EXISTS (
@@ -102,6 +147,9 @@ func resolveFirstExistingTable(ctx context.Context, exec queryExecutor, candidat
 				WHERE table_schema = $1 AND table_name = $2
 			)
 		`, schemaName, tableName).Scan(&exists)
+		if err == nil {
+			schemaExistCache.Store(cacheKey, exists)
+		}
 		if err == nil && exists {
 			return candidate
 		}
@@ -495,33 +543,38 @@ func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fd
 		return cfRows.Err()
 	}
 
-	reason := "System generated at FD activation"
-	for _, cf := range cfList {
-		_, insErr := exec.Exec(ctx, `
-			INSERT INTO investment.fd_audit_cashflow_schedule (
-				cashflow_id, fd_id,
-				action_type, processing_status,
-				reason,
-				requested_by, requested_at,
-				checker_by, checker_at, checker_comment
-			) VALUES (
-				$1, $2,
-				'CREATE', 'APPROVED',
-				$3,
-				$4, now(),
-				$4, now(), 'Auto-approved at FD activation'
-			) ON CONFLICT DO NOTHING`,
-			cf.id, fdID, reason, createdBy,
-		)
-		if insErr != nil {
-			return insErr
-		}
+	if len(cfList) == 0 {
+		return nil
 	}
-	return nil
+
+	// Batch INSERT all audit rows in one round-trip.
+	reason := "System generated at FD activation"
+	var valueTuples []string
+	var args []interface{}
+	paramIdx := 1
+	for _, cf := range cfList {
+		valueTuples = append(valueTuples, fmt.Sprintf(
+			"($%d,$%d,'CREATE','APPROVED',$%d,$%d,now(),$%d,now(),'Auto-approved at FD activation')",
+			paramIdx, paramIdx+1, paramIdx+2, paramIdx+3, paramIdx+3,
+		))
+		args = append(args, cf.id, fdID, reason, createdBy)
+		paramIdx += 4
+	}
+	_, insErr := exec.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO investment.fd_audit_cashflow_schedule (
+			cashflow_id, fd_id,
+			action_type, processing_status,
+			reason,
+			requested_by, requested_at,
+			checker_by, checker_at, checker_comment
+		) VALUES %s
+		ON CONFLICT DO NOTHING`, strings.Join(valueTuples, ",")), args...)
+	return insErr
 }
 
 func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		t0 := time.Now()
 		var req activateFDRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -532,31 +585,92 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		api.LogInfo("[FDActivate][%s] ► request received user=%s", req.ConfirmationID, req.UserID)
+
 		userEmail := getUserEmail(req.UserID)
 		if userEmail == "" {
+			api.LogError("[FDActivate][%s] ✗ getUserEmail returned empty for user_id=%q — session missing?", req.ConfirmationID, req.UserID)
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		api.LogInfo("[FDActivate][%s] ✓ session resolved email=%s (+%s)", req.ConfirmationID, userEmail, time.Since(t0).Round(time.Millisecond))
 
 		ctx := r.Context()
+
+		// ── PHASE 1: ALL READS — done outside any transaction ─────────────────
+		// We use pgxPool directly so none of these queries hold a tx connection
+		// open. This keeps the transaction that follows as short as possible and
+		// avoids Supabase statement-timeout errors caused by long-lived txns.
+
+		t1 := time.Now()
+		rec, err := loadFDRecord(ctx, pgxPool, req.ConfirmationID)
+		if err != nil {
+			api.LogError("[FDActivate][%s] ✗ loadFDRecord failed after %s: %v", req.ConfirmationID, time.Since(t1).Round(time.Millisecond), err)
+			msg, status := getFDMasterError(err, "Load confirmation failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		api.LogInfo("[FDActivate][%s] ✓ loadFDRecord (+%s) entity=%s bank=%s principal=%.2f tenor=%v",
+			req.ConfirmationID, time.Since(t1).Round(time.Millisecond),
+			rec.EntityID, rec.BankID, rec.PrincipalAmount, rec.TenorDays)
+
+		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
+
+		// Duplicate-check outside tx — optimistic, re-checked inside tx below.
+		t2 := time.Now()
+		var existingFDIDCheck string
+		_ = pgxPool.QueryRow(ctx,
+			`SELECT COALESCE(fd_id,'') FROM investment.fd_master
+			 WHERE confirmation_id = $1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
+			req.ConfirmationID,
+		).Scan(&existingFDIDCheck)
+		if existingFDIDCheck != "" {
+			api.LogInfo("[FDActivate][%s] ✗ already activated (pre-tx check) as %s", req.ConfirmationID, existingFDIDCheck)
+			api.RespondWithError(w, http.StatusConflict,
+				fmt.Sprintf("FD already activated for this confirmation: %s", existingFDIDCheck))
+			return
+		}
+		api.LogInfo("[FDActivate][%s] ✓ duplicate-check clear (+%s)", req.ConfirmationID, time.Since(t2).Round(time.Millisecond))
+
+		// Resolve audit table name outside tx.
+		t3 := time.Now()
+		auditTable := resolveFDAuditTable(ctx, pgxPool)
+		api.LogInfo("[FDActivate][%s] ✓ resolveFDAuditTable=%s (+%s)", req.ConfirmationID, auditTable, time.Since(t3).Round(time.Millisecond))
+
+		// Generate cashflow schedule outside tx — pure computation + config reads.
+		t4 := time.Now()
+		cashflows, _, err := GenerateCashflowFromRecord(ctx, pgxPool, rec)
+		if err != nil {
+			api.LogError("[FDActivate][%s] ✗ GenerateCashflowFromRecord failed after %s: %v", req.ConfirmationID, time.Since(t4).Round(time.Millisecond), err)
+			msg, status := getFDMasterError(err, "Cashflow generation failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		api.LogInfo("[FDActivate][%s] ✓ GenerateCashflowFromRecord → %d rows (+%s)", req.ConfirmationID, len(cashflows), time.Since(t4).Round(time.Millisecond))
+
+		// ── PHASE 2: SHORT TRANSACTION — writes only ──────────────────────────
+		// At this point all data is ready in memory. The transaction only does:
+		//   1. Re-check duplicate (serialisation safety)
+		//   2. INSERT fd_master
+		//   3. INSERT fd_audit_master
+		//   4. Batch INSERT cashflow rows
+		//   5. Batch INSERT cashflow audit rows
+		//   6. UPDATE cashflow_generated flag
+		//   7. COMMIT
+		// Target wall-clock: < 2 seconds.
+
+		tTx := time.Now()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			api.LogError("[FDActivate][%s] ✗ tx.Begin failed: %v", req.ConfirmationID, err)
 			msg, status := getFDMasterError(err, "Transaction begin failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
+		api.LogInfo("[FDActivate][%s] ✓ tx.Begin (+%s)", req.ConfirmationID, time.Since(tTx).Round(time.Millisecond))
 
-		rec, err := loadFDRecord(ctx, tx, req.ConfirmationID)
-		if err != nil {
-			msg, status := getFDMasterError(err, "Load confirmation failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-
-		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
-
-		// Double-submit guard: reject if FD already activated for this confirmation.
+		// Serialisation safety re-check inside tx.
 		var existingFDID string
 		_ = tx.QueryRow(ctx,
 			`SELECT COALESCE(fd_id,'') FROM investment.fd_master
@@ -564,59 +678,68 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ConfirmationID,
 		).Scan(&existingFDID)
 		if existingFDID != "" {
+			api.LogInfo("[FDActivate][%s] ✗ already activated (in-tx check) as %s", req.ConfirmationID, existingFDID)
 			api.RespondWithError(w, http.StatusConflict,
 				fmt.Sprintf("FD already activated for this confirmation: %s", existingFDID))
 			return
 		}
 
+		t5 := time.Now()
 		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes, userEmail)
 		if err != nil {
+			api.LogError("[FDActivate][%s] ✗ insertFDMaster failed after %s: %v", req.ConfirmationID, time.Since(t5).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, "FD activation failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		api.LogInfo("[FDActivate][%s] ✓ insertFDMaster → fd_id=%s (+%s)", req.ConfirmationID, fdID, time.Since(t5).Round(time.Millisecond))
 
-		auditTable := resolveFDAuditTable(ctx, tx)
+		t6 := time.Now()
 		if err := insertFDAuditRecord(ctx, tx, auditTable, fdID, userEmail, "CREATE", "PENDING_APPROVAL", ""); err != nil {
+			api.LogError("[FDActivate][%s] ✗ insertFDAuditRecord failed after %s: %v", req.ConfirmationID, time.Since(t6).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		api.LogInfo("[FDActivate][%s] ✓ insertFDAuditRecord (+%s)", req.ConfirmationID, time.Since(t6).Round(time.Millisecond))
 
-		cashflows, _, err := GenerateCashflowForFD(ctx, tx, "", req.ConfirmationID)
-		if err != nil {
-			msg, status := getFDMasterError(err, "Cashflow generation failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		if err := SaveCashflowScheduleWithCreator(ctx, tx, fdID, cashflows, userEmail); err != nil {
+		t7 := time.Now()
+		if err := SaveCashflowScheduleWithRecord(ctx, tx, fdID, cashflows, userEmail, rec); err != nil {
+			api.LogError("[FDActivate][%s] ✗ SaveCashflowSchedule failed after %s: %v", req.ConfirmationID, time.Since(t7).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, "Cashflow save failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		api.LogInfo("[FDActivate][%s] ✓ SaveCashflowSchedule (+%s)", req.ConfirmationID, time.Since(t7).Round(time.Millisecond))
 
-		// Write one APPROVED audit row per cashflow row to establish the initial
-		// audit trail. These represent the system-generated state at activation.
+		t8 := time.Now()
 		if auditErr := insertCashflowAuditRowsApproved(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
-			// Non-fatal: log but don't block activation
-			api.LogError("[FDMaster] cashflow audit insert failed fd=%s: %v", fdID, auditErr)
+			api.LogError("[FDActivate][%s] ✗ cashflow audit insert failed after %s: %v", req.ConfirmationID, time.Since(t8).Round(time.Millisecond), auditErr)
+		} else {
+			api.LogInfo("[FDActivate][%s] ✓ insertCashflowAuditRows (+%s)", req.ConfirmationID, time.Since(t8).Round(time.Millisecond))
 		}
 
 		// Mark cashflow_generated=true so the accrual engine picks this FD up in scope.
+		t9 := time.Now()
 		if _, err := tx.Exec(ctx,
 			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
 			fdID,
 		); err != nil {
+			api.LogError("[FDActivate][%s] ✗ cashflow flag update failed after %s: %v", req.ConfirmationID, time.Since(t9).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, "Cashflow flag update failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		api.LogInfo("[FDActivate][%s] ✓ cashflow_generated flag (+%s)", req.ConfirmationID, time.Since(t9).Round(time.Millisecond))
 
+		t10 := time.Now()
 		if err := tx.Commit(ctx); err != nil {
+			api.LogError("[FDActivate][%s] ✗ tx.Commit failed after %s: %v", req.ConfirmationID, time.Since(t10).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		api.LogInfo("[FDActivate][%s] ✓ tx.Commit (+%s) | TOTAL SYNC=%s", req.ConfirmationID, time.Since(t10).Round(time.Millisecond), time.Since(t0).Round(time.Millisecond))
 
 		go func(fdRecordID string, confirmationID string, email string, entityID string, amount float64, req activateFDRequest) {
 			defer func() {
