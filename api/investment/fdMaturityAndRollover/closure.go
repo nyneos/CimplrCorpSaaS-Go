@@ -1160,7 +1160,8 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 
 		snapshotJSON, _ := json.Marshal(oldRow)
 		// Pass all old values to audit as individual columns.
-		_ = insertClosureAudit(ctx, tx, req.ClosureRequestID, req.UserID, userEmail, "UPDATE", oldStatus, req.UpdateReason, snapshotJSON, oldRow)
+		// Use PENDING_EDIT_APPROVAL so the audit trail shows this was an edit on a pending record.
+		_ = insertClosureAudit(ctx, tx, req.ClosureRequestID, req.UserID, userEmail, "UPDATE", "PENDING_EDIT_APPROVAL", req.UpdateReason, snapshotJSON, oldRow)
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction commit failed")
@@ -1246,7 +1247,13 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
 			  COALESCE(m.bank_name,'') AS bank_name,
 			  m.interest_rate, m.tenure_days, m.fd_status,
-			  COALESCE(ai.status,'') AS approval_status
+			  COALESCE(ai.status,'') AS approval_status,
+			  COALESCE((
+			    SELECT aud.processing_status
+			    FROM investment.fd_audit_closure_request aud
+			    WHERE aud.closure_request_id = cr.closure_request_id
+			    ORDER BY aud.created_at DESC LIMIT 1
+			  ),'') AS latest_processing_status
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
@@ -1713,6 +1720,9 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&instanceEyeID)
 
 			if engineErr == nil && instanceEyeID != "" {
+				// Engine instance found — RecordAction will trigger finalizeRecord which:
+				//   1. Updates processing_status → REJECTED on the audit table
+				//   2. Fires postFinalizeHook which sets closure_status='REJECTED' + clears fd_master
 				if err := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
 					InstanceEyeID: instanceEyeID, ActorUserID: req.UserID, ActorEmail: userEmail,
 					ActionType: approvalengine.ActionRejected,
@@ -1720,21 +1730,23 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				}); err != nil {
 					errors = append(errors, crID+": "+err.Error()); continue
 				}
+				acted++
+			} else {
+				// No engine instance — handle rejection directly with audit row.
+				tx, txErr := pool.Begin(ctx)
+				if txErr != nil { errors = append(errors, crID+": tx begin failed"); continue }
+
+				_, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET closure_status='REJECTED',rejected_at=NOW(),rejected_by=$1,rejection_reason=$2,updated_by=$1,updated_at=NOW() WHERE closure_request_id=$3`, userEmail, req.Comment, crID)
+				_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=NULL,updated_at=NOW() WHERE closure_request_id=$1`, crID)
+
+				snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": "PENDING_APPROVAL", "rejected_by": userEmail, "rejection_reason": req.Comment})
+				_ = insertClosureAudit(ctx, tx, crID, req.UserID, userEmail, "REJECT", "REJECTED", req.Comment, snapshotJSON, map[string]interface{}{"closure_status": "PENDING_APPROVAL"})
+
+				if cerr := tx.Commit(ctx); cerr != nil {
+					_ = tx.Rollback(ctx); errors = append(errors, crID+": commit failed"); continue
+				}
+				acted++
 			}
-
-			tx, txErr := pool.Begin(ctx)
-			if txErr != nil { errors = append(errors, crID+": tx begin failed"); continue }
-
-			_, _ = tx.Exec(ctx, `UPDATE investment.fd_closure_request SET closure_status='REJECTED',rejected_at=NOW(),rejected_by=$1,rejection_reason=$2,updated_by=$1,updated_at=NOW() WHERE closure_request_id=$3`, userEmail, req.Comment, crID)
-			_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=NULL,updated_at=NOW() WHERE closure_request_id=$1`, crID)
-
-			snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": "PENDING_APPROVAL", "rejected_by": userEmail, "rejection_reason": req.Comment})
-			_ = insertClosureAudit(ctx, tx, crID, req.UserID, userEmail, "REJECT", "REJECTED", req.Comment, snapshotJSON, map[string]interface{}{"closure_status": "PENDING_APPROVAL"})
-
-			if cerr := tx.Commit(ctx); cerr != nil {
-				_ = tx.Rollback(ctx); errors = append(errors, crID+": commit failed"); continue
-			}
-			acted++
 		}
 
 		for _, crID := range req.ClosureRequestIDs {

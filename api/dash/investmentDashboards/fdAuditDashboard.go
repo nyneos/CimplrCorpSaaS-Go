@@ -1276,7 +1276,138 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			}, nil
 		})
 
-		// ── 11. Transaction trace for a specific FD (optional) ────────────────
+		// ── 11. User directory — profile for every participant in the approval workflow ───────
+		// Collects all distinct emails from approval_instance + approval_instance_action
+		// in the current period, joins public.users → public.user_roles → public.roles.
+		// Returns a keyed map: email → { user_id, employee_name, business_unit_name,
+		//   status, authentication_type, roles: [{role_id, name, rolecode, description}] }
+		run("user_directory", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				WITH participant_emails AS (
+				  -- all submitters / resolvers on instances in the period
+				  SELECT DISTINCT i.submitted_by_email AS email
+				  FROM uam.approval_instance i
+				  WHERE i.is_deleted = false
+				    AND i.module_code = 'FIXED_DEPOSIT'
+				    AND i.submitted_at >= $1::timestamptz
+				    AND i.submitted_at <  $2::timestamptz
+				  UNION
+				  SELECT DISTINCT i.resolved_by_email
+				  FROM uam.approval_instance i
+				  WHERE i.is_deleted = false
+				    AND i.module_code = 'FIXED_DEPOSIT'
+				    AND i.submitted_at >= $1::timestamptz
+				    AND i.submitted_at <  $2::timestamptz
+				    AND i.resolved_by_email IS NOT NULL
+				  UNION
+				  -- all actors who took actions on those instances
+				  SELECT DISTINCT ia.actor_email
+				  FROM uam.approval_instance_action ia
+				  JOIN uam.approval_instance_eye ie ON ie.instance_eye_id = ia.instance_eye_id
+				  JOIN uam.approval_instance i      ON i.instance_id      = ie.instance_id
+				  WHERE i.is_deleted = false
+				    AND i.module_code = 'FIXED_DEPOSIT'
+				    AND i.submitted_at >= $1::timestamptz
+				    AND i.submitted_at <  $2::timestamptz
+				    AND ia.actor_email IS NOT NULL
+				    AND ia.actor_email NOT IN ('SYSTEM','system@cimplr.in')
+				)
+				SELECT
+				  u.email,
+				  u.id                                          AS user_id,
+				  COALESCE(u.employee_name,'')                  AS employee_name,
+				  COALESCE(u.username_or_employee_id,'')        AS employee_code,
+				  COALESCE(u.business_unit_name,'')             AS business_unit_name,
+				  COALESCE(u.mobile,'')                         AS mobile,
+				  COALESCE(u.status,'')                         AS user_status,
+				  COALESCE(u.authentication_type,'')            AS authentication_type,
+				  COALESCE(r.id,'')                             AS role_id,
+				  COALESCE(r.name,'')                           AS role_name,
+				  COALESCE(r.rolecode,'')                       AS role_code,
+				  COALESCE(r.description,'')                    AS role_description,
+				  COALESCE(r.status,'')                         AS role_status
+				FROM participant_emails pe
+				JOIN public.users u ON u.email = pe.email
+				LEFT JOIN public.user_roles ur ON ur.user_id = u.id
+				LEFT JOIN public.roles r       ON r.id       = ur.role_id
+				ORDER BY u.email, r.name
+			`, startDate, endDate)
+			if err != nil {
+				api.LogError("[AuditDash] user_directory query error: %v", err)
+				return map[string]interface{}{}, nil
+			}
+			defer rows.Close()
+
+			type roleEntry struct {
+				RoleID          string `json:"role_id"`
+				RoleName        string `json:"role_name"`
+				RoleCode        string `json:"role_code"`
+				RoleDescription string `json:"role_description,omitempty"`
+				RoleStatus      string `json:"role_status,omitempty"`
+			}
+			type userProfile struct {
+				UserID             string      `json:"user_id"`
+				Email              string      `json:"email"`
+				EmployeeName       string      `json:"employee_name"`
+				EmployeeCode       string      `json:"employee_code"`
+				BusinessUnitName   string      `json:"business_unit_name"`
+				Mobile             string      `json:"mobile,omitempty"`
+				UserStatus         string      `json:"user_status"`
+				AuthenticationType string      `json:"authentication_type,omitempty"`
+				Roles              []roleEntry `json:"roles"`
+			}
+
+			// map by email — one profile per email, accumulate roles
+			profileMap := make(map[string]*userProfile)
+			emailOrder  := []string{}
+
+			for rows.Next() {
+				var (
+					email, userID, empName, empCode, buName, mobile, uStatus, authType string
+					roleID, roleName, roleCode, roleDesc, roleStatus string
+				)
+				if err2 := rows.Scan(
+					&email, &userID, &empName, &empCode, &buName, &mobile, &uStatus, &authType,
+					&roleID, &roleName, &roleCode, &roleDesc, &roleStatus,
+				); err2 != nil {
+					api.LogError("[AuditDash] user_directory scan error: %v", err2)
+					continue
+				}
+				if _, ok := profileMap[email]; !ok {
+					profileMap[email] = &userProfile{
+						UserID:             userID,
+						Email:              email,
+						EmployeeName:       empName,
+						EmployeeCode:       empCode,
+						BusinessUnitName:   buName,
+						Mobile:             mobile,
+						UserStatus:         uStatus,
+						AuthenticationType: authType,
+						Roles:              []roleEntry{},
+					}
+					emailOrder = append(emailOrder, email)
+				}
+				if roleID != "" {
+					profileMap[email].Roles = append(profileMap[email].Roles, roleEntry{
+						RoleID:          roleID,
+						RoleName:        roleName,
+						RoleCode:        roleCode,
+						RoleDescription: roleDesc,
+						RoleStatus:      roleStatus,
+					})
+				}
+			}
+			rows.Close()
+
+			// Return as a map keyed by email for O(1) frontend lookup
+			out := make(map[string]*userProfile, len(profileMap))
+			for _, email := range emailOrder {
+				out[email] = profileMap[email]
+			}
+			return out, nil
+		})
+
+		// ── 12. Transaction trace for a specific FD (optional) ────────────────
 		if fdFilter != "" {
 			run("transaction_trace", func(ctx context.Context) (interface{}, error) {
 				// A. Master FD state
@@ -1494,6 +1625,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			"evidence_packs":      get("evidence_packs"),
 			"policy_exceptions":   get("policy_exceptions"),
 			"approval_matrix":     get("approval_matrix"),
+			"user_directory":      get("user_directory"),
 			"transaction_trace":   get("transaction_trace"),
 		}
 
