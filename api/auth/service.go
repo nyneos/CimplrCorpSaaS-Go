@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 type UserSession struct {
@@ -65,6 +67,7 @@ func (a *AuthService) Start() error {
 	if a.SessionCleanerPeriod > 0 {
 		go a.sessionCleaner()
 	}
+	StartTokenCleanup(a.db)
 	return nil
 }
 
@@ -73,69 +76,35 @@ func (a *AuthService) Stop() error {
 	return nil
 }
 
-func (a *AuthService) Login(username, password string, clientIP string) (*UserSession, error) {
+// Login authenticates a user by email and password, returning the session and
+// an mfaPending flag. Passwords are compared using bcrypt; if the stored hash
+// is a legacy plaintext value that matches, it is automatically upgraded to bcrypt.
+func (a *AuthService) Login(username, password string, clientIP string) (*UserSession, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	var dbUserID string
-	var dbName string
-	var dbEmail string
+	var dbUserID, dbName, dbEmail string
 	var dbPassword sql.NullString
 	var dbStatus sql.NullString
 
-	err := a.db.QueryRow(`SELECT id, employee_name, email, password, status FROM users WHERE email = $1`, username).
-		Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
+	err := a.db.QueryRow(
+		`SELECT id, employee_name, email, password, status FROM users WHERE email = $1`, username,
+	).Scan(&dbUserID, &dbName, &dbEmail, &dbPassword, &dbStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("Login attempt for unknown user: %s", username))
-			}
-			return nil, errors.New("Invalid Username or Password")
+			LogSecurityEvent(a.db, "", "login_failed", "unknown user: "+username, clientIP)
+			return nil, false, errors.New("Invalid Username or Password")
 		}
-		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit(fmt.Sprintf("Login DB error for %s: %v", username, err))
-		} else {
-			fmt.Println("Login DB error:", err)
-		}
-		return nil, errors.New("internal error")
+		return nil, false, errors.New("internal error")
 	}
 
-	// Check if user is already logged in - force logout from all sessions
-	for sid, session := range a.users {
-		if session.IsLoggedIn && session.UserID == dbUserID {
-			if logger.GlobalLogger != nil {
-				if session.ClientIP == clientIP {
-					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s logging in again from same IP - validating credentials", dbEmail))
-				} else {
-					logger.GlobalLogger.LogAudit(fmt.Sprintf("User %s is logging in from another device/IP", dbEmail))
-				}
-			}
-
-			go func(oldUserID string, reason string) {
-
-				dashboard.SendToUser(oldUserID, []byte(`{"type":"force_logout","reason":"login_from_other_ip"}`))
-
-			}(session.UserID, "re_login")
-
-			delete(a.users, sid)
-			delete(a.userPointers, session.UserID)
-			break
-		}
-	}
-
-	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
-		if logger.GlobalLogger != nil {
-			logger.GlobalLogger.LogAudit("[ERROR] maximum concurrent users reached for login attempt: " + dbEmail)
-		}
-		return nil, errors.New("maximum concurrent users reached")
-	}
-
+	// Account lock check
 	if a.MaxLoginAttempts > 0 {
 		if fa, ok := a.failedAttempts[dbUserID]; ok {
 			if fa.isLocked && time.Now().Before(fa.unlockAt) {
-				return nil, errors.New("Account has been locked due to multiple failed login attempts")
+				LogSecurityEvent(a.db, dbUserID, "login_blocked", "account locked", clientIP)
+				return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
 			}
-
 			if fa.isLocked && time.Now().After(fa.unlockAt) {
 				fa.isLocked = false
 				fa.count = 0
@@ -143,7 +112,23 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		}
 	}
 
-	if !dbPassword.Valid || dbPassword.String != password {
+	// Password verification: bcrypt first, then plaintext fallback with auto-upgrade
+	passwordValid := false
+	if dbPassword.Valid && dbPassword.String != "" {
+		if bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil {
+			passwordValid = true
+		} else if dbPassword.String == password {
+			// Legacy plaintext match — upgrade to bcrypt
+			passwordValid = true
+			if hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
+				_, _ = a.db.Exec(`UPDATE users SET password = $1 WHERE id = $2`, string(hashed), dbUserID)
+				LogSecurityEvent(a.db, dbUserID, "password_upgraded", "plaintext→bcrypt", clientIP)
+			}
+		}
+	}
+
+	if !passwordValid {
+		LogSecurityEvent(a.db, dbUserID, "login_failed", "wrong password", clientIP)
 		if a.MaxLoginAttempts > 0 {
 			fa, ok := a.failedAttempts[dbUserID]
 			if !ok {
@@ -157,23 +142,32 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 				if a.AccountLockDuration > 0 {
 					fa.unlockAt = time.Now().Add(time.Duration(a.AccountLockDuration) * time.Minute)
 				} else {
-
 					fa.unlockAt = time.Now().Add(100 * 365 * 24 * time.Hour)
 				}
-				return nil, errors.New("Account has been locked due to multiple failed login attempts")
+				LogSecurityEvent(a.db, dbUserID, "account_locked", "", clientIP)
+				return nil, false, errors.New("Account has been locked due to multiple failed login attempts")
 			}
 			attemptsLeft := a.MaxLoginAttempts - fa.count
 			if attemptsLeft < 0 {
 				attemptsLeft = 0
 			}
-			return nil, fmt.Errorf("Invalid credentials, %d/%d attempts left", attemptsLeft, a.MaxLoginAttempts)
+			return nil, false, fmt.Errorf("Invalid credentials, %d/%d attempts left", attemptsLeft, a.MaxLoginAttempts)
 		}
-		return nil, errors.New("Invalid credentials")
+		return nil, false, errors.New("Invalid credentials")
 	}
 
-	var roleID, roleName, roleCode sql.NullString
-	_ = a.db.QueryRow(`SELECT r.id, r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`, dbUserID).
-		Scan(&roleID, &roleName, &roleCode)
+	// Force-logout existing sessions
+	a.forceLogoutUser(dbUserID)
+
+	if a.maxUsers > 0 && len(a.users) >= a.maxUsers {
+		return nil, false, errors.New("maximum concurrent users reached")
+	}
+
+	var roleName, roleCode sql.NullString
+	_ = a.db.QueryRow(
+		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
+		dbUserID,
+	).Scan(&roleName, &roleCode)
 
 	sessionID := generateSessionID()
 	session := &UserSession{
@@ -188,6 +182,18 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		IsLoggedIn:    true,
 	}
 
+	// Check MFA — only gate login if BOTH enabled AND secret is configured
+	var mfaEnabled sql.NullBool
+	var mfaSecret sql.NullString
+	_ = a.db.QueryRow(`SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1`, dbUserID).Scan(&mfaEnabled, &mfaSecret)
+	if mfaEnabled.Valid && mfaEnabled.Bool && mfaSecret.Valid && mfaSecret.String != "" {
+		session.IsLoggedIn = false
+		a.users[sessionID] = session
+		a.userPointers[dbUserID] = session
+		LogSecurityEvent(a.db, dbUserID, "login_mfa_pending", username, clientIP)
+		return session, true, nil
+	}
+
 	a.users[sessionID] = session
 	a.userPointers[dbUserID] = session
 
@@ -195,11 +201,8 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		delete(a.failedAttempts, dbUserID)
 	}
 
-	if logger.GlobalLogger != nil {
-		logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged in: %s", username))
-	}
-
-	return session, nil
+	LogSecurityEvent(a.db, dbUserID, "login_success", username, clientIP)
+	return session, false, nil
 }
 
 func (a *AuthService) Logout(UserID string) error {
@@ -209,23 +212,42 @@ func (a *AuthService) Logout(UserID string) error {
 	found := false
 	for sessionID, session := range a.users {
 		if session.UserID == UserID {
-
 			delete(a.users, sessionID)
 			delete(a.userPointers, session.UserID)
 			found = true
-			if logger.GlobalLogger != nil {
-				logger.GlobalLogger.LogAudit(fmt.Sprintf("User logged out: %s (%s)", session.UserID, session.Email))
-			}
+			LogSecurityEvent(a.db, UserID, "logout", session.Email, session.ClientIP)
 		}
 	}
 	if !found {
 		return errors.New("no active session found for user")
 	}
-	// Notify registered hooks (e.g. clear in-memory system notifications)
 	if OnLogoutHook != nil {
 		OnLogoutHook(UserID)
 	}
 	return nil
+}
+
+// forceLogoutUser removes any existing sessions for the user (must be called under lock).
+func (a *AuthService) forceLogoutUser(userID string) {
+	for sid, session := range a.users {
+		if session.UserID == userID {
+			go func(uid string) {
+				dashboard.SendToUser(uid, []byte(`{"type":"force_logout","reason":"login_from_other_ip"}`))
+			}(session.UserID)
+			delete(a.users, sid)
+			delete(a.userPointers, session.UserID)
+			break
+		}
+	}
+}
+
+// HashPassword hashes a plaintext password with bcrypt.
+func HashPassword(plaintext string) (string, error) {
+	hashed, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hashed), nil
 }
 
 var globalAuthService *AuthService
@@ -237,6 +259,11 @@ var OnLogoutHook func(userID string)
 
 func SetGlobalAuthService(svc *AuthService) {
 	globalAuthService = svc
+}
+
+// DB returns the database handle used by this AuthService.
+func (a *AuthService) DB() *sql.DB {
+	return a.db
 }
 func GetActiveSessions() []*UserSession {
 	if globalAuthService == nil {

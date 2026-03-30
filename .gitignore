@@ -3,3 +3,5 @@
 *.env
 *.DS_Store
 *.pem
+SSO_MFA_INTEGRATION_CONTEXT.md
+*.sql
