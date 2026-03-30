@@ -4,15 +4,36 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/utils"
+	"context"
+	crand "crypto/rand"
 	"database/sql"
 	"encoding/json"
-
 	"fmt"
+	"math/big"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
+
+// generateRandomPassword returns a cryptographically random password of the
+// requested length using a charset that satisfies most complexity requirements.
+func generateRandomPassword(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	charsetLen := big.NewInt(int64(len(charset)))
+	result := make([]byte, length)
+	for i := range result {
+		idx, err := crand.Int(crand.Reader, charsetLen)
+		if err != nil {
+			return "", err
+		}
+		result[i] = charset[idx.Int64()]
+	}
+	return string(result), nil
+}
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -25,7 +46,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 }
 
 // Handler: Create user
-func CreateUser(db *sql.DB) http.HandlerFunc {
+func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			AuthenticationType   string `json:"authentication_type"`
@@ -37,6 +58,10 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			Address              string `json:"address"`
 			BusinessUnitName     string `json:"business_unit_name"`
 			UserID               string `json:"user_id"`
+			// Password provisioning
+			PasswordType        string `json:"password_type"`         // "auto" | "custom"
+			Password            string `json:"password"`              // plain-text for "custom"
+			ForcePasswordChange bool   `json:"force_password_change"` // require change on first login
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
@@ -55,6 +80,24 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+
+		// --- Password provisioning -----------------------------------------------
+		plainPassword := req.Password
+		if req.PasswordType == "auto" || plainPassword == "" {
+			var genErr error
+			plainPassword, genErr = generateRandomPassword(16)
+			if genErr != nil {
+				respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
+				return
+			}
+		}
+		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
+		if hashErr != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+			return
+		}
+		// -------------------------------------------------------------------------
+
 		tx, err := db.Begin()
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -70,9 +113,11 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			mobile,
 			address,
 			business_unit_name,
+			password,
+			force_password_change,
 			status,
 			created_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8) RETURNING id`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10) RETURNING id`,
 			req.AuthenticationType,
 			req.EmployeeName,
 			req.UsernameOrEmployeeID,
@@ -80,6 +125,8 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			req.Mobile,
 			req.Address,
 			req.BusinessUnitName,
+			string(hashedPassword),
+			req.ForcePasswordChange,
 			createdBy,
 		).Scan(&userId)
 		if err != nil {
@@ -98,11 +145,29 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		tx.Commit()
+
+		// Fire welcome / credentials email (fire-and-forget)
+		if pool != nil {
+			go catalog.TriggerNotification(
+				context.Background(), pool,
+				"/uam/users/create-user",
+				"USR-"+userId,
+				map[string]interface{}{
+					"UserID":       userId,
+					"EmployeeName": req.EmployeeName,
+					"Email":        req.Email,
+					"Role":         req.Role,
+					"Password":     plainPassword,
+				},
+			)
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"user_id": userId,
-			"role_id": roleId,
+			"success":        true,
+			"user_id":        userId,
+			"role_id":        roleId,
+			"plain_password": plainPassword,
 		})
 	}
 }
@@ -362,6 +427,17 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 		fields := map[string]interface{}{}
 		for k, v := range req {
 			if allowed[k] {
+				// Hash password before storing
+				if k == "password" {
+					if pw, ok := v.(string); ok && pw != "" {
+						hashed, err := auth.HashPassword(pw)
+						if err != nil {
+							respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+							return
+						}
+						v = hashed
+					}
+				}
 				fields[k] = v
 			}
 		}

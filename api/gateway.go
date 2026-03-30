@@ -68,6 +68,7 @@ func stripPathPrefix(next http.Handler) http.Handler {
 var (
 	authService     *auth.AuthService
 	authServiceOnce sync.Once
+	ssoConfig       *auth.SSOConfig
 )
 
 func isDevMode() bool {
@@ -78,6 +79,7 @@ func isDevMode() bool {
 func SetAuthService(svc *auth.AuthService) {
 	authServiceOnce.Do(func() {
 		authService = svc
+		ssoConfig = auth.LoadSSOConfig()
 	})
 }
 
@@ -141,6 +143,8 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // LoginHandler handles POST /auth/login
+// After password verification, if MFA is enabled for the user, returns
+// { "mfa_pending": true, "user_id": "..." } instead of a full session.
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -159,15 +163,25 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientIP := extractClientIP(r)
-	session, err := authService.Login(req.Username, req.Password, clientIP) // Pass IP here
+	session, mfaPending, err := authService.Login(req.Username, req.Password, clientIP)
 	if err != nil {
-		// Log and return JSON error to aid debugging (temporary)
 		log.Printf("Login failed for %s from %s: %v", req.Username, clientIP, err)
 		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+
+	if mfaPending {
+		w.Header().Set(headerContentType, contentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mfa_pending": true,
+			"user_id":     session.UserID,
+			"message":     "MFA verification required",
+		})
+		return
+	}
+
 	w.Header().Set(headerContentType, contentTypeJSON)
 	json.NewEncoder(w).Encode(session)
 }
@@ -705,6 +719,40 @@ func StartGateway() {
 	mux.HandleFunc("/auth/logout", withCORS(LogoutHandler))
 	mux.HandleFunc("/get-sessions", withCORS(GetSessionsHandler))
 	mux.HandleFunc("/auth/session", withCORS(GetSessionByUserIDHandler))
+
+	// SSO (Multi-provider: Microsoft Azure AD + Google)
+	if ssoConfig != nil && ssoConfig.HasAnyProvider() {
+		mux.HandleFunc("/auth/sso/providers", withCORS(auth.SSOProvidersHandler(ssoConfig)))
+		mux.HandleFunc("/auth/sso/login", withCORS(auth.SSOLoginRedirect(ssoConfig)))
+		if authService != nil {
+			mux.HandleFunc("/auth/sso/callback/", withCORS(auth.SSOCallbackHandler(ssoConfig, authService.DB())))
+			mux.HandleFunc("/auth/sso/logout", withCORS(auth.SSOLogoutHandler(ssoConfig, authService.DB())))
+		}
+		log.Println("SSO endpoints enabled")
+	} else {
+		log.Println("SSO endpoints disabled — set AZURE_CLIENT_ID or GOOGLE_CLIENT_ID to enable")
+	}
+
+	// MFA (TOTP)
+	if authService != nil {
+		mfaDB := authService.DB()
+		mux.HandleFunc("/auth/mfa/setup", withCORS(auth.MFASetupHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/confirm", withCORS(auth.MFAConfirmHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/verify", withCORS(auth.MFAVerifyHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/disable", withCORS(auth.MFADisableHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/status", withCORS(auth.MFAStatusHandler(mfaDB)))
+		log.Println("MFA (TOTP) endpoints enabled")
+	}
+
+	// Password Reset (Forgot / Reset)
+	if authService != nil {
+		pwDB := authService.DB()
+		mux.HandleFunc("/auth/forgot-password", withCORS(auth.ForgotPasswordHandler(pwDB)))
+		mux.HandleFunc("/auth/reset-password", withCORS(auth.ResetPasswordHandler(pwDB)))
+		mux.HandleFunc("/auth/validate-reset-token", withCORS(auth.ValidateResetTokenHandler(pwDB)))
+		log.Println("Password reset endpoints enabled")
+	}
+
 	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
 	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
 	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
