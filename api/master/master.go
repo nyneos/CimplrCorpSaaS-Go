@@ -107,14 +107,14 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/currency/active-approved", (allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
 
 	// Bank Master routes (pgx-backed)
-	mux.Handle("/master/bank/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankMaster(pgxPool)))
-	mux.Handle("/master/bank/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadBank(pgxPool)))
-	mux.Handle("/master/bank/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllBankMaster(pgxPool)))
-	mux.Handle("/master/bank/names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankNamesWithID(pgxPool)))
-	mux.Handle("/master/bank/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateBankMasterBulk(pgxPool)))
-	mux.Handle("/master/bank/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteBankAudit(pgxPool)))
+	mux.Handle("/master/bank/create", (allMaster.CreateBankMaster(pgxPool)))
+	mux.Handle("/master/bank/upload", (allMaster.UploadBank(pgxPool)))
+	mux.Handle("/master/bank/all", (allMaster.GetAllBankMaster(pgxPool)))
+	mux.Handle("/master/bank/names", (allMaster.GetBankNamesWithID(pgxPool)))
+	mux.Handle("/master/bank/update", (allMaster.UpdateBankMasterBulk(pgxPool)))
+	mux.Handle("/master/bank/bulk-approve", (allMaster.BulkApproveBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-reject", (allMaster.BulkRejectBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-delete", (allMaster.BulkDeleteBankAudit(pgxPool)))
 
 	// Bank Account Master routes
 	mux.Handle("/master/bankaccount/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankAccountMaster(pgxPool)))

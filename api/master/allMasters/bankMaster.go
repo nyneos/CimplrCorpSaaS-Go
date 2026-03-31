@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	api "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
 	"encoding/json"
@@ -111,13 +112,27 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Get pre-validated context values
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// // Get pre-validated context values
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// if session == nil {
+		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	return
+		// }
+		// createdBy := session.Name
+		// Get created_by from session
+		createdBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				createdBy = s.Name
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		createdBy := session.Name
+
 		// Validate required fields
 		if req.BankName == "" {
 			api.RespondWithError(w, http.StatusBadRequest, constants.FormatMissingFieldError("bank_name"))
@@ -206,6 +221,27 @@ func CreateBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 func GetAllBankMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
+		// Get created_by from session
+		createdBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				createdBy = s.Name
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+
 		ctx := r.Context()
 		query := `
 			SELECT m.bank_id, m.bank_name, m.bank_short_name, m.swift_bic_code, m.country_of_headquarters, m.connectivity_type, m.active_status,
