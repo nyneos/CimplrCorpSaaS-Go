@@ -8,6 +8,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// FinalizeParams groups parameters for finalizeRecord to avoid long parameter lists.
+type FinalizeParams struct {
+	RecordID       string
+	AuditTable     string
+	AuditIDColumn  string
+	RecordTable    string
+	ActionType     string
+	FinalStatus    string
+	CheckerEmail   string
+	CheckerComment string
+}
+
 // finalizeRecord writes the final approval decision back to the legacy audit
 // table and, for approved DELETEs, flips is_deleted on the master record.
 //
@@ -18,23 +30,15 @@ import (
 func finalizeRecord(
 	ctx context.Context,
 	tx pgx.Tx,
-	recordID string,
-	auditTable string,
-	auditIDColumn string,
-	recordTable string,
-	actionType string,
-	finalStatus string,
-	checkerEmail string,
-	checkerComment string,
-) error {
+	p FinalizeParams) error {
 	// Validate that no field is empty before using it in a dynamic query.
-	if auditTable == "" || auditIDColumn == "" || recordTable == "" {
-		return fmt.Errorf("finalizeRecord: missing table/column info for record %s", recordID)
+	if p.AuditTable == "" || p.AuditIDColumn == "" || p.RecordTable == "" {
+		return fmt.Errorf("finalizeRecord: missing table/column info for record %s", p.RecordID)
 	}
 
 	// Step 1: Map final status to legacy processing_status string.
 	processingStatus := "APPROVED"
-	if finalStatus == InstStatusRejected {
+	if p.FinalStatus == InstStatusRejected {
 		processingStatus = "REJECTED"
 	}
 
@@ -44,31 +48,31 @@ func finalizeRecord(
 	auditQ := fmt.Sprintf(`
 		UPDATE %s
 		SET processing_status = $1,
-		    checker_by        = $2,
-		    checker_at        = now(),
-		    checker_comment   = $3
+			checker_by        = $2,
+			checker_at        = now(),
+			checker_comment   = $3
 		WHERE %s = $4
 		  AND processing_status LIKE 'PENDING%%'
-	`, auditTable, auditIDColumn)
+	`, p.AuditTable, p.AuditIDColumn)
 
-	tag, err := tx.Exec(ctx, auditQ, processingStatus, checkerEmail, checkerComment, recordID)
+	tag, err := tx.Exec(ctx, auditQ, processingStatus, p.CheckerEmail, p.CheckerComment, p.RecordID)
 	if err != nil {
 		return fmt.Errorf("finalizeRecord audit update: %w", err)
 	}
 	api.LogInfo("[ApprovalEngine] Finalized audit: table=%s record=%s status=%s rows=%d",
-		auditTable, recordID, processingStatus, tag.RowsAffected())
+		p.AuditTable, p.RecordID, processingStatus, tag.RowsAffected())
 
 	// Step 3: For approved DELETEs, flip is_deleted on the master record.
-	if actionType == "DELETE" && finalStatus == InstStatusApproved {
+	if p.ActionType == "DELETE" && p.FinalStatus == InstStatusApproved {
 		// Table and column names are system-controlled — see note above.
 		delQ := fmt.Sprintf(`
 			UPDATE %s SET is_deleted = true WHERE %s = $1
-		`, recordTable, auditIDColumn)
-		_, err := tx.Exec(ctx, delQ, recordID)
+		`, p.RecordTable, p.AuditIDColumn)
+		_, err := tx.Exec(ctx, delQ, p.RecordID)
 		if err != nil {
 			return fmt.Errorf("finalizeRecord delete flip: %w", err)
 		}
-		api.LogInfo("[ApprovalEngine] is_deleted flipped: table=%s record=%s", recordTable, recordID)
+		api.LogInfo("[ApprovalEngine] is_deleted flipped: table=%s record=%s", p.RecordTable, p.RecordID)
 	}
 
 	return nil

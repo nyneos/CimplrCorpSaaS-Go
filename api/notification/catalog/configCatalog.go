@@ -486,7 +486,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, updQ, uArgs...).Scan(
 				&newConfigID, &newEventID, &newChannel, &newEnabled, &newRetry, &newBackoff, &newPriority,
 			); err != nil {
-				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: "update failed: " + err.Error()})
+				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrUpdateFailed + err.Error()})
 				continue
 			}
 
@@ -501,7 +501,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.Reason, editor,
 				oldEnabled, oldRetryMax, oldRetryBackoff, oldPriority,
 			); err != nil {
-				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: "audit insert failed: " + err.Error()})
+				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 

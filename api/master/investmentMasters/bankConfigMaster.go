@@ -317,7 +317,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -780,7 +780,7 @@ func UpdateBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfigID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
 		if len(req.Fields) == 0 {
@@ -1999,7 +1999,7 @@ func GetBankConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfigID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
 

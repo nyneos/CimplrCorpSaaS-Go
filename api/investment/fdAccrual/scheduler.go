@@ -23,7 +23,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			UserID                string `json:"user_id"`
 			EntityID              string `json:"entity_id"`
 			EntityName            string `json:"entity_name"`
-			ScheduleFrequency     string `json:"schedule_frequency"`  // MONTHLY / QUARTERLY / YEARLY
+			ScheduleFrequency     string `json:"schedule_frequency"` // MONTHLY / QUARTERLY / YEARLY
 			RunDayOfMonth         int    `json:"run_day_of_month"`
 			DefaultBankIDFilter   string `json:"default_bank_id_filter"`
 			DefaultFDStatusFilter string `json:"default_fd_status_filter"`
@@ -119,7 +119,7 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfigID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
 		if len(req.Fields) == 0 {
@@ -137,14 +137,14 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Allowlist of updatable columns
 		allowed := map[string]bool{
-			"schedule_frequency":      true,
-			"run_day_of_month":        true,
-			"run_time":                true,
-			"default_bank_id_filter":  true,
+			"schedule_frequency":       true,
+			"run_day_of_month":         true,
+			"run_time":                 true,
+			"default_bank_id_filter":   true,
 			"default_fd_status_filter": true,
-			"default_run_mode":        true,
+			"default_run_mode":         true,
 			"auto_submit_for_approval": true,
-			"notification_recipients": true,
+			"notification_recipients":  true,
 		}
 
 		setParts := []string{"updated_by = $1", "updated_at = now()"}
@@ -254,7 +254,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -274,7 +274,7 @@ func GetScheduleConfigs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			configs = append(configs, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -298,7 +298,7 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfigID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
 
@@ -318,7 +318,7 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if ct.RowsAffected() == 0 {
-			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
 			return
 		}
 
@@ -343,7 +343,7 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfigID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
 
@@ -363,7 +363,7 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if ct.RowsAffected() == 0 {
-			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
 			return
 		}
 
@@ -380,17 +380,17 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func ApproveAccrualSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string `json:"user_id"`
-			RoleID   string `json:"role_id"`
-			RunID    string `json:"run_id"`
-			Comment  string `json:"comment"`
+			UserID  string `json:"user_id"`
+			RoleID  string `json:"role_id"`
+			RunID   string `json:"run_id"`
+			Comment string `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -472,7 +472,7 @@ func RejectAccrualSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -532,7 +532,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ConfigID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "config_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
 			return
 		}
 
@@ -573,7 +573,7 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if ct.RowsAffected() == 0 {
-			api.RespondWithError(w, http.StatusNotFound, "schedule config not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrScheduleConfigNotFound)
 			return
 		}
 
@@ -667,25 +667,54 @@ func checkAndFireDueSchedules(ctx context.Context, pool *pgxpool.Pool) {
 	rows.Close()
 
 	for _, c := range due {
-		fireScheduledRun(ctx, pool, c.ConfigID, c.EntityID, c.EntityName,
-			c.ScheduleFrequency, c.BankFilter, c.FDStatus,
-			c.DefaultRunMode, c.RunDayOfMonth, c.AutoSubmit,
-			c.Granularity, c.NextRunAt)
+		fireScheduledRun(ctx, pool, FireScheduledParams{
+			ConfigID:     c.ConfigID,
+			EntityID:     c.EntityID,
+			EntityName:   c.EntityName,
+			ScheduleFreq: c.ScheduleFrequency,
+			BankFilter:   c.BankFilter,
+			FDStatus:     c.FDStatus,
+			RunMode:      c.DefaultRunMode,
+			RunDay:       c.RunDayOfMonth,
+			AutoSubmit:   c.AutoSubmit,
+			Granularity:  c.Granularity,
+			ScheduledAt:  c.NextRunAt,
+		})
 	}
 }
 
 // fireScheduledRun creates a run, validates, executes, and optionally submits.
+type FireScheduledParams struct {
+	ConfigID     string
+	EntityID     string
+	EntityName   string
+	ScheduleFreq string
+	BankFilter   string
+	FDStatus     string
+	RunMode      string
+	RunDay       int
+	AutoSubmit   bool
+	Granularity  string
+	ScheduledAt  time.Time
+}
+
 func fireScheduledRun(
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	configID, entityID, entityName string,
-	scheduleFreq, bankFilter, fdStatus string,
-	runMode string,
-	runDay int,
-	autoSubmit bool,
-	granularity string,
-	scheduledAt time.Time,
+	p FireScheduledParams,
 ) {
+	// Map struct fields to local variables to keep existing function body unchanged
+	configID := p.ConfigID
+	entityID := p.EntityID
+	entityName := p.EntityName
+	scheduleFreq := p.ScheduleFreq
+	bankFilter := p.BankFilter
+	fdStatus := p.FDStatus
+	runMode := p.RunMode
+	runDay := p.RunDay
+	autoSubmit := p.AutoSubmit
+	granularity := p.Granularity
+	scheduledAt := p.ScheduledAt
 	// Derive period from scheduledAt (the config's next_run_at), not from now()
 	var periodStart, periodEnd time.Time
 	switch scheduleFreq {
@@ -726,7 +755,7 @@ func fireScheduledRun(
 	).Scan(&existingFinalRun)
 	if existingFinalRun != "" {
 		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s — FINAL run %s already exists",
-			entityID, periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02"), existingFinalRun)
+			entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat), existingFinalRun)
 		updateLastRunStatus(ctx, pool, configID, existingFinalRun, "SKIPPED_DUPLICATE", scheduleFreq, runDay)
 		return
 	}
@@ -759,7 +788,7 @@ func fireScheduledRun(
 		return
 	}
 	api.LogInfo("[FDAccrual] Scheduler created run_id=%s entity=%s period=%s→%s",
-		runID, entityID, periodStart.Format("2006-01-02"), periodEnd.Format("2006-01-02"))
+		runID, entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat))
 
 	// Validate
 	eligible, blockers, _, vErr := validateAndPersistFindings(ctx, pool, runID)

@@ -105,7 +105,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -142,7 +142,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// confirmation_received_date is NOT NULL — default to today if empty
 		receivedDate := req.ReceiptDate
 		if receivedDate == "" {
-			receivedDate = time.Now().Format("2006-01-02")
+			receivedDate = time.Now().Format(constants.DateFormat)
 		}
 
 		err = tx.QueryRow(ctx, `
@@ -239,8 +239,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       eID,
 				TransactionType:  "FD_CONFIRMATION_CREATE",
 				RecordID:         cID,
-				RecordTable:      "investment.fd_confirmation",
-				AuditTable:       "investment.fd_audit_confirmation",
+				RecordTable:      constants.QuerryConfirmation,
+				AuditTable:       constants.QuerryAuditConfirmation,
 				AuditIDColumn:    "confirmation_id",
 				ActionType:       "CREATE",
 				Amount:           amount,
@@ -323,7 +323,7 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -433,8 +433,8 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					EntityCode:       eID,
 					TransactionType:  "FD_CONFIRMATION_VARIANCE_RESOLVE",
 					RecordID:         cID,
-					RecordTable:      "investment.fd_confirmation",
-					AuditTable:       "investment.fd_audit_confirmation",
+					RecordTable:      constants.QuerryConfirmation,
+					AuditTable:       constants.QuerryAuditConfirmation,
 					AuditIDColumn:    "confirmation_id",
 					ActionType:       "EDIT",
 					Amount:           amount,
@@ -452,8 +452,8 @@ func ResolveVariance(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					EntityCode:       eID,
 					TransactionType:  "FD_CONFIRMATION_CREATE",
 					RecordID:         cID,
-					RecordTable:      "investment.fd_confirmation",
-					AuditTable:       "investment.fd_audit_confirmation",
+					RecordTable:      constants.QuerryConfirmation,
+					AuditTable:       constants.QuerryAuditConfirmation,
 					AuditIDColumn:    "confirmation_id",
 					ActionType:       "EDIT",
 					Amount:           amount,
@@ -510,7 +510,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 
@@ -557,7 +557,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, cID+": "+err.Error())
 					continue
 				}
-				engineActed++ // action recorded regardless of whether this is the final eye
+				engineActed++
 				// If the instance is now fully APPROVED, flip statuses.
 				var instStatus string
 				_ = pgxPool.QueryRow(ctx, `SELECT i.status FROM uam.approval_instance i
@@ -587,6 +587,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					); execErr != nil {
 						api.LogError("[FDConfirmation] is_deleted flip failed for %s: %v", cID, execErr)
 					}
+
 				}
 			} else {
 				var anyInstance int
@@ -635,7 +636,6 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				directActed++
 			}
 		}
-
 		totalActed := engineActed + directActed
 		success := totalActed > 0 || len(errors) == 0
 		msg := ""
@@ -679,7 +679,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 
@@ -780,7 +780,6 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				directActed++
 			}
 		}
-
 		totalActed := engineActed + directActed
 		success := totalActed > 0 || len(errors) == 0
 		msg := ""
@@ -817,7 +816,7 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		bookingAccountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "b")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1057,7 +1056,7 @@ func GetConfirmationAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -1077,7 +1076,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		entityID := r.URL.Query().Get("entity_id")
 		bookingAccountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "b")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1085,7 +1084,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Dynamically resolve which currency column exists to avoid parse-time errors.
 		bookingCols, err := loadFDTableColumns(ctx, pgxPool, "investment", "fd_booking_request")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1162,7 +1161,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -1186,7 +1185,7 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		bookingAccountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "b")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1344,8 +1343,8 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						EntityCode:       entityID,
 						TransactionType:  txType,
 						RecordID:         confirmationID,
-						RecordTable:      "investment.fd_confirmation",
-						AuditTable:       "investment.fd_audit_confirmation",
+						RecordTable:      constants.QuerryConfirmation,
+						AuditTable:       constants.QuerryAuditConfirmation,
 						AuditIDColumn:    "confirmation_id",
 						ActionType:       pendingActionType,
 						Amount:           amount,
@@ -1394,7 +1393,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ConfirmationIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 
@@ -1413,7 +1412,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1452,7 +1451,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validConfs = append(validConfs, cm)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 		rows.Close()
@@ -1507,7 +1506,7 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
 					TransactionType: "FD_CONFIRMATION_DELETE", RecordID: cID,
-					RecordTable: "investment.fd_confirmation", AuditTable: "investment.fd_audit_confirmation",
+					RecordTable: constants.QuerryConfirmation, AuditTable: constants.QuerryAuditConfirmation,
 					AuditIDColumn: "confirmation_id", ActionType: "DELETE",
 					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})

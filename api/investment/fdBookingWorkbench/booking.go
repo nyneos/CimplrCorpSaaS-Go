@@ -80,7 +80,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -88,7 +88,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		bookingColumns, err := loadFDTableColumns(ctx, tx, "investment", "fd_booking_request")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -160,7 +160,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"auto_renewal", "booking_remarks", "booking_status", "created_by",
 		}
 		insertQ, insertArgs, returningColumn, ok := buildFDDynamicInsert(
-			"investment.fd_booking_request",
+			constants.QuerryBookingRequest,
 			bookingColumns,
 			preferredCols,
 			insertValues,
@@ -208,8 +208,8 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entityID,
 				TransactionType:  "FD_BOOKING",
 				RecordID:         bID,
-				RecordTable:      "investment.fd_booking_request",
-				AuditTable:       "investment.fd_audit_booking_request",
+				RecordTable:      constants.QuerryBookingRequest,
+				AuditTable:       constants.QuerryAuditBookingRequest,
 				AuditIDColumn:    "booking_id",
 				ActionType:       "CREATE",
 				Amount:           amount,
@@ -237,7 +237,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		go func(bID, eID, uEmail string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+					api.LogError(constants.ErrFDBookingPanic, bID, rec)
 				}
 			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create", bID, map[string]interface{}{
@@ -341,7 +341,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if schemaErr != nil {
 				tx.Rollback(ctx) //nolint:errcheck
 				logDBError(schemaErr, fmt.Sprintf("CreateBookingBulk row %d load schema", i))
-				msg, _ := getUserFriendlyFDError(schemaErr, "Load booking schema failed")
+				msg, _ := getUserFriendlyFDError(schemaErr, constants.ErrLoadBookingSchemaFailed)
 				results = append(results, map[string]interface{}{
 					"row_index": i, "entity_id": row.EntityID,
 					constants.ValueSuccess: false, constants.ValueError: msg,
@@ -421,7 +421,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"auto_renewal", "booking_remarks", "booking_status", "created_by",
 			}
 			insertQ, insertArgs, returningColumn, ok := buildFDDynamicInsert(
-				"investment.fd_booking_request",
+				constants.QuerryBookingRequest,
 				bookingColumns,
 				bulkPreferredCols,
 				insertValues,
@@ -487,7 +487,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: entityID,
 					TransactionType: "FD_BOOKING", RecordID: bID,
-					RecordTable: "investment.fd_booking_request", AuditTable: "investment.fd_audit_booking_request",
+					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "CREATE",
 					Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
@@ -511,7 +511,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			go func(bID, eID, uEmail string, amount float64) {
 				defer func() {
 					if rec := recover(); rec != nil {
-						api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+						api.LogError(constants.ErrFDBookingPanic, bID, rec)
 					}
 				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create-bulk", bID, map[string]interface{}{
@@ -580,7 +580,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -593,7 +593,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var oldValueDate, oldMaturityDate, oldBankID, oldBankAccountID string
 		accountExpr, err := resolveFDBookingAccountExpression(ctx, tx, "fd_booking_request")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -699,7 +699,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 				ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
 				TransactionType: "FD_BOOKING_EDIT", RecordID: bID,
-				RecordTable: "investment.fd_booking_request", AuditTable: "investment.fd_audit_booking_request",
+				RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 				AuditIDColumn: "booking_id", ActionType: "EDIT",
 				Amount: amount, SubmittedBy: uID, SubmittedByEmail: uEmail,
 			})
@@ -721,7 +721,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		go func(bID, eID, uEmail string, amount float64) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+					api.LogError(constants.ErrFDBookingPanic, bID, rec)
 				}
 			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/update", bID, map[string]interface{}{
@@ -754,7 +754,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BookingIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBookingIDsRequired)
 			return
 		}
 
@@ -773,7 +773,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -811,7 +811,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			validBookings = append(validBookings, bm)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 		rows.Close()
@@ -866,7 +866,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				instID, err := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
 					ModuleCode: "FIXED_DEPOSIT", EntityCode: eID,
 					TransactionType: "FD_BOOKING_DELETE", RecordID: bID,
-					RecordTable: "investment.fd_booking_request", AuditTable: "investment.fd_audit_booking_request",
+					RecordTable: constants.QuerryBookingRequest, AuditTable: constants.QuerryAuditBookingRequest,
 					AuditIDColumn: "booking_id", ActionType: "DELETE",
 					Amount: 0, SubmittedBy: uID, SubmittedByEmail: uEmail,
 				})
@@ -888,7 +888,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			go func(bID, eID, uEmail string) {
 				defer func() {
 					if rec := recover(); rec != nil {
-						api.LogError("[FDBooking] notification goroutine panic for booking %s: %v", bID, rec)
+						api.LogError(constants.ErrFDBookingPanic, bID, rec)
 					}
 				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/delete", bID, map[string]interface{}{
@@ -940,7 +940,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 		}
 
 // 		if len(req.BookingIDs) == 0 {
-// 			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
+// 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBookingIDsRequired)
 // 			return
 // 		}
 
@@ -1148,7 +1148,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BookingIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBookingIDsRequired)
 			return
 		}
 
@@ -1196,7 +1196,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, bID+": "+err.Error())
 					continue
 				}
-				engineActed++ // action was recorded regardless of whether this was the final eye
+				engineActed++
 				// If the engine fully approved (last eye done), flip booking status.
 				// Check if instance is now APPROVED.
 				var instStatus string
@@ -1221,6 +1221,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					); execErr != nil {
 						api.LogError("[FDBooking] is_deleted flip failed for %s: %v", bID, execErr)
 					}
+
 				}
 			} else {
 				// No active eye for this user — check if any engine instance exists at all.
@@ -1312,7 +1313,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BookingIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBookingIDsRequired)
 			return
 		}
 
@@ -1402,7 +1403,6 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				directActed++
 			}
 		}
-
 		totalActed := engineActed + directActed
 		success := totalActed > 0 || len(errors) == 0
 		msg := ""
@@ -1439,7 +1439,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		accountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "m")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1616,7 +1616,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		accountExpr, err := resolveFDBookingAccountExpression(ctx, pgxPool, "fd_booking_request")
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Load booking schema failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1777,8 +1777,8 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						EntityCode:       entityID,
 						TransactionType:  txType,
 						RecordID:         bookingID,
-						RecordTable:      "investment.fd_booking_request",
-						AuditTable:       "investment.fd_audit_booking_request",
+						RecordTable:      constants.QuerryBookingRequest,
+						AuditTable:       constants.QuerryAuditBookingRequest,
 						AuditIDColumn:    "booking_id",
 						ActionType:       pendingActionType,
 						Amount:           principalAmount,
@@ -1894,7 +1894,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -2017,7 +2017,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -2039,7 +2039,7 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.BookingIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "booking_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrBookingIDsRequired)
 			return
 		}
 
@@ -2058,7 +2058,7 @@ func MarkAsSentToBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyFDError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

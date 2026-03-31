@@ -180,7 +180,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -966,7 +966,7 @@ func UpdateBankRateCardBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errResults = append(errResults, map[string]interface{}{
 						"rate_card_id":         update.RateCardID,
 						constants.ValueSuccess: false,
-						constants.ValueError:   "Update failed: " + err.Error(),
+						constants.ValueError:   constants.ErrUpdateFailed + err.Error(),
 					})
 					continue
 				}

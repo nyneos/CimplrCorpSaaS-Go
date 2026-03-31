@@ -122,12 +122,12 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			CreatedBy:          userEmail,
 		}
 		var parseErr error
-		input.AccrualPeriodStart, parseErr = time.Parse("2006-01-02", req.AccrualPeriodStart)
+		input.AccrualPeriodStart, parseErr = time.Parse(constants.DateFormat, req.AccrualPeriodStart)
 		if parseErr != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "accrual_period_start must be YYYY-MM-DD")
 			return
 		}
-		input.AccrualPeriodEnd, parseErr = time.Parse("2006-01-02", req.AccrualPeriodEnd)
+		input.AccrualPeriodEnd, parseErr = time.Parse(constants.DateFormat, req.AccrualPeriodEnd)
 		if parseErr != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "accrual_period_end must be YYYY-MM-DD")
 			return
@@ -229,7 +229,7 @@ func ValidateScope(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -343,7 +343,7 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -413,7 +413,7 @@ func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -443,7 +443,7 @@ func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ORDER BY l.entity_id, l.bank_name, l.fd_id`,
 			req.RunID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -463,7 +463,7 @@ func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ledger = append(ledger, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -489,7 +489,7 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id and fd_id are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
 			return
 		}
 
@@ -506,7 +506,7 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND COALESCE(l.is_deleted,false) = false`,
 			req.RunID, req.FDID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer row.Close()
@@ -525,7 +525,7 @@ func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if err := row.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 		if ledger == nil {
@@ -550,7 +550,7 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -996,7 +996,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1016,7 +1016,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			runs = append(runs, row)
 		}
 		if err := rows.Err(); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Row error: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
@@ -1040,7 +1040,7 @@ func GetValidationFindings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -1054,7 +1054,7 @@ func GetValidationFindings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE run_id = $1
 			ORDER BY severity DESC, fd_id`, req.RunID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1095,7 +1095,7 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -1110,7 +1110,7 @@ func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE run_id = $1
 			ORDER BY logged_at`, req.RunID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1257,7 +1257,7 @@ func GetAccrualExceptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
 			return
 		}
 
@@ -1333,20 +1333,20 @@ func GetAccrualExceptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                string  `json:"user_id"`
-			RunID                 string  `json:"run_id"`
-			FDID                  string  `json:"fd_id"`
-			OverrideAmount        float64 `json:"override_amount"`
-			OverrideReasonCode    string  `json:"override_reason_code"`
-			OverrideReasonText    string  `json:"override_reason_text"`
-			OverrideEffPeriod     string  `json:"override_effective_period"`
+			UserID             string  `json:"user_id"`
+			RunID              string  `json:"run_id"`
+			FDID               string  `json:"fd_id"`
+			OverrideAmount     float64 `json:"override_amount"`
+			OverrideReasonCode string  `json:"override_reason_code"`
+			OverrideReasonText string  `json:"override_reason_text"`
+			OverrideEffPeriod  string  `json:"override_effective_period"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id and fd_id are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
 			return
 		}
 		if req.OverrideAmount <= 0 {
@@ -1433,7 +1433,7 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id and fd_id are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
 			return
 		}
 
@@ -1527,13 +1527,13 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"run_id":                   req.RunID,
-			"fd_id":                    req.FDID,
-			"override_status":          "APPROVED",
-			"period_interest_accrued":  newPeriodInterest,
-			"closing_accrued_balance":  newClosingBal,
-			"net_interest_in_period":   newNetInterest,
-			"override_adjustment":      overrideAdj,
+			"run_id":                  req.RunID,
+			"fd_id":                   req.FDID,
+			"override_status":         "APPROVED",
+			"period_interest_accrued": newPeriodInterest,
+			"closing_accrued_balance": newClosingBal,
+			"net_interest_in_period":  newNetInterest,
+			"override_adjustment":     overrideAdj,
 		})
 		api.LogInfo("[FDAccrual] ApproveOverride: run=%s fd=%s by=%s override_amt=%.2f new_period_interest=%.2f",
 			req.RunID, req.FDID, userEmail, overrideAmt, newPeriodInterest)
@@ -1555,7 +1555,7 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "run_id and fd_id are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
 			return
 		}
 
@@ -1738,8 +1738,8 @@ func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID s
 				"No FDs found for entity=%s fd_status_filter=%s period=%s to %s bank_filter=%q. "+
 					"Verify at least one FD is ACTIVE with cashflow_generated=true.",
 				params.EntityID, params.FDStatusFilter,
-				params.PeriodStart.Format("2006-01-02"),
-				params.PeriodEnd.Format("2006-01-02"),
+				params.PeriodStart.Format(constants.DateFormat),
+				params.PeriodEnd.Format(constants.DateFormat),
 				params.BankIDFilter,
 			),
 		)
@@ -1759,7 +1759,7 @@ func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID s
 			"issue_description": fmt.Sprintf(
 				"No FDs found for entity=%s fd_status_filter=%s period=%s to %s bank_filter=%q",
 				params.EntityID, params.FDStatusFilter,
-				params.PeriodStart.Format("2006-01-02"), params.PeriodEnd.Format("2006-01-02"), params.BankIDFilter,
+				params.PeriodStart.Format(constants.DateFormat), params.PeriodEnd.Format(constants.DateFormat), params.BankIDFilter,
 			),
 			"suggested_action": "Verify FD scope and input filters",
 			"detail":           map[string]interface{}{},
@@ -1792,21 +1792,21 @@ func validateAndPersistFindings(ctx context.Context, pool *pgxpool.Pool, runID s
 
 		fid := fmt.Sprintf("%s-F%03d", runID, i+1)
 		rf := map[string]interface{}{
-			"finding_id":       fid,
-			"run_id":           runID,
-			"fd_id":            f.FDID,
-			"fd_ref_no":        f.FdRefNo,
-			"bank_name":        f.BankName,
-			"issue_type":       f.IssueType,
-			"severity":         f.Severity,
+			"finding_id":        fid,
+			"run_id":            runID,
+			"fd_id":             f.FDID,
+			"fd_ref_no":         f.FdRefNo,
+			"bank_name":         f.BankName,
+			"issue_type":        f.IssueType,
+			"severity":          f.Severity,
 			"issue_description": f.Description,
-			"suggested_action": f.SuggestedAction,
-			"error_code":       f.IssueType,
-			"location":         "validateFDsForAccrual",
-			"detail":           map[string]interface{}{},
-			"created_by":       "auto-validator",
-			"created_at":       time.Now().UTC().Format(time.RFC3339),
-			"resolved":         false,
+			"suggested_action":  f.SuggestedAction,
+			"error_code":        f.IssueType,
+			"location":          "validateFDsForAccrual",
+			"detail":            map[string]interface{}{},
+			"created_by":        "auto-validator",
+			"created_at":        time.Now().UTC().Format(time.RFC3339),
+			"resolved":          false,
 		}
 		resultFindings = append(resultFindings, rf)
 	}
@@ -1840,21 +1840,27 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			 SET run_status='FAILED', fds_in_scope=0, fds_calculated=0,
 			     completed_at=now(), updated_at=now()
 			 WHERE run_id=$1`, runID)
-		logAccrualEvent(ctx, pool, runID, "", "ERROR", "SCOPE_EMPTY",
-			fmt.Sprintf(
+		logAccrualEvent(ctx, pool, LogAccrualParams{
+			RunID:     runID,
+			FDID:      "",
+			Level:     "ERROR",
+			EventType: "SCOPE_EMPTY",
+			Message: fmt.Sprintf(
 				"Execute aborted: 0 FDs in scope. entity=%s fd_status_filter=%s period=%s to %s. "+
 					"FDs may have changed status since validation.",
 				params.EntityID, params.FDStatusFilter,
-				params.PeriodStart.Format("2006-01-02"),
-				params.PeriodEnd.Format("2006-01-02"),
-			), nil)
+				params.PeriodStart.Format(constants.DateFormat),
+				params.PeriodEnd.Format(constants.DateFormat),
+			),
+			Detail: nil,
+		})
 		return 0, 0, fmt.Errorf(
 			"accrual execute failed: 0 FDs in scope for entity %s "+
 				"(fd_status_filter=%s, period %s to %s). "+
 				"Ensure FDs are ACTIVE with cashflow_generated=true and overlap the accrual period",
 			params.EntityID, params.FDStatusFilter,
-			params.PeriodStart.Format("2006-01-02"),
-			params.PeriodEnd.Format("2006-01-02"),
+			params.PeriodStart.Format(constants.DateFormat),
+			params.PeriodEnd.Format(constants.DateFormat),
 		)
 	}
 
@@ -1909,9 +1915,15 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 		}
 
 		if !fdEffStart.Before(fdEffEnd) {
-			logAccrualEvent(ctx, pool, runID, fd.FDID, "INFO", "EXCLUDED",
-				fmt.Sprintf("FD effective window empty after boundary conventions: effStart=%s effEnd=%s",
-					fdEffStart.Format("2006-01-02"), fdEffEnd.Format("2006-01-02")), nil)
+			logAccrualEvent(ctx, pool, LogAccrualParams{
+				RunID:     runID,
+				FDID:      fd.FDID,
+				Level:     "INFO",
+				EventType: "EXCLUDED",
+				Message: fmt.Sprintf("FD effective window empty after boundary conventions: effStart=%s effEnd=%s",
+					fdEffStart.Format(constants.DateFormat), fdEffEnd.Format(constants.DateFormat)),
+				Detail: nil,
+			})
 			continue
 		}
 
@@ -1949,10 +1961,16 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			result := calculateAccrualForFD(ctx, pool, fdForCalc, subParams, openingBalance)
 
 			if result.LedgerRowStatus == "EXCLUDED" {
-				logAccrualEvent(ctx, pool, runID, fd.FDID, "INFO", "EXCLUDED",
-					fmt.Sprintf("Sub-period [%s,%s] excluded: %s",
-						sp[0].Format("2006-01-02"), sp[1].Format("2006-01-02"),
-						result.CalculationError), nil)
+				logAccrualEvent(ctx, pool, LogAccrualParams{
+					RunID:     runID,
+					FDID:      fd.FDID,
+					Level:     "INFO",
+					EventType: "EXCLUDED",
+					Message: fmt.Sprintf("Sub-period [%s,%s] excluded: %s",
+						sp[0].Format(constants.DateFormat), sp[1].Format(constants.DateFormat),
+						result.CalculationError),
+					Detail: nil,
+				})
 				continue
 			}
 
@@ -1969,17 +1987,23 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			openingBalance = result.ClosingAccruedBalance
 
 			if isSimulation {
-				logAccrualEvent(ctx, pool, runID, fd.FDID, "INFO", "SIMULATED",
-					fmt.Sprintf(
+				logAccrualEvent(ctx, pool, LogAccrualParams{
+					RunID:     runID,
+					FDID:      fd.FDID,
+					Level:     "INFO",
+					EventType: "SIMULATED",
+					Message: fmt.Sprintf(
 						"SIMULATION fd=%s sub=[%s,%s] days=%d interest=%.4f tds=%.4f net=%.4f formula=%s",
 						fd.FDID,
-						sp[0].Format("2006-01-02"), sp[1].Format("2006-01-02"),
+						sp[0].Format(constants.DateFormat), sp[1].Format(constants.DateFormat),
 						result.AccrualDays,
 						result.PeriodInterestAccrued,
 						result.TDSDeductedInPeriod,
 						result.NetInterestInPeriod,
 						result.FormulaUsed,
-					), nil)
+					),
+					Detail: nil,
+				})
 				fdCalculated = true
 				continue
 			}
@@ -2048,19 +2072,31 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 			)
 			if upsertErr != nil {
 				fdFailed = true
-				logAccrualEvent(ctx, pool, runID, fd.FDID, "ERROR", "LEDGER_UPSERT",
-					fmt.Sprintf("Ledger upsert failed sub=[%s,%s]: %v",
-						sp[0].Format("2006-01-02"), sp[1].Format("2006-01-02"), upsertErr), nil)
+				logAccrualEvent(ctx, pool, LogAccrualParams{
+					RunID:     runID,
+					FDID:      fd.FDID,
+					Level:     "ERROR",
+					EventType: "LEDGER_UPSERT",
+					Message: fmt.Sprintf("Ledger upsert failed sub=[%s,%s]: %v",
+						sp[0].Format(constants.DateFormat), sp[1].Format(constants.DateFormat), upsertErr),
+					Detail: nil,
+				})
 				continue
 			}
 
 			fdCalculated = true
 
-			logAccrualEvent(ctx, pool, runID, fd.FDID, "INFO", "CALCULATED",
-				fmt.Sprintf("sub=[%s,%s] interest=%.4f tds=%.4f net=%.4f days=%d",
-					sp[0].Format("2006-01-02"), sp[1].Format("2006-01-02"),
+			logAccrualEvent(ctx, pool, LogAccrualParams{
+				RunID:     runID,
+				FDID:      fd.FDID,
+				Level:     "INFO",
+				EventType: "CALCULATED",
+				Message: fmt.Sprintf("sub=[%s,%s] interest=%.4f tds=%.4f net=%.4f days=%d",
+					sp[0].Format(constants.DateFormat), sp[1].Format(constants.DateFormat),
 					result.PeriodInterestAccrued, result.TDSDeductedInPeriod,
-					result.NetInterestInPeriod, result.AccrualDays), nil)
+					result.NetInterestInPeriod, result.AccrualDays),
+				Detail: nil,
+			})
 		} // end sub-period loop
 
 		if fdFailed && !fdCalculated {
@@ -2282,7 +2318,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 	defer rows.Close()
 
 	type ledgerRow struct {
-		LedgerID, FDID, EntityID, EntityName, FormulaUsed string
+		LedgerID, FDID, EntityID, EntityName, FormulaUsed  string
 		GrossInterest, PeriodInterest, ClosingBalance, TDS float64
 		PeriodStart, PeriodEnd                             time.Time
 	}
@@ -2326,7 +2362,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 		}
 
 		description := fmt.Sprintf("FD accrual %s period %s→%s | fd_id=%s | run_id=%s",
-			lr.FDID, lr.PeriodStart.Format("2006-01-02"), lr.PeriodEnd.Format("2006-01-02"), lr.FDID, runID)
+			lr.FDID, lr.PeriodStart.Format(constants.DateFormat), lr.PeriodEnd.Format(constants.DateFormat), lr.FDID, runID)
 
 		var entryID string
 		if err := tx.QueryRow(ctx, `
@@ -2393,7 +2429,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 				if tdsErr == nil {
 					var tdsEntryID string
 					tdsDesc := fmt.Sprintf("FD TDS accrual %s period %s→%s | run_id=%s",
-						lr.FDID, lr.PeriodStart.Format("2006-01-02"), lr.PeriodEnd.Format("2006-01-02"), runID)
+						lr.FDID, lr.PeriodStart.Format(constants.DateFormat), lr.PeriodEnd.Format(constants.DateFormat), runID)
 					tdsErr = tdsTx.QueryRow(ctx, `
 						INSERT INTO investment.accounting_journal_entry (
 							activity_id, entity_id, entity_name,
@@ -2559,7 +2595,7 @@ func RecomputeAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			q += " ORDER BY r.created_at"
 			dbRows, err := pgxPool.Query(ctx, q, args...)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 				return
 			}
 			for dbRows.Next() {
@@ -2658,7 +2694,7 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DayCountConvention string `json:"day_count_convention"`
 			RoundingRule       string `json:"rounding_rule"`
 			PrecisionDecimals  int    `json:"precision_decimals"`
-			RunMode            string `json:"run_mode"` // SIMULATION or FINAL
+			RunMode            string `json:"run_mode"`      // SIMULATION or FINAL
 			SkipExisting       bool   `json:"skip_existing"` // default true – skip months with existing FINAL run
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2699,12 +2735,12 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Parse months
-		start, err := time.Parse("2006-01", req.StartMonth)
+		start, err := time.Parse(constants.DateFormatYearMonth, req.StartMonth)
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "start_month must be YYYY-MM")
 			return
 		}
-		end, err := time.Parse("2006-01", req.EndMonth)
+		end, err := time.Parse(constants.DateFormatYearMonth, req.EndMonth)
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "end_month must be YYYY-MM")
 			return
@@ -2729,7 +2765,7 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var monthResults []monthResult
 
 		for m := start; !m.After(end); m = m.AddDate(0, 1, 0) {
-			monthStr := m.Format("2006-01")
+			monthStr := m.Format(constants.DateFormatYearMonth)
 			// Period: 1st to last day of month
 			periodStart := time.Date(m.Year(), m.Month(), 1, 0, 0, 0, 0, time.UTC)
 			periodEnd := time.Date(m.Year(), m.Month()+1, 0, 0, 0, 0, 0, time.UTC) // last day
@@ -2846,23 +2882,23 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string, isSimulation bool) map[string]interface{} {
 	// ── Run header ────────────────────────────────────────────────────────────
 	type runHeader struct {
-		RunID            string  `json:"run_id"`
-		RunType          string  `json:"run_type"`
-		RunMode          string  `json:"run_mode"`
-		RunStatus        string  `json:"run_status"`
-		EntityID         string  `json:"entity_id"`
-		EntityName       string  `json:"entity_name"`
-		PeriodStart      string  `json:"accrual_period_start"`
-		PeriodEnd        string  `json:"accrual_period_end"`
-		FinancialPeriod  string  `json:"financial_period"`
-		Granularity      string  `json:"accrual_granularity"`
-		FDsInScope       int     `json:"fds_in_scope"`
-		FDsCalculated    int     `json:"fds_calculated"`
-		FDsFailed        int     `json:"fds_failed"`
-		TotalInterest    float64 `json:"total_interest_accrued"`
-		TotalTDS         float64 `json:"total_tds_deducted"`
-		TotalNet         float64 `json:"total_accrued_closing_balance"`
-		CreatedAt        string  `json:"created_at"`
+		RunID           string  `json:"run_id"`
+		RunType         string  `json:"run_type"`
+		RunMode         string  `json:"run_mode"`
+		RunStatus       string  `json:"run_status"`
+		EntityID        string  `json:"entity_id"`
+		EntityName      string  `json:"entity_name"`
+		PeriodStart     string  `json:"accrual_period_start"`
+		PeriodEnd       string  `json:"accrual_period_end"`
+		FinancialPeriod string  `json:"financial_period"`
+		Granularity     string  `json:"accrual_granularity"`
+		FDsInScope      int     `json:"fds_in_scope"`
+		FDsCalculated   int     `json:"fds_calculated"`
+		FDsFailed       int     `json:"fds_failed"`
+		TotalInterest   float64 `json:"total_interest_accrued"`
+		TotalTDS        float64 `json:"total_tds_deducted"`
+		TotalNet        float64 `json:"total_accrued_closing_balance"`
+		CreatedAt       string  `json:"created_at"`
 	}
 	var hdr runHeader
 	var periodStart, periodEnd time.Time
@@ -2894,18 +2930,18 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 		&hdr.TotalInterest, &hdr.TotalTDS, &hdr.TotalNet,
 		&hdr.CreatedAt,
 	)
-	hdr.PeriodStart = periodStart.Format("2006-01-02")
-	hdr.PeriodEnd = periodEnd.Format("2006-01-02")
+	hdr.PeriodStart = periodStart.Format(constants.DateFormat)
+	hdr.PeriodEnd = periodEnd.Format(constants.DateFormat)
 
 	// ── KPI summary ───────────────────────────────────────────────────────────
 	kpi := map[string]interface{}{
-		"total_interest_accrued":        math.Round(hdr.TotalInterest*100) / 100,
-		"total_tds_deducted":            math.Round(hdr.TotalTDS*100) / 100,
-		"total_net_accrued":             math.Round(hdr.TotalNet*100) / 100,
-		"fds_in_scope":                  hdr.FDsInScope,
-		"fds_calculated":                hdr.FDsCalculated,
-		"fds_failed":                    hdr.FDsFailed,
-		"accrual_granularity":           hdr.Granularity,
+		"total_interest_accrued": math.Round(hdr.TotalInterest*100) / 100,
+		"total_tds_deducted":     math.Round(hdr.TotalTDS*100) / 100,
+		"total_net_accrued":      math.Round(hdr.TotalNet*100) / 100,
+		"fds_in_scope":           hdr.FDsInScope,
+		"fds_calculated":         hdr.FDsCalculated,
+		"fds_failed":             hdr.FDsFailed,
+		"accrual_granularity":    hdr.Granularity,
 	}
 
 	payload := map[string]interface{}{
@@ -3028,8 +3064,8 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 						"fd_id":                   fdID,
 						"fd_ref_no":               fdRefNo,
 						"bank_name":               bankName,
-						"accrual_period_start":    lStart.Format("2006-01-02"),
-						"accrual_period_end":      lEnd.Format("2006-01-02"),
+						"accrual_period_start":    lStart.Format(constants.DateFormat),
+						"accrual_period_end":      lEnd.Format(constants.DateFormat),
 						"accrual_days":            accrualDays,
 						"principal_amount":        principal,
 						"interest_rate":           rate,
@@ -3085,16 +3121,16 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 					); sErr == nil {
 						auditRows = append(auditRows, map[string]interface{}{
 							"action_type":         actionType,
-							"processing_status":  procStatus,
-							"requested_by":       reqBy,
-							"requested_at":       reqAt,
-							"checker_by":         checkerBy,
-							"checker_at":         checkerAt,
-							"checker_comment":    checkerComment,
-							"old_status":         oldStatus,
-							"old_interest":       oldInterest,
+							"processing_status":   procStatus,
+							"requested_by":        reqBy,
+							"requested_at":        reqAt,
+							"checker_by":          checkerBy,
+							"checker_at":          checkerAt,
+							"checker_comment":     checkerComment,
+							"old_status":          oldStatus,
+							"old_interest":        oldInterest,
 							"old_closing_balance": oldClosing,
-							"old_formula":        oldFormula,
+							"old_formula":         oldFormula,
 						})
 					}
 				}
@@ -3163,13 +3199,13 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 			entry, ok := fdKPIMap[fdID]
 			if !ok {
 				entry = map[string]interface{}{
-					"fd_id":                   fdID,
-					"fd_ref_no":               row["fd_ref_no"],
-					"bank_name":               row["bank_name"],
-					"total_interest_accrued":  0.0,
-					"total_tds_deducted":      0.0,
-					"total_net_accrued":       0.0,
-					"sub_period_count":        0,
+					"fd_id":                  fdID,
+					"fd_ref_no":              row["fd_ref_no"],
+					"bank_name":              row["bank_name"],
+					"total_interest_accrued": 0.0,
+					"total_tds_deducted":     0.0,
+					"total_net_accrued":      0.0,
+					"sub_period_count":       0,
 				}
 				fdKPIMap[fdID] = entry
 			}
@@ -3219,24 +3255,32 @@ func buildAccrualResponse(ctx context.Context, pool *pgxpool.Pool, runID string,
 }
 
 // logAccrualEvent inserts a row into fd_accrual_run_execution_log.
-func logAccrualEvent(ctx context.Context, pool *pgxpool.Pool,
-	runID, fdID, level, eventType, message string, detail map[string]interface{}) {
+// LogAccrualParams groups parameters for logAccrualEvent to keep signatures short.
+type LogAccrualParams struct {
+	RunID     string
+	FDID      string
+	Level     string
+	EventType string
+	Message   string
+	Detail    map[string]interface{}
+}
 
+func logAccrualEvent(ctx context.Context, pool *pgxpool.Pool, p LogAccrualParams) {
 	detailJSON := "{}"
-	if detail != nil {
-		if b, err := json.Marshal(detail); err == nil {
+	if p.Detail != nil {
+		if b, err := json.Marshal(p.Detail); err == nil {
 			detailJSON = string(b)
 		}
 	}
-	fdIDPtr := interface{}(fdID)
-	if fdID == "" {
+	fdIDPtr := interface{}(p.FDID)
+	if p.FDID == "" {
 		fdIDPtr = nil
 	}
 	_, _ = pool.Exec(ctx, `
 		INSERT INTO investment.fd_accrual_run_execution_log (
 			run_id, fd_id, log_level, event_type, message, detail, logged_at
 		) VALUES ($1,$2,$3,$4,$5,$6::jsonb,now())`,
-		runID, fdIDPtr, level, eventType, message, detailJSON)
+		p.RunID, fdIDPtr, p.Level, p.EventType, p.Message, detailJSON)
 }
 
 // ─── String helpers ───────────────────────────────────────────────────────────

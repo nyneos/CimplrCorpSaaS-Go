@@ -506,7 +506,7 @@ func respondValidationErrors(w http.ResponseWriter, findings []map[string]string
 	for _, f := range findings {
 		errs = append(errs, fieldError{Field: f["field"], Message: f["error"]})
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(http.StatusUnprocessableEntity)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,
@@ -1639,7 +1639,7 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 action_type       = 'DELETE'
 			 WHERE audit_id = ANY($3::uuid[])`,
 			userEmail, req.Reason, validIDs); err != nil {
-			api.RespondWithPayload(w, false, "update failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrUpdateFailed+err.Error(), nil)
 			return
 		}
 
@@ -1935,7 +1935,7 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{

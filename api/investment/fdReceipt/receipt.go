@@ -104,7 +104,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.FdID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
 			return
 		}
 		if req.ReceiptDate == "" {
@@ -123,7 +123,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "other_charges must be >= 0")
 			return
 		}
-		receiptDate, err := time.Parse("2006-01-02", req.ReceiptDate)
+		receiptDate, err := time.Parse(constants.DateFormat, req.ReceiptDate)
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "receipt_date must be YYYY-MM-DD")
 			return
@@ -244,7 +244,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				receipt_id, action_type, processing_status, requested_by, requested_at
 			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, receiptID, userEmail)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
@@ -296,7 +296,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -325,7 +325,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		if tdsID != "" {
 			resp["tds_id"] = tdsID
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -345,7 +345,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ReceiptID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "receipt_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrReceiptIDRequired)
 			return
 		}
 		if len(req.Fields) == 0 {
@@ -384,7 +384,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -460,7 +460,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(setClauses, ","), idx)
 
 		if _, err = tx.Exec(ctx, updateSQL, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -479,12 +479,12 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			oldGross, oldTds, oldOther, oldNet,
 			oldBankRef, oldNarration, oldCashflowID, oldIsActive)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -495,8 +495,8 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entityID,
 				TransactionType:  "FD_RECEIPT_EDIT",
 				RecordID:         req.ReceiptID,
-				RecordTable:      "investment.fd_interest_receipt",
-				AuditTable:       "investment.fd_interest_receipt_audit",
+				RecordTable:      constants.QuerryInterestReceipt,
+				AuditTable:       constants.QuerryAuditInterestReceipt,
 				AuditIDColumn:    "receipt_id",
 				ActionType:       "EDIT",
 				Amount:           newGross,
@@ -519,7 +519,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ReceiptID, userEmail, newGross)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"receipt_id": req.ReceiptID,
@@ -571,7 +571,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		if len(validIDs) > 0 {
 			tx, err := pool.Begin(ctx)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 				return
 			}
 			defer tx.Rollback(ctx) //nolint:errcheck
@@ -582,13 +582,13 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						receipt_id, action_type, processing_status, reason, requested_by, requested_at
 					) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`, rid, req.Reason, userEmail)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 					return
 				}
 			}
 
 			if err = tx.Commit(ctx); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 				return
 			}
 
@@ -604,8 +604,8 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 						EntityCode:       eID,
 						TransactionType:  "FD_RECEIPT_DELETE",
 						RecordID:         rid,
-						RecordTable:      "investment.fd_interest_receipt",
-						AuditTable:       "investment.fd_interest_receipt_audit",
+						RecordTable:      constants.QuerryInterestReceipt,
+						AuditTable:       constants.QuerryAuditInterestReceipt,
 						AuditIDColumn:    "receipt_id",
 						ActionType:       "DELETE",
 						Amount:           0,
@@ -629,7 +629,7 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"results": results,
@@ -650,7 +650,7 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ReceiptID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "receipt_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrReceiptIDRequired)
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
@@ -677,7 +677,7 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -690,7 +690,7 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 				updated_by=$1, updated_at=now()
 			WHERE receipt_id=$2 AND receipt_status='CAPTURED'`, userEmail, req.ReceiptID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -699,12 +699,12 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 				receipt_id, action_type, processing_status, requested_by, requested_at
 			) VALUES ($1,'SUBMIT','PENDING_APPROVAL',$2,now())`, req.ReceiptID, userEmail)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -717,8 +717,8 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entityID,
 				TransactionType:  "FD_RECEIPT_APPROVE",
 				RecordID:         req.ReceiptID,
-				RecordTable:      "investment.fd_interest_receipt",
-				AuditTable:       "investment.fd_interest_receipt_audit",
+				RecordTable:      constants.QuerryInterestReceipt,
+				AuditTable:       constants.QuerryAuditInterestReceipt,
 				AuditIDColumn:    "receipt_id",
 				ActionType:       "CREATE",
 				Amount:           gross,
@@ -742,7 +742,7 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ReceiptID, entityID, userEmail, gross)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"receipt_id":     req.ReceiptID,
@@ -773,7 +773,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -815,7 +815,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -850,7 +850,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"approved_count": len(req.ReceiptIDs),
@@ -890,7 +890,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -917,7 +917,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -949,7 +949,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"rejected_count": len(req.ReceiptIDs),
@@ -1104,7 +1104,7 @@ WHERE r.is_deleted = false`
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1118,7 +1118,7 @@ WHERE r.is_deleted = false`
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,
@@ -1140,7 +1140,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.ReceiptID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "receipt_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrReceiptIDRequired)
 			return
 		}
 		userEmail := resolveUserEmail(req.UserID)
@@ -1216,7 +1216,7 @@ func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer jeRows.Close()
 		jeData, _ := rowsToMapSlice(jeRows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":           true,
 			"receipt":           receipt,
@@ -1263,13 +1263,13 @@ func GetReceiptAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,
@@ -1317,7 +1317,7 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 		if req.EntityID != "" {
-			cond := fmt.Sprintf(" AND entity_id=$%d", argIdx)
+			cond := fmt.Sprintf(constants.QuerryEntityID, argIdx)
 			baseSQL += cond
 			summarySQL += cond
 			args = append(args, req.EntityID)
@@ -1341,7 +1341,7 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1352,7 +1352,7 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		var exceptionCount int
 		pool.QueryRow(ctx, summarySQL, args...).Scan(&totalRows, &totalExpected, &totalDeducted, &totalVariance, &exceptionCount) //nolint:errcheck
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,
@@ -1373,12 +1373,12 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID       string `json:"user_id"`
-			EntityID     string `json:"entity_id"`
-			EntityName   string `json:"entity_name"`
-			BankIDFilter string `json:"bank_id_filter"`
-			PeriodStart  string `json:"period_start"`
-			PeriodEnd    string `json:"period_end"`
+			UserID        string `json:"user_id"`
+			EntityID      string `json:"entity_id"`
+			EntityName    string `json:"entity_name"`
+			BankIDFilter  string `json:"bank_id_filter"`
+			PeriodStart   string `json:"period_start"`
+			PeriodEnd     string `json:"period_end"`
 			MatchingBasis string `json:"matching_basis"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1401,7 +1401,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -1425,7 +1425,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -1467,7 +1467,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}(runID)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
 			"reconcile_run_id": runID,
@@ -1507,7 +1507,7 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_receipt_reconcile_run 
 			WHERE reconcile_run_id=$1`, runID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
@@ -1517,7 +1517,7 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			result = out[0]
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"run":     result,
@@ -1555,13 +1555,13 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,
@@ -1614,13 +1614,13 @@ func GetExceptions(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,
@@ -1659,7 +1659,7 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 		var exStatus string
 		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Exception not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
 			return
 		}
 		if exStatus != "OPEN" && exStatus != "IN_REVIEW" {
@@ -1669,7 +1669,7 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -1683,16 +1683,16 @@ func ResolveException(pool *pgxpool.Pool) http.HandlerFunc {
 			req.ProposedResolution, req.ReasonCode, req.ResolutionRemarks, nullStr(req.Attachment),
 			userEmail, req.ExceptionID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
 			"exception_id":     req.ExceptionID,
@@ -1730,7 +1730,7 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 			SELECT exception_status, COALESCE(reviewed_by,'')
 			FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus, &reviewedBy)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Exception not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
 			return
 		}
 		if exStatus != "IN_REVIEW" {
@@ -1744,7 +1744,7 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -1756,12 +1756,12 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 				checker_comment=$2, updated_at=now()
 			WHERE exception_id=$3 AND exception_status='IN_REVIEW'`, userEmail, req.Comment, req.ExceptionID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
@@ -1773,7 +1773,7 @@ func ApproveException(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(req.ExceptionID, userEmail)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
 			"exception_id":     req.ExceptionID,
@@ -1809,7 +1809,7 @@ func CloseException(pool *pgxpool.Pool) http.HandlerFunc {
 		var exStatus string
 		err := pool.QueryRow(ctx, `SELECT exception_status FROM investment.fd_receipt_exception WHERE exception_id=$1 AND is_deleted=false`, req.ExceptionID).Scan(&exStatus)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Exception not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrExceptionNotFound)
 			return
 		}
 		if exStatus != "APPROVED" {
@@ -1819,7 +1819,7 @@ func CloseException(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -1830,16 +1830,16 @@ func CloseException(pool *pgxpool.Pool) http.HandlerFunc {
 				closed_by=$1, closed_at=now(), updated_at=now()
 			WHERE exception_id=$2 AND exception_status='APPROVED'`, userEmail, req.ExceptionID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
 			"exception_id":     req.ExceptionID,
@@ -1917,10 +1917,10 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			posted++
 			results = append(results, map[string]interface{}{
-				"receipt_id":         rid,
-				"success":            true,
-				"interest_entry_id":  interestEntryID,
-				"tds_entry_id":       tdsEntryID,
+				"receipt_id":        rid,
+				"success":           true,
+				"interest_entry_id": interestEntryID,
+				"tds_entry_id":      tdsEntryID,
 			})
 		}
 
@@ -1936,7 +1936,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 			}(rID, userEmail)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"posted":  posted,
@@ -1984,7 +1984,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := pool.Begin(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction begin failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
@@ -2049,7 +2049,7 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			strings.Join(setClauses, ","), idx)
 
 		if _, err = tx.Exec(ctx, updateSQL, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 
@@ -2063,16 +2063,16 @@ func UpdateTDS(pool *pgxpool.Pool) http.HandlerFunc {
 			oldStatus, oldActual, oldRateApplied, oldVariance,
 			oldExceptionRaised, oldBankTDSRef, oldIsActive)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Audit insert failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Commit failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"tds_id":     req.TdsID,
@@ -2113,7 +2113,7 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 			JOIN investment.fd_interest_receipt r ON r.receipt_id = t.receipt_id
 			WHERE t.tds_id=$1`, req.TdsID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer tdsRows.Close()
@@ -2134,7 +2134,7 @@ func GetTDSDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		defer auditRows.Close()
 		auditData, _ := rowsToMapSlice(auditRows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":       true,
 			"tds":           tds,
@@ -2177,13 +2177,13 @@ func GetTDSAuditHistory(pool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,

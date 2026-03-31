@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,12 +21,12 @@ import (
 // AccrualInput holds every field the engine needs for a single FD.
 type AccrualInput struct {
 	FDID             string
-	FdRefNo          string  // bank_fd_ref_no
+	FdRefNo          string // bank_fd_ref_no
 	BankID           string
 	BankName         string
 	EntityID         string
 	EntityName       string
-	InterestTypeCode string  // SIMPLE / COMPOUND / STEPPED
+	InterestTypeCode string // SIMPLE / COMPOUND / STEPPED
 	PrincipalAmount  float64
 	InterestRate     float64 // annual percentage e.g. 7.5
 	DayCountCode     string  // ACT_365 / ACT_360 / 30_360
@@ -34,8 +35,8 @@ type AccrualInput struct {
 	// Bank config fields for holiday-aware accrual day counting
 	BankConfigID        string
 	HolidayCalendarCode string
-	WeekendAccrual      bool // if false, exclude weekends from day count
-	HolidayAccrual      bool // if false, exclude holidays from day count
+	WeekendAccrual      bool   // if false, exclude weekends from day count
+	HolidayAccrual      bool   // if false, exclude holidays from day count
 	WeekendPattern      string // e.g. "Sat,Sun"
 	// Bank config: boundary and rounding conventions (STEP 3)
 	AccrualStartConvention string // INCLUDE / EXCLUDE / NEXT_WD
@@ -50,15 +51,15 @@ type AccrualRunParams struct {
 	PeriodStart        time.Time
 	PeriodEnd          time.Time
 	FinancialPeriod    string
-	DayCountConvention string   // overrides per-FD code if set
-	RoundingRule       string   // ROUND / TRUNCATE
+	DayCountConvention string // overrides per-FD code if set
+	RoundingRule       string // ROUND / TRUNCATE
 	PrecisionDecimals  int
-	EntityID           string   // for scope
-	BankIDFilter       string   // optional
-	FDStatusFilter     string   // ACTIVE default
-	FDInclusionMethod  string   // ALL / SELECT_LIST
+	EntityID           string // for scope
+	BankIDFilter       string // optional
+	FDStatusFilter     string // ACTIVE default
+	FDInclusionMethod  string // ALL / SELECT_LIST
 	FDInclusionList    []string
-	Granularity        string   // DAILY / MONTHLY / QUARTERLY / RUN
+	Granularity        string // DAILY / MONTHLY / QUARTERLY / RUN
 }
 
 // AccrualPeriodResult holds the engine output for one FD x one period.
@@ -119,7 +120,7 @@ type CreateAccrualRunInput struct {
 	RunMode            string
 	EntityID           string
 	EntityName         string
-	Granularity        string   // DAILY / MONTHLY / QUARTERLY / RUN
+	Granularity        string // DAILY / MONTHLY / QUARTERLY / RUN
 	BankIDFilter       string
 	FDStatusFilter     string
 	AccrualPeriodStart time.Time
@@ -276,7 +277,7 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 	if len(results) == 0 {
 		api.LogInfo("[FDAccrual] getFDsInScope: 0 FDs matched scope (entity=%s status=%s period=%s→%s)",
 			params.EntityID, params.FDStatusFilter,
-			params.PeriodStart.Format("2006-01-02"), params.PeriodEnd.Format("2006-01-02"))
+			params.PeriodStart.Format(constants.DateFormat), params.PeriodEnd.Format(constants.DateFormat))
 	}
 	return results, nil
 }
@@ -286,7 +287,7 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 // accrualHolidayCalendar holds expanded holiday dates for accrual engine use.
 type accrualHolidayCalendar struct {
 	CalendarCode   string
-	WeekendPattern string         // e.g. "Sat,Sun"
+	WeekendPattern string          // e.g. "Sat,Sun"
 	HolidayDates   map[string]bool // keyed "YYYY-MM-DD"
 }
 
@@ -505,12 +506,12 @@ func loadHolidayCalendarForAccrual(ctx context.Context, pool *pgxpool.Pool,
 		if err := rows.Scan(&dateStr, &rrule); err != nil {
 			continue
 		}
-		seed, err := time.Parse("2006-01-02", dateStr[:10])
+		seed, err := time.Parse(constants.DateFormat, dateStr[:10])
 		if err != nil {
 			continue
 		}
 		for _, d := range accrualExpandRRule(seed, rrule, expandFrom, expandTo) {
-			cal.HolidayDates[d.Format("2006-01-02")] = true
+			cal.HolidayDates[d.Format(constants.DateFormat)] = true
 		}
 	}
 	return cal
@@ -522,7 +523,7 @@ func accrualIsNonAccrualDay(d time.Time, fd AccrualInput, cal accrualHolidayCale
 	if !fd.WeekendAccrual && accrualIsWeekend(d, fd.WeekendPattern) {
 		return true
 	}
-	if !fd.HolidayAccrual && cal.HolidayDates[d.Format("2006-01-02")] {
+	if !fd.HolidayAccrual && cal.HolidayDates[d.Format(constants.DateFormat)] {
 		return true
 	}
 	return false
@@ -585,7 +586,7 @@ func validateFDsForAccrual(fds []AccrualInput, params AccrualRunParams) []Valida
 				IssueType: "MATURITY_BEFORE_PERIOD",
 				Severity:  "BLOCKER",
 				Description: fmt.Sprintf("FD matured on %s before period start %s",
-					fd.FdMaturityDate.Format("2006-01-02"), params.PeriodStart.Format("2006-01-02")),
+					fd.FdMaturityDate.Format(constants.DateFormat), params.PeriodStart.Format(constants.DateFormat)),
 				SuggestedAction: "Exclude this FD from the run or verify maturity date",
 			})
 		}
@@ -595,7 +596,7 @@ func validateFDsForAccrual(fds []AccrualInput, params AccrualRunParams) []Valida
 				IssueType: "FD_NOT_STARTED_IN_PERIOD",
 				Severity:  "BLOCKER",
 				Description: fmt.Sprintf("FD start date %s is after period end %s",
-					fd.FdStartDate.Format("2006-01-02"), params.PeriodEnd.Format("2006-01-02")),
+					fd.FdStartDate.Format(constants.DateFormat), params.PeriodEnd.Format(constants.DateFormat)),
 				SuggestedAction: "Exclude this FD or adjust the accrual period",
 			})
 		}
@@ -787,10 +788,10 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	if effectiveStart.After(effectiveEnd) {
 		excluded.CalculationError = fmt.Sprintf(
 			"FD period [%s, %s] does not overlap accrual window [%s, %s]",
-			fd.FdStartDate.Format("2006-01-02"),
-			fd.FdMaturityDate.Format("2006-01-02"),
-			params.PeriodStart.Format("2006-01-02"),
-			params.PeriodEnd.Format("2006-01-02"),
+			fd.FdStartDate.Format(constants.DateFormat),
+			fd.FdMaturityDate.Format(constants.DateFormat),
+			params.PeriodStart.Format(constants.DateFormat),
+			params.PeriodEnd.Format(constants.DateFormat),
 		)
 		return excluded
 	}
@@ -801,8 +802,8 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 			BankName: fd.BankName, EntityID: fd.EntityID, EntityName: fd.EntityName,
 			InterestTypeCode: fd.InterestTypeCode,
 			PrincipalAmount:  fd.PrincipalAmount, InterestRate: fd.InterestRate,
-			DayCountCode:   fd.DayCountCode,
-			FdStartDate:    fd.FdStartDate, FdMaturityDate: fd.FdMaturityDate,
+			DayCountCode: fd.DayCountCode,
+			FdStartDate:  fd.FdStartDate, FdMaturityDate: fd.FdMaturityDate,
 			AccrualPeriodStart: effectiveStart,
 			AccrualPeriodEnd:   effectiveEnd,
 			AccrualDays:        0,
@@ -810,7 +811,7 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 			LedgerRowStatus:    "CALCULATED",
 			FormulaUsed: fmt.Sprintf(
 				"0 accrual days: FD started %s on last day of period",
-				fd.FdStartDate.Format("2006-01-02")),
+				fd.FdStartDate.Format(constants.DateFormat)),
 		}
 	}
 

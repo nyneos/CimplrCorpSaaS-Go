@@ -396,7 +396,7 @@ func UpdateDividend(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		q := fmt.Sprintf("UPDATE investment.accounting_dividend SET %s, updated_at=now() WHERE dividend_id=$%d", strings.Join(sets, ", "), pos)
 		args = append(args, req.DividendID)
 		if _, err := tx.Exec(ctx, q, args...); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "update failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
 			return
 		}
 

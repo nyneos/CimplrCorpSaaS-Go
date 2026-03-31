@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"CimplrCorpSaas/api"
@@ -24,6 +23,16 @@ type queryExecutor interface {
 	QueryRow(ctx context.Context, sql string, arguments ...interface{}) pgx.Row
 	Exec(ctx context.Context, sql string, arguments ...interface{}) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, arguments ...interface{}) (pgx.Rows, error)
+}
+
+// InsertFDAuditParams groups parameters for insertFDAuditRecord to avoid long parameter lists.
+type InsertFDAuditParams struct {
+	AuditTable       string
+	RefID            string
+	UserEmail        string
+	ActionType       string
+	ProcessingStatus string
+	Reason           string
 }
 
 type activateFDRequest struct {
@@ -70,32 +79,7 @@ func splitQualifiedTable(name string) (string, string) {
 	return parts[0], parts[1]
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Schema-discovery cache
-// ─────────────────────────────────────────────────────────────────────────────
-// information_schema queries are expensive (each one is a separate network
-// round-trip to Supabase/Postgres).  ActivateFD previously made 10-13 of these
-// per request, adding 0.5–2.5 s of latency.
-//
-// Tables and columns never change at runtime, so we cache every result in a
-// sync.Map keyed by "schema.table" (column map) and "schema.table:exists"
-// (bool).  First call populates; all subsequent calls hit RAM — zero DB cost.
-// ─────────────────────────────────────────────────────────────────────────────
-
-var (
-	schemaColCache   sync.Map // "schema.table" → map[string]bool
-	schemaExistCache sync.Map // "schema.table" → bool
-)
-
 func loadTableColumns(ctx context.Context, exec queryExecutor, schemaName string, tableName string) (map[string]bool, error) {
-	cacheKey := schemaName + "." + tableName
-
-	// Fast path — already cached
-	if cached, ok := schemaColCache.Load(cacheKey); ok {
-		return cached.(map[string]bool), nil
-	}
-
-	// Slow path — query information_schema once
 	rows, err := exec.Query(ctx, `
 		SELECT column_name
 		FROM information_schema.columns
@@ -114,31 +98,12 @@ func loadTableColumns(ctx context.Context, exec queryExecutor, schemaName string
 		}
 		cols[col] = true
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Only cache non-empty results so a transient error doesn't poison the cache
-	if len(cols) > 0 {
-		schemaColCache.Store(cacheKey, cols)
-	}
-	return cols, nil
+	return cols, rows.Err()
 }
 
 func resolveFirstExistingTable(ctx context.Context, exec queryExecutor, candidates []string) string {
 	for _, candidate := range candidates {
 		schemaName, tableName := splitQualifiedTable(candidate)
-		cacheKey := schemaName + "." + tableName + ":exists"
-
-		// Fast path — already cached
-		if cached, ok := schemaExistCache.Load(cacheKey); ok {
-			if cached.(bool) {
-				return candidate
-			}
-			continue
-		}
-
-		// Slow path — query information_schema once
 		var exists bool
 		err := exec.QueryRow(ctx, `
 			SELECT EXISTS (
@@ -147,9 +112,6 @@ func resolveFirstExistingTable(ctx context.Context, exec queryExecutor, candidat
 				WHERE table_schema = $1 AND table_name = $2
 			)
 		`, schemaName, tableName).Scan(&exists)
-		if err == nil {
-			schemaExistCache.Store(cacheKey, exists)
-		}
 		if err == nil && exists {
 			return candidate
 		}
@@ -275,12 +237,12 @@ func resolveFDAuditTable(ctx context.Context, exec queryExecutor) string {
 	})
 }
 
-func insertFDAuditRecord(ctx context.Context, exec queryExecutor, auditTable string, refID string, userEmail string, actionType string, processingStatus string, reason string) error {
-	if auditTable == "" || refID == "" {
+func insertFDAuditRecord(ctx context.Context, exec queryExecutor, p InsertFDAuditParams) error {
+	if p.AuditTable == "" || p.RefID == "" {
 		return nil
 	}
 
-	schemaName, tableName := splitQualifiedTable(auditTable)
+	schemaName, tableName := splitQualifiedTable(p.AuditTable)
 	cols, err := loadTableColumns(ctx, exec, schemaName, tableName)
 	if err != nil {
 		return err
@@ -291,15 +253,15 @@ func insertFDAuditRecord(ctx context.Context, exec queryExecutor, auditTable str
 	}
 
 	valueMap := map[string]interface{}{
-		refCol:              refID,
-		"action_type":       actionType,
-		"processing_status": processingStatus,
-		"requested_by":      userEmail,
+		refCol:              p.RefID,
+		"action_type":       p.ActionType,
+		"processing_status": p.ProcessingStatus,
+		"requested_by":      p.UserEmail,
 		"requested_at":      time.Now(),
-		"reason":            reason,
+		"reason":            p.Reason,
 	}
 	preferred := []string{refCol, "action_type", "processing_status", "reason", "requested_by", "requested_at"}
-	insertSQL, args, _, ok := buildDynamicInsert(auditTable, cols, preferred, valueMap, nil)
+	insertSQL, args, _, ok := buildDynamicInsert(p.AuditTable, cols, preferred, valueMap, nil)
 	if !ok {
 		return nil
 	}
@@ -399,33 +361,33 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 
 	valueMap := map[string]interface{}{
 		// identity
-		"confirmation_id":    rec.ConfirmationID,
-		"booking_id":         rec.BookingID,
+		"confirmation_id": rec.ConfirmationID,
+		"booking_id":      rec.BookingID,
 		// entity
-		"entity_id":          rec.EntityID,
-		"entity_name":        entityName,
+		"entity_id":   rec.EntityID,
+		"entity_name": entityName,
 		// bank
-		"bank_id":            rec.BankID,
-		"bank_name":          bankName,
+		"bank_id":   rec.BankID,
+		"bank_name": bankName,
 		// account — actual column is source_account_id
-		"source_account_id":  rec.BankAccountID,
-		"bank_account_id":    rec.BankAccountID, // fallback if schema uses old name
+		"source_account_id": rec.BankAccountID,
+		"bank_account_id":   rec.BankAccountID, // fallback if schema uses old name
 		// financials
 		"principal_amount":   rec.PrincipalAmount,
 		"interest_rate":      rec.InterestRate,
 		"interest_type_code": interestTypeCode,
 		// dates — actual column is start_date
-		"start_date":         rec.ValueDate,
-		"value_date":         rec.ValueDate, // fallback
-		"maturity_date":      rec.MaturityDate,
+		"start_date":    rec.ValueDate,
+		"value_date":    rec.ValueDate, // fallback
+		"maturity_date": rec.MaturityDate,
 		// tenor — actual column is tenure_days
-		"tenure_days":        rec.TenorDays,
-		"tenor_days":         rec.TenorDays, // fallback
+		"tenure_days": rec.TenorDays,
+		"tenor_days":  rec.TenorDays, // fallback
 		// optional
-		"frequency_id":       rec.FrequencyID,
-		"bank_config_id":     rec.BankConfigID,
-		"tds_plan_id":        rec.TDSPlanID,
-		"day_count_code":     rec.DayCountConvention,
+		"frequency_id":   rec.FrequencyID,
+		"bank_config_id": rec.BankConfigID,
+		"tds_plan_id":    rec.TDSPlanID,
+		"day_count_code": rec.DayCountConvention,
 		// fd reference — NOT NULL in schema
 		"bank_fd_ref_no":     fdRef,
 		"bank_fd_reference":  fdRef,
@@ -433,12 +395,12 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"fd_no":              fdRef,
 		"certificate_number": fdRef,
 		// status
-		"status":             statusValue,
-		"fd_status":          statusValue,
+		"status":    statusValue,
+		"fd_status": statusValue,
 		// audit
-		"created_by":         createdBy,
-		"notes":              notes,
-		"is_deleted":         false,
+		"created_by": createdBy,
+		"notes":      notes,
+		"is_deleted": false,
 	}
 	preferred := []string{
 		"confirmation_id", "booking_id",
@@ -454,7 +416,7 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"status", "fd_status",
 		"created_by", "notes", "is_deleted",
 	}
-	insertSQL, args, returningCol, ok := buildDynamicInsert("investment.fd_master", masterCols, preferred, valueMap, []string{"fd_id", "master_id", "confirmation_id"})
+	insertSQL, args, returningCol, ok := buildDynamicInsert(constants.QuerryMaster, masterCols, preferred, valueMap, []string{"fd_id", "master_id", "confirmation_id"})
 	if !ok {
 		return "", "", fmt.Errorf("unable to build fd_master insert")
 	}
@@ -494,9 +456,9 @@ func updateFDMasterStatus(ctx context.Context, exec queryExecutor, fdIDs []strin
 // The cashflow_id is read back from the just-inserted rows using the cashflow table.
 func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
 	table := resolveFirstExistingTable(ctx, exec, []string{
-		"investment.fd_cashflow_schedule",
-		"investment.fd_cashflow",
-		"investment.fd_master_cashflow_schedule",
+		constants.QuerryCashflowSchedule,
+		constants.QuerryCashflow,
+		constants.QuerryMasterCashflowSchedule,
 	})
 	if table == "" {
 		return nil
@@ -543,38 +505,33 @@ func insertCashflowAuditRowsApproved(ctx context.Context, exec queryExecutor, fd
 		return cfRows.Err()
 	}
 
-	if len(cfList) == 0 {
-		return nil
-	}
-
-	// Batch INSERT all audit rows in one round-trip.
 	reason := "System generated at FD activation"
-	var valueTuples []string
-	var args []interface{}
-	paramIdx := 1
 	for _, cf := range cfList {
-		valueTuples = append(valueTuples, fmt.Sprintf(
-			"($%d,$%d,'CREATE','APPROVED',$%d,$%d,now(),$%d,now(),'Auto-approved at FD activation')",
-			paramIdx, paramIdx+1, paramIdx+2, paramIdx+3, paramIdx+3,
-		))
-		args = append(args, cf.id, fdID, reason, createdBy)
-		paramIdx += 4
+		_, insErr := exec.Exec(ctx, `
+			INSERT INTO investment.fd_audit_cashflow_schedule (
+				cashflow_id, fd_id,
+				action_type, processing_status,
+				reason,
+				requested_by, requested_at,
+				checker_by, checker_at, checker_comment
+			) VALUES (
+				$1, $2,
+				'CREATE', 'APPROVED',
+				$3,
+				$4, now(),
+				$4, now(), 'Auto-approved at FD activation'
+			) ON CONFLICT DO NOTHING`,
+			cf.id, fdID, reason, createdBy,
+		)
+		if insErr != nil {
+			return insErr
+		}
 	}
-	_, insErr := exec.Exec(ctx, fmt.Sprintf(`
-		INSERT INTO investment.fd_audit_cashflow_schedule (
-			cashflow_id, fd_id,
-			action_type, processing_status,
-			reason,
-			requested_by, requested_at,
-			checker_by, checker_at, checker_comment
-		) VALUES %s
-		ON CONFLICT DO NOTHING`, strings.Join(valueTuples, ",")), args...)
-	return insErr
+	return nil
 }
 
 func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		t0 := time.Now()
 		var req activateFDRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -585,92 +542,31 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		api.LogInfo("[FDActivate][%s] ► request received user=%s", req.ConfirmationID, req.UserID)
-
 		userEmail := getUserEmail(req.UserID)
 		if userEmail == "" {
-			api.LogError("[FDActivate][%s] ✗ getUserEmail returned empty for user_id=%q — session missing?", req.ConfirmationID, req.UserID)
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
-		api.LogInfo("[FDActivate][%s] ✓ session resolved email=%s (+%s)", req.ConfirmationID, userEmail, time.Since(t0).Round(time.Millisecond))
 
 		ctx := r.Context()
-
-		// ── PHASE 1: ALL READS — done outside any transaction ─────────────────
-		// We use pgxPool directly so none of these queries hold a tx connection
-		// open. This keeps the transaction that follows as short as possible and
-		// avoids Supabase statement-timeout errors caused by long-lived txns.
-
-		t1 := time.Now()
-		rec, err := loadFDRecord(ctx, pgxPool, req.ConfirmationID)
-		if err != nil {
-			api.LogError("[FDActivate][%s] ✗ loadFDRecord failed after %s: %v", req.ConfirmationID, time.Since(t1).Round(time.Millisecond), err)
-			msg, status := getFDMasterError(err, "Load confirmation failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		api.LogInfo("[FDActivate][%s] ✓ loadFDRecord (+%s) entity=%s bank=%s principal=%.2f tenor=%v",
-			req.ConfirmationID, time.Since(t1).Round(time.Millisecond),
-			rec.EntityID, rec.BankID, rec.PrincipalAmount, rec.TenorDays)
-
-		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
-
-		// Duplicate-check outside tx — optimistic, re-checked inside tx below.
-		t2 := time.Now()
-		var existingFDIDCheck string
-		_ = pgxPool.QueryRow(ctx,
-			`SELECT COALESCE(fd_id,'') FROM investment.fd_master
-			 WHERE confirmation_id = $1 AND COALESCE(is_deleted,false)=false LIMIT 1`,
-			req.ConfirmationID,
-		).Scan(&existingFDIDCheck)
-		if existingFDIDCheck != "" {
-			api.LogInfo("[FDActivate][%s] ✗ already activated (pre-tx check) as %s", req.ConfirmationID, existingFDIDCheck)
-			api.RespondWithError(w, http.StatusConflict,
-				fmt.Sprintf("FD already activated for this confirmation: %s", existingFDIDCheck))
-			return
-		}
-		api.LogInfo("[FDActivate][%s] ✓ duplicate-check clear (+%s)", req.ConfirmationID, time.Since(t2).Round(time.Millisecond))
-
-		// Resolve audit table name outside tx.
-		t3 := time.Now()
-		auditTable := resolveFDAuditTable(ctx, pgxPool)
-		api.LogInfo("[FDActivate][%s] ✓ resolveFDAuditTable=%s (+%s)", req.ConfirmationID, auditTable, time.Since(t3).Round(time.Millisecond))
-
-		// Generate cashflow schedule outside tx — pure computation + config reads.
-		t4 := time.Now()
-		cashflows, _, err := GenerateCashflowFromRecord(ctx, pgxPool, rec)
-		if err != nil {
-			api.LogError("[FDActivate][%s] ✗ GenerateCashflowFromRecord failed after %s: %v", req.ConfirmationID, time.Since(t4).Round(time.Millisecond), err)
-			msg, status := getFDMasterError(err, "Cashflow generation failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		api.LogInfo("[FDActivate][%s] ✓ GenerateCashflowFromRecord → %d rows (+%s)", req.ConfirmationID, len(cashflows), time.Since(t4).Round(time.Millisecond))
-
-		// ── PHASE 2: SHORT TRANSACTION — writes only ──────────────────────────
-		// At this point all data is ready in memory. The transaction only does:
-		//   1. Re-check duplicate (serialisation safety)
-		//   2. INSERT fd_master
-		//   3. INSERT fd_audit_master
-		//   4. Batch INSERT cashflow rows
-		//   5. Batch INSERT cashflow audit rows
-		//   6. UPDATE cashflow_generated flag
-		//   7. COMMIT
-		// Target wall-clock: < 2 seconds.
-
-		tTx := time.Now()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			api.LogError("[FDActivate][%s] ✗ tx.Begin failed: %v", req.ConfirmationID, err)
-			msg, status := getFDMasterError(err, "Transaction begin failed")
+			msg, status := getFDMasterError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx) //nolint:errcheck
-		api.LogInfo("[FDActivate][%s] ✓ tx.Begin (+%s)", req.ConfirmationID, time.Since(tTx).Round(time.Millisecond))
 
-		// Serialisation safety re-check inside tx.
+		rec, err := loadFDRecord(ctx, tx, req.ConfirmationID)
+		if err != nil {
+			msg, status := getFDMasterError(err, "Load confirmation failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+
+		receiptDate := parseDateOrDefault(req.ReceiptDate, rec.ReceiptDate)
+
+		// Double-submit guard: reject if FD already activated for this confirmation.
 		var existingFDID string
 		_ = tx.QueryRow(ctx,
 			`SELECT COALESCE(fd_id,'') FROM investment.fd_master
@@ -678,68 +574,66 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.ConfirmationID,
 		).Scan(&existingFDID)
 		if existingFDID != "" {
-			api.LogInfo("[FDActivate][%s] ✗ already activated (in-tx check) as %s", req.ConfirmationID, existingFDID)
 			api.RespondWithError(w, http.StatusConflict,
 				fmt.Sprintf("FD already activated for this confirmation: %s", existingFDID))
 			return
 		}
 
-		t5 := time.Now()
 		fdID, _, err := insertFDMaster(ctx, tx, rec, req.FDNumber, receiptDate, req.Notes, userEmail)
 		if err != nil {
-			api.LogError("[FDActivate][%s] ✗ insertFDMaster failed after %s: %v", req.ConfirmationID, time.Since(t5).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, "FD activation failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		api.LogInfo("[FDActivate][%s] ✓ insertFDMaster → fd_id=%s (+%s)", req.ConfirmationID, fdID, time.Since(t5).Round(time.Millisecond))
 
-		t6 := time.Now()
-		if err := insertFDAuditRecord(ctx, tx, auditTable, fdID, userEmail, "CREATE", "PENDING_APPROVAL", ""); err != nil {
-			api.LogError("[FDActivate][%s] ✗ insertFDAuditRecord failed after %s: %v", req.ConfirmationID, time.Since(t6).Round(time.Millisecond), err)
+		auditTable := resolveFDAuditTable(ctx, tx)
+		if err := insertFDAuditRecord(ctx, tx, InsertFDAuditParams{
+			AuditTable:       auditTable,
+			RefID:            fdID,
+			UserEmail:        userEmail,
+			ActionType:       "CREATE",
+			ProcessingStatus: "PENDING_APPROVAL",
+			Reason:           "",
+		}); err != nil {
 			msg, status := getFDMasterError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		api.LogInfo("[FDActivate][%s] ✓ insertFDAuditRecord (+%s)", req.ConfirmationID, time.Since(t6).Round(time.Millisecond))
 
-		t7 := time.Now()
-		if err := SaveCashflowScheduleWithRecord(ctx, tx, fdID, cashflows, userEmail, rec); err != nil {
-			api.LogError("[FDActivate][%s] ✗ SaveCashflowSchedule failed after %s: %v", req.ConfirmationID, time.Since(t7).Round(time.Millisecond), err)
+		cashflows, _, err := GenerateCashflowForFD(ctx, tx, "", req.ConfirmationID)
+		if err != nil {
+			msg, status := getFDMasterError(err, "Cashflow generation failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		if err := SaveCashflowScheduleWithCreator(ctx, tx, fdID, cashflows, userEmail); err != nil {
 			msg, status := getFDMasterError(err, "Cashflow save failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		api.LogInfo("[FDActivate][%s] ✓ SaveCashflowSchedule (+%s)", req.ConfirmationID, time.Since(t7).Round(time.Millisecond))
 
-		t8 := time.Now()
+		// Write one APPROVED audit row per cashflow row to establish the initial
+		// audit trail. These represent the system-generated state at activation.
 		if auditErr := insertCashflowAuditRowsApproved(ctx, tx, fdID, cashflows, userEmail); auditErr != nil {
-			api.LogError("[FDActivate][%s] ✗ cashflow audit insert failed after %s: %v", req.ConfirmationID, time.Since(t8).Round(time.Millisecond), auditErr)
-		} else {
-			api.LogInfo("[FDActivate][%s] ✓ insertCashflowAuditRows (+%s)", req.ConfirmationID, time.Since(t8).Round(time.Millisecond))
+			// Non-fatal: log but don't block activation
+			api.LogError("[FDMaster] cashflow audit insert failed fd=%s: %v", fdID, auditErr)
 		}
 
 		// Mark cashflow_generated=true so the accrual engine picks this FD up in scope.
-		t9 := time.Now()
 		if _, err := tx.Exec(ctx,
 			`UPDATE investment.fd_master SET cashflow_generated=true, cashflow_generated_at=now() WHERE fd_id=$1`,
 			fdID,
 		); err != nil {
-			api.LogError("[FDActivate][%s] ✗ cashflow flag update failed after %s: %v", req.ConfirmationID, time.Since(t9).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, "Cashflow flag update failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		api.LogInfo("[FDActivate][%s] ✓ cashflow_generated flag (+%s)", req.ConfirmationID, time.Since(t9).Round(time.Millisecond))
 
-		t10 := time.Now()
 		if err := tx.Commit(ctx); err != nil {
-			api.LogError("[FDActivate][%s] ✗ tx.Commit failed after %s: %v", req.ConfirmationID, time.Since(t10).Round(time.Millisecond), err)
 			msg, status := getFDMasterError(err, constants.ErrCommitFailedCapitalized)
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		api.LogInfo("[FDActivate][%s] ✓ tx.Commit (+%s) | TOTAL SYNC=%s", req.ConfirmationID, time.Since(t10).Round(time.Millisecond), time.Since(t0).Round(time.Millisecond))
 
 		go func(fdRecordID string, confirmationID string, email string, entityID string, amount float64, req activateFDRequest) {
 			defer func() {
@@ -761,7 +655,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				EntityCode:       entityID,
 				TransactionType:  "FD_MASTER_CREATE",
 				RecordID:         fdRecordID,
-				RecordTable:      "investment.fd_master",
+				RecordTable:      constants.QuerryMaster,
 				AuditTable:       auditTableName,
 				AuditIDColumn:    auditIDColumn,
 				ActionType:       "CREATE",
@@ -958,7 +852,6 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				directActed++
 			}
 		}
-
 		totalActed := engineActed + directActed
 		success := totalActed > 0 || len(errors) == 0
 		msg := ""
@@ -1090,12 +983,11 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				directActed++
 			}
 		}
-
 		totalActed := engineActed + directActed
 		success := totalActed > 0 || len(errors) == 0
 		msg := ""
 		if !success {
-			msg = "No FDs were rejected"
+			msg = "No FDs were activated"
 		}
 		api.RespondWithPayload(w, success, msg, map[string]interface{}{
 			"engine_acted": engineActed, "direct_acted": directActed,
@@ -1127,7 +1019,7 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
 		if fdID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
 			return
 		}
 		viewerUserID := r.URL.Query().Get("user_id")
@@ -1148,7 +1040,7 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fmt.Sprintf(`SELECT * FROM investment.fd_master WHERE %s = $1 AND COALESCE(is_deleted,false)=false`, keyCol),
 			fdID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Query failed: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		fdMaps, err := rowsToMaps(fdRows)
@@ -1213,7 +1105,7 @@ func GetFDMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						EntityCode:       entityID,
 						TransactionType:  "FD_MASTER_CREATE",
 						RecordID:         fdID,
-						RecordTable:      "investment.fd_master",
+						RecordTable:      constants.QuerryMaster,
 						AuditTable:       auditTable,
 						AuditIDColumn:    keyCol,
 						ActionType:       "CREATE",
@@ -1312,7 +1204,7 @@ func GetFDMasterAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
 		if fdID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
 			return
 		}
 
@@ -1355,14 +1247,14 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		fdID := strings.TrimSpace(r.URL.Query().Get("fd_id"))
 		if fdID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
 			return
 		}
 
 		table := resolveFirstExistingTable(ctx, pgxPool, []string{
-			"investment.fd_cashflow_schedule",
-			"investment.fd_cashflow",
-			"investment.fd_master_cashflow_schedule",
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
 		})
 		if table == "" {
 			api.RespondWithPayload(w, true, "", []map[string]interface{}{})
@@ -1430,7 +1322,7 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// Strip the pending_fields suffix from reason for clean display
 					if reasonRaw, ok := am["reason"]; ok && reasonRaw != nil {
 						rs := fmt.Sprintf("%v", reasonRaw)
-						if idx := strings.Index(rs, " | pending_fields:"); idx >= 0 {
+						if idx := strings.Index(rs, constants.QuerryPendingFields); idx >= 0 {
 							am["reason"] = rs[:idx]
 						}
 					}
@@ -1486,7 +1378,7 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fdID = strings.TrimSpace(body.FDID)
 		}
 		if fdID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "fd_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrFDIDRequired)
 			return
 		}
 
@@ -1539,7 +1431,7 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CashflowIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "cashflow_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -1559,15 +1451,15 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 ORDER BY requested_at DESC LIMIT 1`,
 				cashflowID,
 			).Scan(&auditID, &requestedBy, &status); err != nil {
-				errs = append(errs, cashflowID+": no pending audit found")
+				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
 			if auditID == "" {
-				errs = append(errs, cashflowID+": no pending audit found")
+				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
 			if requestedBy == userEmail {
-				errs = append(errs, cashflowID+": maker-checker violation")
+				errs = append(errs, cashflowID+constants.QuerryMakerCheckerViolation)
 				continue
 			}
 			if !strings.HasPrefix(status, "PENDING") {
@@ -1640,7 +1532,7 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CashflowIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "cashflow_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -1660,15 +1552,15 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 ORDER BY requested_at DESC LIMIT 1`,
 				cashflowID,
 			).Scan(&auditID, &requestedBy, &status); err != nil {
-				errs = append(errs, cashflowID+": no pending audit found")
+				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
 			if auditID == "" {
-				errs = append(errs, cashflowID+": no pending audit found")
+				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
 			if requestedBy == userEmail {
-				errs = append(errs, cashflowID+": maker-checker violation")
+				errs = append(errs, cashflowID+constants.QuerryMakerCheckerViolation)
 				continue
 			}
 			if !strings.HasPrefix(status, "PENDING") {
@@ -1728,7 +1620,7 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CashflowIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "cashflow_ids are required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -1739,9 +1631,9 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		table := resolveFirstExistingTable(ctx, pgxPool, []string{
-			"investment.fd_cashflow_schedule",
-			"investment.fd_cashflow",
-			"investment.fd_master_cashflow_schedule",
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
 		})
 
 		deleted, skipped, errs := 0, 0, []string{}
@@ -1755,15 +1647,15 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				 ORDER BY requested_at DESC LIMIT 1`,
 				cashflowID,
 			).Scan(&auditID, &requestedBy, &status, &fdID); err != nil {
-				errs = append(errs, cashflowID+": no pending audit found")
+				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
 			if auditID == "" {
-				errs = append(errs, cashflowID+": no pending audit found")
+				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
 			if requestedBy == userEmail {
-				errs = append(errs, cashflowID+": maker-checker violation")
+				errs = append(errs, cashflowID+constants.QuerryMakerCheckerViolation)
 				continue
 			}
 			if !strings.HasPrefix(status, "PENDING") {
@@ -1796,11 +1688,13 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[BulkDeleteCashflow] deleted=%d skipped=%d errors=%d by=%s", deleted, skipped, len(errs), userEmail)
 	}
 }
+
 // ─── EditCashflowLineItem ─────────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/edit
 // Maker-checker edit of individual cashflow schedule line items.
 // Editable: interest_accrued, tds_amount, net_cash_flow, period_days,
-//           event_date, formula_used, accrual_rate_per_day, notes.
+//
+//	event_date, formula_used, accrual_rate_per_day, notes.
 func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1832,12 +1726,12 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		table := resolveFirstExistingTable(ctx, pgxPool, []string{
-			"investment.fd_cashflow_schedule",
-			"investment.fd_cashflow",
-			"investment.fd_master_cashflow_schedule",
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
 		})
 		if table == "" {
-			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCashflowTableNotFound)
 			return
 		}
 
@@ -1973,7 +1867,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		reasonWithFields := req.Reason
 		if len(req.Fields) > 0 {
 			pfJSON, _ := json.Marshal(req.Fields)
-			reasonWithFields = req.Reason + " | pending_fields:" + string(pfJSON)
+			reasonWithFields = req.Reason + constants.QuerryPendingFields + string(pfJSON)
 		}
 
 		// ── Read entity_id + principal for the approval engine ───────────────
@@ -2076,12 +1970,12 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.LogInfo("[FDMaster] EditCashflowLineItem submitted: fd=%s cashflow=%s audit=%s by=%s", req.FDID, req.CashflowID, auditID, userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"fd_id":       req.FDID,
-			"cashflow_id": req.CashflowID,
-			"audit_id":    auditID,
-			"status":      "PENDING_EDIT_APPROVAL",
+			"fd_id":        req.FDID,
+			"cashflow_id":  req.CashflowID,
+			"audit_id":     auditID,
+			"status":       "PENDING_EDIT_APPROVAL",
 			"submitted_by": userEmail,
-			"message":     "Edit submitted for approval. It will be applied once approved.",
+			"message":      "Edit submitted for approval. It will be applied once approved.",
 		})
 	}
 }
@@ -2105,7 +1999,7 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 	// 2. Parse pending_fields JSON from reason suffix " | pending_fields:{json}"
 	var pendingFields map[string]interface{}
 	humanReason := reasonRaw
-	const pfMarker = " | pending_fields:"
+	const pfMarker = constants.QuerryPendingFields
 	if idx := strings.Index(reasonRaw, pfMarker); idx >= 0 {
 		humanReason = reasonRaw[:idx]
 		pfJSON := reasonRaw[idx+len(pfMarker):]
@@ -2124,9 +2018,9 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 
 	// 3. Resolve cashflow table and columns
 	table := resolveFirstExistingTable(ctx, pool, []string{
-		"investment.fd_cashflow_schedule",
-		"investment.fd_cashflow",
-		"investment.fd_master_cashflow_schedule",
+		constants.QuerryCashflowSchedule,
+		constants.QuerryCashflow,
+		constants.QuerryMasterCashflowSchedule,
 	})
 	if table == "" {
 		return fmt.Errorf("applyApprovedCashflowEdit: cashflow table not found")
@@ -2227,7 +2121,15 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 		 WHERE audit_id=$2`, checkerEmail, auditID)
 
 	// 6. Propagate downstream principal changes
-	propagateCashflowDownstream(ctx, pool, table, fdCol, cashflowIDCol, cols, fdID, cashflowID, pendingFields)
+	propagateCashflowDownstream(ctx, pool, PropagateCashflowParams{
+		Table:            table,
+		FDCol:            fdCol,
+		CashflowIDCol:    cashflowIDCol,
+		Cols:             cols,
+		FDID:             fdID,
+		EditedCashflowID: cashflowID,
+		AppliedFields:    pendingFields,
+	})
 
 	return nil
 }
@@ -2236,10 +2138,16 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 // edit was applied, then cascades opening/closing principal changes forward.
 func propagateCashflowDownstream(
 	ctx context.Context, pool *pgxpool.Pool,
-	table, fdCol, cashflowIDCol string, cols map[string]bool,
-	fdID, editedCashflowID string,
-	appliedFields map[string]interface{},
+	p PropagateCashflowParams,
 ) {
+	// map struct fields to local variables to keep existing logic unchanged
+	table := p.Table
+	fdCol := p.FDCol
+	cashflowIDCol := p.CashflowIDCol
+	cols := p.Cols
+	fdID := p.FDID
+	editedCashflowID := p.EditedCashflowID
+	appliedFields := p.AppliedFields
 	seqCol := pickFirstExistingColumn(cols, "sequence_number", "period_number")
 	openCol := pickFirstExistingColumn(cols, "opening_principal")
 	closeCol := pickFirstExistingColumn(cols, "closing_principal")
@@ -2262,10 +2170,10 @@ func propagateCashflowDownstream(
 		return
 	}
 	type cfRow struct {
-		id                                          string
-		eventType                                   string
+		id                                         string
+		eventType                                  string
 		openP, closeP, capAmt, intAmt, tdsAmt, ncf float64
-		seq                                         int
+		seq                                        int
 	}
 	var allRows []cfRow
 	for cfRows.Next() {
@@ -2350,22 +2258,33 @@ func propagateCashflowDownstream(
 	}
 }
 
+// PropagateCashflowParams groups parameters for propagateCashflowDownstream.
+type PropagateCashflowParams struct {
+	Table            string
+	FDCol            string
+	CashflowIDCol    string
+	Cols             map[string]bool
+	FDID             string
+	EditedCashflowID string
+	AppliedFields    map[string]interface{}
+}
+
 // ─── ApproveCashflowEdit ──────────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/approve
 // Checker approves a pending cashflow edit audit row.
 func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string `json:"user_id"`
-			AuditID  string `json:"audit_id"`
-			Comment  string `json:"comment"`
+			UserID  string `json:"user_id"`
+			AuditID string `json:"audit_id"`
+			Comment string `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if req.AuditID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "audit_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAuditIDRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -2382,12 +2301,12 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, req.AuditID,
 		).Scan(&requestedBy, &status, &cashflowID, &fdID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "audit record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrAuditRecordNotFound)
 			return
 		}
 		// Same-person check
 		if requestedBy == userEmail {
-			api.RespondWithError(w, http.StatusBadRequest, "maker and checker cannot be the same person")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
 			return
 		}
 		if !strings.HasPrefix(status, "PENDING") {
@@ -2466,7 +2385,7 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.AuditID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "audit_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAuditIDRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -2483,12 +2402,12 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, req.AuditID,
 		).Scan(&requestedBy, &status, &cashflowID, &fdID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "audit record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrAuditRecordNotFound)
 			return
 		}
 		// Same-person check
 		if requestedBy == userEmail {
-			api.RespondWithError(w, http.StatusBadRequest, "maker and checker cannot be the same person")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
 			return
 		}
 		if !strings.HasPrefix(status, "PENDING") {
@@ -2584,12 +2503,12 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		table := resolveFirstExistingTable(ctx, pgxPool, []string{
-			"investment.fd_cashflow_schedule",
-			"investment.fd_cashflow",
-			"investment.fd_master_cashflow_schedule",
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
 		})
 		if table == "" {
-			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCashflowTableNotFound)
 			return
 		}
 		schemaName, tableName := splitQualifiedTable(table)
@@ -2710,12 +2629,12 @@ func DeleteCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.LogInfo("[CashflowDelete] submitted fd=%s cf=%s audit=%s by=%s", req.FDID, req.CashflowID, auditID, userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"fd_id":       req.FDID,
-			"cashflow_id": req.CashflowID,
-			"audit_id":    auditID,
-			"status":      "PENDING_DELETE_APPROVAL",
+			"fd_id":        req.FDID,
+			"cashflow_id":  req.CashflowID,
+			"audit_id":     auditID,
+			"status":       "PENDING_DELETE_APPROVAL",
 			"submitted_by": userEmail,
-			"message":     "Delete request submitted for approval.",
+			"message":      "Delete request submitted for approval.",
 		})
 	}
 }
@@ -2735,7 +2654,7 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.AuditID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "audit_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrAuditIDRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -2751,11 +2670,11 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			 FROM investment.fd_audit_cashflow_schedule WHERE audit_id = $1`, req.AuditID,
 		).Scan(&requestedBy, &status, &cashflowID, &fdID)
 		if err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "audit record not found")
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrAuditRecordNotFound)
 			return
 		}
 		if requestedBy == userEmail {
-			api.RespondWithError(w, http.StatusBadRequest, "maker and checker cannot be the same person")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
 			return
 		}
 		if !strings.HasPrefix(status, "PENDING") {
@@ -2764,12 +2683,12 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		table := resolveFirstExistingTable(ctx, pgxPool, []string{
-			"investment.fd_cashflow_schedule",
-			"investment.fd_cashflow",
-			"investment.fd_master_cashflow_schedule",
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
 		})
 		if table == "" {
-			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCashflowTableNotFound)
 			return
 		}
 

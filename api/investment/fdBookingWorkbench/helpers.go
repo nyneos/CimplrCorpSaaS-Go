@@ -2,6 +2,7 @@ package fdBooking
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"errors"
 	"fmt"
@@ -403,7 +404,7 @@ func calculateVariance(
 
 	// date variance in days (0 if either is unparseable)
 	dateVar := 0
-	layout := "2006-01-02"
+	layout := constants.DateFormat
 	bd, errB := time.Parse(layout, bookedMaturity)
 	cd, errC := time.Parse(layout, confirmedMaturity)
 	if errB == nil && errC == nil {
@@ -418,8 +419,8 @@ func calculateVariance(
 	thresholdBreached := rateVar > rateTolerance || amtVar > amountTolerance || dateVar > 0
 
 	return VarianceResult{
-		RateVariance:        rateVar,
-		AmountVariance:      amtVar,
+		RateVariance:         rateVar,
+		AmountVariance:       amtVar,
 		MaturityDateVariance: dateVar,
 		HasVariance:          hasVariance,
 		IsThresholdBreached:  thresholdBreached,

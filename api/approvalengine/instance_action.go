@@ -202,8 +202,16 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 			WHERE instance_id = $2`, req.ActorEmail, instanceID); err != nil {
 			return fmt.Errorf("RecordAction reject instance: %w", err)
 		}
-		if err = finalizeRecord(ctx, tx, recordID, auditTable, auditIDColumn, recordTable,
-			actionType, InstStatusRejected, req.ActorEmail, req.Comment); err != nil {
+		if err = finalizeRecord(ctx, tx, FinalizeParams{
+			RecordID:       recordID,
+			AuditTable:     auditTable,
+			AuditIDColumn:  auditIDColumn,
+			RecordTable:    recordTable,
+			ActionType:     actionType,
+			FinalStatus:    InstStatusRejected,
+			CheckerEmail:   req.ActorEmail,
+			CheckerComment: req.Comment,
+		}); err != nil {
 			return err
 		}
 		if err = tx.Commit(ctx); err != nil {
@@ -315,8 +323,16 @@ func RecordAction(ctx context.Context, pool *pgxpool.Pool, req ActionRequest) er
 		return fmt.Errorf("RecordAction finalize instance: %w", err)
 	}
 
-	if err = finalizeRecord(ctx, tx, recordID, auditTable, auditIDColumn, recordTable,
-		actionType, InstStatusApproved, req.ActorEmail, req.Comment); err != nil {
+	if err = finalizeRecord(ctx, tx, FinalizeParams{
+		RecordID:       recordID,
+		AuditTable:     auditTable,
+		AuditIDColumn:  auditIDColumn,
+		RecordTable:    recordTable,
+		ActionType:     actionType,
+		FinalStatus:    InstStatusApproved,
+		CheckerEmail:   req.ActorEmail,
+		CheckerComment: req.Comment,
+	}); err != nil {
 		return err
 	}
 

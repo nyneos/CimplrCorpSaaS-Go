@@ -1,6 +1,7 @@
 package fdMaster
 
 import (
+	"CimplrCorpSaas/api/constants"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
 	"context"
 	"fmt"
@@ -15,7 +16,7 @@ type FDJournalEntry struct {
 }
 
 func buildAccountingPeriod(date time.Time) string {
-	return date.Format("2006-01")
+	return date.Format(constants.DateFormatYearMonth)
 }
 
 func loadBankAccountInfo(ctx context.Context, exec queryExecutor, bankAccountID string) (*accountingworkbench.BankAccountInfo, error) {
@@ -84,7 +85,7 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 		EntryDate:        entryDate,
 		AccountingPeriod: buildAccountingPeriod(entryDate),
 		EntryType:        "FD_ACTIVATION",
-		Description:      fmt.Sprintf("FD activation %s", fd.FDID),
+		Description:      fmt.Sprintf(constants.FormatFDActivation, fd.FDID),
 		TotalDebit:       amount,
 		TotalCredit:      amount,
 		Lines: []accountingworkbench.JournalEntryLine{
@@ -95,7 +96,7 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 				AccountType:   "ASSET",
 				DebitAmount:   amount,
 				CreditAmount:  0,
-				Narration:     fmt.Sprintf("FD activation %s", fd.FDID),
+				Narration:     fmt.Sprintf(constants.FormatFDActivation, fd.FDID),
 			},
 			{
 				LineNumber:    2,
@@ -104,7 +105,7 @@ func buildJournalEntries(fd *FDRecord, bankInfo *accountingworkbench.BankAccount
 				AccountType:   "ASSET",
 				DebitAmount:   0,
 				CreditAmount:  amount,
-				Narration:     fmt.Sprintf("FD activation %s", fd.FDID),
+				Narration:     fmt.Sprintf(constants.FormatFDActivation, fd.FDID),
 			},
 		},
 	}
@@ -128,7 +129,7 @@ func CreateFDAccountingActivity(ctx context.Context, exec queryExecutor, fdID st
 		INSERT INTO investment.auditactionaccountingactivity (
 			activity_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
 		) VALUES ($1, 'CREATE', 'APPROVED', $2, now(), $2, now(), $3)
-	`, activityID, userEmail, fmt.Sprintf("FD activation %s", fdID)); err != nil {
+	`, activityID, userEmail, fmt.Sprintf(constants.FormatFDActivation, fdID)); err != nil {
 		return "", fmt.Errorf("create accounting activity audit: %w", err)
 	}
 

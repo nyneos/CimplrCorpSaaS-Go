@@ -3,6 +3,7 @@ package approvalMatrix
 import (
 	"CimplrCorpSaas/api"
 	approvalengine "CimplrCorpSaas/api/approvalengine"
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -25,7 +26,7 @@ import (
 func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
@@ -41,7 +42,7 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.UserID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 		if req.InstanceEyeID == "" {
@@ -69,7 +70,7 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment:       req.Comment,
 		})
 		if err != nil {
-			msg   := err.Error()
+			msg := err.Error()
 			lower := strings.ToLower(msg)
 			switch {
 			case strings.Contains(lower, "not found"):
@@ -106,13 +107,13 @@ func RecordApprovalAction(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetMyPendingApprovals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		userID := r.URL.Query().Get("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -139,13 +140,13 @@ func GetMyPendingApprovals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 
 		userID := r.URL.Query().Get("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -168,34 +169,34 @@ func GetMySubmissions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 //
 // Returns the full approval workflow enriched with per-eye approver identities:
 //
-//   "eyes": [
-//     {
-//       "position": 1,
-//       "status": "ACTIVE",
-//       "approvers": {
-//         "approver_1": {
-//           "user_email": "cfo@acme.com",
-//           "user_name":  "Alice",
-//           "action_taken": "APPROVED",
-//           "action_at":    "2026-03-18T23:02:44Z",
-//           "action_comment": "looks good"
-//         },
-//         "approver_2": {
-//           "role_name": "Treasury Manager",
-//           "action_taken": ""   // not yet acted
-//         }
-//       },
-//       "action_log": [...]
-//     }
-//   ],
-//   "viewer_can_act":       true,
-//   "viewer_active_eye_id": "IEYE-..."
+//	"eyes": [
+//	  {
+//	    "position": 1,
+//	    "status": "ACTIVE",
+//	    "approvers": {
+//	      "approver_1": {
+//	        "user_email": "cfo@acme.com",
+//	        "user_name":  "Alice",
+//	        "action_taken": "APPROVED",
+//	        "action_at":    "2026-03-18T23:02:44Z",
+//	        "action_comment": "looks good"
+//	      },
+//	      "approver_2": {
+//	        "role_name": "Treasury Manager",
+//	        "action_taken": ""   // not yet acted
+//	      }
+//	    },
+//	    "action_log": [...]
+//	  }
+//	],
+//	"viewer_can_act":       true,
+//	"viewer_active_eye_id": "IEYE-..."
 //
 // user_id is optional; without it viewer_can_act is always false.
 func GetInstanceDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			api.RespondWithError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			api.RespondWithError(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 			return
 		}
 

@@ -89,12 +89,12 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check for duplicate limit combination
 		key := LimitUniqueKey{
-			EntityName: req.EntityName,
-			BankName: req.BankName,
-			CoreLimitType: coreLimitType,
-			LimitType: req.LimitType,
-			LimitSubType: req.LimitSubType,
-			CurrencyCode: strings.ToUpper(req.CurrencyCode),
+			EntityName:     req.EntityName,
+			BankName:       req.BankName,
+			CoreLimitType:  coreLimitType,
+			LimitType:      req.LimitType,
+			LimitSubType:   req.LimitSubType,
+			CurrencyCode:   strings.ToUpper(req.CurrencyCode),
 			ExcludeLimitID: "",
 		}
 		if err := checkLimitUniqueness(ctx, pgxPool, key); err != nil {

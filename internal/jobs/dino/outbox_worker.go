@@ -32,6 +32,7 @@ package jobs
 //   go StartOutboxWorker(ctx, pool)
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -296,7 +297,7 @@ func owCallEndpoint(ctx context.Context, endpointURL string, payloads []owSendPa
 		log.Printf("[outbox-worker] build HTTP request: %v", err)
 		return resultMap
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if apiKey := strings.TrimSpace(os.Getenv("SEND_ENDPOINT_API_KEY")); apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}

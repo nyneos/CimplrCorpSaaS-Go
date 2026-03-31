@@ -73,7 +73,7 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		args := []interface{}{}
 		idx := 1
 		if req.EntityID != "" {
-			statusSQL += fmt.Sprintf(" AND entity_id=$%d", idx)
+			statusSQL += fmt.Sprintf(constants.QuerryEntityID, idx)
 			args = append(args, req.EntityID)
 			idx++
 		}
@@ -106,7 +106,7 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		recentArgs := []interface{}{}
 		ridx := 1
 		if req.EntityID != "" {
-			recentSQL += fmt.Sprintf(" AND entity_id=$%d", ridx)
+			recentSQL += fmt.Sprintf(constants.QuerryEntityID, ridx)
 			recentArgs = append(recentArgs, req.EntityID)
 			ridx++
 		}
@@ -138,7 +138,7 @@ func GetInterestWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 			 FROM investment.fd_interest_receipt WHERE is_deleted=false`,
 		).Scan(&totalCount, &totalGross, &totalTDS, &totalNet) //nolint:errcheck
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
 			"summary":          map[string]interface{}{"total_count": totalCount, "total_gross": totalGross, "total_tds": totalTDS, "total_net": totalNet},
@@ -172,7 +172,7 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		args := []interface{}{}
 		idx := 1
 		if req.EntityID != "" {
-			baseFilter += fmt.Sprintf(" AND entity_id=$%d", idx)
+			baseFilter += fmt.Sprintf(constants.QuerryEntityID, idx)
 			args = append(args, req.EntityID)
 			idx++
 		}
@@ -227,7 +227,7 @@ func GetTDSWorkbenchSummary(pool *pgxpool.Pool) http.HandlerFunc {
 		defer exRows.Close()
 		exData, _ := rowsToMapSlice(exRows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":           true,
 			"summary":           map[string]interface{}{"total_count": totalCount, "total_expected": totalExpected, "total_actual": totalActual, "total_variance": totalVariance, "exception_count": exceptionCount},
@@ -299,7 +299,7 @@ func GetReconciliationDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		defer pipelineRows.Close()
 		pipelineData, _ := rowsToMapSlice(pipelineRows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":            true,
 			"recent_runs":        runData,
@@ -385,7 +385,7 @@ func GetInterestVsAccrualAnalysis(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"rows":    out,

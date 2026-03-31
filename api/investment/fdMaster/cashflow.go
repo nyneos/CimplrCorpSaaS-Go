@@ -1,6 +1,7 @@
 package fdMaster
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"log"
@@ -44,26 +45,26 @@ func (r *FDRecord) InterestType() string { return r.InterestTypeCode }
 
 // BankConfig holds ALL relevant fields from investment.fd_bank_config_master.
 type BankConfig struct {
-	ConfigID                   string
-	DayCountCode               string  // DC-ACT-365 | DC-ACT-360 | DC-ACT-ACT | DC-30-360
-	CapitalizationScheduleType string  // ANNIVERSARY | CALENDAR_QTR_END
-	QuarterDefinition          string  // CALENDAR_QUARTER | 90_DAYS
-	TDSDeductionTiming         string  // ACCRUAL_ANNUAL | MATURITY | NONE
-	RoundingMethod             string  // ROUND | TRUNCATE | ROUND_UP | ROUND_DOWN
-	RoundingFrequency          string  // EACH_PERIOD | AT_MATURITY
-	InterestRoundingDecimals   int
-	AccrualStartConvention     string  // INCLUDE | EXCLUDE
-	AccrualEndConvention       string  // INCLUDE | EXCLUDE
-	PeriodBoundaryDefinition   string  // INCL_START_EXCL_END | INCL_BOTH
-        WeekendAccrual             bool
-        HolidayAccrual             bool
-        HolidayCalendarCode        string  // e.g. "Q" or "IN" — code from mastercalendar
-		BrokenPeriodMethod         string  // SIMPLE | NONE
-		CapitalizationDateAdjustment string  // NO_ADJUST / PRECEDING_WD / FOLLOWING_WD
-		BrokenPeriodLocation         string  // FIRST / LAST / BOTH
-		GracePeriodDays              int
-		GracePeriodRateType          string  // SAME_RATE / SAVINGS_RATE / NO_INTEREST
-		MinimumCompoundingPeriodDays int
+	ConfigID                     string
+	DayCountCode                 string // DC-ACT-365 | DC-ACT-360 | DC-ACT-ACT | DC-30-360
+	CapitalizationScheduleType   string // ANNIVERSARY | CALENDAR_QTR_END
+	QuarterDefinition            string // CALENDAR_QUARTER | 90_DAYS
+	TDSDeductionTiming           string // ACCRUAL_ANNUAL | MATURITY | NONE
+	RoundingMethod               string // ROUND | TRUNCATE | ROUND_UP | ROUND_DOWN
+	RoundingFrequency            string // EACH_PERIOD | AT_MATURITY
+	InterestRoundingDecimals     int
+	AccrualStartConvention       string // INCLUDE | EXCLUDE
+	AccrualEndConvention         string // INCLUDE | EXCLUDE
+	PeriodBoundaryDefinition     string // INCL_START_EXCL_END | INCL_BOTH
+	WeekendAccrual               bool
+	HolidayAccrual               bool
+	HolidayCalendarCode          string // e.g. "Q" or "IN" — code from mastercalendar
+	BrokenPeriodMethod           string // SIMPLE | NONE
+	CapitalizationDateAdjustment string // NO_ADJUST / PRECEDING_WD / FOLLOWING_WD
+	BrokenPeriodLocation         string // FIRST / LAST / BOTH
+	GracePeriodDays              int
+	GracePeriodRateType          string // SAME_RATE / SAVINGS_RATE / NO_INTEREST
+	MinimumCompoundingPeriodDays int
 }
 
 type CompoundingFreq struct {
@@ -86,20 +87,20 @@ type TDSConfig struct {
 // CashflowRow maps 1:1 to the fd_cashflow_schedule table columns.
 type CashflowRow struct {
 	// identity / sequence
-	PeriodNumber    int
-	EventType       string
-	EventDate       time.Time
+	PeriodNumber int
+	EventType    string
+	EventDate    time.Time
 	// period window
 	PeriodStartDate time.Time
 	PeriodEndDate   time.Time
 	PeriodDays      int
 	// amounts
-	OpeningPrincipal float64
-	InterestAccrued  float64
+	OpeningPrincipal  float64
+	InterestAccrued   float64
 	CapitalizedAmount float64
-	ClosingPrincipal float64
-	TDSAmount        float64
-	NetCashFlow      float64
+	ClosingPrincipal  float64
+	TDSAmount         float64
+	NetCashFlow       float64
 	// calculation metadata
 	DayCountCode      string
 	Divisor           int
@@ -117,7 +118,7 @@ type CashflowRow struct {
 func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string) (*FDRecord, error) {
 	bookingCols, err := loadTableColumns(ctx, exec, "investment", "fd_booking_request")
 	if err != nil {
-		return nil, fmt.Errorf("load FD record: %w", err)
+		return nil, fmt.Errorf(constants.ErrLoadFDRecord, err)
 	}
 	bankAccCol := pickFirstExistingColumn(bookingCols, "source_account_id", "bank_account_id", "account_id", "bank_account")
 	bankAccExpr := "''::text"
@@ -127,7 +128,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 
 	confCols, err := loadTableColumns(ctx, exec, "investment", "fd_confirmation")
 	if err != nil {
-		return nil, fmt.Errorf("load FD record: %w", err)
+		return nil, fmt.Errorf(constants.ErrLoadFDRecord, err)
 	}
 	currencyExpr := "''::text"
 	switch {
@@ -197,7 +198,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		&rec.ConfirmationStatus,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("load FD record: %w", err)
+		return nil, fmt.Errorf(constants.ErrLoadFDRecord, err)
 	}
 	return rec, nil
 }
@@ -255,10 +256,10 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 	if strings.TrimSpace(bankConfigID) == "" {
 		return &BankConfig{
 			InterestRoundingDecimals: 2,
-			RoundingMethod: "ROUND",
-			RoundingFrequency: "EACH_PERIOD",
-			WeekendAccrual: true,
-			HolidayAccrual: true,
+			RoundingMethod:           "ROUND",
+			RoundingFrequency:        "EACH_PERIOD",
+			WeekendAccrual:           true,
+			HolidayAccrual:           true,
 		}, nil
 	}
 
@@ -313,10 +314,10 @@ func loadBankConfig(ctx context.Context, exec queryExecutor, bankConfigID string
 	if err != nil {
 		return &BankConfig{
 			InterestRoundingDecimals: 2,
-			RoundingMethod: "ROUND",
-			RoundingFrequency: "EACH_PERIOD",
-			WeekendAccrual: true,
-			HolidayAccrual: true,
+			RoundingMethod:           "ROUND",
+			RoundingFrequency:        "EACH_PERIOD",
+			WeekendAccrual:           true,
+			HolidayAccrual:           true,
 		}, nil
 	}
 	if cfg.InterestRoundingDecimals == 0 {
@@ -388,8 +389,8 @@ func loadTDSConfig(ctx context.Context, exec queryExecutor, planID string) (*TDS
 
 // DayCountInfo holds the canonical fields resolved from fd_day_count_convention_master.
 type DayCountInfo struct {
-	DayCountCode    string // e.g. "DC-ACT-365"
-	ConventionType  string // e.g. "ACT_365" — the canonical enum value
+	DayCountCode   string // e.g. "DC-ACT-365"
+	ConventionType string // e.g. "ACT_365" — the canonical enum value
 }
 
 // loadDayCountConvention resolves a day_count_code (e.g. "DC-ACT-365") or a raw
@@ -472,9 +473,9 @@ func loadInterestType(ctx context.Context, exec queryExecutor, interestTypeRef s
 
 // HolidayCalendarInfo holds the resolved calendar + expanded holiday dates.
 type HolidayCalendarInfo struct {
-	CalendarCode    string
-	WeekendPattern  string // e.g. "Sat,Sun"
-	HolidayDates    map[string]bool // keyed "YYYY-MM-DD" for O(1) lookup
+	CalendarCode   string
+	WeekendPattern string          // e.g. "Sat,Sun"
+	HolidayDates   map[string]bool // keyed "YYYY-MM-DD" for O(1) lookup
 }
 
 // isWeekend returns true if d is a weekend day according to weekendPattern.
@@ -486,12 +487,13 @@ func isWeekend(d time.Time, weekendPattern string) bool {
 
 // expandRRule expands a recurrence rule string into dates within [from, to].
 // Supports:
-//   FREQ=YEARLY             — same day/month every year
-//   FREQ=YEARLY;BYMONTH=N;BYDAY=MO/TU/WE/TH/FR/SA/SU — Nth weekday of month, every year
-//   FREQ=MONTHLY;BYDAY=MO  — every month that weekday
-//   FREQ=DAILY             — every day
-//   FREQ=WEEKLY;BYDAY=MO   — every week that weekday
-//   (empty)                — just the seed date itself
+//
+//	FREQ=YEARLY             — same day/month every year
+//	FREQ=YEARLY;BYMONTH=N;BYDAY=MO/TU/WE/TH/FR/SA/SU — Nth weekday of month, every year
+//	FREQ=MONTHLY;BYDAY=MO  — every month that weekday
+//	FREQ=DAILY             — every day
+//	FREQ=WEEKLY;BYDAY=MO   — every week that weekday
+//	(empty)                — just the seed date itself
 func expandRRule(seed time.Time, rrule string, from, to time.Time) []time.Time {
 	var out []time.Time
 	if seed.IsZero() {
@@ -624,7 +626,7 @@ func adjustToWorkingDay(d time.Time, adjustment string, cfg *BankConfig, cal Hol
 			return true
 		}
 		if !cfg.HolidayAccrual && len(cal.HolidayDates) > 0 {
-			if cal.HolidayDates[t.Format("2006-01-02")] {
+			if cal.HolidayDates[t.Format(constants.DateFormat)] {
 				return true
 			}
 		}
@@ -705,7 +707,7 @@ func loadHolidayCalendar(ctx context.Context, exec queryExecutor, calCode string
 		}
 		expanded := expandRRule(seed, rrule, windowFrom, windowTo)
 		for _, d := range expanded {
-			info.HolidayDates[d.Format("2006-01-02")] = true
+			info.HolidayDates[d.Format(constants.DateFormat)] = true
 		}
 	}
 	return info
@@ -718,7 +720,7 @@ func isNonAccrualDay(d time.Time, cfg *BankConfig, cal HolidayCalendarInfo) bool
 		return true
 	}
 	if !cfg.HolidayAccrual && len(cal.HolidayDates) > 0 {
-		if cal.HolidayDates[d.Format("2006-01-02")] {
+		if cal.HolidayDates[d.Format(constants.DateFormat)] {
 			return true
 		}
 	}
@@ -775,7 +777,7 @@ func getDivisorAndDays(conventionType string, periodStart, periodEnd time.Time) 
 
 	switch norm {
 	case "30_360":
-		days = countDays30_360(periodStart, periodEnd)
+		days = countDays30by360(periodStart, periodEnd)
 		return 360, days
 	case "ACT_360":
 		return 360, rawDays
@@ -802,7 +804,7 @@ func isLeapYear(y int) bool {
 	return (y%4 == 0 && y%100 != 0) || y%400 == 0
 }
 
-func countDays30_360(start, end time.Time) int {
+func countDays30by360(start, end time.Time) int {
 	y1, m1, d1 := start.Date()
 	y2, m2, d2 := end.Date()
 	if d1 == 31 {
@@ -871,7 +873,7 @@ func getDivisorAndDaysWithCal(conventionType string, periodStart, periodEnd time
 	norm := strings.ToUpper(strings.NewReplacer("/", "_", "-", "_").Replace(strings.TrimSpace(conventionType)))
 	norm = strings.TrimPrefix(norm, "DC_")
 	if norm == "30_360" {
-		return 360, countDays30_360(periodStart, periodEnd)
+		return 360, countDays30by360(periodStart, periodEnd)
 	}
 	// For all other conventions count working days if needed.
 	effectiveDays := countAccrualDays(conventionType, periodStart, periodEnd, cfg, cal)
@@ -1210,30 +1212,30 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 						tdsAmt = applyRounding(payoutInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, payoutDate.Equal(fd.MaturityDate))
 					}
 					rows = append(rows, CashflowRow{
-						EventType: "INTEREST_RECEIPT",
-						EventDate: payoutDate,
-						PeriodStartDate: lastPayout,
-						PeriodEndDate: payoutDate,
-						PeriodDays: int(payoutDate.Sub(lastPayout).Hours()/24),
-						OpeningPrincipal: fd.PrincipalAmount,
-						InterestAccrued: payoutInterest,
+						EventType:         "INTEREST_RECEIPT",
+						EventDate:         payoutDate,
+						PeriodStartDate:   lastPayout,
+						PeriodEndDate:     payoutDate,
+						PeriodDays:        int(payoutDate.Sub(lastPayout).Hours() / 24),
+						OpeningPrincipal:  fd.PrincipalAmount,
+						InterestAccrued:   payoutInterest,
 						CapitalizedAmount: 0,
-						ClosingPrincipal: fd.PrincipalAmount,
-						TDSAmount: tdsAmt,
-						NetCashFlow: applyRounding(payoutInterest-tdsAmt, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, payoutDate.Equal(fd.MaturityDate)),
-						DayCountCode: effectiveDayCountCode,
+						ClosingPrincipal:  fd.PrincipalAmount,
+						TDSAmount:         tdsAmt,
+						NetCashFlow:       applyRounding(payoutInterest-tdsAmt, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, payoutDate.Equal(fd.MaturityDate)),
+						DayCountCode:      effectiveDayCountCode,
 					})
 					if tdsAmt > 0 {
 						rows = append(rows, CashflowRow{
-							EventType: "TDS_DEDUCTION",
-							EventDate: payoutDate,
-							PeriodStartDate: lastPayout,
-							PeriodEndDate: payoutDate,
+							EventType:        "TDS_DEDUCTION",
+							EventDate:        payoutDate,
+							PeriodStartDate:  lastPayout,
+							PeriodEndDate:    payoutDate,
 							OpeningPrincipal: fd.PrincipalAmount,
-							TDSAmount: tdsAmt,
-							NetCashFlow: -tdsAmt,
+							TDSAmount:        tdsAmt,
+							NetCashFlow:      -tdsAmt,
 							ClosingPrincipal: fd.PrincipalAmount,
-							DayCountCode: effectiveDayCountCode,
+							DayCountCode:     effectiveDayCountCode,
 						})
 					}
 				}
@@ -1242,18 +1244,18 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 
 			// Maturity: return principal only (interest already paid out)
 			rows = append(rows, CashflowRow{
-				EventType: "MATURITY",
-				EventDate: fd.MaturityDate,
-				PeriodStartDate: lastPayout,
-				PeriodEndDate: fd.MaturityDate,
-				PeriodDays: int(fd.MaturityDate.Sub(lastPayout).Hours()/24),
-				OpeningPrincipal: fd.PrincipalAmount,
-				InterestAccrued: 0,
+				EventType:         "MATURITY",
+				EventDate:         fd.MaturityDate,
+				PeriodStartDate:   lastPayout,
+				PeriodEndDate:     fd.MaturityDate,
+				PeriodDays:        int(fd.MaturityDate.Sub(lastPayout).Hours() / 24),
+				OpeningPrincipal:  fd.PrincipalAmount,
+				InterestAccrued:   0,
 				CapitalizedAmount: 0,
-				ClosingPrincipal: 0,
-				TDSAmount: 0,
-				NetCashFlow: fd.PrincipalAmount,
-				DayCountCode: effectiveDayCountCode,
+				ClosingPrincipal:  0,
+				TDSAmount:         0,
+				NetCashFlow:       fd.PrincipalAmount,
+				DayCountCode:      effectiveDayCountCode,
 			})
 		} else {
 			// AT_MATURITY cumulative behaviour — TDS per FY if threshold crossed
@@ -1276,11 +1278,11 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 					// FY end date is Mar 31 of fy
 					ed := time.Date(fy, time.March, 31, 0, 0, 0, 0, time.UTC)
 					rows = append(rows, CashflowRow{
-						EventType:       "TDS_DEDUCTION",
-						EventDate:       ed,
-						PeriodStartDate: time.Date(fy-1, time.April, 1, 0, 0, 0, 0, time.UTC),
-						PeriodEndDate:   ed,
-						PeriodDays:      365,
+						EventType:        "TDS_DEDUCTION",
+						EventDate:        ed,
+						PeriodStartDate:  time.Date(fy-1, time.April, 1, 0, 0, 0, 0, time.UTC),
+						PeriodEndDate:    ed,
+						PeriodDays:       365,
 						OpeningPrincipal: fd.PrincipalAmount,
 						TDSAmount:        tdsAmt,
 						NetCashFlow:      -tdsAmt,
@@ -1307,7 +1309,7 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 				EventDate:         fd.MaturityDate,
 				PeriodStartDate:   accrualDates[len(accrualDates)-1],
 				PeriodEndDate:     fd.MaturityDate,
-				PeriodDays:        int(fd.MaturityDate.Sub(accrualDates[len(accrualDates)-1]).Hours()/24),
+				PeriodDays:        int(fd.MaturityDate.Sub(accrualDates[len(accrualDates)-1]).Hours() / 24),
 				OpeningPrincipal:  fd.PrincipalAmount,
 				InterestAccrued:   totalInterest,
 				CapitalizedAmount: 0,
@@ -1318,21 +1320,21 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 			})
 		}
 
-			// Sort and renumber per BRD ordering
-			sort.SliceStable(rows, func(i, j int) bool {
-				if rows[i].EventDate.Equal(rows[j].EventDate) {
-					order := map[string]int{"ACCRUAL": 1, "INTEREST_RECEIPT": 2, "CAPITALIZATION": 3, "TDS_DEDUCTION": 4, "MATURITY": 5}
-					return order[rows[i].EventType] < order[rows[j].EventType]
-				}
-				return rows[i].EventDate.Before(rows[j].EventDate)
-			})
+		// Sort and renumber per BRD ordering
+		sort.SliceStable(rows, func(i, j int) bool {
+			if rows[i].EventDate.Equal(rows[j].EventDate) {
+				order := map[string]int{"ACCRUAL": 1, "INTEREST_RECEIPT": 2, "CAPITALIZATION": 3, "TDS_DEDUCTION": 4, "MATURITY": 5}
+				return order[rows[i].EventType] < order[rows[j].EventType]
+			}
+			return rows[i].EventDate.Before(rows[j].EventDate)
+		})
 		for i := range rows {
 			rows[i].PeriodNumber = i + 1
 		}
 		return rows
 	}
-    // Fallback return to satisfy compiler (should be unreachable).
-    return nil
+	// Fallback return to satisfy compiler (should be unreachable).
+	return nil
 }
 
 // generateCompoundSchedule handles COMPOUND FDs — interest is capitalized each period.
@@ -1351,22 +1353,30 @@ func generateCompoundSchedule(
 ) []CashflowRow {
 	// Build monthly accrual entries first
 	accrualDates := buildMonthlyAccrualDates(fd)
-	type aEntry struct{
+	type aEntry struct {
 		PeriodStart time.Time
-		PeriodEnd time.Time
-		PeriodDays int
-		Divisor int
-		OpeningP float64
-		Interest float64
+		PeriodEnd   time.Time
+		PeriodDays  int
+		Divisor     int
+		OpeningP    float64
+		Interest    float64
 	}
 	accrualRows := make([]*aEntry, 0, len(accrualDates))
 	for i, end := range accrualDates {
 		var start time.Time
-		if i == 0 { start = fd.ValueDate } else { start = accrualDates[i-1] }
+		if i == 0 {
+			start = fd.ValueDate
+		} else {
+			start = accrualDates[i-1]
+		}
 		divisor, days := getDivisorAndDaysWithCal(effectiveConvention, start, end, cfg, calInfo)
-		if days <= 0 { days = 1 }
-		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") { days++ }
-		accrualRows = append(accrualRows, &aEntry{PeriodStart:start, PeriodEnd:end, PeriodDays:days, Divisor:divisor})
+		if days <= 0 {
+			days = 1
+		}
+		if strings.EqualFold(cfg.PeriodBoundaryDefinition, "INCL_BOTH") {
+			days++
+		}
+		accrualRows = append(accrualRows, &aEntry{PeriodStart: start, PeriodEnd: end, PeriodDays: days, Divisor: divisor})
 	}
 
 	periodEnds := buildCapitalizationDates(fd, cfg, freq, calInfo)
@@ -1377,12 +1387,16 @@ func generateCompoundSchedule(
 
 	// Initialize FY TDS end
 	fyEndYear := fd.ValueDate.Year()
-	if fd.ValueDate.Month() >= time.April { fyEndYear++ }
-	lastTDSFYEnd := time.Date(fyEndYear, time.March, 31,0,0,0,0,time.UTC)
+	if fd.ValueDate.Month() >= time.April {
+		fyEndYear++
+	}
+	lastTDSFYEnd := time.Date(fyEndYear, time.March, 31, 0, 0, 0, 0, time.UTC)
 
 	lastCapDate := fd.ValueDate
 	for _, capEnd := range periodEnds {
-		if !capEnd.After(lastCapDate) { continue }
+		if !capEnd.After(lastCapDate) {
+			continue
+		}
 
 		// collect accruals within (lastCapDate <= a.PeriodStart) && (a.PeriodEnd <= capEnd)
 		var capInterest float64
@@ -1456,7 +1470,12 @@ func generateCompoundSchedule(
 			OpeningPrincipal:  openingPrincipal,
 			InterestAccrued:   capInterest,
 			CapitalizedAmount: capitalized,
-			ClosingPrincipal:  func() float64 { if isMaturity { return 0 }; return closingPrincipal }(),
+			ClosingPrincipal: func() float64 {
+				if isMaturity {
+					return 0
+				}
+				return closingPrincipal
+			}(),
 			TDSAmount:         0,
 			NetCashFlow:       maturityNetCF,
 			DayCountCode:      effectiveDayCountCode,
@@ -1537,7 +1556,9 @@ func generateCompoundSchedule(
 		}
 		return rows[i].EventDate.Before(rows[j].EventDate)
 	})
-	for i := range rows { rows[i].PeriodNumber = i+1 }
+	for i := range rows {
+		rows[i].PeriodNumber = i + 1
+	}
 	return rows
 }
 
@@ -1619,9 +1640,9 @@ func SaveCashflowScheduleWithRecord(ctx context.Context, exec queryExecutor, fdI
 	}
 
 	table := resolveFirstExistingTable(ctx, exec, []string{
-		"investment.fd_cashflow_schedule",
-		"investment.fd_cashflow",
-		"investment.fd_master_cashflow_schedule",
+		constants.QuerryCashflowSchedule,
+		constants.QuerryCashflow,
+		constants.QuerryMasterCashflowSchedule,
 	})
 	if table == "" {
 		return nil
@@ -1658,9 +1679,9 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 	}
 
 	table := resolveFirstExistingTable(ctx, exec, []string{
-		"investment.fd_cashflow_schedule",
-		"investment.fd_cashflow",
-		"investment.fd_master_cashflow_schedule",
+		constants.QuerryCashflowSchedule,
+		constants.QuerryCashflow,
+		constants.QuerryMasterCashflowSchedule,
 	})
 	if table == "" {
 		return nil
@@ -1735,42 +1756,58 @@ func saveCashflowBatch(ctx context.Context, exec queryExecutor, table, fdCol str
 	makeValueMap := func(row CashflowRow) map[string]interface{} {
 		vm := map[string]interface{}{
 			fdCol:                  fdID,
-			"sequence_number":     row.PeriodNumber,
-			"period_number":       row.PeriodNumber,
-			"event_type":         row.EventType,
-			"event_date":         row.EventDate,
-			"cashflow_date":      row.EventDate,
-			"period_start_date":  nilIfZero(row.PeriodStartDate),
-			"period_end_date":    nilIfZero(row.PeriodEndDate),
-			"period_days":        nilIfZero(row.PeriodDays),
-			"opening_principal":  row.OpeningPrincipal,
-			"interest_accrued":   row.InterestAccrued,
-			"interest_amount":    row.InterestAccrued,
-			"capitalized_amount": row.CapitalizedAmount,
-			"closing_principal":  row.ClosingPrincipal,
-			"tds_amount":         row.TDSAmount,
-			"net_cash_flow":      row.NetCashFlow,
-			"net_cashflow":       row.NetCashFlow,
-			"net_amount":         row.NetCashFlow,
-			"day_count_code":     nilIfEmpty(row.DayCountCode),
-			"divisor":            nilIfZero(row.Divisor),
-			"formula_used":       nilIfEmpty(row.FormulaUsed),
+			"sequence_number":      row.PeriodNumber,
+			"period_number":        row.PeriodNumber,
+			"event_type":           row.EventType,
+			"event_date":           row.EventDate,
+			"cashflow_date":        row.EventDate,
+			"period_start_date":    nilIfZero(row.PeriodStartDate),
+			"period_end_date":      nilIfZero(row.PeriodEndDate),
+			"period_days":          nilIfZero(row.PeriodDays),
+			"opening_principal":    row.OpeningPrincipal,
+			"interest_accrued":     row.InterestAccrued,
+			"interest_amount":      row.InterestAccrued,
+			"capitalized_amount":   row.CapitalizedAmount,
+			"closing_principal":    row.ClosingPrincipal,
+			"tds_amount":           row.TDSAmount,
+			"net_cash_flow":        row.NetCashFlow,
+			"net_cashflow":         row.NetCashFlow,
+			"net_amount":           row.NetCashFlow,
+			"day_count_code":       nilIfEmpty(row.DayCountCode),
+			"divisor":              nilIfZero(row.Divisor),
+			"formula_used":         nilIfEmpty(row.FormulaUsed),
 			"accrual_rate_per_day": row.AccrualRatePerDay,
-			"dr_account_code":    nilIfEmpty(row.DrAccountCode),
-			"dr_account_name":    nilIfEmpty(row.DrAccountName),
-			"cr_account_code":    nilIfEmpty(row.CrAccountCode),
-			"cr_account_name":    nilIfEmpty(row.CrAccountName),
-			"created_by":         createdBy,
-			"created_at":         now,
+			"dr_account_code":      nilIfEmpty(row.DrAccountCode),
+			"dr_account_name":      nilIfEmpty(row.DrAccountName),
+			"cr_account_code":      nilIfEmpty(row.CrAccountCode),
+			"cr_account_name":      nilIfEmpty(row.CrAccountName),
+			"created_by":           createdBy,
+			"created_at":           now,
 		}
-		if cols["bank_id"] { vm["bank_id"] = masterBankID }
-		if cols["bank_name"] { vm["bank_name"] = masterBankName }
-		if cols["entity_id"] { vm["entity_id"] = masterEntityID }
-		if cols["entity_name"] { vm["entity_name"] = masterEntityName }
-		if cols["source_account_id"] { vm["source_account_id"] = masterSourceAccount }
-		if cols["posting_status"] { vm["posting_status"] = "NOT_POSTED" }
-		if cols["bank_confirmed"] { vm["bank_confirmed"] = false }
-		if cols["bank_reference"] { vm["bank_reference"] = "" }
+		if cols["bank_id"] {
+			vm["bank_id"] = masterBankID
+		}
+		if cols["bank_name"] {
+			vm["bank_name"] = masterBankName
+		}
+		if cols["entity_id"] {
+			vm["entity_id"] = masterEntityID
+		}
+		if cols["entity_name"] {
+			vm["entity_name"] = masterEntityName
+		}
+		if cols["source_account_id"] {
+			vm["source_account_id"] = masterSourceAccount
+		}
+		if cols["posting_status"] {
+			vm["posting_status"] = "NOT_POSTED"
+		}
+		if cols["bank_confirmed"] {
+			vm["bank_confirmed"] = false
+		}
+		if cols["bank_reference"] {
+			vm["bank_reference"] = ""
+		}
 		return vm
 	}
 

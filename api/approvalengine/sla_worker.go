@@ -278,9 +278,16 @@ func handleSequentialSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedE
 			return
 		}
 		// Write final audit: mark record as rejected by system due to SLA
-		if err = finalizeRecord(ctx, tx, eye.recordID, eye.auditTable, eye.auditIDColumn,
-			eye.recordTable, eye.actionType, InstStatusRejected,
-			"system@auto", "Auto-rejected: SLA breached and no escalation configured"); err != nil {
+		if err = finalizeRecord(ctx, tx, FinalizeParams{
+			RecordID:       eye.recordID,
+			AuditTable:     eye.auditTable,
+			AuditIDColumn:  eye.auditIDColumn,
+			RecordTable:    eye.recordTable,
+			ActionType:     eye.actionType,
+			FinalStatus:    InstStatusRejected,
+			CheckerEmail:   "system@auto",
+			CheckerComment: "Auto-rejected: SLA breached and no escalation configured",
+		}); err != nil {
 			api.LogError("[SLA WORKER] SeqSkip finalizeRecord instance=%s: %v", eye.instanceID, err)
 			return
 		}
@@ -345,9 +352,16 @@ func handleParallelSkip(ctx context.Context, pool *pgxpool.Pool, eye breachedEye
 			api.LogError("[SLA WORKER] ParSkip finalize instance=%s: %v", eye.instanceID, err)
 			return
 		}
-		if err = finalizeRecord(ctx, tx, eye.recordID, eye.auditTable, eye.auditIDColumn,
-			eye.recordTable, eye.actionType, InstStatusRejected,
-			"system@auto", "Auto-rejected: SLA breached and no escalation configured"); err != nil {
+		if err = finalizeRecord(ctx, tx, FinalizeParams{
+			RecordID:       eye.recordID,
+			AuditTable:     eye.auditTable,
+			AuditIDColumn:  eye.auditIDColumn,
+			RecordTable:    eye.recordTable,
+			ActionType:     eye.actionType,
+			FinalStatus:    InstStatusRejected,
+			CheckerEmail:   "system@auto",
+			CheckerComment: "Auto-rejected: SLA breached and no escalation configured",
+		}); err != nil {
 			api.LogError("[SLA WORKER] ParSkip finalizeRecord instance=%s: %v", eye.instanceID, err)
 			return
 		}

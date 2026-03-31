@@ -9,6 +9,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,7 +51,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID            string  `json:"user_id"`
 			EntityID          string  `json:"entity_id"`
 			FDID              string  `json:"fd_id"`
-			ReceiptID         string  `json:"receipt_id"`          // required: must be a valid fd_interest_receipt.receipt_id
+			ReceiptID         string  `json:"receipt_id"` // required: must be a valid fd_interest_receipt.receipt_id
 			PeriodStart       string  `json:"period_start"`
 			PeriodEnd         string  `json:"period_end"`
 			TDSExpected       float64 `json:"tds_expected"`
@@ -143,7 +144,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "TDS register entry created successfully",
@@ -256,10 +257,10 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Calculate summary
 		summary := map[string]interface{}{
-			"total_count":         len(entries),
-			"total_tds_expected":  0.0,
-			"total_tds_actual":    0.0,
-			"total_variance":      0.0,
+			"total_count":        len(entries),
+			"total_tds_expected": 0.0,
+			"total_tds_actual":   0.0,
+			"total_variance":     0.0,
 		}
 
 		for _, entry := range entries {
@@ -268,7 +269,7 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			summary["total_variance"] = summary["total_variance"].(float64) + toFloat64(entry["tds_variance"])
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    entries,
@@ -284,16 +285,16 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID            string `json:"user_id"`
-			EntityID          string `json:"entity_id"`
-			ReconcileAction   string `json:"reconcile_action"` // AUTO or MANUAL
-			ToleranceAmount   float64 `json:"tolerance_amount"`
+			UserID              string  `json:"user_id"`
+			EntityID            string  `json:"entity_id"`
+			ReconcileAction     string  `json:"reconcile_action"` // AUTO or MANUAL
+			ToleranceAmount     float64 `json:"tolerance_amount"`
 			ReconciliationItems []struct {
 				TDSID                string  `json:"tds_id"`
 				ExpectedAmount       float64 `json:"expected_amount"`
 				ActualAmount         float64 `json:"actual_amount"`
 				ReconciliationAction string  `json:"reconciliation_action"` // ACCEPT, REJECT
-				Notes               string  `json:"notes"`
+				Notes                string  `json:"notes"`
 			} `json:"reconciliation_items"`
 		}
 
@@ -309,7 +310,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := context.Background()
-		
+
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Transaction start failed")
@@ -318,7 +319,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		updatedCount := 0
-		
+
 		if req.ReconcileAction == "AUTO" {
 			// Auto-reconcile within tolerance
 			_, err = tx.Exec(ctx, `
@@ -334,7 +335,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				  AND is_deleted = false`,
 				req.ToleranceAmount, userEmail, req.EntityID,
 			)
-			
+
 			if err != nil {
 				api.LogError("[TDSReconcile] Auto reconcile failed: %v", err)
 				api.RespondWithError(w, http.StatusInternalServerError, "Auto reconciliation failed")
@@ -361,12 +362,12 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 					WHERE tds_id = $5`,
 					item.ActualAmount, variance, newStatus, userEmail, item.TDSID,
 				)
-				
+
 				if err != nil {
 					api.LogError("[TDSReconcile] Manual reconcile failed for %s: %v", item.TDSID, err)
 					continue
 				}
-				
+
 				updatedCount++
 			}
 		}
@@ -376,7 +377,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "TDS reconciliation completed successfully",
@@ -477,7 +478,7 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 			payload = []map[string]interface{}{}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    payload,

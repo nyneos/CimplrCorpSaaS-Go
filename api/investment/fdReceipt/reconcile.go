@@ -93,7 +93,19 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 		}
 
 		// Step 5: Insert result
-		resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, matchStatus, matchingBasis, variance, variancePct, hasException, cashflowID, accrualID, cashflowAmt, rec.Gross)
+		resultID, rErr := insertReconcileResult(ctx, pool, ReconcileResultParams{
+			Rec:              rec,
+			RunID:            runID,
+			MatchStatus:      matchStatus,
+			MatchingBasis:    matchingBasis,
+			Variance:         variance,
+			VariancePct:      variancePct,
+			HasException:     hasException,
+			CashflowID:       cashflowID,
+			AccrualLedgerID:  accrualID,
+			ExpectedInterest: cashflowAmt,
+			ReceivedInterest: rec.Gross,
+		})
 		if rErr != nil {
 			continue
 		}
@@ -120,7 +132,15 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 
 		// Step 7: Insert exception if needed
 		if hasException {
-			exID, _ := insertException(ctx, pool, rec, runID, resultID, matchStatus, cashflowAmt, rec.Gross, triggeredBy)
+			exID, _ := insertException(ctx, pool, ExceptionParams{
+				Rec:           rec,
+				RunID:         runID,
+				ResultID:      resultID,
+				ExceptionType: matchStatus,
+				ExpectedAmt:   cashflowAmt,
+				ReceivedAmt:   rec.Gross,
+				RaisedBy:      triggeredBy,
+			})
 			if exID != "" {
 				if _, execErr := pool.Exec(ctx,
 					`UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`,
@@ -165,9 +185,29 @@ func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) er
 				continue
 			}
 			rec := ReceiptRow{FDID: fdID, FdRefNo: fdRef, EntityID: entID, Gross: schAmt, ReceiptDate: eventDate}
-			resultID, rErr := insertReconcileResult(ctx, pool, rec, runID, "UNMATCHED", matchingBasis, schAmt, 100.0, true, cfID, "", schAmt, 0)
+			resultID, rErr := insertReconcileResult(ctx, pool, ReconcileResultParams{
+				Rec:              rec,
+				RunID:            runID,
+				MatchStatus:      "UNMATCHED",
+				MatchingBasis:    matchingBasis,
+				Variance:         schAmt,
+				VariancePct:      100.0,
+				HasException:     true,
+				CashflowID:       cfID,
+				AccrualLedgerID:  "",
+				ExpectedInterest: schAmt,
+				ReceivedInterest: 0,
+			})
 			if rErr == nil {
-				exID, _ := insertException(ctx, pool, rec, runID, resultID, "MISSING_RECEIPT", schAmt, 0, triggeredBy)
+				exID, _ := insertException(ctx, pool, ExceptionParams{
+					Rec:           rec,
+					RunID:         runID,
+					ResultID:      resultID,
+					ExceptionType: "MISSING_RECEIPT",
+					ExpectedAmt:   schAmt,
+					ReceivedAmt:   0,
+					RaisedBy:      triggeredBy,
+				})
 				if exID != "" {
 					if _, execErr := pool.Exec(ctx,
 						`UPDATE investment.fd_receipt_reconcile_result SET exception_id=$1 WHERE result_id=$2`,
@@ -244,7 +284,7 @@ func findMatchingCashflow(ctx context.Context, pool *pgxpool.Pool, rec ReceiptRo
 		FROM investment.fd_cashflow_schedule
 		WHERE fd_id = $1
 		  AND event_type = 'MATURITY'
-		  AND ABS((event_date - $2::date)) < 7
+		 AND ABS((event_date - $2::date)) < 7
 		  AND COALESCE(is_deleted, false) = false
 		LIMIT 1`, rec.FDID, rec.ReceiptDate).Scan(&maturityCFID, &maturityAmt)
 	if err == nil && maturityCFID != "" {
@@ -304,11 +344,34 @@ func classify(gross, cashflowAmt, accrualAmt float64) (string, float64, float64)
 
 // insertReconcileResult writes one reconciliation result row and returns its ID.
 // Columns match investment.fd_receipt_reconcile_result schema exactly.
-func insertReconcileResult(ctx context.Context, pool *pgxpool.Pool,
-	rec ReceiptRow, runID, matchStatus, matchingBasis string,
-	variance, variancePct float64, hasException bool,
-	cashflowID, accrualLedgerID string,
-	expectedInterest, receivedInterest float64) (string, error) {
+// ReconcileResultParams groups arguments for insertReconcileResult.
+type ReconcileResultParams struct {
+	Rec              ReceiptRow
+	RunID            string
+	MatchStatus      string
+	MatchingBasis    string
+	Variance         float64
+	VariancePct      float64
+	HasException     bool
+	CashflowID       string
+	AccrualLedgerID  string
+	ExpectedInterest float64
+	ReceivedInterest float64
+}
+
+func insertReconcileResult(ctx context.Context, pool *pgxpool.Pool, p ReconcileResultParams) (string, error) {
+	// map to locals for minimal changes to existing logic
+	rec := p.Rec
+	runID := p.RunID
+	matchStatus := p.MatchStatus
+	matchingBasis := p.MatchingBasis
+	variance := p.Variance
+	variancePct := p.VariancePct
+	hasException := p.HasException
+	cashflowID := p.CashflowID
+	accrualLedgerID := p.AccrualLedgerID
+	expectedInterest := p.ExpectedInterest
+	receivedInterest := p.ReceivedInterest
 
 	// Fetch bank_id, bank_name from fd_master for the result row
 	var bankID, bankName string
@@ -348,7 +411,7 @@ func insertReconcileResult(ctx context.Context, pool *pgxpool.Pool,
 		nullStr(cashflowID), nullStr(accrualLedgerID),
 		rec.EntityID, bankID, bankName,
 		periodStart, periodEnd, matchingBasis,
-		expectedInterest, expectedInterest,     // expected_net = expected_interest (no TDS expected side)
+		expectedInterest, expectedInterest, // expected_net = expected_interest (no TDS expected side)
 		receivedInterest, rec.TDS, rec.Net,
 		variance, tdsVariance, variancePct,
 		matchStatus, hasException,
@@ -358,10 +421,25 @@ func insertReconcileResult(ctx context.Context, pool *pgxpool.Pool,
 
 // insertException creates an exception record for a result with variance/missing.
 // Returns the new exception_id and any error.
-func insertException(ctx context.Context, pool *pgxpool.Pool,
-	rec ReceiptRow, runID, resultID, exceptionType string,
-	expectedAmt, receivedAmt float64,
-	raisedBy string) (string, error) {
+// ExceptionParams groups arguments for insertException.
+type ExceptionParams struct {
+	Rec           ReceiptRow
+	RunID         string
+	ResultID      string
+	ExceptionType string
+	ExpectedAmt   float64
+	ReceivedAmt   float64
+	RaisedBy      string
+}
+
+func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams) (string, error) {
+	rec := p.Rec
+	runID := p.RunID
+	resultID := p.ResultID
+	exceptionType := p.ExceptionType
+	expectedAmt := p.ExpectedAmt
+	receivedAmt := p.ReceivedAmt
+	raisedBy := p.RaisedBy
 
 	severity := "WARNING"
 	if exceptionType == "MISSING_RECEIPT" || exceptionType == "EXCEPTION" {
