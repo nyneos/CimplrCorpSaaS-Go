@@ -2,6 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"encoding/json"
 	"errors"
@@ -143,12 +144,21 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// Get created_by from session
+		createdBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				createdBy = s.Name
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		createdBy := session.Name
+
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
 			if len(cur.CurrencyCode) != 3 {
@@ -273,6 +283,27 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // GET handler to fetch all currency records
 func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
+		// Get created_by from session
+		createdBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				createdBy = s.Name
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+
 		ctx := r.Context()
 
 		// --- Query: mastercurrency + latest audit info per currency (for ordering) ---
