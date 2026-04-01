@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -282,6 +284,69 @@ func insertBankConfigArgs(input BankConfigInput) []interface{} {
 	}
 }
 
+// bankConfigExists checks whether an equivalent active (not deleted) bank config
+// already exists matching the unique index uniq_bank_config_active semantics.
+// Returns (exists, existingConfigID, error)
+func bankConfigExists(ctx context.Context, querier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}, input BankConfigInput) (bool, string, error) {
+	prodNull := input.ProductType == nil
+	minAmtNull := input.MinimumAmount == nil
+	maxAmtNull := input.MaximumAmount == nil
+
+	q := `SELECT config_id FROM investment.fd_bank_config_master
+		WHERE bank_code = $1
+		  AND ((product_type IS NULL) = $2) AND product_type IS NOT DISTINCT FROM $3
+		  AND ((minimum_amount IS NULL) = $4) AND minimum_amount IS NOT DISTINCT FROM $5
+		  AND ((maximum_amount IS NULL) = $6) AND maximum_amount IS NOT DISTINCT FROM $7
+		  AND day_count_code = $8
+		  AND capitalization_schedule_type = $9
+		  AND capitalization_date_adjustment = $10
+		  AND accrual_start_convention = $11
+		  AND accrual_end_convention = $12
+		  AND period_boundary_definition = $13
+		  AND holiday_calendar_code = $14
+		  AND broken_period_method = $15
+		  AND broken_period_location = $16
+		  AND rounding_method = $17
+		  AND rounding_frequency = $18
+		  AND tds_deduction_timing = $19
+		  AND effective_from = $20
+		  AND COALESCE(effective_to, '9999-12-31'::date) = COALESCE($21::date, '9999-12-31'::date)
+		  AND COALESCE(is_deleted,false) = false
+		LIMIT 1`
+
+	row := querier.QueryRow(ctx, q,
+		input.BankCode,
+		prodNull, input.ProductType,
+		minAmtNull, input.MinimumAmount,
+		maxAmtNull, input.MaximumAmount,
+		input.DayCountCode,
+		input.CapitalizationScheduleType,
+		input.CapitalizationDateAdjustment,
+		input.AccrualStartConvention,
+		input.AccrualEndConvention,
+		input.PeriodBoundaryDefinition,
+		input.HolidayCalendarCode,
+		input.BrokenPeriodMethod,
+		input.BrokenPeriodLocation,
+		input.RoundingMethod,
+		input.RoundingFrequency,
+		input.TdsDeductionTiming,
+		input.EffectiveFrom,
+		input.EffectiveTo,
+	)
+	var id string
+	if err := row.Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+
+	return true, id, nil
+}
+
 const bankConfigInsertCols = `bank_code, product_type, minimum_amount, maximum_amount,
 	day_count_code, capitalization_schedule_type, capitalization_date_adjustment,
 	accrual_start_convention, accrual_end_convention, period_boundary_definition,
@@ -389,7 +454,6 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 		}
-
 
 		ctx := r.Context()
 		var validInputs []BankConfigInput
@@ -513,6 +577,17 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 			}
+
+			// uniqueness pre-check (fail-fast)
+			if exists, existingID, err := bankConfigExists(ctx, pgxPool, input); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+				return
+			} else if exists {
+				cols := "bank_code, product_type, minimum_amount, maximum_amount, day_count_code, capitalization_schedule_type, capitalization_date_adjustment, accrual_start_convention, accrual_end_convention, period_boundary_definition, holiday_calendar_code, broken_period_method, broken_period_location, rounding_method, rounding_frequency, tds_deduction_timing, effective_from, effective_to"
+				sendFail(i+2, fmt.Sprintf("conflicts with existing active bank config %s: matching unique key columns: %s", existingID, cols))
+				return
+			}
+
 			validInputs = append(validInputs, input)
 		}
 
@@ -634,6 +709,17 @@ func CreateBankConfigSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		// uniqueness pre-check to provide friendly error
+		if exists, existingID, err := bankConfigExists(ctx, tx, req.BankConfigInput); err != nil {
+			msg, status := getUserFriendlyBankConfigError(err, "failed to validate uniqueness")
+			api.RespondWithError(w, status, msg)
+			return
+		} else if exists {
+			cols := "bank_code, product_type, minimum_amount, maximum_amount, day_count_code, capitalization_schedule_type, capitalization_date_adjustment, accrual_start_convention, accrual_end_convention, period_boundary_definition, holiday_calendar_code, broken_period_method, broken_period_location, rounding_method, rounding_frequency, tds_deduction_timing, effective_from, effective_to"
+			api.RespondWithPayload(w, false, fmt.Sprintf("Create aborted: a matching active bank config already exists (config_id=%s) matching columns: %s", existingID, cols), nil)
+			return
+		}
 
 		var configID string
 		args := insertBankConfigArgs(req.BankConfigInput)
