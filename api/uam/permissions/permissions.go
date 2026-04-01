@@ -755,49 +755,51 @@ func GetSidebarPermissions(db *sql.DB) http.HandlerFunc {
 			http.Error(w, `{"success":false,"error":constants.ErrUserIDRequired}`, http.StatusBadRequest)
 			return
 		}
+		// Build the page list dynamically from `permissions` table, and compute
+		// whether the requesting user has 'hasAccess' true for each page.
+		// We consider only top-level permissions (tab_name IS NULL or empty) for sidebar.
 
-		allPages := []string{
-			"entity", "hierarchical", "masters", "dashboard", "cfo-dashboard",
-			"fx-ops-dashboard", "bu-currency-exposure-dashboard", "hedging-dashboard",
-			"dashboard-builder", "exposure-bucketing", "hedging-proposal", "roles",
-			"permissions", "user-creation", "exposure-upload", "exposure-linkage",
-			"fx-forward-booking", "forward-confirmation", "fx-cancellation", "settlement",
-		}
+		query := `
+		WITH pages AS (
+			SELECT DISTINCT LOWER(TRIM(page_name)) AS page_name
+			FROM public.permissions
+			WHERE page_name IS NOT NULL AND TRIM(page_name) <> ''
+		), user_allowed AS (
+			SELECT LOWER(TRIM(p.page_name)) AS page_name,
+				   bool_or(COALESCE(rp.allowed, false)) AS has_access
+			FROM public.permissions p
+			JOIN public.role_permissions rp ON rp.permission_id = p.id
+			JOIN public.roles r ON r.id = rp.role_id
+			JOIN public.user_roles ur ON ur.role_id = r.id AND ur.user_id = $1
+			WHERE p.action = 'hasAccess'
+			  AND (p.tab_name IS NULL OR TRIM(p.tab_name) = '')
+			  AND LOWER(COALESCE(rp.status,'')) = 'approved'
+			  AND LOWER(COALESCE(r.status,'')) = 'approved'
+			GROUP BY LOWER(TRIM(p.page_name))
+		)
+		SELECT p.page_name, COALESCE(ua.has_access, false) AS has_access
+		FROM pages p
+		LEFT JOIN user_allowed ua ON ua.page_name = p.page_name
+		ORDER BY p.page_name
+		`
 
-		_, _ = db.Exec(`
-			INSERT INTO public.permissions (page_name, tab_name, action)
-			SELECT p, '', 'hasAccess'
-			FROM unnest($1::text[]) AS p
-			ON CONFLICT (page_name, COALESCE(tab_name, ''), action) DO NOTHING
-		`, pq.Array(allPages))
-
-		rows, err := db.Query(`
-			SELECT DISTINCT LOWER(p.page_name)
-			FROM public.user_roles ur
-			JOIN public.roles r ON ur.role_id = r.id
-			JOIN public.role_permissions rp ON r.id = rp.role_id
-			JOIN public.permissions p ON rp.permission_id = p.id
-			WHERE ur.user_id = $1
-			  AND LOWER(rp.status) = 'approved'
-			  AND LOWER(r.status) = 'approved'
-			  AND p.action = 'hasAccess'
-			  AND rp.allowed = true
-		`, req.UserID)
+		rows, err := db.Query(query, req.UserID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"success":false,"error":"%v"}`, err), http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		pages := make(map[string]bool, len(allPages))
-		for _, p := range allPages {
-			pages[p] = false
-		}
-
+		pages := map[string]bool{}
 		for rows.Next() {
-			var page string
-			_ = rows.Scan(&page)
-			pages[page] = true
+			var page sql.NullString
+			var hasAccess bool
+			if err := rows.Scan(&page, &hasAccess); err != nil {
+				continue
+			}
+			if page.Valid {
+				pages[strings.ToLower(strings.TrimSpace(page.String))] = hasAccess
+			}
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
