@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"context"
 )
 
 // getUserFriendlyRateCardError converts database errors to user-friendly messages
@@ -150,6 +152,46 @@ func validateRateCardFields(input BankRateCardInput) error {
 	return nil
 }
 
+// rateCardExists checks whether an equivalent active (not deleted) rate card
+// already exists matching the unique index uniq_fd_rate_card_active semantics.
+func rateCardExists(ctx context.Context, querier interface{ QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row }, input BankRateCardInput) (bool, error) {
+	// Nullness flags for min/max amount
+	minAmtNull := input.MinAmount == nil
+	maxAmtNull := input.MaxAmount == nil
+
+	// For comparison of effective_to use COALESCE(effective_to, '9999-12-31')
+	q := `SELECT rate_card_id FROM investment.fd_bank_rate_card_master
+		WHERE bank_code = $1
+		  AND deposit_type = $2
+		  AND min_tenor_days = $3
+		  AND max_tenor_days = $4
+		  AND ((min_amount IS NULL) = $5) AND min_amount IS NOT DISTINCT FROM $6
+		  AND ((max_amount IS NULL) = $7) AND max_amount IS NOT DISTINCT FROM $8
+		  AND effective_from = $9
+		  AND COALESCE(effective_to, '9999-12-31'::date) = COALESCE($10::date, '9999-12-31'::date)
+		  AND COALESCE(is_deleted,false) = false
+		LIMIT 1`
+
+	row := querier.QueryRow(ctx, q,
+		input.BankCode,
+		strings.ToUpper(strings.TrimSpace(input.DepositType)),
+		input.MinTenorDays,
+		input.MaxTenorDays,
+		minAmtNull, input.MinAmount,
+		maxAmtNull, input.MaxAmount,
+		input.EffectiveFrom,
+		input.EffectiveTo,
+	)
+	var id string
+	if err := row.Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // rateCardFieldPairs maps JSON field names to scan position indices
 var rateCardFieldPairs = map[string]int{
 	"bank_code":                    0,
@@ -226,9 +268,23 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		header := data[0]
+		rows := data[1:]
+
+		// normalize header keys: lowercase, trim, remove non-alphanumeric chars
+		normalize := func(s string) string {
+			s = strings.ToLower(strings.TrimSpace(s))
+			out := make([]rune, 0, len(s))
+			for _, r := range s {
+				if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+					out = append(out, r)
+				}
+			}
+			return string(out)
+		}
+
 		colMap := make(map[string]int)
 		for i, col := range header {
-			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+			colMap[normalize(col)] = i
 		}
 
 		requiredCols := []string{"bank_code", "deposit_type", "min_tenor_days", "max_tenor_days", "interest_rate", "effective_from"}
@@ -241,17 +297,22 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		var validInputs []BankRateCardInput
-		var errResults []map[string]interface{}
+		// Fail-fast send helper
+		sendFail := func(row int, msg string) {
+			summary := fmt.Sprintf("RateCard upload aborted: row %d failed validation: %s", row, msg)
+			api.RespondWithPayload(w, false, summary, nil)
+		}
 
-		for i, row := range data[1:] {
+		var validInputs []BankRateCardInput
+		for ri, row := range rows {
 			if len(row) == 0 {
 				continue
 			}
+			get := func(col string) string { return getColumnValue(row, colMap, normalize(col)) }
 
-			minTenorPtr, _ := parseIntPtr(getColumnValue(row, colMap, "min_tenor_days"))
-			maxTenorPtr, _ := parseIntPtr(getColumnValue(row, colMap, "max_tenor_days"))
-			interestRatePtr, _ := parseFloatPtr(getColumnValue(row, colMap, "interest_rate"))
+			minTenorPtr, _ := parseIntPtr(get("min_tenor_days"))
+			maxTenorPtr, _ := parseIntPtr(get("max_tenor_days"))
+			interestRatePtr, _ := parseFloatPtr(get("interest_rate"))
 
 			minTenor := 0
 			if minTenorPtr != nil {
@@ -266,66 +327,116 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				interestRate = *interestRatePtr
 			}
 
+			efFromRaw := get("effective_from")
+			efFrom, dateErr := parseMasterDate(efFromRaw)
+			if dateErr != nil || efFrom == "" {
+				sendFail(ri+2, "effective_from must be a valid date (YYYY-MM-DD)")
+				return
+			}
+
+			var efToPtr *string
+			if etRaw := get("effective_to"); etRaw != "" {
+				efTo, dateErr2 := parseMasterDate(etRaw)
+				if dateErr2 != nil {
+					sendFail(ri+2, "effective_to must be a valid date (YYYY-MM-DD)")
+					return
+				}
+				efToPtr = &efTo
+				if efToPtr != nil && efTo != "" && efTo < efFrom {
+					sendFail(ri+2, "effective_to must be >= effective_from")
+					return
+				}
+			}
+
 			input := BankRateCardInput{
-				BankCode:      getColumnValue(row, colMap, "bank_code"),
-				DepositType:   strings.ToUpper(getColumnValue(row, colMap, "deposit_type")),
+				BankCode:      strings.TrimSpace(get("bank_code")),
+				DepositType:   strings.ToUpper(strings.TrimSpace(get("deposit_type"))),
 				MinTenorDays:  minTenor,
 				MaxTenorDays:  maxTenor,
 				InterestRate:  interestRate,
-				EffectiveFrom: getColumnValue(row, colMap, "effective_from"),
+				EffectiveFrom: efFrom,
+				EffectiveTo:   efToPtr,
 			}
 
-			input.MinAmount, _ = parseFloatPtr(getColumnValue(row, colMap, "min_amount"))
-			input.MaxAmount, _ = parseFloatPtr(getColumnValue(row, colMap, "max_amount"))
-			input.IsCallable, _ = parseBoolPtr(getColumnValue(row, colMap, "is_callable"))
-			input.PenaltyPercentage, _ = parseFloatPtr(getColumnValue(row, colMap, "penalty_percentage"))
+			input.MinAmount, _ = parseFloatPtr(get("min_amount"))
+			input.MaxAmount, _ = parseFloatPtr(get("max_amount"))
+			input.IsCallable, _ = parseBoolPtr(get("is_callable"))
+			input.PenaltyPercentage, _ = parseFloatPtr(get("penalty_percentage"))
 
-			pwaStr := getColumnValue(row, colMap, "premature_withdrawal_allowed")
+			pwaStr := get("premature_withdrawal_allowed")
 			pwaPtr, _ := parseBoolPtr(pwaStr)
 			if pwaPtr != nil {
 				input.PrematureWithdrawalAllowed = *pwaPtr
 			} else {
-				input.PrematureWithdrawalAllowed = true // default
+				input.PrematureWithdrawalAllowed = true
 			}
 
-			if et := getColumnValue(row, colMap, "effective_to"); et != "" {
-				input.EffectiveTo = &et
-			}
-			if rs := getColumnValue(row, colMap, "rate_source"); rs != "" {
+			if rs := get("rate_source"); rs != "" {
 				rsUpper := strings.ToUpper(rs)
 				input.RateSource = &rsUpper
 			}
-
-			soStr := getColumnValue(row, colMap, "special_offer")
+			soStr := get("special_offer")
 			soPtr, _ := parseBoolPtr(soStr)
 			if soPtr != nil {
 				input.SpecialOffer = *soPtr
 			}
-			if od := getColumnValue(row, colMap, "offer_details"); od != "" {
+			if od := get("offer_details"); od != "" {
 				input.OfferDetails = &od
 			}
-			input.IsActive, _ = parseBoolPtr(getColumnValue(row, colMap, "is_active"))
+			input.IsActive, _ = parseBoolPtr(get("is_active"))
 			if input.IsActive == nil {
 				t := true
 				input.IsActive = &t
 			}
 
+			// basic validations
 			if err := validateRateCardFields(input); err != nil {
-				errResults = append(errResults, map[string]interface{}{
-					"row_index":            i + 2,
-					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
-				})
-				continue
+				sendFail(ri+2, err.Error())
+				return
 			}
+
+			// cross-field checks: min/max amount
+			if input.MinAmount != nil && input.MaxAmount != nil {
+				if *input.MinAmount > *input.MaxAmount {
+					sendFail(ri+2, "min_amount must be <= max_amount when both provided")
+					return
+				}
+			}
+
+			// Resolve bank code (bank_id or bank_name accepted)
+			if input.BankCode == "" {
+				sendFail(ri+2, "bank_code is required")
+				return
+			}
+			if name, _ := bankNameShortFromCode(ctx, input.BankCode); name == "" {
+				if code, ok := bankCodeFromName(ctx, input.BankCode); ok {
+					input.BankCode = code
+				} else {
+					sendFail(ri+2, "bank identifier not recognized (not an approved bank id or name): "+input.BankCode)
+					return
+				}
+			}
+
+			// uniqueness pre-check
+			exists, err := rateCardExists(ctx, pgxPool, input)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+				return
+			}
+			if exists {
+				sendFail(ri+2, "conflicts with existing active rate card")
+				return
+			}
+
 			validInputs = append(validInputs, input)
 		}
 
 		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errResults)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, nil)
 			return
 		}
 
+		// Transactional per-row insertion to avoid multi-row RETURNING issues
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed+err.Error())
@@ -333,71 +444,30 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// Batch insert: 16 fields per row
-		const fieldsPerRow = 16
-		valueStrings := make([]string, len(validInputs))
-		valueArgs := make([]interface{}, 0, len(validInputs)*fieldsPerRow)
-
-		for i, input := range validInputs {
-			base := i * fieldsPerRow
-			valueStrings[i] = fmt.Sprintf(
-				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d::date,$%d::date,$%d,$%d,$%d,$%d)",
-				base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8,
-				base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16,
-			)
-			valueArgs = append(valueArgs,
-				input.BankCode,
-				input.DepositType,
-				input.MinTenorDays,
-				input.MaxTenorDays,
-				input.InterestRate,
-				input.MinAmount,
-				input.MaxAmount,
-				input.IsCallable,
-				input.PrematureWithdrawalAllowed,
-				input.PenaltyPercentage,
-				input.EffectiveFrom, // string → ::date coercion
-				input.EffectiveTo,   // *string → ::date, nil → NULL
-				input.RateSource,
-				input.SpecialOffer,
-				input.OfferDetails,
-				input.IsActive,
-			)
-		}
-
-		batchInsertQuery := fmt.Sprintf(`
-			INSERT INTO investment.fd_bank_rate_card_master (
-				bank_code, deposit_type, min_tenor_days, max_tenor_days, interest_rate,
-				min_amount, max_amount, is_callable, premature_withdrawal_allowed, penalty_percentage,
-				effective_from, effective_to, rate_source, special_offer, offer_details, is_active
-			) VALUES %s
-			RETURNING rate_card_id
-		`, strings.Join(valueStrings, ","))
-
-		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
-		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		defer insertRows.Close()
-
 		var insertedIDs []string
 		var insertedRecords []map[string]interface{}
-
-		for insertRows.Next() {
+		for _, input := range validInputs {
 			var id string
-			if err := insertRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Insert scan failed: "+err.Error())
+			err := tx.QueryRow(ctx, `
+				INSERT INTO investment.fd_bank_rate_card_master (
+					bank_code, deposit_type, min_tenor_days, max_tenor_days, interest_rate,
+					min_amount, max_amount, is_callable, premature_withdrawal_allowed, penalty_percentage,
+					effective_from, effective_to, rate_source, special_offer, offer_details, is_active
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::date,$12::date,$13,$14,$15,$16)
+				RETURNING rate_card_id
+			`,
+				input.BankCode, input.DepositType, input.MinTenorDays, input.MaxTenorDays, input.InterestRate,
+				input.MinAmount, input.MaxAmount, input.IsCallable, input.PrematureWithdrawalAllowed, input.PenaltyPercentage,
+				input.EffectiveFrom, input.EffectiveTo, input.RateSource, input.SpecialOffer, input.OfferDetails, input.IsActive,
+			).Scan(&id)
+			if err != nil {
+				msg, status := getUserFriendlyRateCardError(err, "Insert failed")
+				api.RespondWithError(w, status, msg)
 				return
 			}
 			insertedIDs = append(insertedIDs, id)
-			insertedRecords = append(insertedRecords, map[string]interface{}{
-				constants.ValueSuccess: true,
-				"rate_card_id":         id,
-			})
+			insertedRecords = append(insertedRecords, map[string]interface{}{constants.ValueSuccess: true, "rate_card_id": id})
 		}
-		insertRows.Close()
 
 		if len(insertedIDs) > 0 {
 			auditValues := make([]string, len(insertedIDs))
@@ -424,9 +494,8 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		allResults := append(insertedRecords, errResults...)
-		api.RespondWithPayload(w, len(insertedRecords) > 0, "", allResults)
-		api.LogInfo("RateCard upload: %d inserted, %d errors from %s", len(insertedRecords), len(errResults), handler.Filename)
+		api.RespondWithPayload(w, len(insertedRecords) > 0, "", insertedRecords)
+		api.LogInfo("RateCard upload: %d inserted from %s", len(insertedRecords), handler.Filename)
 	}
 }
 
@@ -470,6 +539,15 @@ func CreateBankRateCardSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		// Check uniqueness before attempting insert to provide a friendly error
+		if exists, err := rateCardExists(ctx, tx, req.BankRateCardInput); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+			return
+		} else if exists {
+			api.RespondWithPayload(w, false, "Rate card create aborted: a matching active rate card already exists", nil)
+			return
+		}
 
 		var rateCardID string
 		err = tx.QueryRow(ctx, `
@@ -545,6 +623,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 
 		var validRows []BankRateCardInput
+		var validRowIndices []int
 		var errResults []map[string]interface{}
 
 		for i, row := range req.Rows {
@@ -561,6 +640,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 			} else {
 				validRows = append(validRows, row)
+				validRowIndices = append(validRowIndices, i)
 			}
 		}
 
@@ -576,57 +656,51 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		const fieldsPerRow = 16
-		valueStrings := make([]string, len(validRows))
-		valueArgs := make([]interface{}, 0, len(validRows)*fieldsPerRow)
-
-		for i, input := range validRows {
-			base := i * fieldsPerRow
-			valueStrings[i] = fmt.Sprintf(
-				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d::date,$%d::date,$%d,$%d,$%d,$%d)",
-				base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8,
-				base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16,
-			)
-			valueArgs = append(valueArgs,
-				input.BankCode, input.DepositType, input.MinTenorDays, input.MaxTenorDays, input.InterestRate,
-				input.MinAmount, input.MaxAmount, input.IsCallable, input.PrematureWithdrawalAllowed, input.PenaltyPercentage,
-				input.EffectiveFrom, input.EffectiveTo, input.RateSource,
-				input.SpecialOffer, input.OfferDetails, input.IsActive,
-			)
+		// Pre-check uniqueness per valid row inside the transaction and perform per-row inserts.
+		var toInsert []BankRateCardInput
+		var toInsertIndices []int
+		for idx, input := range validRows {
+			origIdx := validRowIndices[idx]
+			exists, err := rateCardExists(ctx, tx, input)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+				return
+			}
+			if exists {
+				errResults = append(errResults, map[string]interface{}{
+					"row_index":            origIdx,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "conflicts with existing active rate card",
+				})
+				continue
+			}
+			toInsert = append(toInsert, input)
+			toInsertIndices = append(toInsertIndices, origIdx)
 		}
-
-		batchInsertQuery := fmt.Sprintf(`
-			INSERT INTO investment.fd_bank_rate_card_master (
-				bank_code, deposit_type, min_tenor_days, max_tenor_days, interest_rate,
-				min_amount, max_amount, is_callable, premature_withdrawal_allowed, penalty_percentage,
-				effective_from, effective_to, rate_source, special_offer, offer_details, is_active
-			) VALUES %s RETURNING rate_card_id
-		`, strings.Join(valueStrings, ","))
-
-		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
-		if err != nil {
-			msg, status := getUserFriendlyRateCardError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
-			return
-		}
-		defer insertRows.Close()
 
 		var insertedIDs []string
 		var insertedRecords []map[string]interface{}
-
-		for insertRows.Next() {
+		for _, input := range toInsert {
 			var id string
-			if err := insertRows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
+			err := tx.QueryRow(ctx, `
+				INSERT INTO investment.fd_bank_rate_card_master (
+					bank_code, deposit_type, min_tenor_days, max_tenor_days, interest_rate,
+					min_amount, max_amount, is_callable, premature_withdrawal_allowed, penalty_percentage,
+					effective_from, effective_to, rate_source, special_offer, offer_details, is_active
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::date,$12::date,$13,$14,$15,$16)
+				RETURNING rate_card_id
+			`,
+				input.BankCode, input.DepositType, input.MinTenorDays, input.MaxTenorDays, input.InterestRate,
+				input.MinAmount, input.MaxAmount, input.IsCallable, input.PrematureWithdrawalAllowed, input.PenaltyPercentage,
+				input.EffectiveFrom, input.EffectiveTo, input.RateSource, input.SpecialOffer, input.OfferDetails, input.IsActive,
+			).Scan(&id)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Insert failed: "+err.Error())
 				return
 			}
 			insertedIDs = append(insertedIDs, id)
-			insertedRecords = append(insertedRecords, map[string]interface{}{
-				constants.ValueSuccess: true,
-				"rate_card_id":         id,
-			})
+			insertedRecords = append(insertedRecords, map[string]interface{}{constants.ValueSuccess: true, "rate_card_id": id})
 		}
-		insertRows.Close()
 
 		if len(insertedIDs) > 0 {
 			auditValues := make([]string, len(insertedIDs))

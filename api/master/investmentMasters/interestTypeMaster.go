@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -208,15 +209,21 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		header := rows[0]
 		data := rows[1:]
 
-		// Validate required columns
+		// Normalize header keys (remove non-alphanumeric, lowercase) and validate required columns
+		normalize := func(s string) string {
+			s = strings.ToLower(strings.TrimSpace(s))
+			re := regexp.MustCompile(`[^a-z0-9]`)
+			return re.ReplaceAllString(s, "")
+		}
+
 		requiredCols := []string{"interest_type_code", "interest_type_name", "calculation_method"}
 		colMap := make(map[string]int)
 		for i, col := range header {
-			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+			colMap[normalize(col)] = i
 		}
 
 		for _, reqCol := range requiredCols {
-			if _, exists := colMap[reqCol]; !exists {
+			if _, exists := colMap[normalize(reqCol)]; !exists {
 				errMsg := fmt.Sprintf("Required column '%s' not found", reqCol)
 				api.RespondWithError(w, http.StatusBadRequest, errMsg)
 				api.LogError("Column validation failed: %s", errMsg)
@@ -227,48 +234,57 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Process rows in ultra-fast batch mode
 		ctx := r.Context()
 		var validInputs []InterestTypeInput
-		var errors []map[string]interface{}
+		var validSourceRows []int
 
-		// Pre-validate ALL rows first
+		// helper to send concise fail-fast response
+		sendFail := func(row int, errMsg string) {
+			summary := fmt.Sprintf("Interest type upload aborted: row %d failed validation: %s", row, errMsg)
+			api.RespondWithPayload(w, false, summary, nil)
+		}
+
+		// Pre-validate ALL rows first (fail-fast on first error)
 		for rowIdx, row := range data {
 			if len(row) == 0 {
 				continue
 			}
 
+			// helper to fetch by normalized name
+			get := func(col string) string { return getColumnValue(row, colMap, normalize(col)) }
+
 			input := InterestTypeInput{
-				InterestTypeCode:  getColumnValue(row, colMap, "interest_type_code"),
-				InterestTypeName:  getColumnValue(row, colMap, "interest_type_name"),
-				CalculationMethod: strings.ToUpper(getColumnValue(row, colMap, "calculation_method")),
+				InterestTypeCode:  get("interest_type_code"),
+				InterestTypeName:  get("interest_type_name"),
+				CalculationMethod: strings.ToUpper(get("calculation_method")),
 			}
 
 			// Parse optional fields with detailed error handling
 			var fieldErrors []string
 
-			if val := getColumnValue(row, colMap, "min_tenor_days"); val != "" {
+			if val := get("min_tenor_days"); val != "" {
 				if parsed, err := parseIntPtr(val); err != nil {
 					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid min_tenor_days '%s'", val))
 				} else {
 					input.MinTenorDays = parsed
 				}
 			}
-			if val := getColumnValue(row, colMap, "max_tenor_days"); val != "" {
+			if val := get("max_tenor_days"); val != "" {
 				if parsed, err := parseIntPtr(val); err != nil {
 					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid max_tenor_days '%s'", val))
 				} else {
 					input.MaxTenorDays = parsed
 				}
 			}
-			if val := getColumnValue(row, colMap, "is_default"); val != "" {
+			if val := get("is_default"); val != "" {
 				if parsed, err := parseBoolPtr(val); err != nil {
 					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid is_default '%s' (use true/false)", val))
 				} else {
 					input.IsDefault = parsed
 				}
 			}
-			if val := getColumnValue(row, colMap, "description"); val != "" {
+			if val := get("description"); val != "" {
 				input.Description = val
 			}
-			if val := getColumnValue(row, colMap, "is_active"); val != "" {
+			if val := get("is_active"); val != "" {
 				if parsed, err := parseBoolPtr(val); err != nil {
 					fieldErrors = append(fieldErrors, fmt.Sprintf("invalid is_active '%s' (use true/false)", val))
 				} else {
@@ -286,28 +302,20 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				input.IsActive = &defaultVal
 			}
 
-			// Validate field parsing errors first
+			// Validate field parsing errors first (fail-fast)
 			if len(fieldErrors) > 0 {
-				errors = append(errors, map[string]interface{}{
-					"row":                  rowIdx + 2,
-					constants.ValueSuccess: false,
-					constants.ValueError:   "Field parsing errors: " + strings.Join(fieldErrors, ", "),
-					"interest_type_code":   input.InterestTypeCode,
-				})
-				continue
+				sendFail(rowIdx+2, "Field parsing errors: "+strings.Join(fieldErrors, ", "))
+				return
 			}
 
-			// Validate business logic
+			// Validate business logic (fail-fast)
 			if err := validateInterestTypeFields(input); err != nil {
-				errors = append(errors, map[string]interface{}{
-					"row":                  rowIdx + 2,
-					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
-					"interest_type_code":   input.InterestTypeCode,
-				})
-			} else {
-				validInputs = append(validInputs, input)
+				sendFail(rowIdx+2, err.Error())
+				return
 			}
+
+			validInputs = append(validInputs, input)
+			validSourceRows = append(validSourceRows, rowIdx+2)
 		}
 
 		// ULTRA FAST: Single transaction for ALL inserts
@@ -356,29 +364,26 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			existingNames[name] = true
 		}
 
-		// Filter out duplicates and create error reports
+		// Fail-fast on first duplicate (treat duplicates as validation errors)
 		var finalValidInputs []InterestTypeInput
-		for _, input := range validInputs {
+		for i, input := range validInputs {
 			if existingCodes[input.InterestTypeCode] {
-				errors = append(errors, map[string]interface{}{
-					"interest_type_code":   input.InterestTypeCode,
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrInterestTypeCodeAlreadyExists,
-				})
-			} else if existingNames[input.InterestTypeName] {
-				errors = append(errors, map[string]interface{}{
-					"interest_type_code":   input.InterestTypeCode,
-					constants.ValueSuccess: false,
-					constants.ValueError:   constants.ErrInterestTypeNameAlreadyExists,
-				})
-			} else {
-				finalValidInputs = append(finalValidInputs, input)
+				src := 0
+				if i < len(validSourceRows) {
+					src = validSourceRows[i]
+				}
+				sendFail(src, constants.ErrInterestTypeCodeAlreadyExists)
+				return
 			}
-		}
-
-		if len(finalValidInputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation or are duplicates", errors)
-			return
+			if existingNames[input.InterestTypeName] {
+				src := 0
+				if i < len(validSourceRows) {
+					src = validSourceRows[i]
+				}
+				sendFail(src, constants.ErrInterestTypeNameAlreadyExists)
+				return
+			}
+			finalValidInputs = append(finalValidInputs, input)
 		}
 
 		// Build batch insert - ALL remaining valid rows in ONE query
@@ -471,12 +476,16 @@ func UploadInterestTypeSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Combine results
-		allResults := append(insertedRecords, errors...)
-		success := len(insertedRecords) > 0
-		api.RespondWithPayload(w, success, "", allResults)
-		api.LogInfo("Upload completed: %d inserted, %d errors, %d total from file %s",
-			len(insertedRecords), len(errors), len(data), handler.Filename)
+		// Respond concisely
+		if len(insertedRecords) > 0 {
+			msg := fmt.Sprintf("%d interest types created successfully", len(insertedRecords))
+			api.RespondWithPayload(w, true, msg, nil)
+			api.LogInfo("Upload completed: %d inserted, %d total from file %s",
+				len(insertedRecords), len(data), handler.Filename)
+			return
+		}
+		api.RespondWithPayload(w, false, "No interest types were created", nil)
+		api.LogInfo("Upload completed: 0 inserted, %d total from file %s", len(data), handler.Filename)
 	}
 }
 

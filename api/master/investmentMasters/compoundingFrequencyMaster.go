@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -135,6 +136,100 @@ func GetCompoundingFrequenciesApprovedActive(pgxPool *pgxpool.Pool) http.Handler
 	}
 }
 
+// validateCompoundingFrequencyMap validates fields in a generic input map and returns
+// an error message string (empty if valid). This is used by bulk and upload flows.
+func validateCompoundingFrequencyMap(m map[string]interface{}) string {
+	// code
+	code, _ := m["frequency_code"].(string)
+	name, _ := m["frequency_name"].(string)
+	ftype, _ := m["frequency_type"].(string)
+
+	// frequency_code: required, pattern ^FREQ-[A-Za-z-]+$, max 50
+	if strings.TrimSpace(code) == "" {
+		return "frequency_code is required"
+	}
+	if len(code) > 50 {
+		return "frequency_code max length is 50"
+	}
+	codeRe := regexp.MustCompile(`^FREQ-[A-Za-z-]+$`)
+	if !codeRe.MatchString(code) {
+		return "frequency_code must match pattern FREQ-[A-Za-z-]+"
+	}
+
+	// frequency_name: required, max 100
+	if strings.TrimSpace(name) == "" {
+		return "frequency_name is required"
+	}
+	if len(name) > 100 {
+		return "frequency_name max length is 100"
+	}
+
+	// frequency_type: required, enum
+	if strings.TrimSpace(ftype) == "" {
+		return "frequency_type is required"
+	}
+	ftype = strings.ToUpper(ftype)
+	allowed := map[string]bool{"DAILY": true, "MONTHLY": true, "QUARTERLY": true, "HALF_YEARLY": true, "ANNUAL": true, "CUSTOM": true}
+	if !allowed[ftype] {
+		return "frequency_type must be one of DAILY, MONTHLY, QUARTERLY, HALF_YEARLY, ANNUAL, CUSTOM"
+	}
+
+	// compounding_periods_per_year: required if CUSTOM, if present must be >=1
+	if ftype == "CUSTOM" {
+		if v, ok := m["compounding_periods_per_year"]; !ok {
+			return "compounding_periods_per_year is required for CUSTOM frequency_type"
+		} else {
+			// value may be int or float64 depending on JSON decoding
+			switch val := v.(type) {
+			case int:
+				if val < 1 {
+					return "compounding_periods_per_year must be >= 1"
+				}
+			case float64:
+				if int(val) < 1 {
+					return "compounding_periods_per_year must be >= 1"
+				}
+			default:
+				return "compounding_periods_per_year must be a number"
+			}
+		}
+	} else {
+		if v, ok := m["compounding_periods_per_year"]; ok && v != nil {
+			switch val := v.(type) {
+			case int:
+				if val < 1 {
+					return "compounding_periods_per_year must be >= 1"
+				}
+			case float64:
+				if int(val) < 1 {
+					return "compounding_periods_per_year must be >= 1"
+				}
+			}
+		}
+	}
+
+	// days_per_period: if present must be >=1
+	if v, ok := m["days_per_period"]; ok && v != nil {
+		switch val := v.(type) {
+		case int:
+			if val < 1 {
+				return "days_per_period must be >= 1"
+			}
+		case float64:
+			if int(val) < 1 {
+				return "days_per_period must be >= 1"
+			}
+		}
+	}
+
+	// description: max 500
+	if v, ok := m["description"].(string); ok && len(v) > 500 {
+		return "description max length is 500"
+	}
+
+	return ""
+}
+
 // --- Create Single Handler ---
 func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -153,8 +248,17 @@ func CreateCompoundingFrequencySingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		if req.FrequencyCode == "" || req.FrequencyName == "" || req.FrequencyType == "" || req.CompoundingPeriodsPerYear <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "frequency_code, frequency_name, frequency_type and compounding_periods_per_year are required")
+		// Validate input per rules: compounding_periods_per_year required only for CUSTOM
+		inputMap := map[string]interface{}{
+			"frequency_code":               req.FrequencyCode,
+			"frequency_name":               req.FrequencyName,
+			"frequency_type":               req.FrequencyType,
+			"compounding_periods_per_year": req.CompoundingPeriodsPerYear,
+			"days_per_period":              req.DaysPerPeriod,
+			"description":                  req.Description,
+		}
+		if errMsg := validateCompoundingFrequencyMap(inputMap); errMsg != "" {
+			api.RespondWithError(w, http.StatusBadRequest, errMsg)
 			return
 		}
 
@@ -479,12 +583,26 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		header := rows[0]
 		data := rows[1:]
-		colMap := make(map[string]int)
-		for i, col := range header {
-			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+		// normalize header keys: lowercase, trim, remove non-alphanumeric chars
+		normalize := func(s string) string {
+			s = strings.ToLower(strings.TrimSpace(s))
+			// remove any character that is not a-z, 0-9 or _
+			out := make([]rune, 0, len(s))
+			for _, r := range s {
+				if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+					out = append(out, r)
+				}
+			}
+			return string(out)
 		}
 
-		requiredCols := []string{"frequency_code", "frequency_name", "frequency_type", "compounding_periods_per_year"}
+		colMap := make(map[string]int)
+		for i, col := range header {
+			colMap[normalize(col)] = i
+		}
+
+		requiredCols := []string{"frequency_code", "frequency_name", "frequency_type"}
+		// compounding_periods_per_year may be required depending on frequency_type per-row
 		for _, rc := range requiredCols {
 			if _, ok := colMap[rc]; !ok {
 				api.RespondWithError(w, http.StatusBadRequest, "Required column '"+rc+"' not found")
@@ -495,30 +613,78 @@ func UploadCompoundingFrequencySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Reuse CreateCompoundingFrequency logic by building rows
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
+		// Fail-fast: validate each row and abort on first validation error
 		for ri, row := range data {
-			code := getColumnValue(row, colMap, "frequency_code")
-			name := getColumnValue(row, colMap, "frequency_name")
-			ftype := getColumnValue(row, colMap, "frequency_type")
-			periodsStr := getColumnValue(row, colMap, "compounding_periods_per_year")
-			if code == "" || name == "" || ftype == "" || periodsStr == "" {
-				errorsList = append(errorsList, map[string]interface{}{"row": ri + 2, constants.ValueSuccess: false, constants.ValueError: "Missing required columns"})
-				continue
-			}
-			periods, _ := parseIntPtr(periodsStr)
-			days := (*int)(nil)
-			if v := getColumnValue(row, colMap, "days_per_period"); v != "" {
-				if p, err := parseIntPtr(v); err == nil {
-					days = p
+			get := func(col string) string { return getColumnValue(row, colMap, col) }
+
+			code := strings.TrimSpace(get("frequency_code"))
+			name := strings.TrimSpace(get("frequency_name"))
+			ftype := strings.TrimSpace(get("frequency_type"))
+			periodsStr := strings.TrimSpace(get("compounding_periods_per_year"))
+			daysStr := strings.TrimSpace(get("days_per_period"))
+			desc := strings.TrimSpace(get("description"))
+
+			// Build map for validation helper
+			var periodsVal interface{} = nil
+			if periodsStr != "" {
+				if p, err := parseIntPtr(periodsStr); err == nil && p != nil {
+					periodsVal = *p
 				}
 			}
+			var daysVal interface{} = nil
+			if daysStr != "" {
+				if d, err := parseIntPtr(daysStr); err == nil && d != nil {
+					daysVal = *d
+				}
+			}
+
+			input := map[string]interface{}{
+				"frequency_code":               code,
+				"frequency_name":               name,
+				"frequency_type":               ftype,
+				"compounding_periods_per_year": periodsVal,
+				"days_per_period":              daysVal,
+				"description":                  desc,
+			}
+
+			if vErr := validateCompoundingFrequencyMap(input); vErr != "" {
+				// Fail-fast response
+				summary := fmt.Sprintf("Compounding frequency upload aborted: row %d failed validation: %s", ri+2, vErr)
+				api.RespondWithPayload(w, false, summary, nil)
+				return
+			}
+
+			// prepare normalized values for insertion
 			isActive := func() *bool { b := true; return &b }()
+			// if periodsVal is nil, set default 0
+			var periodsInt int
+			if periodsVal != nil {
+				switch v := periodsVal.(type) {
+				case int:
+					periodsInt = v
+				case float64:
+					periodsInt = int(v)
+				}
+			}
+
+			var daysPtr *int
+			if daysVal != nil {
+				switch v := daysVal.(type) {
+				case int:
+					daysPtr = &v
+				case float64:
+					dv := int(v)
+					daysPtr = &dv
+				}
+			}
+
 			inputs = append(inputs, map[string]interface{}{
 				"frequency_code":               code,
 				"frequency_name":               name,
 				"frequency_type":               strings.ToUpper(ftype),
-				"compounding_periods_per_year": *periods,
-				"days_per_period":              days,
-				"description":                  getColumnValue(row, colMap, "description"),
+				"compounding_periods_per_year": periodsInt,
+				"days_per_period":              daysPtr,
+				"description":                  desc,
 				"is_active":                    isActive,
 			})
 		}

@@ -362,9 +362,20 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		header := data[0]
+		// normalize header keys: lowercase, trim, remove non-alphanumeric chars
+		normalize := func(s string) string {
+			s = strings.ToLower(strings.TrimSpace(s))
+			out := make([]rune, 0, len(s))
+			for _, r := range s {
+				if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+					out = append(out, r)
+				}
+			}
+			return string(out)
+		}
 		colMap := make(map[string]int)
 		for i, col := range header {
-			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+			colMap[normalize(col)] = i
 		}
 
 		requiredCols := []string{"bank_code", "day_count_code", "holiday_calendar_code",
@@ -379,41 +390,44 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+
 		ctx := r.Context()
 		var validInputs []BankConfigInput
-		var errResults []map[string]interface{}
+		// Fail-fast helper
+		sendFail := func(row int, msg string) {
+			summary := fmt.Sprintf("BankConfig upload aborted: row %d failed validation: %s", row, msg)
+			api.RespondWithPayload(w, false, summary, nil)
+		}
 
 		for i, row := range data[1:] {
 			if len(row) == 0 {
 				continue
 			}
 
+			get := func(col string) string { return getColumnValue(row, colMap, normalize(col)) }
+
 			input := BankConfigInput{
-				BankCode:                     getColumnValue(row, colMap, "bank_code"),
-				DayCountCode:                 getColumnValue(row, colMap, "day_count_code"),
-				HolidayCalendarCode:          getColumnValue(row, colMap, "holiday_calendar_code"),
-				CapitalizationScheduleType:   getColumnValue(row, colMap, "capitalization_schedule_type"),
-				CapitalizationDateAdjustment: getColumnValue(row, colMap, "capitalization_date_adjustment"),
-				AccrualStartConvention:       getColumnValue(row, colMap, "accrual_start_convention"),
-				AccrualEndConvention:         getColumnValue(row, colMap, "accrual_end_convention"),
-				PeriodBoundaryDefinition:     getColumnValue(row, colMap, "period_boundary_definition"),
-				BrokenPeriodMethod:           getColumnValue(row, colMap, "broken_period_method"),
-				BrokenPeriodLocation:         getColumnValue(row, colMap, "broken_period_location"),
-				RoundingMethod:               getColumnValue(row, colMap, "rounding_method"),
-				RoundingFrequency:            getColumnValue(row, colMap, "rounding_frequency"),
-				TdsDeductionTiming:           getColumnValue(row, colMap, "tds_deduction_timing"),
+				BankCode:                     strings.TrimSpace(get("bank_code")),
+				DayCountCode:                 strings.TrimSpace(get("day_count_code")),
+				HolidayCalendarCode:          strings.TrimSpace(get("holiday_calendar_code")),
+				CapitalizationScheduleType:   strings.TrimSpace(get("capitalization_schedule_type")),
+				CapitalizationDateAdjustment: strings.TrimSpace(get("capitalization_date_adjustment")),
+				AccrualStartConvention:       strings.TrimSpace(get("accrual_start_convention")),
+				AccrualEndConvention:         strings.TrimSpace(get("accrual_end_convention")),
+				PeriodBoundaryDefinition:     strings.TrimSpace(get("period_boundary_definition")),
+				BrokenPeriodMethod:           strings.TrimSpace(get("broken_period_method")),
+				BrokenPeriodLocation:         strings.TrimSpace(get("broken_period_location")),
+				RoundingMethod:               strings.TrimSpace(get("rounding_method")),
+				RoundingFrequency:            strings.TrimSpace(get("rounding_frequency")),
+				TdsDeductionTiming:           strings.TrimSpace(get("tds_deduction_timing")),
 			}
 
 			// ── Date sanitisation ────────────────────────────────────────────
 			// Parse effective_from — accepts any common format, normalises to YYYY-MM-DD
-			efFrom, dateErr := parseMasterDate(getColumnValue(row, colMap, "effective_from"))
+			efFrom, dateErr := parseMasterDate(get("effective_from"))
 			if dateErr != nil {
-				errResults = append(errResults, map[string]interface{}{
-					"row_index":            i + 2,
-					constants.ValueSuccess: false,
-					constants.ValueError:   "effective_from: " + dateErr.Error(),
-				})
-				continue
+				sendFail(i+2, "effective_from: "+dateErr.Error())
+				return
 			}
 			input.EffectiveFrom = efFrom
 
@@ -421,21 +435,27 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if etRaw := getColumnValue(row, colMap, "effective_to"); etRaw != "" {
 				efTo, dateErr2 := parseMasterDate(etRaw)
 				if dateErr2 != nil {
-					errResults = append(errResults, map[string]interface{}{
-						"row_index":            i + 2,
-						constants.ValueSuccess: false,
-						constants.ValueError:   "effective_to: " + dateErr2.Error(),
-					})
-					continue
+					sendFail(i+2, "effective_to: "+dateErr2.Error())
+					return
 				}
 				input.EffectiveTo = &efTo
+				if *input.EffectiveTo < input.EffectiveFrom {
+					sendFail(i+2, "effective_to must be >= effective_from")
+					return
+				}
 			}
 
 			if pt := getColumnValue(row, colMap, "product_type"); pt != "" {
 				input.ProductType = &pt
 			}
-			input.MinimumAmount, _ = parseFloatPtr(getColumnValue(row, colMap, "minimum_amount"))
-			input.MaximumAmount, _ = parseFloatPtr(getColumnValue(row, colMap, "maximum_amount"))
+			input.MinimumAmount, _ = parseFloatPtr(get("minimum_amount"))
+			input.MaximumAmount, _ = parseFloatPtr(get("maximum_amount"))
+			if input.MinimumAmount != nil && input.MaximumAmount != nil {
+				if *input.MinimumAmount > *input.MaximumAmount {
+					sendFail(i+2, "minimum_amount must be <= maximum_amount when both provided")
+					return
+				}
+			}
 
 			waPtr, _ := parseBoolPtr(getColumnValue(row, colMap, "weekend_accrual"))
 			if waPtr != nil {
@@ -446,11 +466,17 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				input.HolidayAccrual = *haPtr
 			}
 
-			rdPtr, _ := parseIntPtr(getColumnValue(row, colMap, "interest_rounding_decimals"))
+			rdPtr, _ := parseIntPtr(get("interest_rounding_decimals"))
 			if rdPtr != nil {
 				input.InterestRoundingDecimals = *rdPtr
 			} else {
 				input.InterestRoundingDecimals = 2
+			}
+
+			// interest rounding decimals sanity check (0..6)
+			if input.InterestRoundingDecimals < 0 || input.InterestRoundingDecimals > 6 {
+				sendFail(i+2, "interest_rounding_decimals must be between 0 and 6")
+				return
 			}
 
 			input.GracePeriodDays, _ = parseIntPtr(getColumnValue(row, colMap, "grace_period_days"))
@@ -471,18 +497,27 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := validateBankConfigFields(input); err != nil {
-				errResults = append(errResults, map[string]interface{}{
-					"row_index":            i + 2,
-					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
-				})
-				continue
+				sendFail(i+2, err.Error())
+				return
+			}
+			// Resolve bank code from name if needed
+			if input.BankCode == "" {
+				sendFail(i+2, "bank_code is required")
+				return
+			}
+			if name, _ := bankNameShortFromCode(ctx, input.BankCode); name == "" {
+				if code, ok := bankCodeFromName(ctx, input.BankCode); ok {
+					input.BankCode = code
+				} else {
+					sendFail(i+2, "bank identifier not recognized (not an approved bank id or name): "+input.BankCode)
+					return
+				}
 			}
 			validInputs = append(validInputs, input)
 		}
 
 		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errResults)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, nil)
 			return
 		}
 
@@ -554,9 +589,8 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		allResults := append(insertedRecords, errResults...)
-		api.RespondWithPayload(w, len(insertedRecords) > 0, "", allResults)
-		api.LogInfo("BankConfig upload: %d inserted, %d errors from %s", len(insertedRecords), len(errResults), handler.Filename)
+		api.RespondWithPayload(w, len(insertedRecords) > 0, "", insertedRecords)
+		api.LogInfo("BankConfig upload: %d inserted from %s", len(insertedRecords), handler.Filename)
 	}
 }
 
