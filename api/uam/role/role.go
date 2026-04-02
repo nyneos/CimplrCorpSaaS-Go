@@ -360,7 +360,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Approve roles
 		if len(toApprove) > 0 {
-			appRows, err := db.Query(`UPDATE roles SET status = 'approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
+			appRows, err := db.Query(`UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
 			if err == nil {
 				defer appRows.Close()
 				cols, _ := appRows.Columns()
