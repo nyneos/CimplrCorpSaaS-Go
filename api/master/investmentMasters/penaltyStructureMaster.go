@@ -254,6 +254,72 @@ func penaltyStructureExists(ctx context.Context, querier interface {
 	return true, nil
 }
 
+// penaltyStructureFindConflict returns a map of column values for an existing
+// active penalty structure that matches the unique-index expression for the
+// provided input. Returns (nil, nil) when no conflict found.
+func penaltyStructureFindConflict(ctx context.Context, querier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}, input PenaltyStructureInput) (map[string]interface{}, error) {
+	minAmtNull := input.MinAmountRange == nil
+	maxAmtNull := input.MaxAmountRange == nil
+	minHeldNull := input.MinHeldDays == nil
+	maxHeldNull := input.MaxHeldDays == nil
+
+	q := `SELECT penalty_id, bank_code, min_amount_range, max_amount_range, min_tenor_days, max_tenor_days, min_held_days, max_held_days, penalty_type, penalty_value, calculation_method, effective_from, effective_to
+		FROM investment.fd_penalty_structure_master
+		WHERE bank_code = $1
+		  AND ((min_amount_range IS NULL) = $2) AND min_amount_range IS NOT DISTINCT FROM $3
+		  AND ((max_amount_range IS NULL) = $4) AND max_amount_range IS NOT DISTINCT FROM $5
+		  AND min_tenor_days = $6
+		  AND max_tenor_days = $7
+		  AND ((min_held_days IS NULL) = $8) AND min_held_days IS NOT DISTINCT FROM $9
+		  AND ((max_held_days IS NULL) = $10) AND max_held_days IS NOT DISTINCT FROM $11
+		  AND penalty_type = $12
+		  AND penalty_value = $13
+		  AND calculation_method = $14
+		  AND COALESCE(is_deleted,false) = false
+		LIMIT 1`
+
+	row := querier.QueryRow(ctx, q,
+		input.BankCode,
+		minAmtNull, input.MinAmountRange,
+		maxAmtNull, input.MaxAmountRange,
+		input.MinTenorDays,
+		input.MaxTenorDays,
+		minHeldNull, input.MinHeldDays,
+		maxHeldNull, input.MaxHeldDays,
+		strings.ToUpper(input.PenaltyType),
+		input.PenaltyValue,
+		input.CalculationMethod,
+	)
+
+	// scan into interface{} columns so we can echo the raw values back
+	var pid, bcode, minAmt, maxAmt, minTenor, maxTenor, minHeld, maxHeld, pType, pValue, calcMethod, effFrom, effTo interface{}
+	if err := row.Scan(&pid, &bcode, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &effFrom, &effTo); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	m := map[string]interface{}{
+		"penalty_id":        pid,
+		"bank_code":         bcode,
+		"min_amount_range":  minAmt,
+		"max_amount_range":  maxAmt,
+		"min_tenor_days":    minTenor,
+		"max_tenor_days":    maxTenor,
+		"min_held_days":     minHeld,
+		"max_held_days":     maxHeld,
+		"penalty_type":      pType,
+		"penalty_value":     pValue,
+		"calculation_method": calcMethod,
+		"effective_from":    effFrom,
+		"effective_to":      effTo,
+	}
+	return m, nil
+}
+
 // --- Single Create Handler ---
 func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -299,11 +365,11 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		// Check uniqueness before attempting insert to provide a friendly error
-		if exists, err := penaltyStructureExists(ctx, tx, input); err != nil {
+		if conflict, err := penaltyStructureFindConflict(ctx, tx, input); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
 			return
-		} else if exists {
-			api.RespondWithPayload(w, false, "Penalty create aborted: a matching active penalty structure already exists", nil)
+		} else if conflict != nil {
+			api.RespondWithPayload(w, false, fmt.Sprintf("Penalty create aborted: a matching active penalty structure already exists (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]), nil)
 			return
 		}
 
@@ -444,17 +510,17 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Pre-check uniqueness for each final row to provide readable per-row errors
 		// Use transaction to minimize race window
 		for i := 0; i < len(finalValidInputs); {
-			exists, err := penaltyStructureExists(ctx, tx, finalValidInputs[i])
+			conflict, err := penaltyStructureFindConflict(ctx, tx, finalValidInputs[i])
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "failed uniqueness check: "+err.Error())
 				return
 			}
-			if exists {
+			if conflict != nil {
 				// mark as error and remove from finalValidInputs
 				errorsList = append(errorsList, map[string]interface{}{
 					"row_index":            i,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Duplicate active penalty structure exists",
+					constants.ValueError:   fmt.Sprintf("Duplicate active penalty structure exists (penalty_id=%v, bank_code=%v)", conflict["penalty_id"], conflict["bank_code"]),
 					"bank_code":            finalValidInputs[i].BankCode,
 				})
 				// remove element i
@@ -1941,16 +2007,14 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			// Check unique constraint pre-insert to provide friendly error
-			exists, err := penaltyStructureExists(ctx, pgxPool, input)
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
-				return
-			}
-			if exists {
-				sendFail(rowIdx+2, "conflicts with existing active penalty structure")
-				return
-			}
+				// Check unique constraint pre-insert to provide friendly error
+				if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
+					api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+					return
+				} else if conflict != nil {
+					sendFail(rowIdx+2, fmt.Sprintf("conflicts with existing active penalty structure (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]))
+					return
+				}
 
 			validInputs = append(validInputs, input)
 		}
@@ -2006,7 +2070,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					max_tenor_days, min_held_days, max_held_days, penalty_type,
 					penalty_value, calculation_method, no_interest_if_withdrawn_before,
 					description, effective_from, effective_to, is_active
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 				RETURNING penalty_id, bank_code
 			`
 
