@@ -38,6 +38,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ValueDate           string  `json:"value_date"`                // NOT NULL
 			MaturityDate        string  `json:"maturity_date"`             // → expected_maturity_date NOT NULL
 			InterestType        string  `json:"interest_type"`             // → interest_type_code NOT NULL
+			InterestTypeID      string  `json:"interest_type_id"`
 			FrequencyID         string  `json:"frequency_id"`              // → frequency_id
 			InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
 			DayCountCode        string  `json:"day_count_code"`            // → day_count_code
@@ -154,6 +155,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"tenor_type":             nullIfEmpty(tenorTypeNorm),
 			"tenure_years":           req.TenureYears,
 			"interest_type_code":     req.InterestType,
+			"interest_type_id":       nullIfEmpty(req.InterestTypeID),
 			"expected_start_date":    coerceDateValue(expectedStartDate),
 			"expected_maturity_date": coerceDateValue(req.MaturityDate),
 			"value_date":             coerceDateValue(req.ValueDate),
@@ -171,7 +173,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"source_account_number", "bank_config_id",
 			"principal_amount", "interest_rate", "tenure_days", "tenure_months",
 			"tenor_type", "tenure_years",
-			"interest_type_code", "expected_start_date", "expected_maturity_date", "value_date",
+			"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 			"frequency_id", "day_count_code", "tds_plan_id", "product_code",
 			"auto_renewal", "booking_remarks", "booking_status", "created_by",
 		}
@@ -297,7 +299,8 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ExpectedStartDate   string  `json:"expected_start_date"` // NOT NULL
 				ValueDate           string  `json:"value_date"`          // NOT NULL
 				MaturityDate        string  `json:"maturity_date"`       // → expected_maturity_date NOT NULL
-				InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
+					InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
+					InterestTypeID      string  `json:"interest_type_id"`
 				FrequencyID         string  `json:"frequency_id"`
 				InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
 				DayCountCode        string  `json:"day_count_code"`
@@ -429,7 +432,8 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"tenure_months":          row.TenorMonths,
 				"tenor_type":             nullIfEmpty(tenorTypeNorm),
 				"tenure_years":           row.TenureYears,
-				"interest_type_code":     row.InterestType,
+						"interest_type_code":     row.InterestType,
+						"interest_type_id":       nullIfEmpty(row.InterestTypeID),
 				"expected_start_date":    coerceDateValue(expectedStartDate),
 				"expected_maturity_date": coerceDateValue(row.MaturityDate),
 				"value_date":             coerceDateValue(row.ValueDate),
@@ -447,7 +451,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"source_account_number", "bank_config_id",
 				"principal_amount", "interest_rate", "tenure_days", "tenure_months",
 				"tenor_type", "tenure_years",
-				"interest_type_code", "expected_start_date", "expected_maturity_date", "value_date",
+						"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 				"frequency_id", "day_count_code", "tds_plan_id", "product_code",
 				"auto_renewal", "booking_remarks", "booking_status", "created_by",
 			}
@@ -618,13 +622,14 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		// Select FOR UPDATE and verify status gate
-		var currentStatus, entityID string
-		var oldPrincipal, oldRate float64
+			var currentStatus, entityID string
+			var oldPrincipal, oldRate float64
 		var oldTenorDays int
 		var oldTenorMonths int
 		var oldTenureYears int
 		var oldTenorType string
-		var oldValueDate, oldMaturityDate, oldBankID, oldBankAccountID string
+			var oldValueDate, oldMaturityDate, oldBankID, oldBankAccountID string
+			var oldInterestTypeID string
 		accountExpr, err := resolveFDBookingAccountExpression(ctx, tx, "fd_booking_request")
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
@@ -635,13 +640,14 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			SELECT booking_status, entity_id,
 				   COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(tenure_days,0), COALESCE(tenure_months,0), COALESCE(tenure_years,0), COALESCE(tenor_type,''),
 				   COALESCE(TO_CHAR(value_date,'YYYY-MM-DD'),''), COALESCE(TO_CHAR(expected_maturity_date,'YYYY-MM-DD'),''),
-				   COALESCE(bank_id,''), %s
+				   COALESCE(bank_id,''), %s,
+				   COALESCE(interest_type_id,'')
 			FROM investment.fd_booking_request
 			WHERE booking_id = $1 AND COALESCE(is_deleted,false) = false
 			FOR UPDATE`, accountExpr),
 			req.BookingID,
 		).Scan(&currentStatus, &entityID, &oldPrincipal, &oldRate, &oldTenorDays, &oldTenorMonths, &oldTenureYears, &oldTenorType,
-			&oldValueDate, &oldMaturityDate, &oldBankID, &oldBankAccountID)
+			&oldValueDate, &oldMaturityDate, &oldBankID, &oldBankAccountID, &oldInterestTypeID)
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, "Fetch booking failed")
 			api.RespondWithError(w, status, msg)
@@ -657,7 +663,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		allowedFields := map[string]bool{
 			"principal_amount": true, "interest_rate": true, "tenure_days": true,
 			"value_date": true, "expected_maturity_date": true, "maturity_amount": true,
-			"interest_type": true, "interest_payout_frequency": true,
+			"interest_type": true, "interest_type_id": true, "interest_payout_frequency": true,
 			"compounding_frequency": true, "day_count_convention": true,
 			"currency": true, "tds_plan_id": true, "penalty_structure_id": true,
 			"renewal_instructions": true, "notes": true, "bank_config_id": true,
@@ -698,11 +704,11 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if _, err = tx.Exec(ctx, `
 			INSERT INTO investment.fd_audit_booking_request (
 				booking_id, action_type, processing_status, requested_by, requested_at, reason,
-				old_principal_amount, old_interest_rate, old_tenure_days, old_tenor_type, old_tenure_years,
+				old_principal_amount, old_interest_rate, old_interest_type_id, old_tenure_days, old_tenor_type, old_tenure_years,
 				old_value_date, old_expected_maturity_date, old_bank_id, old_source_account_id
-			) VALUES ($1,'EDIT','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			) VALUES ($1,'EDIT','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 			req.BookingID, userEmail, req.Reason,
-			oldPrincipal, oldRate, oldTenorDays, nullIfEmpty(oldTenorType), oldTenureYears,
+			oldPrincipal, oldRate, nullIfEmpty(oldInterestTypeID), oldTenorDays, nullIfEmpty(oldTenorType), oldTenureYears,
 			coerceDateValue(oldValueDate), coerceDateValue(oldMaturityDate),
 			oldBankID, oldBankAccountID,
 		); err != nil {
@@ -1500,6 +1506,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.old_expected_maturity_date,
 					a.old_source_account_id,
 					a.old_interest_type_code,
+					a.old_interest_type_id,
 					a.old_expected_start_date,
 					a.old_frequency_id,
 					a.old_day_count_code,
@@ -1535,6 +1542,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.principal_amount,0)                                      AS principal_amount,
 				COALESCE(m.interest_rate,0)                                         AS interest_rate,
 				COALESCE(m.interest_type_code,'')                                   AS interest_type,
+				COALESCE(m.interest_type_id,'')                                     AS interest_type_id,
 				COALESCE(m.tenure_days,0)                                           AS tenor_days,
 				COALESCE(m.tenure_months,0)                                         AS tenor_months,
 				COALESCE(m.tenure_years,0)                                          AS tenor_years,
@@ -1565,6 +1573,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.old_principal_amount,0)                                  AS old_principal_amount,
 				COALESCE(l.old_interest_rate,0)                                     AS old_interest_rate,
 				COALESCE(l.old_interest_type_code,'')                               AS old_interest_type,
+				COALESCE(l.old_interest_type_id,'')                                 AS old_interest_type_id,
 				COALESCE(l.old_tenure_days,0)                                       AS old_tenor_days,
 				COALESCE(l.old_tenor_type,'')                                       AS old_tenor_type,
 				COALESCE(l.old_tenure_years,0)                                      AS old_tenure_years,
@@ -1677,6 +1686,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(principal_amount,0)                                   AS principal_amount,
 					COALESCE(interest_rate,0)                                      AS interest_rate,
 					COALESCE(interest_type_code,'')                                AS interest_type,
+					COALESCE(interest_type_id,'')                                  AS interest_type_id,
 					COALESCE(tenure_days,0)                                        AS tenor_days,
 					COALESCE(tenure_months,0)                                      AS tenor_months,
 					COALESCE(tenure_years,0)                                       AS tenor_years,
@@ -1732,6 +1742,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(a.old_principal_amount,0)                                 AS old_principal_amount,
 				COALESCE(a.old_interest_rate,0)                                    AS old_interest_rate,
 				COALESCE(a.old_interest_type_code,'')                              AS old_interest_type,
+				COALESCE(a.old_interest_type_id,'')                                AS old_interest_type_id,
 				COALESCE(a.old_tenure_days,0)                                      AS old_tenor_days,
 				COALESCE(a.old_tenor_type,'')                                     AS old_tenor_type,
 				COALESCE(a.old_tenure_years,0)                                     AS old_tenure_years,
@@ -1885,6 +1896,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(m.principal_amount,0)                                    AS principal_amount,
 					COALESCE(m.interest_rate,0)                                       AS interest_rate,
 					COALESCE(m.interest_type_code,'')                                 AS interest_type,
+					COALESCE(m.interest_type_id,'')                                   AS interest_type_id,
 					COALESCE(m.tenure_days,0)                                         AS tenor_days,
 					COALESCE(TO_CHAR(m.expected_start_date,'YYYY-MM-DD'),'')          AS expected_start_date,
 					COALESCE(TO_CHAR(m.value_date,'YYYY-MM-DD'),'')                   AS value_date,
@@ -1892,6 +1904,7 @@ func GetBookingAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(a.old_principal_amount,0)                                AS old_principal_amount,
 					COALESCE(a.old_interest_rate,0)                                   AS old_interest_rate,
 					COALESCE(a.old_interest_type_code,'')                             AS old_interest_type,
+					COALESCE(a.old_interest_type_id,'')                               AS old_interest_type_id,
 					COALESCE(a.old_tenure_days,0)                                     AS old_tenor_days,
 					COALESCE(a.old_tenor_type,'')                                     AS old_tenor_type,
 					COALESCE(a.old_tenure_years,0)                                    AS old_tenure_years,
@@ -1978,6 +1991,7 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.principal_amount,0)                                 AS principal_amount,
 				COALESCE(m.interest_rate,0)                                    AS interest_rate,
 				COALESCE(m.interest_type_code,'')                              AS interest_type,
+				COALESCE(m.interest_type_id,'')                                AS interest_type_id,
 				COALESCE(m.tenure_days,0)                                      AS tenor_days,
 				COALESCE(m.tenure_months,0)                                    AS tenor_months,
 				COALESCE(m.tenure_years,0)                                     AS tenor_years,
