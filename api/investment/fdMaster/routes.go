@@ -27,5 +27,16 @@ func RegisterFDMasterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB) 
 	mux.Handle("/investment/fd/master/cashflow/bulk-reject", mid(http.HandlerFunc(BulkRejectCashflowEdit(pool))))
 	mux.Handle("/investment/fd/master/cashflow/bulk-delete", mid(http.HandlerFunc(BulkDeleteCashflow(pool))))
 	mux.Handle("/investment/fd/master/cashflow/audit", mid(http.HandlerFunc(GetCashflowAuditHistory(pool))))
+	mux.Handle("/investment/fd/master/cashflow/group", mid(http.HandlerFunc(GetCashflowGroupView(pool))))
 	mux.Handle("/investment/fd/master/journals", mid(http.HandlerFunc(GetFDJournalEntries(pool))))
+
+	// ── Cashflow Simulator (no persistence) ────────────────────────────────
+	// POST /investment/fd/simulator/cashflow           — full what-if cashflow run
+	// POST /investment/fd/simulator/cashflow/diff      — booking vs confirmation diff
+	// GET|POST /investment/fd/simulator/holidays       — range list (or single-date check)
+	// POST /investment/fd/simulator/maturity-date      — maturity date with holiday adjustment
+	mux.Handle("/investment/fd/simulator/cashflow", mid(http.HandlerFunc(SimulateCashflowHandler(pool))))
+	mux.Handle("/investment/fd/simulator/cashflow/diff", mid(http.HandlerFunc(SimulateDiffHandler(pool))))
+	mux.Handle("/investment/fd/simulator/holidays", mid(http.HandlerFunc(GetHolidayListHandler(pool))))
+	mux.Handle("/investment/fd/simulator/maturity-date", mid(http.HandlerFunc(MaturityDateHandler(pool))))
 }

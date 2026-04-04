@@ -3,7 +3,9 @@ package fdBooking
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/varianceengine"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -371,9 +373,15 @@ func validateBookingFields(req map[string]interface{}) string {
 	if v, ok := req["interest_rate"].(float64); ok && v <= 0 {
 		return "interest_rate must be greater than zero."
 	}
-	// tenor_days
+	// tenor: accept tenor_days OR tenure_months OR tenure_years (validate when provided)
 	if v, ok := req["tenor_days"].(float64); ok && v <= 0 {
 		return "tenor_days must be greater than zero."
+	}
+	if v, ok := req["tenure_months"].(float64); ok && v <= 0 {
+		return "tenure_months must be greater than zero."
+	}
+	if v, ok := req["tenure_years"].(float64); ok && v <= 0 {
+		return "tenure_years must be greater than zero."
 	}
 	return ""
 }
@@ -425,4 +433,48 @@ func calculateVariance(
 		HasVariance:          hasVariance,
 		IsThresholdBreached:  thresholdBreached,
 	}
+}
+
+// ─── payoutJSON ───────────────────────────────────────────────────────────────
+// payoutJSON passes through a *json.RawMessage for JSONB columns.
+// Returns nil when the pointer is nil so Postgres stores NULL.
+func payoutJSON(raw *json.RawMessage) interface{} {
+	if raw == nil {
+		return nil
+	}
+	return *raw
+}
+
+// ─── buildVarianceDetailsJSON ─────────────────────────────────────────────────
+// Builds a compact JSON summary of flagged variance items for storage in
+// fd_confirmation.variance_details (text / jsonb column).
+func buildVarianceDetailsJSON(items []varianceengine.VarianceItem) *string {
+	type entry struct {
+		Field    string  `json:"field"`
+		Expected string  `json:"expected"`
+		Actual   string  `json:"actual"`
+		Delta    float64 `json:"delta"`
+		Priority string  `json:"priority"`
+	}
+	var entries []entry
+	for _, v := range items {
+		if v.HasVariance {
+			entries = append(entries, entry{
+				Field:    v.FieldName,
+				Expected: v.ExpectedValue,
+				Actual:   v.ActualValue,
+				Delta:    v.VarianceDelta,
+				Priority: v.Priority,
+			})
+		}
+	}
+	if len(entries) == 0 {
+		return nil // → NULL in jsonb column
+	}
+	b, err := json.Marshal(entries)
+	if err != nil {
+		return nil
+	}
+	s := string(b)
+	return &s
 }

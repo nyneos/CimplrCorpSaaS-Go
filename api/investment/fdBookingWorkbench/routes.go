@@ -73,6 +73,15 @@ func RegisterFDBookingRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		"/investment/fd/confirmation/resolve-variance",
 		mid(http.HandlerFunc(ResolveVariance(pool))),
 	)
+	// Primary variance-resolve route (ResolveVariance delegates to VarianceResolve)
+	mux.Handle(
+		"/investment/fd/confirmation/variance-resolve",
+		mid(http.HandlerFunc(VarianceResolve(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/confirmation/variance-exception",
+		mid(http.HandlerFunc(VarianceException(pool))),
+	)
 	mux.Handle(
 		"/investment/fd/confirmation/approve",
 		mid(http.HandlerFunc(BulkApproveConfirmation(pool))),

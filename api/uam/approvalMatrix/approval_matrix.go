@@ -118,9 +118,9 @@ func validateMasterFields(moduleCode, approvalOrder string, minAmount, maxAmount
 }
 
 func validateEyeFields(eyeCount, position int, slaHours *int) error {
-	if eyeCount != 2 && eyeCount != 4 && eyeCount != 6 {
-		return errors.New("eye_count must be 2, 4, or 6")
-	}
+	// if eyeCount != 2 && eyeCount != 4 && eyeCount != 6 {
+	// 	return errors.New("eye_count must be 2, 4, or 6")
+	// }
 	if position < 1 {
 		return errors.New("position must be >= 1")
 	}

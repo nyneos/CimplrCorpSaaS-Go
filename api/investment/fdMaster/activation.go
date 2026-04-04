@@ -380,9 +380,15 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"start_date":    rec.ValueDate,
 		"value_date":    rec.ValueDate, // fallback
 		"maturity_date": rec.MaturityDate,
-		// tenor — actual column is tenure_days
-		"tenure_days": rec.TenorDays,
-		"tenor_days":  rec.TenorDays, // fallback
+		// tenor — actual columns: tenure_days, tenure_months, tenure_type, tenure_years
+		"tenure_days":   rec.TenorDays,
+		"tenor_days":    rec.TenorDays, // fallback old name
+		"tenure_months": rec.TenorMonths,
+		"tenor_months":  rec.TenorMonths, // fallback old name
+		"tenure_type":   rec.TenureType,
+		"tenor_type":    rec.TenureType, // fallback old name
+		"tenure_years":  rec.TenureYears,
+		"tenor_years":   rec.TenureYears, // fallback old name
 		// optional
 		"frequency_id":   rec.FrequencyID,
 		"bank_config_id": rec.BankConfigID,
@@ -411,6 +417,9 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"start_date", "value_date",
 		"maturity_date",
 		"tenure_days", "tenor_days",
+		"tenure_months", "tenor_months",
+		"tenure_type", "tenor_type",
+		"tenure_years", "tenor_years",
 		"frequency_id", "bank_config_id", "tds_plan_id", "day_count_code",
 		"bank_fd_ref_no", "fd_number", "fd_no", "certificate_number", "bank_fd_reference",
 		"status", "fd_status",
@@ -431,7 +440,16 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 	return fdID, firstNonEmpty(refCol, returningCol), nil
 }
 
+// updateFDMasterStatus sets fd_status for the given fd_ids.
+// When targetStatus is "ACTIVE", it also stamps activated_by and activated_at
+// if those columns exist on the table.
 func updateFDMasterStatus(ctx context.Context, exec queryExecutor, fdIDs []string, targetStatus string) error {
+	return updateFDMasterStatusBy(ctx, exec, fdIDs, targetStatus, "")
+}
+
+// updateFDMasterStatusBy is the full variant that accepts the acting user email
+// so that activated_by / activated_at can be stamped when status → ACTIVE.
+func updateFDMasterStatusBy(ctx context.Context, exec queryExecutor, fdIDs []string, targetStatus string, actorEmail string) error {
 	if len(fdIDs) == 0 {
 		return nil
 	}
@@ -444,6 +462,18 @@ func updateFDMasterStatus(ctx context.Context, exec queryExecutor, fdIDs []strin
 	statusCol := pickFirstExistingColumn(masterCols, "status", "fd_status")
 	if keyCol == "" || statusCol == "" {
 		return nil
+	}
+
+	// When activating, also stamp activated_by / activated_at if the columns exist.
+	if targetStatus == "ACTIVE" && actorEmail != "" &&
+		masterCols["activated_by"] && masterCols["activated_at"] {
+		query := fmt.Sprintf(
+			`UPDATE investment.fd_master
+			 SET %s = $1, activated_by = $2, activated_at = now()
+			 WHERE %s = ANY($3::text[]) AND COALESCE(is_deleted,false)=false`,
+			statusCol, keyCol)
+		_, err = exec.Exec(ctx, query, targetStatus, actorEmail, fdIDs)
+		return err
 	}
 
 	query := fmt.Sprintf("UPDATE investment.fd_master SET %s = $1 WHERE %s = ANY($2::text[]) AND COALESCE(is_deleted,false)=false", statusCol, keyCol)
@@ -784,7 +814,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						continue
 					}
 					auditTable := resolveFDAuditTable(ctx, tx)
-					_ = updateFDMasterStatus(ctx, tx, []string{fdID}, "ACTIVE")
+					_ = updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail)
 					_ = updateFDAuditStatus(ctx, tx, auditTable, []string{fdID}, userEmail, "APPROVED", req.Comment)
 					rec, err := loadFDRecordByFDID(ctx, tx, fdID)
 					if err == nil {
@@ -821,7 +851,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					errors = append(errors, fdID+": audit update failed")
 					continue
 				}
-				if err := updateFDMasterStatus(ctx, tx, []string{fdID}, "ACTIVE"); err != nil {
+				if err := updateFDMasterStatusBy(ctx, tx, []string{fdID}, "ACTIVE", userEmail); err != nil {
 					_ = tx.Rollback(ctx)
 					errors = append(errors, fdID+": status update failed")
 					continue
@@ -1416,6 +1446,177 @@ func GetFDJournalEntries(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// ─── GetCashflowGroupView ─────────────────────────────────────────────────────
+// GET /investment/fd/master/cashflow/group
+// Query params: entity_id, fd_status, fd_id (all optional)
+//
+// Returns one summary row per fd_id with aggregated cashflow statistics and
+// per-event-type event counts. Use as the "list" view before drilling into
+// the per-row cashflow schedule.
+func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		entityID := strings.TrimSpace(r.URL.Query().Get("entity_id"))
+		fdStatus := strings.TrimSpace(r.URL.Query().Get("fd_status"))
+		fdIDFilter := strings.TrimSpace(r.URL.Query().Get("fd_id"))
+
+		// Resolve cashflow table
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
+		})
+		if table == "" {
+			api.RespondWithError(w, http.StatusInternalServerError, "cashflow table not found")
+			return
+		}
+		masterTable := resolveFirstExistingTable(ctx, pgxPool, []string{"investment.fd_master"})
+		if masterTable == "" {
+			masterTable = "investment.fd_master"
+		}
+
+		var args []interface{}
+		pos := 1
+
+		groupSQL := fmt.Sprintf(`
+			SELECT
+				cf.fd_id,
+				MAX(m.booking_id)                                                    AS booking_id,
+				MAX(m.confirmation_id)                                               AS confirmation_id,
+				MAX(m.entity_name)                                                   AS entity_name,
+				MAX(m.bank_name)                                                     AS bank_name,
+				MAX(m.principal_amount)                                              AS principal_amount,
+				MAX(m.interest_rate)                                                 AS interest_rate,
+				MAX(m.value_date)                                                    AS start_date,
+				MAX(m.maturity_date)                                                 AS maturity_date,
+				MAX(m.fd_status)                                                     AS fd_status,
+				COUNT(cf.cashflow_id)                                                AS total_cashflow_events,
+				COALESCE(SUM(cf.interest_accrued), 0)                               AS total_interest_accrued,
+				COALESCE(SUM(cf.tds_amount), 0)                                     AS total_tds,
+				COALESCE(SUM(cf.net_cash_flow), 0)                                  AS total_net_cash_flow,
+				MAX(cf.event_date)                                                   AS last_event_date,
+				COUNT(CASE WHEN aud.processing_status LIKE 'PENDING%%' THEN 1 END)  AS pending_edit_count
+			FROM %s cf
+			JOIN %s m ON m.fd_id = cf.fd_id
+			LEFT JOIN LATERAL (
+				SELECT processing_status
+				FROM investment.fd_audit_cashflow_schedule a
+				WHERE a.cashflow_id = cf.cashflow_id
+				  AND a.processing_status LIKE 'PENDING%%'
+				LIMIT 1
+			) aud ON true
+			WHERE (cf.is_deleted IS NULL OR cf.is_deleted = false)
+		`, table, masterTable)
+
+		if entityID != "" {
+			groupSQL += fmt.Sprintf(" AND m.entity_id = $%d", pos)
+			args = append(args, entityID)
+			pos++
+		}
+		if fdStatus != "" {
+			groupSQL += fmt.Sprintf(" AND m.fd_status = $%d", pos)
+			args = append(args, fdStatus)
+			pos++
+		}
+		if fdIDFilter != "" {
+			groupSQL += fmt.Sprintf(" AND cf.fd_id = $%d", pos)
+			args = append(args, fdIDFilter)
+			pos++
+		}
+		groupSQL += " GROUP BY cf.fd_id ORDER BY MAX(m.value_date) DESC"
+
+		rows, err := pgxPool.Query(ctx, groupSQL, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "group query failed: "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		type GroupRow struct {
+			FDID                 string           `json:"fd_id"`
+			BookingID            *string          `json:"booking_id"`
+			ConfirmationID       *string          `json:"confirmation_id"`
+			EntityName           *string          `json:"entity_name"`
+			BankName             *string          `json:"bank_name"`
+			PrincipalAmount      *float64         `json:"principal_amount"`
+			InterestRate         *float64         `json:"interest_rate"`
+			StartDate            *string          `json:"start_date"`
+			MaturityDate         *string          `json:"maturity_date"`
+			FDStatus             *string          `json:"fd_status"`
+			TotalCashflowEvents  int64            `json:"total_cashflow_events"`
+			TotalInterestAccrued float64          `json:"total_interest_accrued"`
+			TotalTDS             float64          `json:"total_tds"`
+			TotalNetCashFlow     float64          `json:"total_net_cash_flow"`
+			LastEventDate        *string          `json:"last_event_date"`
+			HasPendingEdits      bool             `json:"has_pending_edits"`
+			EventTypeCounts      map[string]int64 `json:"event_type_counts"`
+		}
+
+		var groups []GroupRow
+		for rows.Next() {
+			var g GroupRow
+			var startRaw, maturityRaw, lastRaw interface{}
+			var pendingCount int64
+			if scanErr := rows.Scan(
+				&g.FDID, &g.BookingID, &g.ConfirmationID,
+				&g.EntityName, &g.BankName,
+				&g.PrincipalAmount, &g.InterestRate,
+				&startRaw, &maturityRaw,
+				&g.FDStatus,
+				&g.TotalCashflowEvents,
+				&g.TotalInterestAccrued, &g.TotalTDS, &g.TotalNetCashFlow,
+				&lastRaw,
+				&pendingCount,
+			); scanErr != nil {
+				api.LogError("[GetCashflowGroupView] scan error: %v", scanErr)
+				continue
+			}
+			g.HasPendingEdits = pendingCount > 0
+			// Format time.Time dates → "YYYY-MM-DD"
+			formatIF := func(v interface{}) *string {
+				if v == nil {
+					return nil
+				}
+				type fmtable interface{ Format(string) string }
+				if t, ok := v.(fmtable); ok {
+					s := t.Format(constants.DateFormat)
+					return &s
+				}
+				return nil
+			}
+			g.StartDate = formatIF(startRaw)
+			g.MaturityDate = formatIF(maturityRaw)
+			g.LastEventDate = formatIF(lastRaw)
+
+			// Per-event-type counts
+			g.EventTypeCounts = map[string]int64{}
+			etRows, etErr := pgxPool.Query(ctx,
+				fmt.Sprintf(`SELECT event_type, COUNT(*) FROM %s
+				             WHERE fd_id = $1 AND (is_deleted IS NULL OR is_deleted = false)
+				             GROUP BY event_type`, table),
+				g.FDID)
+			if etErr == nil {
+				for etRows.Next() {
+					var et string
+					var cnt int64
+					if etErr2 := etRows.Scan(&et, &cnt); etErr2 == nil {
+						g.EventTypeCounts[et] = cnt
+					}
+				}
+				etRows.Close()
+			}
+			groups = append(groups, g)
+		}
+		if rows.Err() != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "scan error: "+rows.Err().Error())
+			return
+		}
+		if groups == nil {
+			groups = []GroupRow{}
+		}
+		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": groups})
+	}
+}
 // ─── BulkApproveCashflowEdit ──────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/bulk-approve
 // Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
@@ -1423,15 +1624,12 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
-			CashflowIDs []string `json:"cashflow_ids"`
+			FDID        string   `json:"fd_id"`        // approve all pending edits for this FD
+			CashflowIDs []string `json:"cashflow_ids"` // OR explicit list — fd_id takes precedence
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		if len(req.CashflowIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -1440,6 +1638,31 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+
+		// If fd_id supplied, resolve all pending cashflow_ids for that FD
+		if strings.TrimSpace(req.FDID) != "" {
+			rows, qErr := pgxPool.Query(ctx,
+				`SELECT DISTINCT cashflow_id
+				 FROM investment.fd_audit_cashflow_schedule
+				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, req.FDID)
+			if qErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "db error resolving cashflow_ids: "+qErr.Error())
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var cid string
+				if scanErr := rows.Scan(&cid); scanErr == nil {
+					req.CashflowIDs = append(req.CashflowIDs, cid)
+				}
+			}
+			rows.Close()
+		}
+
+		if len(req.CashflowIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
+			return
+		}
 		approved, skipped, errs := 0, 0, []string{}
 
 		for _, cashflowID := range req.CashflowIDs {
@@ -1519,20 +1742,19 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── BulkRejectCashflowEdit ───────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/bulk-reject
-// Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
+// Body: { "user_id":"", "fd_id":"" OR "cashflow_ids":["",""], "comment":"" }
+// On rejection the cashflow row is reverted to the old_* snapshot stored in the
+// audit table, and downstream rows are re-propagated.
 func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
-			CashflowIDs []string `json:"cashflow_ids"`
+			FDID        string   `json:"fd_id"`        // reject all pending edits for this FD
+			CashflowIDs []string `json:"cashflow_ids"` // OR explicit list
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		if len(req.CashflowIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -1541,17 +1763,63 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+
+		// If fd_id supplied, resolve all pending cashflow_ids for that FD
+		if strings.TrimSpace(req.FDID) != "" {
+			rows, qErr := pgxPool.Query(ctx,
+				`SELECT DISTINCT cashflow_id
+				 FROM investment.fd_audit_cashflow_schedule
+				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, req.FDID)
+			if qErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "db error resolving cashflow_ids: "+qErr.Error())
+				return
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var cid string
+				if scanErr := rows.Scan(&cid); scanErr == nil {
+					req.CashflowIDs = append(req.CashflowIDs, cid)
+				}
+			}
+			rows.Close()
+		}
+
+		if len(req.CashflowIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
+			return
+		}
+
+		// Resolve cashflow table once.
+		table := resolveFirstExistingTable(ctx, pgxPool, []string{
+			constants.QuerryCashflowSchedule,
+			constants.QuerryCashflow,
+			constants.QuerryMasterCashflowSchedule,
+		})
+
 		rejected, skipped, errs := 0, 0, []string{}
 
 		for _, cashflowID := range req.CashflowIDs {
-			var auditID, requestedBy, status string
+			// Read audit row — get both identity and old_* snapshot columns.
+			var auditID, requestedBy, status, fdID string
+			var oldIntAcc, oldTDSAmt, oldNetCF, oldCapAmt, oldCloseP, oldOpenP *float64
 			if err := pgxPool.QueryRow(ctx,
-				`SELECT audit_id, COALESCE(requested_by,''), COALESCE(processing_status,'')
+				`SELECT audit_id,
+				        COALESCE(requested_by,''),
+				        COALESCE(processing_status,''),
+				        COALESCE(fd_id,''),
+				        old_interest_accrued,
+				        old_tds_amount,
+				        old_net_cash_flow,
+				        old_capitalized_amount,
+				        old_closing_principal,
+				        old_opening_principal
 				 FROM investment.fd_audit_cashflow_schedule
 				 WHERE cashflow_id = $1 AND processing_status LIKE 'PENDING%'
 				 ORDER BY requested_at DESC LIMIT 1`,
 				cashflowID,
-			).Scan(&auditID, &requestedBy, &status); err != nil {
+			).Scan(&auditID, &requestedBy, &status, &fdID,
+				&oldIntAcc, &oldTDSAmt, &oldNetCF, &oldCapAmt, &oldCloseP, &oldOpenP,
+			); err != nil {
 				errs = append(errs, cashflowID+constants.QuerryNoPendingAuditFound)
 				continue
 			}
@@ -1567,7 +1835,8 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				skipped++
 				continue
 			}
-			// Try engine path
+
+			// Try engine rejection path
 			var instanceEyeID string
 			engineErr := pgxPool.QueryRow(ctx, `
 				SELECT ie.instance_eye_id
@@ -1589,10 +1858,81 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					Comment:       req.Comment,
 				})
 			}
+
+			// Stamp audit row as REJECTED
 			_, _ = pgxPool.Exec(ctx,
 				`UPDATE investment.fd_audit_cashflow_schedule
 				 SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
 				 WHERE audit_id=$3`, userEmail, req.Comment, auditID)
+
+			// Revert cashflow row to old_* snapshot (if snapshots exist)
+			if table != "" && fdID != "" &&
+				(oldIntAcc != nil || oldTDSAmt != nil || oldNetCF != nil || oldCapAmt != nil) {
+				revertedFields := map[string]interface{}{}
+				if oldIntAcc != nil {
+					revertedFields["interest_accrued"] = *oldIntAcc
+				}
+				if oldTDSAmt != nil {
+					revertedFields["tds_amount"] = *oldTDSAmt
+				}
+				if oldNetCF != nil {
+					revertedFields["net_cash_flow"] = *oldNetCF
+				}
+				if oldCapAmt != nil {
+					revertedFields["capitalized_amount"] = *oldCapAmt
+				}
+				if oldCloseP != nil {
+					revertedFields["closing_principal"] = *oldCloseP
+				}
+				if oldOpenP != nil {
+					revertedFields["opening_principal"] = *oldOpenP
+				}
+
+				// Build SET clause for revert
+				setParts := []string{"is_edited=false", "edited_by=NULL", "edited_at=NULL"}
+				revertArgs := []interface{}{}
+				argIdx := 1
+				colAliases := map[string][]string{
+					"interest_accrued":   {"interest_accrued", "interest_amount"},
+					"tds_amount":         {"tds_amount"},
+					"net_cash_flow":      {"net_cash_flow", "net_cashflow", "net_amount"},
+					"capitalized_amount": {"capitalized_amount"},
+					"closing_principal":  {"closing_principal"},
+					"opening_principal":  {"opening_principal"},
+				}
+				// Resolve actual column names from table schema
+				tSchema, tName := splitQualifiedTable(table)
+				tableCols, _ := loadTableColumns(ctx, pgxPool, tSchema, tName)
+				for logicCol, val := range revertedFields {
+					for _, alias := range colAliases[logicCol] {
+						if tableCols[alias] {
+							setParts = append(setParts, fmt.Sprintf("%s=$%d", alias, argIdx))
+							revertArgs = append(revertArgs, val)
+							argIdx++
+							break
+						}
+					}
+				}
+				revertArgs = append(revertArgs, cashflowID, fdID)
+				revertSQL := fmt.Sprintf(`UPDATE %s SET %s WHERE cashflow_id=$%d AND fd_id=$%d`,
+					table, strings.Join(setParts, ", "), argIdx, argIdx+1)
+				if _, execErr := pgxPool.Exec(ctx, revertSQL, revertArgs...); execErr != nil {
+					api.LogError("[BulkRejectCashflow] revert failed cf=%s: %v", cashflowID, execErr)
+				} else {
+					// Re-propagate downstream from the reverted row
+					pSchema, pName := splitQualifiedTable(table)
+					cols, _ := loadTableColumns(ctx, pgxPool, pSchema, pName)
+					propagateCashflowDownstream(ctx, pgxPool, PropagateCashflowParams{
+						Table:            table,
+						FDCol:            "fd_id",
+						CashflowIDCol:    "cashflow_id",
+						Cols:             cols,
+						FDID:             fdID,
+						EditedCashflowID: cashflowID,
+						AppliedFields:    revertedFields,
+					})
+				}
+			}
 			rejected++
 		}
 
