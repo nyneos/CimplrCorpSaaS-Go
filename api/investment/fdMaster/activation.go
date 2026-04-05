@@ -1225,7 +1225,172 @@ func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
 			return
 		}
+
+		// ── Enrich each FD row with its latest activation audit processing_status ──
+		// This lets the UI know whether an FD is PENDING_APPROVAL, APPROVED, REJECTED,
+		// APPROVAL_PENDING (engine), etc. without the client needing a separate audit call.
+		auditTable := resolveFDAuditTable(ctx, pgxPool)
+		if auditTable != "" {
+			schemaName, tableName := splitQualifiedTable(auditTable)
+			auditCols, _ := loadTableColumns(ctx, pgxPool, schemaName, tableName)
+			refCol := pickFirstExistingColumn(auditCols, "fd_id", "master_id", "confirmation_id")
+			if refCol != "" {
+				for i, row := range payload {
+					fdKey := ""
+					for _, k := range []string{"fd_id", "master_id", "confirmation_id"} {
+						if v, ok := row[k]; ok && v != nil {
+							fdKey = fmt.Sprintf("%v", v)
+							break
+						}
+					}
+					if fdKey == "" {
+						continue
+					}
+					var activationStatus string
+					_ = pgxPool.QueryRow(ctx, fmt.Sprintf(
+						`SELECT COALESCE(processing_status,'') FROM %s
+						 WHERE %s = $1
+						 ORDER BY requested_at DESC LIMIT 1`,
+						auditTable, refCol), fdKey).Scan(&activationStatus)
+					payload[i]["processing_status"] = activationStatus
+				}
+			}
+		}
+
 		api.RespondWithPayload(w, true, "", payload)
+	}
+}
+
+// ─── GetActiveFDsInRange ──────────────────────────────────────────────────────
+// POST /investment/fd/master/active-range
+// Returns all ACTIVE FDs (fd_status = ACTIVE, approved) whose lifespan
+// overlaps the caller-supplied date window:
+//
+//	FD start_date <= range_end  AND  FD maturity_date >= range_start
+//
+// Excludes MATURED, PREMATURELY_CLOSED, ROLLED_OVER, CANCELLED, REJECTED.
+// Returns the full fd_master rows plus a convenience `fd_ids` string array.
+//
+// Body: { "user_id":"", "entity_id":"", "start_date":"YYYY-MM-DD", "end_date":"YYYY-MM-DD" }
+// All body fields are optional filters except that start_date and end_date
+// must both be present to enable the date-range filter.
+func GetActiveFDsInRange(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID    string `json:"user_id"`
+			EntityID  string `json:"entity_id"`
+			BankID    string `json:"bank_id"`
+			StartDate string `json:"start_date"` // range window start (inclusive)
+			EndDate   string `json:"end_date"`   // range window end   (inclusive)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+
+		ctx := r.Context()
+
+		masterCols, err := loadTableColumns(ctx, pgxPool, "investment", "fd_master")
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			return
+		}
+
+		// Resolve dynamic column names
+		startCol := pickFirstExistingColumn(masterCols, "value_date", "start_date", "booking_date")
+		if startCol == "" {
+			startCol = "value_date"
+		}
+		maturityCol := pickFirstExistingColumn(masterCols, "maturity_date", "mature_date", "maturity")
+		if maturityCol == "" {
+			maturityCol = "maturity_date"
+		}
+		statusCol := pickFirstExistingColumn(masterCols, "fd_status", "status")
+		if statusCol == "" {
+			statusCol = "fd_status"
+		}
+
+		// Closed/terminated statuses to exclude
+		excludedStatuses := []string{"MATURED", "PREMATURELY_CLOSED", "ROLLED_OVER", "CANCELLED", "REJECTED"}
+
+		query := fmt.Sprintf(`
+			SELECT *
+			FROM investment.fd_master
+			WHERE COALESCE(is_deleted, false) = false
+			  AND %s = 'ACTIVE'
+			  AND %s <> ALL($1::text[])
+		`, statusCol, statusCol)
+		args := []interface{}{excludedStatuses}
+		pos := 2
+
+		if req.EntityID != "" && masterCols["entity_id"] {
+			query += fmt.Sprintf(" AND entity_id = $%d", pos)
+			args = append(args, req.EntityID)
+			pos++
+		}
+		if req.BankID != "" && masterCols["bank_id"] {
+			query += fmt.Sprintf(" AND bank_id = $%d", pos)
+			args = append(args, req.BankID)
+			pos++
+		}
+
+		// Date-range overlap: FD lifespan overlaps [start_date, end_date]
+		// Condition: fd.start_date <= range_end AND fd.maturity_date >= range_start
+		if req.StartDate != "" && req.EndDate != "" {
+			if masterCols[startCol] && masterCols[maturityCol] {
+				query += fmt.Sprintf(" AND %s <= $%d::date AND %s >= $%d::date",
+					maturityCol, pos, startCol, pos+1)
+				args = append(args, req.EndDate, req.StartDate)
+				pos += 2
+			}
+		} else if req.StartDate != "" {
+			if masterCols[maturityCol] {
+				query += fmt.Sprintf(" AND %s >= $%d::date", maturityCol, pos)
+				args = append(args, req.StartDate)
+				pos++
+			}
+		} else if req.EndDate != "" {
+			if masterCols[startCol] {
+				query += fmt.Sprintf(" AND %s <= $%d::date", startCol, pos)
+				args = append(args, req.EndDate)
+				pos++
+			}
+		}
+
+		query += fmt.Sprintf(" ORDER BY %s ASC", maturityCol)
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToQuery+": "+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		payload, err := rowsToMaps(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+err.Error())
+			return
+		}
+		if payload == nil {
+			payload = []map[string]interface{}{}
+		}
+
+		// Build convenience fd_ids array
+		fdIDs := make([]string, 0, len(payload))
+		for _, row := range payload {
+			for _, k := range []string{"fd_id", "master_id", "confirmation_id"} {
+				if v, ok := row[k]; ok && v != nil {
+					fdIDs = append(fdIDs, fmt.Sprintf("%v", v))
+					break
+				}
+			}
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"fd_ids": fdIDs,
+			"data":   payload,
+			"count":  len(payload),
+		})
 	}
 }
 
@@ -1509,7 +1674,12 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(SUM(cf.tds_amount), 0)                                     AS total_tds,
 				COALESCE(SUM(cf.net_cash_flow), 0)                                  AS total_net_cash_flow,
 				MAX(cf.event_date)                                                   AS last_event_date,
-				COUNT(CASE WHEN aud.processing_status LIKE 'PENDING%%' THEN 1 END)  AS pending_edit_count
+				COUNT(CASE WHEN aud.processing_status LIKE 'PENDING%%' THEN 1 END)  AS pending_edit_count,
+				CASE
+					WHEN COUNT(CASE WHEN aud.processing_status LIKE 'PENDING%%' THEN 1 END) > 0
+						THEN 'PENDING_EDIT_APPROVAL'
+					ELSE 'APPROVED'
+				END                                                                  AS cashflow_processing_status
 			FROM %s cf
 			JOIN %s m ON m.fd_id = cf.fd_id
 			LEFT JOIN LATERAL (
@@ -1547,23 +1717,24 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		type GroupRow struct {
-			FDID                 string           `json:"fd_id"`
-			BookingID            *string          `json:"booking_id"`
-			ConfirmationID       *string          `json:"confirmation_id"`
-			EntityName           *string          `json:"entity_name"`
-			BankName             *string          `json:"bank_name"`
-			PrincipalAmount      *float64         `json:"principal_amount"`
-			InterestRate         *float64         `json:"interest_rate"`
-			StartDate            *string          `json:"start_date"`
-			MaturityDate         *string          `json:"maturity_date"`
-			FDStatus             *string          `json:"fd_status"`
-			TotalCashflowEvents  int64            `json:"total_cashflow_events"`
-			TotalInterestAccrued float64          `json:"total_interest_accrued"`
-			TotalTDS             float64          `json:"total_tds"`
-			TotalNetCashFlow     float64          `json:"total_net_cash_flow"`
-			LastEventDate        *string          `json:"last_event_date"`
-			HasPendingEdits      bool             `json:"has_pending_edits"`
-			EventTypeCounts      map[string]int64 `json:"event_type_counts"`
+			FDID                     string           `json:"fd_id"`
+			BookingID                *string          `json:"booking_id"`
+			ConfirmationID           *string          `json:"confirmation_id"`
+			EntityName               *string          `json:"entity_name"`
+			BankName                 *string          `json:"bank_name"`
+			PrincipalAmount          *float64         `json:"principal_amount"`
+			InterestRate             *float64         `json:"interest_rate"`
+			StartDate                *string          `json:"start_date"`
+			MaturityDate             *string          `json:"maturity_date"`
+			FDStatus                 *string          `json:"fd_status"`
+			TotalCashflowEvents      int64            `json:"total_cashflow_events"`
+			TotalInterestAccrued     float64          `json:"total_interest_accrued"`
+			TotalTDS                 float64          `json:"total_tds"`
+			TotalNetCashFlow         float64          `json:"total_net_cash_flow"`
+			LastEventDate            *string          `json:"last_event_date"`
+			HasPendingEdits          bool             `json:"has_pending_edits"`
+			CashflowProcessingStatus string           `json:"cashflow_processing_status"` // PENDING | CONSOLIDATED
+			EventTypeCounts          map[string]int64 `json:"event_type_counts"`
 		}
 
 		var groups []GroupRow
@@ -1581,6 +1752,7 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&g.TotalInterestAccrued, &g.TotalTDS, &g.TotalNetCashFlow,
 				&lastRaw,
 				&pendingCount,
+				&g.CashflowProcessingStatus,
 			); scanErr != nil {
 				api.LogError("[GetCashflowGroupView] scan error: %v", scanErr)
 				continue
@@ -1631,15 +1803,17 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"data": groups})
 	}
 }
+
 // ─── BulkApproveCashflowEdit ──────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/bulk-approve
-// Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
+// Body: { "user_id":"", "fd_id":"FD-xxx", "fd_ids":["FD-xxx","FD-yyy"], "cashflow_ids":["",""], "comment":"" }
 func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
-			FDID        string   `json:"fd_id"`        // approve all pending edits for this FD
-			CashflowIDs []string `json:"cashflow_ids"` // OR explicit list — fd_id takes precedence
+			FDID        string   `json:"fd_id"`        // single FD — approve all pending edits
+			FDIDs       []string `json:"fd_ids"`       // multiple FDs — approve all pending edits for each
+			CashflowIDs []string `json:"cashflow_ids"` // OR explicit list
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1653,17 +1827,20 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		// If fd_id supplied, resolve all pending cashflow_ids for that FD
+		// Collect all FD IDs (single fd_id + fd_ids array)
+		allFDIDs := append([]string{}, req.FDIDs...)
 		if strings.TrimSpace(req.FDID) != "" {
+			allFDIDs = append(allFDIDs, req.FDID)
+		}
+		for _, fdID := range allFDIDs {
 			rows, qErr := pgxPool.Query(ctx,
 				`SELECT DISTINCT cashflow_id
 				 FROM investment.fd_audit_cashflow_schedule
-				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, req.FDID)
+				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, fdID)
 			if qErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "db error resolving cashflow_ids: "+qErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "db error resolving cashflow_ids for "+fdID+": "+qErr.Error())
 				return
 			}
-			defer rows.Close()
 			for rows.Next() {
 				var cid string
 				if scanErr := rows.Scan(&cid); scanErr == nil {
@@ -1756,14 +1933,15 @@ func BulkApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── BulkRejectCashflowEdit ───────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/bulk-reject
-// Body: { "user_id":"", "fd_id":"" OR "cashflow_ids":["",""], "comment":"" }
+// Body: { "user_id":"", "fd_id":"FD-xxx", "fd_ids":["FD-xxx","FD-yyy"], "cashflow_ids":["",""], "comment":"" }
 // On rejection the cashflow row is reverted to the old_* snapshot stored in the
 // audit table, and downstream rows are re-propagated.
 func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
-			FDID        string   `json:"fd_id"`        // reject all pending edits for this FD
+			FDID        string   `json:"fd_id"`        // single FD — reject all pending edits
+			FDIDs       []string `json:"fd_ids"`       // multiple FDs
 			CashflowIDs []string `json:"cashflow_ids"` // OR explicit list
 			Comment     string   `json:"comment"`
 		}
@@ -1778,17 +1956,20 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		ctx := r.Context()
 
-		// If fd_id supplied, resolve all pending cashflow_ids for that FD
+		// Collect all FD IDs (single fd_id + fd_ids array)
+		allFDIDs := append([]string{}, req.FDIDs...)
 		if strings.TrimSpace(req.FDID) != "" {
+			allFDIDs = append(allFDIDs, req.FDID)
+		}
+		for _, fdID := range allFDIDs {
 			rows, qErr := pgxPool.Query(ctx,
 				`SELECT DISTINCT cashflow_id
 				 FROM investment.fd_audit_cashflow_schedule
-				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, req.FDID)
+				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, fdID)
 			if qErr != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "db error resolving cashflow_ids: "+qErr.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, "db error resolving cashflow_ids for "+fdID+": "+qErr.Error())
 				return
 			}
-			defer rows.Close()
 			for rows.Next() {
 				var cid string
 				if scanErr := rows.Scan(&cid); scanErr == nil {
@@ -1960,21 +2141,19 @@ func BulkRejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── BulkDeleteCashflow ───────────────────────────────────────────────────────
 // POST /investment/fd/master/cashflow/bulk-delete
-// Body: { "user_id":"", "cashflow_ids":["",""], "comment":"" }
+// Body: { "user_id":"", "fd_id":"FD-xxx", "fd_ids":["FD-xxx","FD-yyy"], "cashflow_ids":["",""], "comment":"" }
 // Approves pending DELETE audit rows (actually soft-deletes the cashflow rows).
 func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
+			FDID        string   `json:"fd_id"`        // single FD
+			FDIDs       []string `json:"fd_ids"`       // multiple FDs
 			CashflowIDs []string `json:"cashflow_ids"`
 			Comment     string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		if len(req.CashflowIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrCashflowIDsRequired)
 			return
 		}
 		userEmail := getUserEmail(req.UserID)
@@ -1983,6 +2162,27 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+
+		// Collect all FD IDs (single fd_id + fd_ids array)
+		allFDIDs := append([]string{}, req.FDIDs...)
+		if strings.TrimSpace(req.FDID) != "" {
+			allFDIDs = append(allFDIDs, req.FDID)
+		}
+		for _, fdID := range allFDIDs {
+			rows, qErr := pgxPool.Query(ctx,
+				`SELECT DISTINCT cashflow_id
+				 FROM investment.fd_audit_cashflow_schedule
+				 WHERE fd_id = $1 AND processing_status LIKE 'PENDING%'`, fdID)
+			if qErr == nil {
+				for rows.Next() {
+					var cid string
+					if scanErr := rows.Scan(&cid); scanErr == nil {
+						req.CashflowIDs = append(req.CashflowIDs, cid)
+					}
+				}
+				rows.Close()
+			}
+		}
 
 		table := resolveFirstExistingTable(ctx, pgxPool, []string{
 			constants.QuerryCashflowSchedule,

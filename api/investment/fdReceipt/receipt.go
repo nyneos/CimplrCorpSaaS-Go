@@ -1056,6 +1056,125 @@ WHERE r.is_deleted = false`
 	}
 }
 
+// ─── HANDLER 7b: GetTDSReceiptsAll ───────────────────────────────────────────
+// POST /investment/fd/receipt/tds/all
+// Returns ALL TDS receipts (any status) enriched with fd_master data.
+// Filters: entity_id, fd_id, bank_id, tds_status, from_date, to_date — all optional.
+// Ordered by deduction_date DESC.
+
+func GetTDSReceiptsAll(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID    string `json:"user_id"`
+			EntityID  string `json:"entity_id"`
+			FDID      string `json:"fd_id"`
+			BankID    string `json:"bank_id"`
+			TDSStatus string `json:"tds_status"`
+			FromDate  string `json:"from_date"`
+			ToDate    string `json:"to_date"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		userEmail := resolveUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+		baseSQL := `
+SELECT
+  t.tds_id,
+  COALESCE(t.receipt_id,'')              AS receipt_id,
+  t.fd_id,
+  COALESCE(t.fd_ref_no,'')               AS fd_ref_no,
+  t.entity_id,
+  COALESCE(t.entity_name, m.entity_name, t.entity_id, '') AS entity_name,
+  COALESCE(t.bank_id,'')                 AS bank_id,
+  COALESCE(t.bank_name, m.bank_name, '') AS bank_name,
+  COALESCE(m.principal_amount, 0)        AS fd_principal_amount,
+  COALESCE(m.interest_rate, 0)           AS fd_interest_rate,
+  COALESCE(m.maturity_date::text,'')     AS fd_maturity_date,
+  COALESCE(m.fd_status,'')               AS fd_status,
+  TO_CHAR(t.period_start,'YYYY-MM-DD')   AS period_start,
+  TO_CHAR(t.period_end,'YYYY-MM-DD')     AS period_end,
+  TO_CHAR(t.deduction_date,'YYYY-MM-DD') AS deduction_date,
+  COALESCE(t.gross_interest, 0)          AS gross_interest,
+  COALESCE(t.tds_rate_applied, 0)        AS tds_rate_applied,
+  COALESCE(t.tds_expected, 0)            AS tds_expected,
+  COALESCE(t.tds_deducted_actual, 0)     AS tds_deducted_actual,
+  COALESCE(t.tds_variance, 0)            AS tds_variance,
+  COALESCE(t.tds_section,'')             AS tds_section,
+  COALESCE(t.tds_plan_id,'')             AS tds_plan_id,
+  COALESCE(t.has_pan, false)             AS has_pan,
+  COALESCE(t.tds_status,'CAPTURED')      AS tds_status,
+  COALESCE(t.exception_raised, false)    AS exception_raised,
+  COALESCE(t.reconcile_status,'')        AS reconcile_status,
+  COALESCE(t.reconcile_run_id,'')        AS reconcile_run_id,
+  COALESCE(t.ingestion_source,'')        AS ingestion_source,
+  COALESCE(t.is_active, true)            AS is_active,
+  TO_CHAR(t.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at
+FROM investment.fd_tds_receipt t
+LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+WHERE t.is_deleted = false`
+
+		args := []interface{}{}
+		argIdx := 1
+
+		if req.EntityID != "" {
+			baseSQL += fmt.Sprintf(" AND t.entity_id=$%d", argIdx)
+			args = append(args, req.EntityID)
+			argIdx++
+		}
+		if req.FDID != "" {
+			baseSQL += fmt.Sprintf(" AND t.fd_id=$%d", argIdx)
+			args = append(args, req.FDID)
+			argIdx++
+		}
+		if req.BankID != "" {
+			baseSQL += fmt.Sprintf(" AND t.bank_id=$%d", argIdx)
+			args = append(args, req.BankID)
+			argIdx++
+		}
+		if req.TDSStatus != "" {
+			baseSQL += fmt.Sprintf(" AND t.tds_status=$%d", argIdx)
+			args = append(args, req.TDSStatus)
+			argIdx++
+		}
+		if req.FromDate != "" {
+			baseSQL += fmt.Sprintf(" AND t.deduction_date>=$%d::date", argIdx)
+			args = append(args, req.FromDate)
+			argIdx++
+		}
+		if req.ToDate != "" {
+			baseSQL += fmt.Sprintf(" AND t.deduction_date<=$%d::date", argIdx)
+			args = append(args, req.ToDate)
+			argIdx++
+		}
+		baseSQL += " ORDER BY t.deduction_date DESC, t.created_at DESC"
+
+		rows, err := pool.Query(ctx, baseSQL, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+		out, _ := rowsToMapSlice(rows)
+		if out == nil {
+			out = []map[string]interface{}{}
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"rows":    out,
+			"count":   len(out),
+		})
+	}
+}
+
 // ─── HANDLER 8: GetReceiptDetail ─────────────────────────────────────────────
 
 func GetReceiptDetail(pool *pgxpool.Pool) http.HandlerFunc {
@@ -1305,25 +1424,31 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 // the projected outcome immediately for the UI to display.
 // The user then calls /reconcile/ingest with the same run_id to commit.
 
+// ─── HANDLER 11a: RunReconciliation (pure preview — zero DB writes) ───────────
+//
+// POST /investment/fd/reconcile/run
+// Takes receipt_ids and/or tds_ids (or entity_id + period for bulk).
+// Derives the period directly from those receipt rows — caller does NOT need to
+// supply period_start/period_end when passing specific IDs.
+// Returns a full preview inline.  Nothing is persisted.
+
 func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID       string   `json:"user_id"`
-			EntityID     string   `json:"entity_id"`
-			EntityName   string   `json:"entity_name"`
-			BankIDFilter string   `json:"bank_id_filter"`
-			PeriodStart  string   `json:"period_start"`
-			PeriodEnd    string   `json:"period_end"`
-			MatchingBasis string  `json:"matching_basis"`
-			// Optionally target specific receipts/TDS IDs instead of all for entity+period
-			ReceiptIDs []string `json:"receipt_ids"`
-			TDSIDs     []string `json:"tds_ids"`
+			UserID        string   `json:"user_id"`
+			EntityID      string   `json:"entity_id"`
+			EntityName    string   `json:"entity_name"`
+			BankIDFilter  string   `json:"bank_id_filter"`
+			PeriodStart   string   `json:"period_start"`
+			PeriodEnd     string   `json:"period_end"`
+			MatchingBasis string   `json:"matching_basis"`
+			ReceiptIDs    []string `json:"receipt_ids"`
+			TDSIDs        []string `json:"tds_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		// When specific IDs are given entity+period are optional (we auto-derive period from the records)
 		hasIDs := len(req.ReceiptIDs) > 0 || len(req.TDSIDs) > 0
 		if !hasIDs && (req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "") {
 			api.RespondWithError(w, http.StatusBadRequest, "Provide either receipt_ids/tds_ids or (entity_id + period_start + period_end)")
@@ -1337,7 +1462,96 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.MatchingBasis == "" {
 			req.MatchingBasis = "BOTH"
 		}
-		// When IDs are supplied and no period given, use a wide sentinel period
+
+		ctx := r.Context()
+
+		var preview *ReconcilePreviewSummary
+		var previewErr error
+
+		if hasIDs {
+			// Fast path: specific IDs — derive period from those rows, no run row needed.
+			preview, previewErr = reconcilePreviewDirect(ctx, pool, req.MatchingBasis, req.ReceiptIDs, req.TDSIDs)
+		} else {
+			// Bulk path: entity + period — use the engine via a temporary ephemeral run row
+			// that gets deleted after the preview is computed.
+			var runID string
+			insErr := pool.QueryRow(ctx, `
+				INSERT INTO investment.fd_receipt_reconcile_run (
+					reconcile_run_id, entity_id, entity_name, bank_id_filter,
+					period_start, period_end, matching_basis,
+					triggered_by, triggered_at, trigger_mode, run_status
+				) VALUES (
+					'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+					$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','PREVIEW'
+				) RETURNING reconcile_run_id`,
+				req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
+				req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
+			).Scan(&runID)
+			if insErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Reconcile preview failed: "+insErr.Error())
+				return
+			}
+			preview, previewErr = reconcileEngine(ctx, pool, runID, true, nil, nil)
+			// Clean up the ephemeral preview run row — it's not needed
+			pool.Exec(ctx, `DELETE FROM investment.fd_receipt_reconcile_run WHERE reconcile_run_id=$1 AND run_status='PREVIEW'`, runID) //nolint:errcheck
+		}
+
+		if previewErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Preview computation failed: "+previewErr.Error())
+			return
+		}
+
+		api.LogInfo("[FDReceipt] ReconcilePreview (no DB write) entity=%s i=%d tds=%d",
+			req.EntityID, preview.Interest.Processed, preview.TDS.Processed)
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Dry-run preview. Call /reconcile/ingest with the same payload to commit.",
+			"preview": preview,
+		})
+	}
+}
+
+// ─── HANDLER 11b: IngestReconciliation (actual commit) ────────────────────────
+//
+// POST /investment/fd/reconcile/ingest
+// Accepts the SAME payload as /reconcile/run.
+// Creates a fresh run row, then fires the full reconciliation goroutine (writes
+// junction table rows, result rows, exception rows, updates receipts).
+// Returns run_id immediately; poll /reconcile/status for progress.
+
+func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID        string `json:"user_id"`
+			EntityID      string `json:"entity_id"`
+			EntityName    string `json:"entity_name"`
+			BankIDFilter  string `json:"bank_id_filter"`
+			PeriodStart   string `json:"period_start"`
+			PeriodEnd     string `json:"period_end"`
+			MatchingBasis string `json:"matching_basis"`
+			// Optionally target specific receipts/TDS IDs instead of all for entity+period
+			ReceiptIDs []string `json:"receipt_ids"`
+			TDSIDs     []string `json:"tds_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		hasIDs := len(req.ReceiptIDs) > 0 || len(req.TDSIDs) > 0
+		if !hasIDs && (req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "") {
+			api.RespondWithError(w, http.StatusBadRequest, "Provide either receipt_ids/tds_ids or (entity_id + period_start + period_end)")
+			return
+		}
+		userEmail := resolveUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		if req.MatchingBasis == "" {
+			req.MatchingBasis = "BOTH"
+		}
 		if req.PeriodStart == "" {
 			req.PeriodStart = "2000-01-01"
 		}
@@ -1347,7 +1561,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Create run row in PREVIEW status (not RUNNING — nothing is written yet)
+		// Create a fresh RUNNING run row
 		var runID string
 		err := pool.QueryRow(ctx, `
 			INSERT INTO investment.fd_receipt_reconcile_run (
@@ -1356,7 +1570,7 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 				triggered_by, triggered_at, trigger_mode, run_status
 			) VALUES (
 				'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-				$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','PREVIEW'
+				$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','RUNNING'
 			) RETURNING reconcile_run_id`,
 			req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
 			req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
@@ -1366,100 +1580,11 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Run engine in dry-run mode — synchronous, returns preview immediately
-		preview, previewErr := reconcileEngine(ctx, pool, runID, true, req.ReceiptIDs, req.TDSIDs)
-		if previewErr != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Preview computation failed: "+previewErr.Error())
-			return
-		}
+		// Capture for goroutine
+		filterReceiptIDs := req.ReceiptIDs
+		filterTDSIDs := req.TDSIDs
 
-		api.LogInfo("[FDReceipt] ReconcilePreview run_id=%s entity=%s period=%s→%s i=%d tds=%d",
-			runID, req.EntityID, req.PeriodStart, req.PeriodEnd,
-			preview.Interest.Processed, preview.TDS.Processed)
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":          true,
-			"reconcile_run_id": runID,
-			"run_status":       "PREVIEW",
-			"message":          "Dry-run preview. Call /reconcile/ingest with this run_id to commit.",
-			"preview":          preview,
-		})
-	}
-}
-
-// ─── HANDLER 11b: IngestReconciliation (actual commit) ────────────────────────
-//
-// POST /investment/fd/reconcile/ingest
-// Takes a run_id that was previously created by /reconcile/run (status=PREVIEW),
-// fires the full reconciliation goroutine (writes junction table rows, result rows,
-// exception rows, updates receipts). Returns immediately; poll /reconcile/status.
-
-func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID         string `json:"user_id"`
-			ReconcileRunID string `json:"reconcile_run_id"`
-			// Alternatively create a fresh run inline if no run_id provided
-			EntityID      string `json:"entity_id"`
-			EntityName    string `json:"entity_name"`
-			BankIDFilter  string `json:"bank_id_filter"`
-			PeriodStart   string `json:"period_start"`
-			PeriodEnd     string `json:"period_end"`
-			MatchingBasis string `json:"matching_basis"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
-		}
-		userEmail := resolveUserEmail(req.UserID)
-		if userEmail == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
-			return
-		}
-
-		ctx := r.Context()
-		runID := req.ReconcileRunID
-
-		if runID == "" {
-			// No prior preview — create the run row fresh
-			if req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id or (entity_id, period_start, period_end) are required")
-				return
-			}
-			if req.MatchingBasis == "" {
-				req.MatchingBasis = "BOTH"
-			}
-			err := pool.QueryRow(ctx, `
-				INSERT INTO investment.fd_receipt_reconcile_run (
-					reconcile_run_id, entity_id, entity_name, bank_id_filter,
-					period_start, period_end, matching_basis,
-					triggered_by, triggered_at, trigger_mode, run_status
-				) VALUES (
-					'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-					$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','RUNNING'
-				) RETURNING reconcile_run_id`,
-				req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
-				req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
-			).Scan(&runID)
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Reconcile run insert failed: "+err.Error())
-				return
-			}
-		} else {
-			// Transition existing PREVIEW run → RUNNING
-			res, upErr := pool.Exec(ctx,
-				`UPDATE investment.fd_receipt_reconcile_run
-				 SET run_status='RUNNING', triggered_by=$1, triggered_at=now()
-				 WHERE reconcile_run_id=$2 AND run_status='PREVIEW'`,
-				userEmail, runID)
-			if upErr != nil || res.RowsAffected() == 0 {
-				api.RespondWithError(w, http.StatusBadRequest, "Run not found or already ingested (status must be PREVIEW)")
-				return
-			}
-		}
-
-		go func(rID string) {
+		go func(rID, eID, uEmail string) {
 			defer func() {
 				if rec := recover(); rec != nil {
 					api.LogError("[FDReceipt] IngestReconciliation panic run=%s: %v", rID, rec)
@@ -1471,14 +1596,14 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}()
 			bgCtx := context.Background()
-			if rErr := runReconciliation(bgCtx, pool, rID); rErr != nil {
+			if rErr := runReconciliation(bgCtx, pool, rID, filterReceiptIDs, filterTDSIDs); rErr != nil {
 				api.LogError("[FDReceipt] IngestReconciliation failed run=%s: %v", rID, rErr)
 				pool.Exec(bgCtx,
 					`UPDATE investment.fd_receipt_reconcile_run
 					 SET run_status='FAILED', error_message=$1, completed_at=now()
 					 WHERE reconcile_run_id=$2`, rErr.Error(), rID) //nolint:errcheck
 			}
-		}(runID)
+		}(runID, req.EntityID, userEmail)
 
 		go func(rID, eID, uEmail string) {
 			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/reconcile/ingest", rID, map[string]interface{}{
@@ -1489,7 +1614,9 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}(runID, req.EntityID, userEmail)
 
-		api.LogInfo("[FDReceipt] IngestReconciliation started: run_id=%s", runID)
+		api.LogInfo("[FDReceipt] IngestReconciliation started: run_id=%s entity=%s period=%s→%s i=%d tds=%d",
+			runID, req.EntityID, req.PeriodStart, req.PeriodEnd,
+			len(req.ReceiptIDs), len(req.TDSIDs))
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
@@ -1501,77 +1628,129 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ─── HANDLER 12: GetReconcileRunStatus ───────────────────────────────────────
+// Returns a list of reconcile runs (no run_id required).
+// Filters: entity_id, run_status, reconcile_run_id (any combination, all optional).
+// Results ordered by triggered_at DESC (latest first).
 
 func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		runID := r.URL.Query().Get("reconcile_run_id")
-		if runID == "" {
-			var req struct {
-				UserID         string `json:"user_id"`
-				ReconcileRunID string `json:"reconcile_run_id"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-				runID = req.ReconcileRunID
-			}
+		// Accept filters from either query-string or JSON body
+		var req struct {
+			UserID         string `json:"user_id"`
+			EntityID       string `json:"entity_id"`
+			RunStatus      string `json:"run_status"`
+			ReconcileRunID string `json:"reconcile_run_id"`
+			Limit          int    `json:"limit"`
+			Offset         int    `json:"offset"`
 		}
-		if runID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id is required")
-			return
+		// Try JSON body first, fall back to query params
+		if r.Body != nil {
+			json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
 		}
+		if req.EntityID == "" {
+			req.EntityID = r.URL.Query().Get("entity_id")
+		}
+		if req.RunStatus == "" {
+			req.RunStatus = r.URL.Query().Get("run_status")
+		}
+		if req.ReconcileRunID == "" {
+			req.ReconcileRunID = r.URL.Query().Get("reconcile_run_id")
+		}
+		// if req.Limit <= 0 {
+		// 	req.Limit = 50
+		// }
 
 		ctx := r.Context()
-		rows, err := pool.Query(ctx, `
+
+		baseSQL := `
 			SELECT reconcile_run_id, entity_id, entity_name,
-			       COALESCE(bank_id_filter,'') AS bank_id_filter,
-			       period_start, period_end, matching_basis,
-			       run_status, trigger_mode, triggered_by, triggered_at,
-			       COALESCE(completed_at::text,'')   AS completed_at,
-			       COALESCE(error_message,'')         AS error_message,
-			       COALESCE(interest_processed,0)     AS interest_processed,
-			       COALESCE(interest_matched,0)       AS interest_matched,
-			       COALESCE(interest_partial,0)       AS interest_partial,
-			       COALESCE(interest_unmatched,0)     AS interest_unmatched,
-			       COALESCE(interest_exception,0)     AS interest_exception,
-			       COALESCE(tds_processed,0)          AS tds_processed,
-			       COALESCE(tds_matched,0)            AS tds_matched,
-			       COALESCE(tds_partial,0)            AS tds_partial,
-			       COALESCE(tds_unmatched,0)          AS tds_unmatched,
-			       COALESCE(tds_exception,0)          AS tds_exception,
-			       COALESCE(total_expected_interest,0) AS total_expected_interest,
-			       COALESCE(total_received_interest,0) AS total_received_interest,
-			       COALESCE(total_interest_variance,0) AS total_interest_variance,
-			       COALESCE(total_expected_tds,0)     AS total_expected_tds,
-			       COALESCE(total_received_tds,0)     AS total_received_tds,
-			       COALESCE(total_tds_variance,0)     AS total_tds_variance
+			       COALESCE(bank_id_filter,'')             AS bank_id_filter,
+			       period_start::text, period_end::text,
+			       matching_basis,
+			       run_status, trigger_mode, triggered_by,
+			       triggered_at::text                      AS triggered_at,
+			       COALESCE(completed_at::text,'')         AS completed_at,
+			       COALESCE(error_message,'')              AS error_message,
+			       COALESCE(interest_processed,0)          AS interest_processed,
+			       COALESCE(interest_matched,0)            AS interest_matched,
+			       COALESCE(interest_partial,0)            AS interest_partial,
+			       COALESCE(interest_unmatched,0)          AS interest_unmatched,
+			       COALESCE(interest_exception,0)          AS interest_exception,
+			       COALESCE(tds_processed,0)               AS tds_processed,
+			       COALESCE(tds_matched,0)                 AS tds_matched,
+			       COALESCE(tds_partial,0)                 AS tds_partial,
+			       COALESCE(tds_unmatched,0)               AS tds_unmatched,
+			       COALESCE(tds_exception,0)               AS tds_exception,
+			       COALESCE(total_expected_interest,0)     AS total_expected_interest,
+			       COALESCE(total_received_interest,0)     AS total_received_interest,
+			       COALESCE(total_interest_variance,0)     AS total_interest_variance,
+			       COALESCE(total_expected_tds,0)          AS total_expected_tds,
+			       COALESCE(total_received_tds,0)          AS total_received_tds,
+			       COALESCE(total_tds_variance,0)          AS total_tds_variance
 			FROM investment.fd_receipt_reconcile_run
-			WHERE reconcile_run_id=$1`, runID)
+			WHERE 1=1`
+
+		args := []interface{}{}
+		argIdx := 1
+
+		if req.ReconcileRunID != "" {
+			baseSQL += fmt.Sprintf(" AND reconcile_run_id=$%d", argIdx)
+			args = append(args, req.ReconcileRunID)
+			argIdx++
+		}
+		if req.EntityID != "" {
+			baseSQL += fmt.Sprintf(" AND entity_id=$%d", argIdx)
+			args = append(args, req.EntityID)
+			argIdx++
+		}
+		if req.RunStatus != "" {
+			baseSQL += fmt.Sprintf(" AND run_status=$%d", argIdx)
+			args = append(args, req.RunStatus)
+			argIdx++
+		}
+
+		baseSQL += fmt.Sprintf(" ORDER BY triggered_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		args = append(args, req.Limit, req.Offset)
+
+		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 		out, _ := rowsToMapSlice(rows)
-		var result interface{}
-		if len(out) > 0 {
-			result = out[0]
+		if out == nil {
+			out = []map[string]interface{}{}
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"run":     result,
+			"runs":    out,
+			"count":   len(out),
 		})
 	}
 }
 
 // ─── HANDLER 13: GetReconcileResults ─────────────────────────────────────────
+// Returns reconcile result rows enriched with FD master data + cashflow/accrual
+// detail lines.  Matches the same shape as the preview line.
+// Filters: reconcile_run_id, entity_id, fd_id, receipt_id, tds_id, match_status
+// — all optional.  Ordered by created_at DESC (latest first).
 
 func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID         string `json:"user_id"`
 			ReconcileRunID string `json:"reconcile_run_id"`
+			EntityID       string `json:"entity_id"`
+			FDID           string `json:"fd_id"`
+			ReceiptID      string `json:"receipt_id"`
+			TDSID          string `json:"tds_id"`
 			MatchStatus    string `json:"match_status"`
+			MatchingBasis  string `json:"matching_basis"`
+			Limit          int    `json:"limit"`
+			Offset         int    `json:"offset"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1582,15 +1761,86 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
+		// if req.Limit <= 0 {
+		// 	req.Limit = 100
+		// }
+		if req.MatchingBasis == "" {
+			req.MatchingBasis = "BOTH"
+		}
 
 		ctx := r.Context()
-		baseSQL := `SELECT * FROM investment.fd_receipt_reconcile_result WHERE reconcile_run_id=$1`
-		args := []interface{}{req.ReconcileRunID}
-		if req.MatchStatus != "" {
-			baseSQL += " AND match_status=$2"
-			args = append(args, req.MatchStatus)
+
+		// ── 1. Fetch base result rows enriched with FD master ─────────────────
+		baseSQL := `
+			SELECT
+				rr.result_id,
+				rr.reconcile_run_id,
+				rr.result_type,
+				rr.fd_id,
+				COALESCE(m.bank_fd_ref_no, rr.fd_ref_no, '') AS fd_ref_no,
+				rr.entity_id,
+				COALESCE(m.entity_name, rr.entity_id, '')     AS entity_name,
+				rr.bank_id,
+				COALESCE(m.bank_name, '')                      AS bank_name,
+				COALESCE(m.principal_amount,   0)              AS principal_amount,
+				COALESCE(m.interest_rate,      0)              AS interest_rate,
+				COALESCE(m.maturity_date::text,'')             AS maturity_date,
+				COALESCE(m.fd_status,'')                       AS fd_status,
+				rr.period_start::text,
+				rr.period_end::text,
+				rr.matching_basis,
+				COALESCE(rr.receipt_id,'')                     AS receipt_id,
+				COALESCE(rr.tds_id,'')                         AS tds_id,
+				COALESCE(rr.expected_amount,    0)             AS expected_amount,
+				COALESCE(rr.received_amount,    0)             AS received_amount,
+				COALESCE(rr.amount_variance,    0)             AS amount_variance,
+				COALESCE(rr.amount_variance_pct,0)             AS amount_variance_pct,
+				rr.match_status,
+				COALESCE(rr.match_type,'')                     AS match_type,
+				COALESCE(rr.has_exception, false)              AS has_exception,
+				COALESCE(rr.exception_id,'')                   AS exception_id,
+				rr.created_at::text                            AS created_at
+			FROM investment.fd_receipt_reconcile_result rr
+			LEFT JOIN investment.fd_master m
+			       ON m.fd_id = rr.fd_id AND m.is_deleted = false
+			WHERE 1=1`
+
+		args := []interface{}{}
+		argIdx := 1
+
+		if req.ReconcileRunID != "" {
+			baseSQL += fmt.Sprintf(" AND rr.reconcile_run_id=$%d", argIdx)
+			args = append(args, req.ReconcileRunID)
+			argIdx++
 		}
-		baseSQL += " ORDER BY fd_id ASC"
+		if req.EntityID != "" {
+			baseSQL += fmt.Sprintf(" AND rr.entity_id=$%d", argIdx)
+			args = append(args, req.EntityID)
+			argIdx++
+		}
+		if req.FDID != "" {
+			baseSQL += fmt.Sprintf(" AND rr.fd_id=$%d", argIdx)
+			args = append(args, req.FDID)
+			argIdx++
+		}
+		if req.ReceiptID != "" {
+			baseSQL += fmt.Sprintf(" AND rr.receipt_id=$%d", argIdx)
+			args = append(args, req.ReceiptID)
+			argIdx++
+		}
+		if req.TDSID != "" {
+			baseSQL += fmt.Sprintf(" AND rr.tds_id=$%d", argIdx)
+			args = append(args, req.TDSID)
+			argIdx++
+		}
+		if req.MatchStatus != "" {
+			baseSQL += fmt.Sprintf(" AND rr.match_status=$%d", argIdx)
+			args = append(args, req.MatchStatus)
+			argIdx++
+		}
+
+		baseSQL += fmt.Sprintf(" ORDER BY rr.created_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+		args = append(args, req.Limit, req.Offset)
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
@@ -1598,13 +1848,153 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		defer rows.Close()
-		out, _ := rowsToMapSlice(rows)
+
+		type ExceptionLine struct {
+			ExceptionID      string  `json:"exception_id"`
+			ExceptionType    string  `json:"exception_type"`
+			Severity         string  `json:"severity"`
+			ExceptionStatus  string  `json:"exception_status"`
+			ExpectedAmount   float64 `json:"expected_amount"`
+			ReceivedAmount   float64 `json:"received_amount"`
+			VarianceAmount   float64 `json:"variance_amount"`
+			RaisedBy         string  `json:"raised_by"`
+			RaisedAt         string  `json:"raised_at"`
+			ResolvedBy       string  `json:"resolved_by,omitempty"`
+			ResolvedAt       string  `json:"resolved_at,omitempty"`
+			ResolutionRemarks string `json:"resolution_remarks,omitempty"`
+		}
+
+		type ResultLine struct {
+			ResultID        string  `json:"result_id"`
+			ReconcileRunID  string  `json:"reconcile_run_id"`
+			ResultType      string  `json:"result_type"`
+			FDID            string  `json:"fd_id"`
+			FdRefNo         string  `json:"fd_ref_no"`
+			EntityID        string  `json:"entity_id"`
+			EntityName      string  `json:"entity_name"`
+			BankID          string  `json:"bank_id"`
+			BankName        string  `json:"bank_name"`
+			PrincipalAmount float64 `json:"principal_amount"`
+			InterestRate    float64 `json:"interest_rate"`
+			MaturityDate    string  `json:"maturity_date"`
+			FDStatus        string  `json:"fd_status"`
+			PeriodStart     string  `json:"period_start"`
+			PeriodEnd       string  `json:"period_end"`
+			MatchingBasis   string  `json:"matching_basis"`
+			ReceiptID       string  `json:"receipt_id,omitempty"`
+			TDSID           string  `json:"tds_id,omitempty"`
+			ExpectedAmount  float64 `json:"expected_amount"`
+			ReceivedAmount  float64 `json:"received_amount"`
+			Variance        float64 `json:"variance"`
+			VariancePct     float64 `json:"variance_pct"`
+			MatchStatus     string  `json:"match_status"`
+			MatchType       string  `json:"match_type"`
+			HasException    bool    `json:"has_exception"`
+			ExceptionID     string  `json:"exception_id,omitempty"`
+			CreatedAt       string  `json:"created_at"`
+			// Detail arrays — same shape as preview
+			Cashflows     []CashflowLine      `json:"cashflows"`
+			AccrualLedger []AccrualLedgerLine `json:"accrual_ledger"`
+			// Exceptions embedded so they can be resolved inline
+			Exceptions []ExceptionLine `json:"exceptions"`
+		}
+
+		var results []ResultLine
+		for rows.Next() {
+			var rl ResultLine
+			if e := rows.Scan(
+				&rl.ResultID, &rl.ReconcileRunID, &rl.ResultType,
+				&rl.FDID, &rl.FdRefNo,
+				&rl.EntityID, &rl.EntityName,
+				&rl.BankID, &rl.BankName,
+				&rl.PrincipalAmount, &rl.InterestRate,
+				&rl.MaturityDate, &rl.FDStatus,
+				&rl.PeriodStart, &rl.PeriodEnd,
+				&rl.MatchingBasis,
+				&rl.ReceiptID, &rl.TDSID,
+				&rl.ExpectedAmount, &rl.ReceivedAmount,
+				&rl.Variance, &rl.VariancePct,
+				&rl.MatchStatus, &rl.MatchType,
+				&rl.HasException, &rl.ExceptionID,
+				&rl.CreatedAt,
+			); e == nil {
+				rl.Cashflows = []CashflowLine{}
+				rl.AccrualLedger = []AccrualLedgerLine{}
+				rl.Exceptions = []ExceptionLine{}
+				results = append(results, rl)
+			}
+		}
+		rows.Close()
+
+		// ── 2. Enrich each result with cashflow + accrual detail lines ────────
+		for i := range results {
+			rl := &results[i]
+			if rl.PeriodStart == "" || rl.PeriodEnd == "" || rl.FDID == "" {
+				continue
+			}
+			ps, pe := parseDateRange(rl.PeriodStart, rl.PeriodEnd)
+			matchBasis := rl.MatchingBasis
+			if matchBasis == "" {
+				matchBasis = req.MatchingBasis
+			}
+			forTDS := rl.ResultType == "TDS"
+
+			if matchBasis == "CASHFLOW" || matchBasis == "BOTH" {
+				if cf := loadCashflowsForReceipt(ctx, pool, rl.FDID, ps, pe, forTDS); cf != nil {
+					rl.Cashflows = cf
+				}
+			}
+			if matchBasis == "ACCRUAL" || matchBasis == "BOTH" {
+				if al := loadAccrualLedgerForReceipt(ctx, pool, rl.FDID, ps, pe, forTDS); al != nil {
+					rl.AccrualLedger = al
+				}
+			}
+
+			// ── 3. Load exceptions for this result row ────────────────────────
+			if rl.HasException || rl.ExceptionID != "" {
+				exRows, exErr := pool.Query(ctx, `
+					SELECT
+						exception_id,
+						COALESCE(exception_type,'')    AS exception_type,
+						COALESCE(severity,'')          AS severity,
+						COALESCE(exception_status,'')  AS exception_status,
+						COALESCE(expected_amount,0)    AS expected_amount,
+						COALESCE(received_amount,0)    AS received_amount,
+						COALESCE(variance_amount,0)    AS variance_amount,
+						COALESCE(raised_by,'')         AS raised_by,
+						COALESCE(raised_at::text,'')   AS raised_at,
+						COALESCE(resolved_by,'')       AS resolved_by,
+						COALESCE(resolved_at::text,'') AS resolved_at,
+						COALESCE(resolution_remarks,'') AS resolution_remarks
+					FROM investment.fd_receipt_exception
+					WHERE result_id = $1 AND is_deleted = false
+					ORDER BY raised_at DESC`, rl.ResultID)
+				if exErr == nil {
+					for exRows.Next() {
+						var ex ExceptionLine
+						if se := exRows.Scan(
+							&ex.ExceptionID, &ex.ExceptionType, &ex.Severity, &ex.ExceptionStatus,
+							&ex.ExpectedAmount, &ex.ReceivedAmount, &ex.VarianceAmount,
+							&ex.RaisedBy, &ex.RaisedAt,
+							&ex.ResolvedBy, &ex.ResolvedAt, &ex.ResolutionRemarks,
+						); se == nil {
+							rl.Exceptions = append(rl.Exceptions, ex)
+						}
+					}
+					exRows.Close()
+				}
+			}
+		}
+
+		if results == nil {
+			results = []ResultLine{}
+		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"rows":    out,
-			"count":   len(out),
+			"rows":    results,
+			"count":   len(results),
 		})
 	}
 }

@@ -32,4 +32,8 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 		mid(http.HandlerFunc(DeleteClosureRequest(pool))))
 	mux.Handle("/investment/fd/closure/approval-list",
 		mid(http.HandlerFunc(GetClosureApprovalList(pool))))
+
+	// Maturity Summary — pivot-table view of all FDs
+	mux.Handle("/investment/fd/maturity/summary",
+		mid(http.HandlerFunc(GetFDMaturitySummary(pool))))
 }

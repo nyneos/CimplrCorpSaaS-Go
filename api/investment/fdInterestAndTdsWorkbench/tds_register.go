@@ -10,6 +10,8 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,7 +45,10 @@ func toFloat64(v interface{}) float64 {
 
 // ─── TDS Register Create ────────────────────────────────────────────────────
 // POST /investment/fd/tds-register/create
-// Creates new TDS register entries
+// Creates a standalone TDS receipt entry (backlog fill).
+// receipt_id is optional — if not provided the entry is created without a link
+// to an interest receipt.  fd_ref_no, bank_id, entity_name, bank_name are resolved
+// from fd_master using fd_id — no hallucination, read from the actual table.
 
 func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -51,13 +56,16 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID            string  `json:"user_id"`
 			EntityID          string  `json:"entity_id"`
 			FDID              string  `json:"fd_id"`
-			ReceiptID         string  `json:"receipt_id"` // required: must be a valid fd_interest_receipt.receipt_id
+			ReceiptID         string  `json:"receipt_id"`         // optional
 			PeriodStart       string  `json:"period_start"`
 			PeriodEnd         string  `json:"period_end"`
 			TDSExpected       float64 `json:"tds_expected"`
 			TDSDeductedActual float64 `json:"tds_deducted_actual"`
-			InterestAmount    float64 `json:"interest_amount"`
+			GrossInterest     float64 `json:"gross_interest"`     // renamed from interest_amount
 			TDSDeductionDate  string  `json:"tds_deduction_date"`
+			TDSRateApplied    float64 `json:"tds_rate_applied"`
+			TDSSection        string  `json:"tds_section"`
+			HasPAN            bool    `json:"has_pan"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -78,64 +86,60 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// If no receipt_id provided, find the latest one for this fd_id
-		receiptID := req.ReceiptID
-		var fdRefNo, bankID string
-		if receiptID == "" {
-			err := pool.QueryRow(ctx, `
-				SELECT receipt_id, COALESCE(fd_ref_no,''), COALESCE(bank_id,'')
-				FROM investment.fd_interest_receipt 
-				WHERE fd_id = $1 AND is_deleted = false 
-				ORDER BY created_at DESC LIMIT 1`,
-				req.FDID).Scan(&receiptID, &fdRefNo, &bankID)
-			if err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "No interest receipt found for fd_id '"+req.FDID+"'. Provide a valid receipt_id.")
-				return
-			}
-		} else {
-			// Fetch fd_ref_no and bank_id from the provided receipt_id
-			pool.QueryRow(ctx, `
-				SELECT COALESCE(fd_ref_no,''), COALESCE(bank_id,'')
-				FROM investment.fd_interest_receipt 
-				WHERE receipt_id = $1 AND is_deleted = false`,
-				receiptID).Scan(&fdRefNo, &bankID)
+		// ── Resolve fd_ref_no, bank_id, entity_name, bank_name from fd_master ──
+		var fdRefNo, bankID, entityName, bankName string
+		_ = pool.QueryRow(ctx, `
+			SELECT
+				COALESCE(bank_fd_ref_no, ''),
+				COALESCE(bank_id, ''),
+				COALESCE(entity_name, ''),
+				COALESCE(bank_name, '')
+			FROM investment.fd_master
+			WHERE fd_id = $1 AND is_deleted = false
+			LIMIT 1`, req.FDID).Scan(&fdRefNo, &bankID, &entityName, &bankName)
+
+		tdsVariance := req.TDSDeductedActual - req.TDSExpected
+		exceptionRaised := tdsVariance != 0
+
+		// receipt_id is nullable — pass NULL when not provided
+		var receiptIDArg interface{}
+		if strings.TrimSpace(req.ReceiptID) != "" {
+			receiptIDArg = req.ReceiptID
+		}
+		// deduction_date falls back to period_end if not provided
+		deductionDate := req.TDSDeductionDate
+		if strings.TrimSpace(deductionDate) == "" {
+			deductionDate = req.PeriodEnd
 		}
 
-		// Verify the receipt_id actually exists
-		var exists bool
-		pool.QueryRow(ctx, `
-			SELECT EXISTS(SELECT 1 FROM investment.fd_interest_receipt WHERE receipt_id = $1 AND is_deleted = false)`,
-			receiptID).Scan(&exists)
-		if !exists {
-			api.RespondWithError(w, http.StatusBadRequest, "receipt_id '"+receiptID+"' not found in fd_interest_receipt")
-			return
-		}
-
-		// Insert TDS receipt — fd_ref_no comes from fd_interest_receipt (not fd_master)
 		var tdsID string
 		err := pool.QueryRow(ctx, `
 			INSERT INTO investment.fd_tds_receipt (
-				tds_id, fd_id, fd_ref_no, entity_id, bank_id,
+				tds_id, receipt_id, fd_id, fd_ref_no, entity_id, entity_name, bank_id, bank_name,
 				ingestion_source,
 				period_start, period_end, deduction_date,
-				gross_interest, tds_expected, tds_deducted_actual, tds_variance,
+				gross_interest, tds_rate_applied, tds_rate_expected,
+				tds_expected, tds_deducted_actual, tds_variance,
+				has_pan, tds_section,
 				tds_status, exception_raised,
 				is_active, is_deleted
 			) VALUES (
 				'TDSR-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,8)),
-				$1,
-				$2,
-				$3,
-				$4,
+				$1, $2, $3, $4, $5, $6, $7,
 				'TDS_WORKBENCH',
-				$5::date, $6::date, COALESCE($7::date, $6::date),
-				$8, $9, $10, ($10::numeric - $9::numeric),
-				'CAPTURED', ($10::numeric - $9::numeric) != 0,
+				$8::date, $9::date, $10::date,
+				$11, $12, $12,
+				$13, $14, $15,
+				$16, $17,
+				'CAPTURED', $18,
 				true, false
 			) RETURNING tds_id`,
-			req.FDID, fdRefNo, req.EntityID, bankID,
-			req.PeriodStart, req.PeriodEnd, nullIfEmpty(req.TDSDeductionDate),
-			req.InterestAmount, req.TDSExpected, req.TDSDeductedActual,
+			receiptIDArg, req.FDID, fdRefNo, req.EntityID, entityName, bankID, bankName,
+			req.PeriodStart, req.PeriodEnd, deductionDate,
+			req.GrossInterest, req.TDSRateApplied,
+			req.TDSExpected, req.TDSDeductedActual, tdsVariance,
+			req.HasPAN, nullIfEmpty(req.TDSSection),
+			exceptionRaised,
 		).Scan(&tdsID)
 
 		if err != nil {
@@ -151,11 +155,16 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"data": map[string]interface{}{
 				"tds_id":              tdsID,
 				"fd_id":               req.FDID,
+				"fd_ref_no":           fdRefNo,
 				"entity_id":           req.EntityID,
+				"entity_name":         entityName,
+				"bank_id":             bankID,
+				"bank_name":           bankName,
 				"ingestion_source":    "TDS_WORKBENCH",
 				"tds_expected":        req.TDSExpected,
 				"tds_deducted_actual": req.TDSDeductedActual,
-				"tds_variance":        req.TDSDeductedActual - req.TDSExpected,
+				"tds_variance":        tdsVariance,
+				"exception_raised":    exceptionRaised,
 			},
 		})
 	}
@@ -323,7 +332,8 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if req.ReconcileAction == "AUTO" {
 			// Auto-reconcile within tolerance
-			_, err = tx.Exec(ctx, `
+			var cmdTag pgconn.CommandTag
+			cmdTag, err = tx.Exec(ctx, `
 				UPDATE investment.fd_tds_receipt 
 				SET tds_status = CASE
 					WHEN ABS(tds_variance) <= $1 THEN 'APPROVED'
@@ -341,6 +351,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithError(w, http.StatusInternalServerError, "Auto reconciliation failed")
 				return
 			}
+			updatedCount = int(cmdTag.RowsAffected())
 		} else {
 			// Manual reconciliation
 			for _, item := range req.ReconciliationItems {
@@ -421,13 +432,18 @@ func GetTDSJournalEntries(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// If tds_id provided, resolve it to its receipt_id
+		// If tds_id provided, resolve receipt_id (may be NULL) and fd_id fallback
 		if req.TDSID != "" && req.ReceiptID == "" {
-			var rid string
+			var rid, fdid pgtype.Text
 			if err := pool.QueryRow(ctx,
-				`SELECT receipt_id FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
-				req.TDSID).Scan(&rid); err == nil {
-				req.ReceiptID = rid
+				`SELECT receipt_id, fd_id FROM investment.fd_tds_receipt WHERE tds_id = $1 AND is_deleted = false`,
+				req.TDSID).Scan(&rid, &fdid); err == nil {
+				if rid.Valid && rid.String != "" {
+					req.ReceiptID = rid.String
+				} else if fdid.Valid && fdid.String != "" && req.FDID == "" {
+					// TDS_WORKBENCH entry — no receipt_id, fall back to fd_id
+					req.FDID = fdid.String
+				}
 			}
 		}
 

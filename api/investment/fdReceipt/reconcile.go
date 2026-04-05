@@ -21,7 +21,9 @@ type ReceiptRow struct {
 	FDID        string
 	FdRefNo     string
 	EntityID    string
+	EntityName  string
 	BankID      string
+	BankName    string
 	PeriodStart time.Time
 	PeriodEnd   time.Time
 	ReceiptDate time.Time
@@ -36,7 +38,9 @@ type TDSRow struct {
 	FDID          string
 	FdRefNo       string
 	EntityID      string
+	EntityName    string
 	BankID        string
+	BankName      string
 	PeriodStart   time.Time
 	PeriodEnd     time.Time
 	DeductionDate time.Time
@@ -84,6 +88,11 @@ type ReconcilePreviewLine struct {
 	ResultType     string  `json:"result_type"`
 	FDID           string  `json:"fd_id"`
 	FdRefNo        string  `json:"fd_ref_no"`
+	// FD / entity / bank metadata
+	EntityID       string  `json:"entity_id"`
+	EntityName     string  `json:"entity_name"`
+	BankID         string  `json:"bank_id"`
+	BankName       string  `json:"bank_name"`
 	PeriodStart    string  `json:"period_start"`
 	PeriodEnd      string  `json:"period_end"`
 	ReceivedAmount float64 `json:"received_amount"`
@@ -202,6 +211,10 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 			ResultType:     "INTEREST",
 			FDID:           rec.FDID,
 			FdRefNo:        rec.FdRefNo,
+			EntityID:       rec.EntityID,
+			EntityName:     rec.EntityName,
+			BankID:         rec.BankID,
+			BankName:       rec.BankName,
 			PeriodStart:    rec.PeriodStart.Format("2006-01-02"),
 			PeriodEnd:      rec.PeriodEnd.Format("2006-01-02"),
 			ReceivedAmount: rec.Gross,
@@ -324,6 +337,10 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				ResultType:     "TDS",
 				FDID:           tds.FDID,
 				FdRefNo:        tds.FdRefNo,
+				EntityID:       tds.EntityID,
+				EntityName:     tds.EntityName,
+				BankID:         tds.BankID,
+				BankName:       tds.BankName,
 				PeriodStart:    tds.PeriodStart.Format("2006-01-02"),
 				PeriodEnd:      tds.PeriodEnd.Format("2006-01-02"),
 				ReceivedAmount: tds.Actual,
@@ -460,9 +477,213 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 }
 
 // runReconciliation is the background goroutine entry point (full ingest, dryRun=false).
-func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string) error {
-	_, err := reconcileEngine(ctx, pool, runID, false, nil, nil)
+func runReconciliation(ctx context.Context, pool *pgxpool.Pool, runID string, filterReceiptIDs, filterTDSIDs []string) error {
+	_, err := reconcileEngine(ctx, pool, runID, false, filterReceiptIDs, filterTDSIDs)
 	return err
+}
+
+// reconcilePreviewDirect runs a pure in-memory preview without any run row.
+// It derives entity+period from the receipt/TDS records themselves.
+// No DB writes happen — safe to call repeatedly.
+func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
+	matchingBasis string,
+	filterReceiptIDs, filterTDSIDs []string) (*ReconcilePreviewSummary, error) {
+
+	// Derive entity+period from the supplied IDs by querying the receipt tables.
+	// We use the widest possible period that covers all supplied records.
+	entityID := ""
+	periodStart := "2099-12-31"
+	periodEnd := "2000-01-01"
+
+	if len(filterReceiptIDs) > 0 {
+		rows, err := pool.Query(ctx, `
+			SELECT entity_id, period_start::text, period_end::text
+			FROM investment.fd_interest_receipt
+			WHERE receipt_id = ANY($1::text[]) AND is_deleted = false`, filterReceiptIDs)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var eid, ps, pe string
+				if rows.Scan(&eid, &ps, &pe) == nil {
+					if entityID == "" {
+						entityID = eid
+					}
+					if ps < periodStart {
+						periodStart = ps
+					}
+					if pe > periodEnd {
+						periodEnd = pe
+					}
+				}
+			}
+		}
+	}
+	if len(filterTDSIDs) > 0 {
+		rows2, err := pool.Query(ctx, `
+			SELECT entity_id, period_start::text, period_end::text
+			FROM investment.fd_tds_receipt
+			WHERE tds_id = ANY($1::text[]) AND is_deleted = false`, filterTDSIDs)
+		if err == nil {
+			defer rows2.Close()
+			for rows2.Next() {
+				var eid, ps, pe string
+				if rows2.Scan(&eid, &ps, &pe) == nil {
+					if entityID == "" {
+						entityID = eid
+					}
+					if ps < periodStart {
+						periodStart = ps
+					}
+					if pe > periodEnd {
+						periodEnd = pe
+					}
+				}
+			}
+		}
+	}
+	// Fallback sentinels if nothing was found
+	if periodStart == "2099-12-31" {
+		periodStart = "2000-01-01"
+	}
+	if periodEnd == "2000-01-01" {
+		periodEnd = "2099-12-31"
+	}
+	if matchingBasis == "" {
+		matchingBasis = "BOTH"
+	}
+
+	preview := &ReconcilePreviewSummary{
+		EntityID:         entityID,
+		PeriodStart:      periodStart,
+		PeriodEnd:        periodEnd,
+		MatchingBasis:    matchingBasis,
+		InterestReceipts: make(map[string]*ReconcilePreviewLine),
+		TDSReceipts:      make(map[string]*ReconcilePreviewLine),
+	}
+
+	iProcessed, iMatched, iPartial, iUnmatched, iException := 0, 0, 0, 0, 0
+	iTotalExpected, iTotalReceived := 0.0, 0.0
+
+	receipts, err := loadInterestReceipts(ctx, pool, entityID, periodStart, periodEnd, filterReceiptIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range receipts {
+		iProcessed++
+		var cfLines []CashflowLine
+		var acLines []AccrualLedgerLine
+		var expectedCF, expectedAcc float64
+		if matchingBasis == "CASHFLOW" || matchingBasis == "BOTH" {
+			cfLines = loadCashflowsForReceipt(ctx, pool, rec.FDID, rec.PeriodStart, rec.PeriodEnd, false)
+			for _, cf := range cfLines {
+				expectedCF += cf.Amount
+			}
+		}
+		if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
+			acLines = loadAccrualLedgerForReceipt(ctx, pool, rec.FDID, rec.PeriodStart, rec.PeriodEnd, false)
+			for _, al := range acLines {
+				expectedAcc += al.Amount
+			}
+		}
+		expected := resolveExpected(matchingBasis, expectedCF, expectedAcc)
+		matchStatus, variance, variancePct := classifyVariance(rec.Gross, expected)
+		line := ReconcilePreviewLine{
+			ReceiptID: rec.ReceiptID, ResultType: "INTEREST",
+			FDID: rec.FDID, FdRefNo: rec.FdRefNo,
+			EntityID: rec.EntityID, EntityName: rec.EntityName,
+			BankID: rec.BankID, BankName: rec.BankName,
+			PeriodStart: rec.PeriodStart.Format("2006-01-02"),
+			PeriodEnd:   rec.PeriodEnd.Format("2006-01-02"),
+			ReceivedAmount: rec.Gross,
+			ExpectedCF: expectedCF, ExpectedAcc: expectedAcc, ExpectedFinal: expected,
+			Variance: variance, VariancePct: variancePct, MatchStatus: matchStatus,
+			Cashflows: cfLines, AccrualLedger: acLines,
+		}
+		if matchStatus != "MATCHED" {
+			line.ExceptionType = deriveExceptionType(variance, expected)
+		}
+		preview.Lines = append(preview.Lines, line)
+		preview.InterestReceipts[rec.ReceiptID] = &preview.Lines[len(preview.Lines)-1]
+		switch matchStatus {
+		case "MATCHED":
+			iMatched++
+		case "PARTIAL":
+			iPartial++
+		case "EXCEPTION":
+			iException++
+		default:
+			iUnmatched++
+		}
+		iTotalExpected += expected
+		iTotalReceived += rec.Gross
+	}
+
+	tProcessed, tMatched, tPartial, tUnmatched, tException := 0, 0, 0, 0, 0
+	tTotalExpected, tTotalReceived := 0.0, 0.0
+	tdsRows, _ := loadTDSReceipts(ctx, pool, entityID, periodStart, periodEnd, filterTDSIDs)
+	for _, tds := range tdsRows {
+		tProcessed++
+		var tdsCFLines []CashflowLine
+		var tdsACLines []AccrualLedgerLine
+		var expectedCF, expectedAcc float64
+		if matchingBasis == "CASHFLOW" || matchingBasis == "BOTH" {
+			tdsCFLines = loadCashflowsForReceipt(ctx, pool, tds.FDID, tds.PeriodStart, tds.PeriodEnd, true)
+			for _, cf := range tdsCFLines {
+				expectedCF += cf.Amount
+			}
+		}
+		if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
+			tdsACLines = loadAccrualLedgerForReceipt(ctx, pool, tds.FDID, tds.PeriodStart, tds.PeriodEnd, true)
+			for _, al := range tdsACLines {
+				expectedAcc += al.Amount
+			}
+		}
+		expected := resolveExpected(matchingBasis, expectedCF, expectedAcc)
+		matchStatus, variance, variancePct := classifyVariance(tds.Actual, expected)
+		line := ReconcilePreviewLine{
+			TDSID: tds.TDSID, ResultType: "TDS",
+			FDID: tds.FDID, FdRefNo: tds.FdRefNo,
+			EntityID: tds.EntityID, EntityName: tds.EntityName,
+			BankID: tds.BankID, BankName: tds.BankName,
+			PeriodStart: tds.PeriodStart.Format("2006-01-02"),
+			PeriodEnd:   tds.PeriodEnd.Format("2006-01-02"),
+			ReceivedAmount: tds.Actual,
+			ExpectedCF: expectedCF, ExpectedAcc: expectedAcc, ExpectedFinal: expected,
+			Variance: variance, VariancePct: variancePct, MatchStatus: matchStatus,
+			Cashflows: tdsCFLines, AccrualLedger: tdsACLines,
+		}
+		if matchStatus != "MATCHED" {
+			line.ExceptionType = deriveExceptionType(variance, expected)
+		}
+		preview.Lines = append(preview.Lines, line)
+		preview.TDSReceipts[tds.TDSID] = &preview.Lines[len(preview.Lines)-1]
+		switch matchStatus {
+		case "MATCHED":
+			tMatched++
+		case "PARTIAL":
+			tPartial++
+		case "EXCEPTION":
+			tException++
+		default:
+			tUnmatched++
+		}
+		tTotalExpected += expected
+		tTotalReceived += tds.Actual
+	}
+
+	preview.Interest = ReconcilePassSummary{
+		Processed:     iProcessed, Matched: iMatched, Partial: iPartial,
+		Unmatched:     iUnmatched, Exception: iException,
+		TotalExpected: iTotalExpected, TotalReceived: iTotalReceived,
+		TotalVariance: iTotalReceived - iTotalExpected,
+	}
+	preview.TDS = ReconcilePassSummary{
+		Processed:     tProcessed, Matched: tMatched, Partial: tPartial,
+		Unmatched:     tUnmatched, Exception: tException,
+		TotalExpected: tTotalExpected, TotalReceived: tTotalReceived,
+		TotalVariance: tTotalReceived - tTotalExpected,
+	}
+	return preview, nil
 }
 
 // ─── Data loaders ─────────────────────────────────────────────────────────────
@@ -473,25 +694,31 @@ func loadInterestReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, per
 	if len(filterIDs) > 0 {
 		// Specific receipt IDs requested — ignore entity+period filter
 		rows, err = pool.Query(ctx, `
-			SELECT receipt_id, fd_id, fd_ref_no, entity_id,
-			       COALESCE(bank_id,''),
-			       period_start, period_end, receipt_date,
-			       gross_interest_received, tds_amount_deducted, net_amount_received
-			FROM investment.fd_interest_receipt
-			WHERE receipt_id = ANY($1::text[])
-			  AND receipt_status IN ('APPROVED','POSTED','PARTIAL')
-			  AND is_deleted = false`, filterIDs)
+			SELECT r.receipt_id, r.fd_id, r.fd_ref_no, r.entity_id,
+			       COALESCE(m.entity_name, r.entity_id, '')   AS entity_name,
+			       COALESCE(r.bank_id,'')                      AS bank_id,
+			       COALESCE(m.bank_name, '')                   AS bank_name,
+			       r.period_start, r.period_end, r.receipt_date,
+			       r.gross_interest_received, r.tds_amount_deducted, r.net_amount_received
+			FROM investment.fd_interest_receipt r
+			LEFT JOIN investment.fd_master m ON m.fd_id = r.fd_id AND m.is_deleted = false
+			WHERE r.receipt_id = ANY($1::text[])
+			  AND r.receipt_status IN ('APPROVED','POSTED','PARTIAL')
+			  AND r.is_deleted = false`, filterIDs)
 	} else {
 		rows, err = pool.Query(ctx, `
-			SELECT receipt_id, fd_id, fd_ref_no, entity_id,
-			       COALESCE(bank_id,''),
-			       period_start, period_end, receipt_date,
-			       gross_interest_received, tds_amount_deducted, net_amount_received
-			FROM investment.fd_interest_receipt
-			WHERE entity_id = $1
-			  AND receipt_date BETWEEN $2::date AND $3::date
-			  AND receipt_status IN ('APPROVED','POSTED','PARTIAL')
-			  AND is_deleted = false`, entityID, periodStart, periodEnd)
+			SELECT r.receipt_id, r.fd_id, r.fd_ref_no, r.entity_id,
+			       COALESCE(m.entity_name, r.entity_id, '')   AS entity_name,
+			       COALESCE(r.bank_id,'')                      AS bank_id,
+			       COALESCE(m.bank_name, '')                   AS bank_name,
+			       r.period_start, r.period_end, r.receipt_date,
+			       r.gross_interest_received, r.tds_amount_deducted, r.net_amount_received
+			FROM investment.fd_interest_receipt r
+			LEFT JOIN investment.fd_master m ON m.fd_id = r.fd_id AND m.is_deleted = false
+			WHERE r.entity_id = $1
+			  AND r.receipt_date BETWEEN $2::date AND $3::date
+			  AND r.receipt_status IN ('APPROVED','POSTED','PARTIAL')
+			  AND r.is_deleted = false`, entityID, periodStart, periodEnd)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load interest receipts: %w", err)
@@ -500,7 +727,7 @@ func loadInterestReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, per
 	var out []ReceiptRow
 	for rows.Next() {
 		var r ReceiptRow
-		if e := rows.Scan(&r.ReceiptID, &r.FDID, &r.FdRefNo, &r.EntityID, &r.BankID,
+		if e := rows.Scan(&r.ReceiptID, &r.FDID, &r.FdRefNo, &r.EntityID, &r.EntityName, &r.BankID, &r.BankName,
 			&r.PeriodStart, &r.PeriodEnd, &r.ReceiptDate,
 			&r.Gross, &r.TDS, &r.Net); e == nil {
 			out = append(out, r)
@@ -514,25 +741,31 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 	var err error
 	if len(filterIDs) > 0 {
 		rows, err = pool.Query(ctx, `
-			SELECT tds_id, fd_id, fd_ref_no, entity_id,
-			       COALESCE(bank_id,''),
-			       period_start, period_end, deduction_date,
-			       tds_deducted_actual
-			FROM investment.fd_tds_receipt
-			WHERE tds_id = ANY($1::text[])
-			  AND tds_status IN ('APPROVED','POSTED','PARTIAL')
-			  AND is_deleted = false`, filterIDs)
+			SELECT t.tds_id, t.fd_id, t.fd_ref_no, t.entity_id,
+			       COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
+			       COALESCE(t.bank_id,'')                    AS bank_id,
+			       COALESCE(m.bank_name, '')                 AS bank_name,
+			       t.period_start, t.period_end, t.deduction_date,
+			       t.tds_deducted_actual
+			FROM investment.fd_tds_receipt t
+			LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+			WHERE t.tds_id = ANY($1::text[])
+			  AND t.tds_status IN ('APPROVED','POSTED','PARTIAL')
+			  AND t.is_deleted = false`, filterIDs)
 	} else {
 		rows, err = pool.Query(ctx, `
-			SELECT tds_id, fd_id, fd_ref_no, entity_id,
-			       COALESCE(bank_id,''),
-			       period_start, period_end, deduction_date,
-			       tds_deducted_actual
-			FROM investment.fd_tds_receipt
-			WHERE entity_id = $1
-			  AND deduction_date BETWEEN $2::date AND $3::date
-			  AND tds_status IN ('APPROVED','POSTED','PARTIAL')
-			  AND is_deleted = false`, entityID, periodStart, periodEnd)
+			SELECT t.tds_id, t.fd_id, t.fd_ref_no, t.entity_id,
+			       COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
+			       COALESCE(t.bank_id,'')                    AS bank_id,
+			       COALESCE(m.bank_name, '')                 AS bank_name,
+			       t.period_start, t.period_end, t.deduction_date,
+			       t.tds_deducted_actual
+			FROM investment.fd_tds_receipt t
+			LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+			WHERE t.entity_id = $1
+			  AND t.deduction_date BETWEEN $2::date AND $3::date
+			  AND t.tds_status IN ('APPROVED','POSTED','PARTIAL')
+			  AND t.is_deleted = false`, entityID, periodStart, periodEnd)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load TDS receipts: %w", err)
@@ -541,7 +774,7 @@ func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodSt
 	var out []TDSRow
 	for rows.Next() {
 		var t TDSRow
-		if e := rows.Scan(&t.TDSID, &t.FDID, &t.FdRefNo, &t.EntityID, &t.BankID,
+		if e := rows.Scan(&t.TDSID, &t.FDID, &t.FdRefNo, &t.EntityID, &t.EntityName, &t.BankID, &t.BankName,
 			&t.PeriodStart, &t.PeriodEnd, &t.DeductionDate, &t.Actual); e == nil {
 			out = append(out, t)
 		}
@@ -1060,6 +1293,21 @@ func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams)
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
+
+// parseDateRange parses two "YYYY-MM-DD" strings into time.Time values.
+// On parse error it falls back to sensible sentinel dates so callers never panic.
+func parseDateRange(start, end string) (time.Time, time.Time) {
+	const layout = "2006-01-02"
+	ps, err1 := time.Parse(layout, start)
+	pe, err2 := time.Parse(layout, end)
+	if err1 != nil {
+		ps = time.Time{}
+	}
+	if err2 != nil {
+		pe = time.Now()
+	}
+	return ps, pe
+}
 
 func markRunFailed(ctx context.Context, pool *pgxpool.Pool, runID, msg string) {
 	pool.Exec(ctx, //nolint:errcheck

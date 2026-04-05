@@ -775,13 +775,18 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Fetch confirmation state
+		// Fetch confirmation state — LEFT JOIN so confirmations without a matching
+		// booking row (e.g. directly-created VRN-* entries) still resolve correctly.
+		// entity_id is taken from fd_confirmation first, falling back to the booking.
 		var currentStatus, bookingID, entityID string
 		var confPrincipal float64
 		err := pgxPool.QueryRow(ctx, `
-			SELECT c.confirmation_status, c.booking_id, COALESCE(b.entity_id,''), COALESCE(c.actual_principal,0)
+			SELECT c.confirmation_status,
+			       COALESCE(c.booking_id,''),
+			       COALESCE(c.entity_id, b.entity_id, ''),
+			       COALESCE(c.actual_principal, c.confirmed_principal_amount, 0)
 			FROM investment.fd_confirmation c
-			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
+			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_id = $1 AND COALESCE(c.is_deleted,false) = false`,
 			req.ConfirmationID,
 		).Scan(&currentStatus, &bookingID, &entityID, &confPrincipal)

@@ -29,6 +29,8 @@ func RegisterFDReceiptRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		mid(http.HandlerFunc(DeleteReceipt(pool))))
 	mux.Handle("/investment/fd/receipt/all",
 		mid(http.HandlerFunc(GetReceiptsWithAudit(pool))))
+	mux.Handle("/investment/fd/receipt/tds/all",
+		mid(http.HandlerFunc(GetTDSReceiptsAll(pool))))
 	mux.Handle("/investment/fd/receipt/detail",
 		mid(http.HandlerFunc(GetReceiptDetail(pool))))
 	mux.Handle("/investment/fd/receipt/audit",
