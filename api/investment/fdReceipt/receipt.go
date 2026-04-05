@@ -944,7 +944,7 @@ SELECT
   COALESCE(r.entity_name,'')          AS entity_name,
   COALESCE(r.bank_id,'')              AS bank_id,
   COALESCE(r.bank_name,'')            AS bank_name,
-  COALESCE(r.cashflow_id,'')          AS cashflow_id,
+	''                                  AS cashflow_id,
   TO_CHAR(r.receipt_date,'YYYY-MM-DD') AS receipt_date,
   TO_CHAR(r.period_start,'YYYY-MM-DD') AS period_start,
   TO_CHAR(r.period_end,'YYYY-MM-DD')   AS period_end,
