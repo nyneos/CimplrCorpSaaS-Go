@@ -16,8 +16,8 @@ func RegisterFDInterestWorkbenchRoutes(mux *http.ServeMux, pool *pgxpool.Pool, d
 	mux.Handle("/investment/fd/workbench/tds-summary", mid(http.HandlerFunc(GetTDSWorkbenchSummary(pool))))
 	mux.Handle("/investment/fd/workbench/reconciliation-dashboard", mid(http.HandlerFunc(GetReconciliationDashboard(pool))))
 	mux.Handle("/investment/fd/workbench/interest-vs-accrual", mid(http.HandlerFunc(GetInterestVsAccrualAnalysis(pool))))
-	
-	// TDS Register endpoints
+
+	// TDS Register (standalone workbench ingestion — ingestion_source=TDS_WORKBENCH)
 	mux.Handle("/investment/fd/tds-register/create", mid(http.HandlerFunc(CreateTDSRegister(pool))))
 	mux.Handle("/investment/fd/tds-register/view", mid(http.HandlerFunc(GetTDSRegisterView(pool))))
 	mux.Handle("/investment/fd/tds-register/reconcile", mid(http.HandlerFunc(ReconcileTDSRegister(pool))))

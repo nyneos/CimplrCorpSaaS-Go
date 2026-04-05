@@ -27,9 +27,9 @@ type FDRecord struct {
 	InterestRate            float64
 	InterestTypeCode        string // SIMPLE / COMPOUND / STEPPED
 	TenorDays               int
-	TenorMonths             int
+	TenorMonths             int    // optional: tenor in months (may be 0)
 	TenureType              string // DAYS | MONTHS | YEARS
-	TenureYears             int
+	TenureYears             int    // optional: tenor in years (may be 0)
 	ValueDate               time.Time // maps to start_date
 	MaturityDate            time.Time
 	MaturityAmount          float64
@@ -45,6 +45,46 @@ type FDRecord struct {
 
 // InterestType is an alias kept for backward compat inside cashflow calculations.
 func (r *FDRecord) InterestType() string { return r.InterestTypeCode }
+
+// stampCumulativeFields fills snapshot fields (InterestRate, TDSRate, FinancialYear,
+// and running cumulative totals) on each CashflowRow after generation.
+func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []CashflowRow {
+	fyInterest := 0.0
+	fyTDS := 0.0
+	totalInterest := 0.0
+	currentFY := ""
+
+	financialYear := func(d time.Time) string {
+		y := d.Year()
+		if d.Month() < 4 { // Indian FY: Apr–Mar
+			return fmt.Sprintf("FY%d-%d", y-1, y%100)
+		}
+		return fmt.Sprintf("FY%d-%d", y, (y+1)%100)
+	}
+
+	for i := range rows {
+		fy := financialYear(rows[i].EventDate)
+		if fy != currentFY {
+			fyInterest = 0
+			fyTDS = 0
+			currentFY = fy
+		}
+		if rows[i].EventType == "ACCRUAL" || rows[i].EventType == "INTEREST_RECEIPT" {
+			fyInterest += rows[i].InterestAccrued
+			totalInterest += rows[i].InterestAccrued
+		}
+		if rows[i].EventType == "TDS" {
+			fyTDS += rows[i].TDSAmount
+		}
+		rows[i].InterestRate = fd.InterestRate
+		rows[i].TDSRate = tdsRate
+		rows[i].FinancialYear = fy
+		rows[i].CumulativeInterestFY = math.Round(fyInterest*100) / 100
+		rows[i].CumulativeTDSFY = math.Round(fyTDS*100) / 100
+		rows[i].CumulativeInterestTotal = math.Round(totalInterest*100) / 100
+	}
+	return rows
+}
 
 // BankConfig holds ALL relevant fields from investment.fd_bank_config_master.
 type BankConfig struct {
@@ -116,13 +156,13 @@ type CashflowRow struct {
 	DrAccountName string
 	CrAccountCode string
 	CrAccountName string
-	// Snapshot / cumulative fields (new)
-	InterestRate           float64 // snapshot of FD interest rate for this row
-	TDSRate                float64 // snapshot of TDS rate (0 if no TDS plan)
-	FinancialYear          string  // e.g. "2026-27" — Indian FY of the event_date
-	CumulativeInterestFY   float64 // running total of interest_accrued within this FY
-	CumulativeTDSFY        float64 // running total of tds_amount within this FY
-	CumulativeInterestTotal float64 // running total of interest_accrued from FD start
+	// snapshot fields stamped after generation
+	InterestRate            float64
+	TDSRate                 float64
+	FinancialYear           string
+	CumulativeInterestFY    float64
+	CumulativeTDSFY         float64
+	CumulativeInterestTotal float64
 }
 
 // ── DB loaders ─────────────────────────────────────────────────────────────
@@ -155,11 +195,6 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 	}
 
 	rec := &FDRecord{}
-	// confirmed_frequency_id on fd_confirmation is the bank-confirmed payout
-	// frequency (a real FREQ-XXX ID).  Fall back to booking's frequency_id only
-	// if the confirmation hasn't set one.  The booking layer stores the same
-	// FREQ-XXX IDs — historically some rows stored cap schedule type strings
-	// there, but new bookings should always store proper FREQ-XXX IDs.
 	q := fmt.Sprintf(`
 		SELECT
 			c.confirmation_id,
@@ -168,23 +203,20 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			COALESCE(b.bank_id, '') AS bank_id,
 			%s AS bank_account_id,
 			COALESCE(b.bank_config_id, '') AS bank_config_id,
-			COALESCE(NULLIF(c.confirmed_frequency_id,''), b.frequency_id, '') AS frequency_id,
+			COALESCE(b.frequency_id, '') AS frequency_id,
 			COALESCE(c.actual_principal, 0),
 			COALESCE(c.confirmed_rate, 0),
 			COALESCE(b.interest_type_code, 'SIMPLE') AS interest_type_code,
-			COALESCE(c.tenor_days, b.tenure_days, 0),
-			COALESCE(c.tenor_months, b.tenure_months, 0),
-			COALESCE(c.tenor_type, b.tenure_type, 'DAYS') AS tenure_type,
-			COALESCE(c.tenor_years, b.tenure_years, 0),
+			COALESCE(b.tenure_days, 0),
 			COALESCE(c.actual_start_date, b.expected_start_date),
 			COALESCE(c.actual_maturity_date, b.expected_maturity_date),
 			0,
-			COALESCE(NULLIF(c.confirmed_frequency_id,''), b.frequency_id, '') AS interest_payout_frequency,
+			COALESCE(b.frequency_id, '') AS interest_payout_frequency,
 			'' AS compounding_frequency,
 			COALESCE(b.day_count_code, '') AS day_count_convention,
 			%s AS currency,
 			COALESCE(b.tds_plan_id, ''),
-			COALESCE(c.bank_fd_ref_no, b.booking_id, ''),
+			COALESCE(c.bank_fd_ref_no, c.bank_reference_number, ''),
 			COALESCE(c.confirmation_received_date, c.actual_start_date),
 			COALESCE(c.confirmation_status, '')
 		FROM investment.fd_confirmation c
@@ -205,9 +237,6 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		&rec.InterestRate,
 		&rec.InterestTypeCode,
 		&rec.TenorDays,
-		&rec.TenorMonths,
-		&rec.TenureType,
-		&rec.TenureYears,
 		&rec.ValueDate,
 		&rec.MaturityDate,
 		&rec.MaturityAmount,
@@ -1526,6 +1555,8 @@ func generateCompoundSchedule(
 	seq := 0
 	var rows []CashflowRow
 	var cumulativeInterest float64
+	// map of capitalization date -> closing principal after that cap
+	capPrincipal := map[string]float64{}
 
 	// Initialize FY TDS end
 	fyEndYear := fd.ValueDate.Year()
@@ -1533,22 +1564,6 @@ func generateCompoundSchedule(
 		fyEndYear++
 	}
 	lastTDSFYEnd := time.Date(fyEndYear, time.March, 31, 0, 0, 0, 0, time.UTC)
-
-	// Pre-compute payout frequency months for TDS routing.
-	capFreqType := strings.ToUpper(strings.TrimSpace(
-		firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, freq.FrequencyName),
-	))
-	_ = capFreqType // retained for potential future use
-	payoutFreqMonthsPre := 0
-	if payoutFreq != nil {
-		pft := strings.ToUpper(strings.TrimSpace(
-			firstNonEmpty(payoutFreq.FrequencyType, payoutFreq.FrequencyCode, payoutFreq.FrequencyName),
-		))
-		payoutFreqMonthsPre = freqTypeToMonths(pft)
-	}
-	// principalAtDate tracks the compounded closing principal at each cap-period end.
-	// Used to assign the correct opening_principal on INTEREST_RECEIPT events.
-	principalAtDate := make(map[time.Time]float64)
 
 	lastCapDate := fd.ValueDate
 	for _, capEnd := range periodEnds {
@@ -1580,6 +1595,7 @@ func generateCompoundSchedule(
 		isMaturity := capEnd.Equal(fd.MaturityDate)
 
 		// FIX 3: compute TDS first, then capitalized = interest - TDS (not just interest)
+		// NOTE: if TDS timing is "RECEIPT" we should NOT deduct TDS at capitalization time
 		tdsThisPeriod := 0.0
 		tdsTiming := strings.ToUpper(strings.TrimSpace(tdsDeductionTiming))
 		if hasTDS {
@@ -1592,11 +1608,14 @@ func generateCompoundSchedule(
 				if isMaturity && cumulativeInterest >= tdsCfg.ThresholdAmount {
 					tdsThisPeriod = applyRounding(cumulativeInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
 				}
-			default: // RECEIPT / EACH_PERIOD — TDS every cap period
-				// Only charge TDS in the cap loop when no separate INTEREST_RECEIPT events
-				// will be emitted (i.e. no explicit payout freq). When payout freq is set,
-				// the payout loop owns all TDS to avoid double-deduction.
-				if payoutFreqMonthsPre == 0 {
+			default:
+				// default previously treated RECEIPT/EACH_PERIOD the same.
+				// Treat explicit RECEIPT as payout-time deduction and skip here.
+				if strings.Contains(tdsTiming, "RECEIPT") {
+					// no TDS at capitalization; will be handled during INTEREST_RECEIPT
+					tdsThisPeriod = 0
+				} else {
+					// EACH_PERIOD or unspecified -> deduct per capitalization
 					if capInterest >= tdsCfg.ThresholdAmount {
 						tdsThisPeriod = applyRounding(capInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isMaturity)
 					}
@@ -1621,10 +1640,7 @@ func generateCompoundSchedule(
 		seq++
 		maturityNetCF := 0.0
 		if isMaturity {
-			// Maturity payout = compounded corpus (openingPrincipal) + final broken-period
-			// net interest (capitalized). Using only openingPrincipal omits the last period's
-			// interest earned between the final quarterly cap and the maturity date.
-			maturityNetCF = applyRounding(openingPrincipal+capitalized, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+			maturityNetCF = applyRounding(closingPrincipal, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
 		}
 		rows = append(rows, CashflowRow{
 			PeriodNumber:      seq,
@@ -1679,48 +1695,35 @@ func generateCompoundSchedule(
 			}
 		}
 
+		// record closing principal after this capitalization for use by payout computation
+		capPrincipal[capEnd.Format("2006-01-02")] = closingPrincipal
+
 		// advance
 		openingPrincipal = closingPrincipal
-		principalAtDate[capEnd] = closingPrincipal
 		lastCapDate = capEnd
 	}
 
 	// ── INTEREST_RECEIPT rows (periodic cash payout for COMPOUND FDs) ─────
-	// If the entity receives interest cash periodically, emit INTEREST_RECEIPT events.
-	// payoutFreq drives this; it is always set when frequency_id is provided on the booking.
-	// INTEREST_RECEIPT is emitted regardless of whether payout freq matches cap freq:
-	// the bank may compound quarterly AND pay out quarterly (separate accounting vs cash event).
-	// Pure accumulation (no cash payouts) = payoutFreq nil or FrequencyID empty.
-	if payoutFreq != nil && payoutFreq.FrequencyID != "" {
+	// If the entity receives interest cash periodically (e.g. half-yearly payout
+	// on a quarterly-compounding FD), emit INTEREST_RECEIPT events here.
+	// payoutFreq drives this; if it's the same as freq (or nil/empty), no extra
+	// cash events are emitted (pure accumulation).
+	if payoutFreq != nil {
 		payoutFreqType := strings.ToUpper(strings.TrimSpace(
 			firstNonEmpty(payoutFreq.FrequencyType, payoutFreq.FrequencyCode, payoutFreq.FrequencyName),
 		))
 		payoutMonths := freqTypeToMonths(payoutFreqType)
-		if payoutMonths > 0 {
+		// determine compounding months to avoid emitting payout rows when payout == compounding
+		compFreqType := strings.ToUpper(strings.TrimSpace(
+			firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, freq.FrequencyName),
+		))
+		compMonths := freqTypeToMonths(compFreqType)
+
+		// Only emit payout events when payoutMonths > 0 AND payout frequency differs from compounding frequency.
+		if payoutMonths > 0 && payoutMonths != compMonths {
 			payoutDates := buildPayoutDates(fd, payoutMonths)
 			lastPayout := fd.ValueDate
-
-			// TDS tracking for payout loop: cumulative interest per FY for ACCRUAL timing.
-			payoutTDSTiming := strings.ToUpper(strings.TrimSpace(tdsDeductionTiming))
-			payoutCumulativeInterest := 0.0
-			payoutFYEndYear := fd.ValueDate.Year()
-			if fd.ValueDate.Month() >= time.April {
-				payoutFYEndYear++
-			}
-			payoutLastTDSFYEnd := time.Date(payoutFYEndYear, time.March, 31, 0, 0, 0, 0, time.UTC)
-
 			for _, payoutDate := range payoutDates {
-				// Find the compounded principal at the start of this payout period
-				principalForPayout := fd.PrincipalAmount
-				for _, capDate := range periodEnds {
-					if capDate.After(lastPayout) {
-						break
-					}
-					if p, ok := principalAtDate[capDate]; ok {
-						principalForPayout = p
-					}
-				}
-
 				// Sum accruals whose period-end falls within (lastPayout, payoutDate]
 				payoutInterest := 0.0
 				for _, a := range accrualRows {
@@ -1729,50 +1732,40 @@ func generateCompoundSchedule(
 					}
 				}
 				if payoutInterest > 0 {
-					payoutCumulativeInterest += payoutInterest
 					isLastPayout := payoutDate.Equal(fd.MaturityDate)
 					tdsAmt := 0.0
+					if hasTDS && tdsCfg != nil && payoutInterest >= tdsCfg.ThresholdAmount {
+						tdsAmt = applyRounding(payoutInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout)
+					}
+					netPayout := applyRounding(payoutInterest-tdsAmt, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout)
 
-					if hasTDS && tdsCfg != nil {
-						switch {
-						case strings.Contains(payoutTDSTiming, "ACCRUAL"):
-							// Annual accrual threshold: TDS fires when FY cumulative interest crosses threshold.
-							// Check if this payout crosses a FY boundary or is the last payout.
-							fyBoundaryCrossed := payoutDate.After(payoutLastTDSFYEnd) || isLastPayout
-							if fyBoundaryCrossed && payoutCumulativeInterest >= tdsCfg.ThresholdAmount {
-								tdsAmt = applyRounding(payoutCumulativeInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout)
-								// Advance FY boundary for next cycle
-								for payoutDate.After(payoutLastTDSFYEnd) {
-									payoutLastTDSFYEnd = payoutLastTDSFYEnd.AddDate(1, 0, 0)
+					// compute opening principal for this payout by finding the last capitalization closing principal
+					opPrincipal := fd.PrincipalAmount
+					// find latest cap date <= payoutDate
+					var latestCap time.Time
+					for k := range capPrincipal {
+						if d, err := time.Parse("2006-01-02", k); err == nil {
+							if d.Before(payoutDate) || d.Equal(payoutDate) {
+								if d.After(latestCap) {
+									latestCap = d
 								}
-								payoutCumulativeInterest = 0
-							}
-						case strings.Contains(payoutTDSTiming, "RECEIPT"):
-							// Per-receipt: TDS each time interest >= threshold
-							if payoutInterest >= tdsCfg.ThresholdAmount {
-								tdsAmt = applyRounding(payoutInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout)
-							}
-						case strings.Contains(payoutTDSTiming, "MATURITY"):
-							// Only at maturity — handled in cap loop, skip here
-						default:
-							// Default = per-receipt
-							if payoutInterest >= tdsCfg.ThresholdAmount {
-								tdsAmt = applyRounding(payoutInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout)
 							}
 						}
 					}
+					if !latestCap.IsZero() {
+						opPrincipal = capPrincipal[latestCap.Format("2006-01-02")]
+					}
 
-					netPayout := applyRounding(payoutInterest-tdsAmt, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout)
 					rows = append(rows, CashflowRow{
 						EventType:         "INTEREST_RECEIPT",
 						EventDate:         payoutDate,
 						PeriodStartDate:   lastPayout,
 						PeriodEndDate:     payoutDate,
 						PeriodDays:        int(payoutDate.Sub(lastPayout).Hours() / 24),
-						OpeningPrincipal:  principalForPayout,
+						OpeningPrincipal:  opPrincipal,
 						InterestAccrued:   payoutInterest,
 						CapitalizedAmount: 0,
-						ClosingPrincipal:  principalForPayout,
+						ClosingPrincipal:  opPrincipal, // principal unchanged — only interest paid out
 						TDSAmount:         tdsAmt,
 						NetCashFlow:       netPayout,
 						DayCountCode:      effectiveDayCountCode,
@@ -1785,12 +1778,12 @@ func generateCompoundSchedule(
 							PeriodStartDate:  lastPayout,
 							PeriodEndDate:    payoutDate,
 							PeriodDays:       int(payoutDate.Sub(lastPayout).Hours() / 24),
-							OpeningPrincipal: principalForPayout,
+							OpeningPrincipal: opPrincipal,
 							TDSAmount:        tdsAmt,
 							NetCashFlow:      -tdsAmt,
-							ClosingPrincipal: principalForPayout,
+							ClosingPrincipal: opPrincipal,
 							DayCountCode:     effectiveDayCountCode,
-							FormulaUsed:      fmt.Sprintf("TDS_PAYOUT = %.2f × %.4f%%", payoutCumulativeInterest+tdsAmt/tdsCfg.TDSRate*100, tdsCfg.TDSRate),
+							FormulaUsed:      fmt.Sprintf("TDS_PAYOUT = %.2f × %.4f%%", payoutInterest, tdsCfg.TDSRate),
 						})
 					}
 				}
@@ -1899,11 +1892,6 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	log.Printf("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
 
 	rows := generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo, calInfo)
-	tdsRate := 0.0
-	if tds != nil {
-		tdsRate = tds.TDSRate
-	}
-	rows = stampCumulativeFields(rows, fd, tdsRate)
 	log.Printf("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
 	return rows, fd, nil
 }
@@ -2026,13 +2014,6 @@ func saveCashflowBatch(ctx context.Context, exec queryExecutor, table, fdCol str
 		"dr_account_code", "dr_account_name",
 		"cr_account_code", "cr_account_name",
 		"created_by", "created_at",
-		// Cumulative / snapshot columns (new)
-		"financial_year",
-		"cumulative_interest_total",
-		"cumulative_interest_fy",
-		"cumulative_tds_fy",
-		"interest_rate",
-		"tds_rate",
 	}
 	// Optional cosmetic columns — only include if they exist in the schema.
 	optionalCols := []string{"bank_id", "bank_name", "entity_id", "entity_name", "source_account_id", "posting_status", "bank_confirmed", "bank_reference"}
@@ -2076,13 +2057,6 @@ func saveCashflowBatch(ctx context.Context, exec queryExecutor, table, fdCol str
 			"cr_account_name":      nilIfEmpty(row.CrAccountName),
 			"created_by":           createdBy,
 			"created_at":           now,
-			// Cumulative / snapshot
-			"financial_year":            nilIfEmpty(row.FinancialYear),
-			"cumulative_interest_total":  row.CumulativeInterestTotal,
-			"cumulative_interest_fy":     row.CumulativeInterestFY,
-			"cumulative_tds_fy":          row.CumulativeTDSFY,
-			"interest_rate":              row.InterestRate,
-			"tds_rate":                   row.TDSRate,
 		}
 		if cols["bank_id"] {
 			vm["bank_id"] = masterBankID
@@ -2192,65 +2166,4 @@ func nilIfEmpty(s string) interface{} {
 		return nil
 	}
 	return s
-}
-
-// ── financialYear returns the Indian FY label ("2026-27") for any date. ────
-func financialYear(d time.Time) string {
-	y := d.Year()
-	if d.Month() < time.April {
-		return fmt.Sprintf("%d-%02d", y-1, y%100)
-	}
-	return fmt.Sprintf("%d-%02d", y, (y+1)%100)
-}
-
-// stampCumulativeFields stamps the InterestRate, TDSRate, FinancialYear,
-// CumulativeInterestFY, CumulativeTDSFY, and CumulativeInterestTotal fields
-// onto every row in the schedule, and also fixes the MATURITY row so that
-// its NetCashFlow = principal + CumulativeInterestTotal - CumulativeTDSFY.
-// This is called once after the full schedule is built and sorted.
-func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []CashflowRow {
-	var cumTotal, cumFY, cumTDSFY float64
-	curFY := ""
-
-	for i, row := range rows {
-		fy := financialYear(row.EventDate)
-		if curFY == "" {
-			curFY = fy
-		}
-		// FY boundary reset
-		if fy != curFY {
-			curFY = fy
-			cumFY = 0
-			cumTDSFY = 0
-		}
-
-		// Accumulate
-		if row.EventType == "ACCRUAL" || row.EventType == "CAPITALIZATION" || row.EventType == "INTEREST_RECEIPT" {
-			cumTotal += row.InterestAccrued
-			cumFY += row.InterestAccrued
-		}
-		if row.EventType == "TDS_DEDUCTION" {
-			cumTDSFY += row.TDSAmount
-		}
-
-		rows[i].InterestRate = fd.InterestRate
-		rows[i].TDSRate = tdsRate
-		rows[i].FinancialYear = fy
-		rows[i].CumulativeInterestFY = cumFY
-		rows[i].CumulativeTDSFY = cumTDSFY
-		rows[i].CumulativeInterestTotal = cumTotal
-
-		// Fix MATURITY row: NetCashFlow = closing principal corpus + all accrued interest
-		if row.EventType == "MATURITY" {
-			// opening principal at maturity is already the final compounded corpus.
-			// net = principal_returned + total_interest - total_tds
-			netMat := row.OpeningPrincipal + cumTotal - rows[i].TDSAmount
-			if netMat < 0 {
-				netMat = row.OpeningPrincipal
-			}
-			rows[i].NetCashFlow = netMat
-			rows[i].CumulativeInterestTotal = cumTotal
-		}
-	}
-	return rows
 }

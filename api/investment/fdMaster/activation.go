@@ -1475,6 +1475,20 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			masterTable = "investment.fd_master"
 		}
 
+		// Inspect master table columns and pick sensible column names for
+		// start/maturity dates. This avoids runtime SQL errors when deployed
+		// against a schema where the column may have a different name.
+		mschema, mtable := splitQualifiedTable(masterTable)
+		masterCols, _ := loadTableColumns(ctx, pgxPool, mschema, mtable)
+		startCol := pickFirstExistingColumn(masterCols, "value_date", "start_date", "booking_date", "receipt_date", "created_at")
+		if startCol == "" {
+			startCol = "value_date"
+		}
+		maturityCol := pickFirstExistingColumn(masterCols, "maturity_date", "mature_date", "maturity")
+		if maturityCol == "" {
+			maturityCol = "maturity_date"
+		}
+
 		var args []interface{}
 		pos := 1
 
@@ -1487,8 +1501,8 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				MAX(m.bank_name)                                                     AS bank_name,
 				MAX(m.principal_amount)                                              AS principal_amount,
 				MAX(m.interest_rate)                                                 AS interest_rate,
-				MAX(m.value_date)                                                    AS start_date,
-				MAX(m.maturity_date)                                                 AS maturity_date,
+				MAX(m.%s)                                                            AS start_date,
+				MAX(m.%s)                                                            AS maturity_date,
 				MAX(m.fd_status)                                                     AS fd_status,
 				COUNT(cf.cashflow_id)                                                AS total_cashflow_events,
 				COALESCE(SUM(cf.interest_accrued), 0)                               AS total_interest_accrued,
@@ -1506,7 +1520,7 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				LIMIT 1
 			) aud ON true
 			WHERE (cf.is_deleted IS NULL OR cf.is_deleted = false)
-		`, table, masterTable)
+		`, startCol, maturityCol, table, masterTable)
 
 		if entityID != "" {
 			groupSQL += fmt.Sprintf(" AND m.entity_id = $%d", pos)
@@ -1523,7 +1537,7 @@ func GetCashflowGroupView(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, fdIDFilter)
 			pos++
 		}
-		groupSQL += " GROUP BY cf.fd_id ORDER BY MAX(m.value_date) DESC"
+		groupSQL += fmt.Sprintf(" GROUP BY cf.fd_id ORDER BY MAX(m.%s) DESC", startCol)
 
 		rows, err := pgxPool.Query(ctx, groupSQL, args...)
 		if err != nil {

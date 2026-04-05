@@ -136,8 +136,8 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	// Step 4: UPDATE receipt with journal_entry_id + POSTED status
 	_, err = tx.Exec(ctx, `
 		UPDATE investment.fd_interest_receipt
-		SET journal_entry_id=$1, receipt_status='POSTED', updated_by=$2, updated_at=now()
-		WHERE receipt_id=$3`, interestEntryID, userEmail, rec.ReceiptID)
+		SET journal_entry_id=$1, receipt_status='POSTED'
+		WHERE receipt_id=$2`, interestEntryID, rec.ReceiptID)
 	if err != nil {
 		return "", "", fmt.Errorf("receipt update: %w", err)
 	}
@@ -146,8 +146,8 @@ func postReceiptJournals(ctx context.Context, pool *pgxpool.Pool, rec ReceiptFor
 	if tdsEntryID != "" {
 		pool.Exec(ctx, `
 			UPDATE investment.fd_tds_receipt
-			SET journal_entry_id=$1, updated_by=$2, updated_at=now()
-			WHERE receipt_id=$3`, tdsEntryID, userEmail, rec.ReceiptID) //nolint:errcheck
+			SET journal_entry_id=$1
+			WHERE receipt_id=$2`, tdsEntryID, rec.ReceiptID) //nolint:errcheck
 	}
 
 	if err = tx.Commit(ctx); err != nil {

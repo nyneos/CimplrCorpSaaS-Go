@@ -115,27 +115,27 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		var tdsID string
 		err := pool.QueryRow(ctx, `
 			INSERT INTO investment.fd_tds_receipt (
-				tds_id, receipt_id, fd_id, fd_ref_no, entity_id, bank_id,
+				tds_id, fd_id, fd_ref_no, entity_id, bank_id,
+				ingestion_source,
 				period_start, period_end, deduction_date,
 				gross_interest, tds_expected, tds_deducted_actual, tds_variance,
 				tds_status, exception_raised,
-				is_active, is_deleted, created_by, created_at
+				is_active, is_deleted
 			) VALUES (
 				'TDSR-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,8)),
 				$1,
 				$2,
 				$3,
 				$4,
-				$5,
-				$6::date, $7::date, COALESCE($8::date, $7::date),
-				$9, $10, $11, ($11::numeric - $10::numeric),
-				'CAPTURED', ($11::numeric - $10::numeric) != 0,
-				true, false, $12, NOW()
+				'TDS_WORKBENCH',
+				$5::date, $6::date, COALESCE($7::date, $6::date),
+				$8, $9, $10, ($10::numeric - $9::numeric),
+				'CAPTURED', ($10::numeric - $9::numeric) != 0,
+				true, false
 			) RETURNING tds_id`,
-			receiptID, req.FDID, fdRefNo, req.EntityID, bankID,
+			req.FDID, fdRefNo, req.EntityID, bankID,
 			req.PeriodStart, req.PeriodEnd, nullIfEmpty(req.TDSDeductionDate),
 			req.InterestAmount, req.TDSExpected, req.TDSDeductedActual,
-			userEmail,
 		).Scan(&tdsID)
 
 		if err != nil {
@@ -150,9 +150,9 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			"message": "TDS register entry created successfully",
 			"data": map[string]interface{}{
 				"tds_id":              tdsID,
-				"receipt_id":          receiptID,
 				"fd_id":               req.FDID,
 				"entity_id":           req.EntityID,
+				"ingestion_source":    "TDS_WORKBENCH",
 				"tds_expected":        req.TDSExpected,
 				"tds_deducted_actual": req.TDSDeductedActual,
 				"tds_variance":        req.TDSDeductedActual - req.TDSExpected,
@@ -205,12 +205,13 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(tds.gross_interest, 0) AS gross_interest,
 				COALESCE(tds.tds_status, 'CAPTURED') AS tds_status,
 				COALESCE(tds.exception_raised, false) AS exception_raised,
-				TO_CHAR(tds.created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+				TO_CHAR(tds.deduction_date, 'YYYY-MM-DD') AS deduction_date_fmt,
 				COALESCE(fd.entity_name, '') AS entity_name,
 				COALESCE(fd.bank_name, '') AS bank_name
 			FROM investment.fd_tds_receipt tds
 			LEFT JOIN investment.fd_master fd ON fd.fd_id = tds.fd_id
-			WHERE tds.is_deleted = false`
+			WHERE tds.is_deleted = false
+		  AND tds.ingestion_source = 'TDS_WORKBENCH'`
 
 		args := []interface{}{}
 		argIdx := 1
@@ -239,7 +240,7 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 
-		sql += " ORDER BY tds.created_at DESC LIMIT 100"
+		sql += " ORDER BY tds.deduction_date DESC LIMIT 100"
 
 		rows, err := pool.Query(ctx, sql, args...)
 		if err != nil {
@@ -327,13 +328,12 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				SET tds_status = CASE
 					WHEN ABS(tds_variance) <= $1 THEN 'APPROVED'
 					ELSE 'CAPTURED'
-				END,
-				updated_by = $2,
-				updated_at = NOW()
-				WHERE entity_id = $3 
+				END
+				WHERE entity_id = $2
+				  AND ingestion_source = 'TDS_WORKBENCH'
 				  AND tds_status = 'CAPTURED'
 				  AND is_deleted = false`,
-				req.ToleranceAmount, userEmail, req.EntityID,
+				req.ToleranceAmount, req.EntityID,
 			)
 
 			if err != nil {
@@ -356,11 +356,9 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 					UPDATE investment.fd_tds_receipt 
 					SET tds_deducted_actual = $1,
 						tds_variance = $2,
-						tds_status = $3,
-						updated_by = $4,
-						updated_at = NOW()
-					WHERE tds_id = $5`,
-					item.ActualAmount, variance, newStatus, userEmail, item.TDSID,
+						tds_status = $3
+					WHERE tds_id = $4`,
+					item.ActualAmount, variance, newStatus, item.TDSID,
 				)
 
 				if err != nil {

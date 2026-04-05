@@ -215,23 +215,25 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		err = tx.QueryRow(ctx, `
 			INSERT INTO investment.fd_interest_receipt (
 				receipt_id, fd_id, fd_ref_no, entity_id, entity_name,
-				bank_id, bank_name, cashflow_id,
+				bank_id, bank_name,
 				receipt_date, period_start, period_end,
 				gross_interest_received, tds_amount_deducted, other_charges, net_amount_received,
 				currency, bank_reference_no, narration, attachment,
-				receipt_status, reconcile_status, submitted_for_approval,
-				is_active, is_deleted, created_by
+				ingestion_mode,
+				receipt_status, reconcile_status,
+				is_active, is_deleted
 			) VALUES (
 				'IREC-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'INR',$15,$16,$17,
-				'CAPTURED','PENDING',false,true,false,$18
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'INR',$14,$15,$16,
+				'MANUAL',
+				'CAPTURED','PENDING',
+				true,false
 			) RETURNING receipt_id`,
 			req.FdID, fdRefNo, entityID, entityName,
-			bankID, bankName, nullStr(req.CashflowID),
+			bankID, bankName,
 			receiptDate, periodStartArg, periodEndArg,
 			req.GrossInterestReceived, req.TdsAmountDeducted, req.OtherCharges, net,
 			nullStr(req.BankReferenceNo), nullStr(req.Narration), nullStr(req.Attachment),
-			userEmail,
 		).Scan(&receiptID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt insert failed: "+err.Error())
@@ -263,22 +265,24 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			err = tx.QueryRow(ctx, `
 				INSERT INTO investment.fd_tds_receipt (
 					tds_id, receipt_id, fd_id, fd_ref_no, entity_id, bank_id,
+					ingestion_source,
 					period_start, period_end, deduction_date,
 					gross_interest, tds_rate_applied, tds_rate_expected,
 					tds_expected, tds_deducted_actual, tds_variance,
 					tds_plan_id, has_pan, tds_section,
-					tds_status, exception_raised,is_active, is_deleted, created_by
+					tds_status, exception_raised, is_active, is_deleted
 				) VALUES (
 					'TDSR-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-					$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-					'CAPTURED',false,true,false,$18
+					$1,$2,$3,$4,$5,
+					'INTEREST_RECEIPT',
+					$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+					'CAPTURED',false,true,false
 				) RETURNING tds_id`,
 				receiptID, req.FdID, fdRefNo, entityID, bankID,
 				periodStartArg, periodEndArg, receiptDate,
 				req.GrossInterestReceived, tdsRateApplied, tdsRateApplied,
 				tdsExpected, req.TdsAmountDeducted, tdsVariance,
 				tdsPlanIDStr, hasPAN, nullStr(tdsSection),
-				userEmail,
 			).Scan(&tdsID)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "TDS receipt insert failed: "+err.Error())
@@ -288,7 +292,7 @@ func CreateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			_, err = tx.Exec(ctx, `
 				INSERT INTO investment.fd_tds_receipt_audit (
 					tds_id, action_type, processing_status, requested_by, requested_at
-				) VALUES ($1,'CREATE','APPROVED',$2,now())`, tdsID, userEmail)
+				) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, tdsID, userEmail)
 			if err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "TDS audit insert failed: "+err.Error())
 				return
@@ -393,16 +397,16 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		var oldStatus string
 		var oldReceiptDate, oldPeriodStart, oldPeriodEnd *time.Time
 		var oldGross, oldTds, oldOther, oldNet float64
-		var oldBankRef, oldNarration, oldCashflowID *string
+		var oldBankRef, oldNarration *string
 		var oldIsActive bool
 		err = tx.QueryRow(ctx, `
 			SELECT receipt_status, receipt_date, period_start, period_end,
 			       gross_interest_received, tds_amount_deducted, other_charges,
-			       net_amount_received, bank_reference_no, narration, cashflow_id, is_active
+			       net_amount_received, bank_reference_no, narration, is_active
 			FROM investment.fd_interest_receipt WHERE receipt_id=$1 FOR UPDATE`, req.ReceiptID).Scan(
 			&oldStatus, &oldReceiptDate, &oldPeriodStart, &oldPeriodEnd,
 			&oldGross, &oldTds, &oldOther, &oldNet,
-			&oldBankRef, &oldNarration, &oldCashflowID, &oldIsActive)
+			&oldBankRef, &oldNarration, &oldIsActive)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Snapshot failed: "+err.Error())
 			return
@@ -411,7 +415,7 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		allowed := map[string]bool{
 			"receipt_date": true, "period_start": true, "period_end": true,
 			"gross_interest_received": true, "tds_amount_deducted": true, "other_charges": true,
-			"bank_reference_no": true, "narration": true, "cashflow_id": true,
+			"bank_reference_no": true, "narration": true,
 			"attachment": true, "is_active": true,
 		}
 
@@ -452,9 +456,6 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, newNet)
 			idx++
 		}
-		setClauses = append(setClauses, fmt.Sprintf("updated_by=$%d", idx), fmt.Sprintf("updated_at=$%d", idx+1))
-		args = append(args, userEmail, time.Now())
-		idx += 2
 		args = append(args, req.ReceiptID)
 		updateSQL := fmt.Sprintf("UPDATE investment.fd_interest_receipt SET %s WHERE receipt_id=$%d",
 			strings.Join(setClauses, ","), idx)
@@ -471,13 +472,13 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 				old_receipt_status, old_receipt_date, old_period_start, old_period_end,
 				old_gross_interest_received, old_tds_amount_deducted, old_other_charges,
 				old_net_amount_received, old_bank_reference_no, old_narration,
-				old_cashflow_id, old_is_active
+				old_is_active
 			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,$3,now(),
-				$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+				$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 			req.ReceiptID, req.Reason, userEmail,
 			oldStatus, oldReceiptDate, oldPeriodStart, oldPeriodEnd,
 			oldGross, oldTds, oldOther, oldNet,
-			oldBankRef, oldNarration, oldCashflowID, oldIsActive)
+			oldBankRef, oldNarration, oldIsActive)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
 			return
@@ -638,6 +639,9 @@ func DeleteReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ─── HANDLER 4: SubmitReceiptForApproval ──────────────────────────────────────
+// Deprecated: In the new schema there is no SUBMIT step — CREATE already sets
+// processing_status = PENDING_APPROVAL. This handler is kept for backward
+// compatibility but is a no-op: it just confirms the receipt exists and is CAPTURED.
 
 func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -661,92 +665,21 @@ func SubmitReceiptForApproval(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var receiptStatus string
-		var gross float64
-		var entityID string
-		err := pool.QueryRow(ctx, `
-			SELECT receipt_status, gross_interest_received, entity_id
-			FROM investment.fd_interest_receipt WHERE receipt_id=$1 AND is_deleted=false`, req.ReceiptID).Scan(&receiptStatus, &gross, &entityID)
+		err := pool.QueryRow(ctx,
+			`SELECT receipt_status FROM investment.fd_interest_receipt WHERE receipt_id=$1 AND is_deleted=false`,
+			req.ReceiptID).Scan(&receiptStatus)
 		if err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "Receipt not found")
 			return
 		}
-		if receiptStatus != "CAPTURED" {
-			api.RespondWithError(w, http.StatusBadRequest, "receipt_status must be CAPTURED to submit")
-			return
-		}
 
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
-			return
-		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_interest_receipt SET
-				receipt_status='APPROVAL_PENDING',
-				submitted_for_approval=true,
-				submitted_at=now(), submitted_by=$1,
-				updated_by=$1, updated_at=now()
-			WHERE receipt_id=$2 AND receipt_status='CAPTURED'`, userEmail, req.ReceiptID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrUpdateFailed+err.Error())
-			return
-		}
-
-		_, err = tx.Exec(ctx, `
-			INSERT INTO investment.fd_interest_receipt_audit (
-				receipt_id, action_type, processing_status, requested_by, requested_at
-			) VALUES ($1,'SUBMIT','PENDING_APPROVAL',$2,now())`, req.ReceiptID, userEmail)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrAuditInsertFailed+err.Error())
-			return
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
-			return
-		}
-
-		api.LogInfo("[FDReceipt] Submitted receipt_id=%s by=%s", req.ReceiptID, userEmail)
-
-		go func() {
-			bgCtx := context.Background()
-			instID, instErr := approvalengine.CreateInstance(bgCtx, pool, approvalengine.InstanceRequest{
-				ModuleCode:       "FIXED_DEPOSIT",
-				EntityCode:       entityID,
-				TransactionType:  "FD_RECEIPT_APPROVE",
-				RecordID:         req.ReceiptID,
-				RecordTable:      constants.QuerryInterestReceipt,
-				AuditTable:       constants.QuerryAuditInterestReceipt,
-				AuditIDColumn:    "receipt_id",
-				ActionType:       "CREATE",
-				Amount:           gross,
-				SubmittedBy:      req.UserID,
-				SubmittedByEmail: userEmail,
-			})
-			if instErr != nil {
-				api.LogError("[FDReceipt] CreateInstance SUBMIT failed: %v", instErr)
-			} else if instID != "" {
-				api.LogInfo("[FDReceipt] CreateInstance SUBMIT created instance=%s", instID)
-			}
-		}()
-
-		go func(rID, eID, uEmail string, amount float64) {
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/submit", rID, map[string]interface{}{
-				"entity_id":   eID,
-				"record_id":   rID,
-				"event":       "FD_RECEIPT_SUBMITTED",
-				"actor_email": uEmail,
-				"amount":      amount,
-			})
-		}(req.ReceiptID, entityID, userEmail, gross)
-
+		// New schema: CREATE already inserts audit with PENDING_APPROVAL — no separate submit needed.
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"receipt_id":     req.ReceiptID,
-			"receipt_status": "APPROVAL_PENDING",
+			"receipt_status": receiptStatus,
+			"message":        "Receipt is already in approval queue from creation. No separate submit step required.",
 		})
 	}
 }
@@ -792,10 +725,8 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 		// Step 2: Receipt status
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_interest_receipt
-			SET receipt_status='APPROVED',
-			    approved_by=$1, approved_at=now(),
-			    updated_by=$1, updated_at=now()
-			WHERE receipt_id=ANY($2) AND receipt_status='APPROVAL_PENDING'`, userEmail, req.ReceiptIDs)
+			SET receipt_status='APPROVED'
+			WHERE receipt_id=ANY($1) AND receipt_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -907,10 +838,8 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_interest_receipt
-			SET receipt_status='REJECTED',
-			    rejected_by=$1, rejected_at=now(),
-			    updated_by=$1, updated_at=now()
-			WHERE receipt_id=ANY($2) AND receipt_status='APPROVAL_PENDING'`, userEmail, req.ReceiptIDs)
+			SET receipt_status='REJECTED'
+			WHERE receipt_id=ANY($1) AND receipt_status='CAPTURED'`, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Receipt update failed: "+err.Error())
 			return
@@ -1368,12 +1297,110 @@ func GetTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// ─── HANDLER 11: RunReconciliation ───────────────────────────────────────────
+// ─── HANDLER 11: RunReconciliation (preview / dry-run) ────────────────────────
+//
+// POST /investment/fd/reconcile/run
+// Creates a reconcile_run row in PREVIEW status, runs the engine in dry-run mode
+// (no junction table INSERTs, no result INSERTs, no receipt UPDATEs), and returns
+// the projected outcome immediately for the UI to display.
+// The user then calls /reconcile/ingest with the same run_id to commit.
 
 func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID        string `json:"user_id"`
+			UserID       string   `json:"user_id"`
+			EntityID     string   `json:"entity_id"`
+			EntityName   string   `json:"entity_name"`
+			BankIDFilter string   `json:"bank_id_filter"`
+			PeriodStart  string   `json:"period_start"`
+			PeriodEnd    string   `json:"period_end"`
+			MatchingBasis string  `json:"matching_basis"`
+			// Optionally target specific receipts/TDS IDs instead of all for entity+period
+			ReceiptIDs []string `json:"receipt_ids"`
+			TDSIDs     []string `json:"tds_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		// When specific IDs are given entity+period are optional (we auto-derive period from the records)
+		hasIDs := len(req.ReceiptIDs) > 0 || len(req.TDSIDs) > 0
+		if !hasIDs && (req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "") {
+			api.RespondWithError(w, http.StatusBadRequest, "Provide either receipt_ids/tds_ids or (entity_id + period_start + period_end)")
+			return
+		}
+		userEmail := resolveUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+		if req.MatchingBasis == "" {
+			req.MatchingBasis = "BOTH"
+		}
+		// When IDs are supplied and no period given, use a wide sentinel period
+		if req.PeriodStart == "" {
+			req.PeriodStart = "2000-01-01"
+		}
+		if req.PeriodEnd == "" {
+			req.PeriodEnd = "2099-12-31"
+		}
+
+		ctx := r.Context()
+
+		// Create run row in PREVIEW status (not RUNNING — nothing is written yet)
+		var runID string
+		err := pool.QueryRow(ctx, `
+			INSERT INTO investment.fd_receipt_reconcile_run (
+				reconcile_run_id, entity_id, entity_name, bank_id_filter,
+				period_start, period_end, matching_basis,
+				triggered_by, triggered_at, trigger_mode, run_status
+			) VALUES (
+				'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+				$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','PREVIEW'
+			) RETURNING reconcile_run_id`,
+			req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
+			req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
+		).Scan(&runID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Reconcile run insert failed: "+err.Error())
+			return
+		}
+
+		// Run engine in dry-run mode — synchronous, returns preview immediately
+		preview, previewErr := reconcileEngine(ctx, pool, runID, true, req.ReceiptIDs, req.TDSIDs)
+		if previewErr != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Preview computation failed: "+previewErr.Error())
+			return
+		}
+
+		api.LogInfo("[FDReceipt] ReconcilePreview run_id=%s entity=%s period=%s→%s i=%d tds=%d",
+			runID, req.EntityID, req.PeriodStart, req.PeriodEnd,
+			preview.Interest.Processed, preview.TDS.Processed)
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"reconcile_run_id": runID,
+			"run_status":       "PREVIEW",
+			"message":          "Dry-run preview. Call /reconcile/ingest with this run_id to commit.",
+			"preview":          preview,
+		})
+	}
+}
+
+// ─── HANDLER 11b: IngestReconciliation (actual commit) ────────────────────────
+//
+// POST /investment/fd/reconcile/ingest
+// Takes a run_id that was previously created by /reconcile/run (status=PREVIEW),
+// fires the full reconciliation goroutine (writes junction table rows, result rows,
+// exception rows, updates receipts). Returns immediately; poll /reconcile/status.
+
+func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string `json:"user_id"`
+			ReconcileRunID string `json:"reconcile_run_id"`
+			// Alternatively create a fresh run inline if no run_id provided
 			EntityID      string `json:"entity_id"`
 			EntityName    string `json:"entity_name"`
 			BankIDFilter  string `json:"bank_id_filter"`
@@ -1385,94 +1412,90 @@ func RunReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "entity_id, period_start, period_end are required")
-			return
-		}
 		userEmail := resolveUserEmail(req.UserID)
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
-		if req.MatchingBasis == "" {
-			req.MatchingBasis = "BOTH"
-		}
 
 		ctx := r.Context()
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTransactionFailed)
-			return
+		runID := req.ReconcileRunID
+
+		if runID == "" {
+			// No prior preview — create the run row fresh
+			if req.EntityID == "" || req.PeriodStart == "" || req.PeriodEnd == "" {
+				api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id or (entity_id, period_start, period_end) are required")
+				return
+			}
+			if req.MatchingBasis == "" {
+				req.MatchingBasis = "BOTH"
+			}
+			err := pool.QueryRow(ctx, `
+				INSERT INTO investment.fd_receipt_reconcile_run (
+					reconcile_run_id, entity_id, entity_name, bank_id_filter,
+					period_start, period_end, matching_basis,
+					triggered_by, triggered_at, trigger_mode, run_status
+				) VALUES (
+					'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
+					$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','RUNNING'
+				) RETURNING reconcile_run_id`,
+				req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
+				req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
+			).Scan(&runID)
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Reconcile run insert failed: "+err.Error())
+				return
+			}
+		} else {
+			// Transition existing PREVIEW run → RUNNING
+			res, upErr := pool.Exec(ctx,
+				`UPDATE investment.fd_receipt_reconcile_run
+				 SET run_status='RUNNING', triggered_by=$1, triggered_at=now()
+				 WHERE reconcile_run_id=$2 AND run_status='PREVIEW'`,
+				userEmail, runID)
+			if upErr != nil || res.RowsAffected() == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "Run not found or already ingested (status must be PREVIEW)")
+				return
+			}
 		}
-		defer tx.Rollback(ctx) //nolint:errcheck
-
-		var runID string
-		err = tx.QueryRow(ctx, `
-			INSERT INTO investment.fd_receipt_reconcile_run (
-				reconcile_run_id, entity_id, entity_name, bank_id_filter,
-				period_start, period_end, matching_basis,
-				triggered_by, triggered_at, trigger_mode, run_status
-			) VALUES (
-				'RRUN-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,7)),
-				$1,$2,$3,$4,$5,$6,$7,now(),'MANUAL','RUNNING'
-			) RETURNING reconcile_run_id`,
-			req.EntityID, req.EntityName, nullStr(req.BankIDFilter),
-			req.PeriodStart, req.PeriodEnd, req.MatchingBasis, userEmail,
-		).Scan(&runID)
-		if err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Reconcile run insert failed: "+err.Error())
-			return
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
-			return
-		}
-
-		api.LogInfo("[FDReceipt] RunReconciliation started: run_id=%s entity=%s period=%s→%s", runID, req.EntityID, req.PeriodStart, req.PeriodEnd)
-
-		go func(rID, eID, uEmail string) {
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/reconcile/run", rID, map[string]interface{}{
-				"entity_id":   eID,
-				"record_id":   rID,
-				"event":       "FD_RECONCILIATION_TRIGGERED",
-				"actor_email": uEmail,
-			})
-		}(runID, req.EntityID, userEmail)
 
 		go func(rID string) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					api.LogError("[FDReceipt] Reconciliation goroutine panic run=%s: %v", rID, rec)
-					if _, upErr := pool.Exec(context.Background(),
+					api.LogError("[FDReceipt] IngestReconciliation panic run=%s: %v", rID, rec)
+					pool.Exec(context.Background(),
 						`UPDATE investment.fd_receipt_reconcile_run
 						 SET run_status='FAILED', error_message=$1, completed_at=now()
 						 WHERE reconcile_run_id=$2`,
-						fmt.Sprintf("panic: %v", rec), rID,
-					); upErr != nil {
-						api.LogError("[FDReceipt] Could not mark run FAILED after panic: %v", upErr)
-					}
+						fmt.Sprintf("panic: %v", rec), rID) //nolint:errcheck
 				}
 			}()
 			bgCtx := context.Background()
 			if rErr := runReconciliation(bgCtx, pool, rID); rErr != nil {
-				api.LogError("[FDReceipt] Reconciliation failed run=%s: %v", rID, rErr)
-				if _, upErr := pool.Exec(bgCtx,
+				api.LogError("[FDReceipt] IngestReconciliation failed run=%s: %v", rID, rErr)
+				pool.Exec(bgCtx,
 					`UPDATE investment.fd_receipt_reconcile_run
 					 SET run_status='FAILED', error_message=$1, completed_at=now()
-					 WHERE reconcile_run_id=$2`, rErr.Error(), rID,
-				); upErr != nil {
-					api.LogError("[FDReceipt] Could not mark run FAILED for run=%s: %v", rID, upErr)
-				}
+					 WHERE reconcile_run_id=$2`, rErr.Error(), rID) //nolint:errcheck
 			}
 		}(runID)
 
+		go func(rID, eID, uEmail string) {
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/receipt/reconcile/ingest", rID, map[string]interface{}{
+				"entity_id":   eID,
+				"record_id":   rID,
+				"event":       "FD_RECONCILIATION_INGESTED",
+				"actor_email": uEmail,
+			})
+		}(runID, req.EntityID, userEmail)
+
+		api.LogInfo("[FDReceipt] IngestReconciliation started: run_id=%s", runID)
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":          true,
 			"reconcile_run_id": runID,
 			"run_status":       "RUNNING",
-			"message":          "Reconciliation started. Poll /reconcile/status for results.",
+			"message":          "Reconciliation ingestion started. Poll /reconcile/status for progress.",
 		})
 	}
 }
@@ -1498,13 +1521,29 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		rows, err := pool.Query(ctx, `
-			SELECT reconcile_run_id, entity_id, entity_name, bank_id_filter,
-			       period_start, period_end, matching_basis, run_status, trigger_mode,
-			       receipts_processed, receipts_matched, receipts_unmatched, receipts_exception,
-			       receipts_partial, total_expected_interest, total_received_interest, total_interest_variance,
-			       total_expected_tds, total_received_tds, total_tds_variance,
-			       triggered_by, triggered_at, completed_at, error_message
-			FROM investment.fd_receipt_reconcile_run 
+			SELECT reconcile_run_id, entity_id, entity_name,
+			       COALESCE(bank_id_filter,'') AS bank_id_filter,
+			       period_start, period_end, matching_basis,
+			       run_status, trigger_mode, triggered_by, triggered_at,
+			       COALESCE(completed_at::text,'')   AS completed_at,
+			       COALESCE(error_message,'')         AS error_message,
+			       COALESCE(interest_processed,0)     AS interest_processed,
+			       COALESCE(interest_matched,0)       AS interest_matched,
+			       COALESCE(interest_partial,0)       AS interest_partial,
+			       COALESCE(interest_unmatched,0)     AS interest_unmatched,
+			       COALESCE(interest_exception,0)     AS interest_exception,
+			       COALESCE(tds_processed,0)          AS tds_processed,
+			       COALESCE(tds_matched,0)            AS tds_matched,
+			       COALESCE(tds_partial,0)            AS tds_partial,
+			       COALESCE(tds_unmatched,0)          AS tds_unmatched,
+			       COALESCE(tds_exception,0)          AS tds_exception,
+			       COALESCE(total_expected_interest,0) AS total_expected_interest,
+			       COALESCE(total_received_interest,0) AS total_received_interest,
+			       COALESCE(total_interest_variance,0) AS total_interest_variance,
+			       COALESCE(total_expected_tds,0)     AS total_expected_tds,
+			       COALESCE(total_received_tds,0)     AS total_received_tds,
+			       COALESCE(total_tds_variance,0)     AS total_tds_variance
+			FROM investment.fd_receipt_reconcile_run
 			WHERE reconcile_run_id=$1`, runID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
