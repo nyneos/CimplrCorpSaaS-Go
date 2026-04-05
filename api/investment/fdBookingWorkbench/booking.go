@@ -2025,19 +2025,24 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(fm.fd_id,'')                                          AS fd_id,
 				COALESCE(fm.fd_status,'')                                      AS fd_status,
 				COALESCE(fm.bank_fd_ref_no,'')                                 AS fd_ref_no,
-				-- latest audit: who approved and when
-				COALESCE(aud.requested_by,'')                                  AS approved_by,
-				COALESCE(TO_CHAR(aud.requested_at,'YYYY-MM-DD HH24:MI'),'')   AS approved_at
+				-- latest audit: who approved/checked and when (pick most-recent)
+				COALESCE(aud.requested_by, aud.checker_by, '')                AS approved_by,
+				COALESCE(TO_CHAR(
+					GREATEST(
+						COALESCE(aud.requested_at,'1970-01-01'::timestamp),
+						COALESCE(aud.checker_at,'1970-01-01'::timestamp)
+					), 'YYYY-MM-DD HH24:MI'), '')                                AS approved_at
 			FROM investment.fd_booking_request m
 			LEFT JOIN investment.fd_confirmation c
 				ON c.booking_id = m.booking_id AND COALESCE(c.is_deleted,false) = false
 			LEFT JOIN investment.fd_master fm
 				ON fm.booking_id = m.booking_id AND COALESCE(fm.is_deleted,false) = false
 			LEFT JOIN LATERAL (
-				SELECT requested_by, requested_at
+				SELECT requested_by, requested_at, checker_by, checker_at
 				FROM investment.fd_audit_booking_request
 				WHERE booking_id = m.booking_id AND processing_status = 'APPROVED'
-				ORDER BY requested_at DESC LIMIT 1
+				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp), COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+				LIMIT 1
 			) aud ON true
 			WHERE COALESCE(m.is_deleted,false) = false`
 
@@ -2062,7 +2067,8 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 
-		q += ` ORDER BY m.expected_maturity_date ASC`
+		// Order by the most-recent approval/check timestamp (newest first).
+		q += ` ORDER BY GREATEST(COALESCE(aud.requested_at,'1970-01-01'::timestamp), COALESCE(aud.checker_at,'1970-01-01'::timestamp)) DESC`
 
 		rows, err := pgxPool.Query(ctx, q, args...)
 		if err != nil {
