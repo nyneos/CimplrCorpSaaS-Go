@@ -959,7 +959,6 @@ SELECT
   COALESCE(r.reconcile_status,'')      AS reconcile_status,
   COALESCE(r.reconcile_run_id,'')      AS reconcile_run_id,
   COALESCE(r.journal_entry_id,'')      AS journal_entry_id,
-  COALESCE(r.submitted_for_approval,false) AS submitted_for_approval,
   COALESCE(r.is_active,true)           AS is_active,
   COALESCE(l.processing_status,'')     AS processing_status,
   COALESCE(l.action_type,'')           AS action_type,
