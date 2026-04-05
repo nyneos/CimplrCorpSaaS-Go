@@ -717,6 +717,17 @@ const recipientSubquery = `
 func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// Entity filter: restrict to templates whose parent event is in the caller's accessible pool.
+		// buNames is already resolved by PreValidation middleware — no extra DB call.
+		entityFilterSQL := ""
+		var entityArgs []interface{}
+		if !isAdmin && len(buNames) > 0 {
+			entityFilterSQL = ` AND (COALESCE(e.entity_name,'') = '' OR COALESCE(e.entity_name,'') = ANY($1::text[]))`
+			entityArgs = []interface{}{buNames}
+		}
+
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.template_id)
@@ -795,11 +806,19 @@ func GetTemplatesWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				` + recipientSubquery + ` AS recipients
 
 			FROM notification_svc.template t
+			LEFT JOIN notification_svc.event e ON e.event_id = t.event_id
 			LEFT JOIN latest_audit l ON l.template_id = t.template_id
 			LEFT JOIN history h ON h.template_id = t.template_id
+		` + entityFilterSQL + `
 			ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC
 		`
-		rows, err := pgxPool.Query(ctx, q)
+		var rows pgx.Rows
+		var err error
+		if len(entityArgs) > 0 {
+			rows, err = pgxPool.Query(ctx, q, entityArgs...)
+		} else {
+			rows, err = pgxPool.Query(ctx, q)
+		}
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -843,9 +862,20 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		// Entity bifurcation — uses PreValidation middleware-provided org pool.
+		// Admin callers bypass filtering; non-admin callers see only templates
+		// whose parent event belongs to their accessible business-unit pool.
+		buNames, isAdmin := callerContext(ctx)
+		entityFilterSQL := ""
+		var args []interface{}
+		if !isAdmin && len(buNames) > 0 {
+			// buNames goes in as $1 so subsequent args offset correctly.
+			args = append(args, buNames)
+			entityFilterSQL = fmt.Sprintf(` AND (COALESCE(e.entity_name,'') = '' OR COALESCE(e.entity_name,'') = ANY($%d::text[]))`, len(args))
+		}
+
 		// Build dynamic filter clause with correct positional args
 		var filterParts []string
-		var args []interface{}
 		if req.TemplateID != "" {
 			args = append(args, req.TemplateID)
 			filterParts = append(filterParts, fmt.Sprintf("AND a.template_id = $%d", len(args)))
@@ -926,7 +956,7 @@ func GetTemplateVersions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN notification_svc.event e ON e.event_id = t.event_id
 			WHERE a.is_deleted = false
 			AND 1=1
-			` + filterClause + `
+			` + entityFilterSQL + filterClause + `
 			ORDER BY GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamptz), COALESCE(a.checker_at, '1970-01-01'::timestamptz)) DESC NULLS LAST
 		`
 
@@ -1180,7 +1210,18 @@ func GetTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetTemplatesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := fmt.Sprintf(`
+		buNames, isAdmin := callerContext(ctx)
+
+		// Entity filter via parent event's entity_name.
+		// buNames is already resolved by PreValidation middleware — no extra DB call.
+		entityFilterSQL := ""
+		var entityArgs []interface{}
+		if !isAdmin && len(buNames) > 0 {
+			entityFilterSQL = ` AND (COALESCE(e.entity_name,'') = '' OR COALESCE(e.entity_name,'') = ANY($1::text[]))`
+			entityArgs = []interface{}{buNames}
+		}
+
+		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.template_id)
 					a.template_id, a.processing_status, a.action_type, a.audit_id,
@@ -1195,13 +1236,19 @@ func GetTemplatesApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(l.subject,'') AS subject, COALESCE(l.body_text,'') AS body_text,
 				COALESCE(l.body_html,'') AS body_html, COALESCE(l.is_html_enabled,false) AS is_html_enabled,
 				COALESCE(l.version_label,'') AS version_label,
-				%s AS recipients
+				` + recipientSubquery + ` AS recipients
 			FROM notification_svc.template t
+			JOIN notification_svc.event e ON e.event_id = t.event_id
 			LEFT JOIN latest_audit l ON l.template_id = t.template_id
 			WHERE t.is_active = true
-			ORDER BY t.template_name
-		`, recipientSubquery)
-		rows, err := pgxPool.Query(ctx, q)
+		` + entityFilterSQL + ` ORDER BY t.template_name`
+		var rows pgx.Rows
+		var err error
+		if len(entityArgs) > 0 {
+			rows, err = pgxPool.Query(ctx, q, entityArgs...)
+		} else {
+			rows, err = pgxPool.Query(ctx, q)
+		}
 		if err != nil {
 			api.RespondWithPayload(w, false, err.Error(), nil)
 			return
@@ -1250,6 +1297,20 @@ func GetTemplateAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// Access check: verify the template's parent event is in caller's pool.
+		if !isAdmin && len(buNames) > 0 {
+			var evtEntity string
+			_ = pgxPool.QueryRow(ctx,
+				`SELECT COALESCE(e.entity_name,'') FROM notification_svc.template t JOIN notification_svc.event e ON e.event_id=t.event_id WHERE t.template_id=$1`,
+				req.TemplateID).Scan(&evtEntity)
+			if !entityInPool(evtEntity, buNames) {
+				api.RespondWithPayload(w, false, "you do not have access to this template", nil)
+				return
+			}
+		}
+
 		q := `SELECT audit_id, template_id, action_type, processing_status, subject, body_text, body_html, is_html_enabled, formula_steps, version_label, requested_by, requested_at, checker_by, checker_at, checker_comment, old_subject, old_body_text, old_body_html, old_formula_steps, COALESCE(is_deleted,false) AS is_deleted, COALESCE(old_recipients,'{}') AS old_recipients FROM notification_svc.audit_template WHERE template_id = $1 ORDER BY requested_at DESC`
 		rows, err := pgxPool.Query(ctx, q, req.TemplateID)
 		if err != nil {
@@ -1627,9 +1688,7 @@ func DeleteTemplateVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// ULTRA FAST: single UPDATE — marks all eligible rows as PENDING_DELETE_APPROVAL in one query
 		validIDs := make([]string, len(req.AuditIDs))
-		for i, v := range req.AuditIDs {
-			validIDs[i] = v
-		}
+		copy(validIDs, req.AuditIDs)
 		if _, err := pgxPool.Exec(ctx,
 			`UPDATE notification_svc.audit_template
 			 SET processing_status = 'PENDING_DELETE_APPROVAL',
@@ -1882,6 +1941,47 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// For USER recipients, validate that each user's business_unit_name is in
+		// the caller's accessible pool (already resolved by middleware — no CTE needed).
+		// We batch-query all user IDs at once to avoid N+1 queries.
+		if !isAdmin && len(buNames) > 0 {
+			var userIDs []string
+			for _, rec := range req.Recipients {
+				if strings.ToUpper(strings.TrimSpace(rec.RecipientType)) == "USER" && rec.RecipientUserID != "" &&
+					!strings.Contains(rec.RecipientUserID, "@") { // skip raw-email recipients
+					userIDs = append(userIDs, rec.RecipientUserID)
+				}
+			}
+			if len(userIDs) > 0 {
+				type userEntity struct {
+					id     string
+					entity string
+				}
+				ueRows, ueErr := pgxPool.Query(ctx,
+					`SELECT id::text, COALESCE(business_unit_name,'') FROM users WHERE id::text = ANY($1::text[])`,
+					userIDs)
+				if ueErr != nil {
+					api.RespondWithPayload(w, false, "could not validate recipient entities: "+ueErr.Error(), nil)
+					return
+				}
+				defer ueRows.Close()
+				for ueRows.Next() {
+					var uid, uEntity string
+					if err := ueRows.Scan(&uid, &uEntity); err != nil {
+						continue
+					}
+					if !entityInPool(uEntity, buNames) {
+						api.RespondWithPayload(w, false,
+							fmt.Sprintf("recipient user %q belongs to entity %q which is not in your accessible org pool", uid, uEntity), nil)
+						return
+					}
+				}
+				ueRows.Close()
+			}
+		}
+
 		// Validate and build rows
 		rows := make([][]interface{}, 0, len(req.Recipients))
 		var validationErrors []string
@@ -2401,14 +2501,25 @@ func CreateTemplateWithRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// Entity scope check: caller must be able to access the event they're creating a template for.
+		if !isAdmin && len(buNames) > 0 {
+			var evtEntity string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_name,'') FROM notification_svc.event WHERE event_id=$1`, req.EventID).Scan(&evtEntity)
+			if !entityInPool(evtEntity, buNames) {
+				api.RespondWithPayload(w, false, "event entity is not in your accessible org pool", nil)
+				return
+			}
+		}
+
 		// ── Pre-flight template validation (before any DB write) ─────────────────
 		isHTMLBool := req.IsHTML != nil && *req.IsHTML
 		if findings := validateTemplateRequest(req.Subject, req.BodyText, req.BodyHTML, isHTMLBool); len(findings) > 0 {
 			respondValidationErrors(w, findings)
 			return
 		}
-
-		ctx := r.Context()
 
 		// ── single transaction: template + audit_template + recipients ────────
 		// If recipients fail → whole tx rolls back → no dangling template row.
@@ -2514,6 +2625,43 @@ func CreateTemplateWithRecipientsBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if creator == "" {
 			api.RespondWithPayload(w, false, constants.ErrInvalidSessionCapitalized, nil)
 			return
+		}
+
+		// Entity scope check: batch-fetch all event entities and verify access before any DB write.
+		{
+			ctxCheck := r.Context()
+			buNamesCheck, isAdminCheck := callerContext(ctxCheck)
+			if !isAdminCheck && len(buNamesCheck) > 0 {
+				// Collect unique event IDs
+				evtIDSet := make(map[string]struct{})
+				for _, rrow := range req.Rows {
+					if rrow.EventID != "" {
+						evtIDSet[rrow.EventID] = struct{}{}
+					}
+				}
+				evtIDs := make([]string, 0, len(evtIDSet))
+				for id := range evtIDSet {
+					evtIDs = append(evtIDs, id)
+				}
+				// Single batch query for all event entities
+				evtEntityRows, qErr := pgxPool.Query(ctxCheck,
+					`SELECT event_id::text, COALESCE(entity_name,'') FROM notification_svc.event WHERE event_id = ANY($1::text[])`,
+					evtIDs)
+				if qErr == nil {
+					for evtEntityRows.Next() {
+						var eid, eEntity string
+						if scanErr := evtEntityRows.Scan(&eid, &eEntity); scanErr == nil {
+							if !entityInPool(eEntity, buNamesCheck) {
+								evtEntityRows.Close()
+								api.RespondWithPayload(w, false,
+									fmt.Sprintf("event %q entity %q is not in your accessible org pool", eid, eEntity), nil)
+								return
+							}
+						}
+					}
+					evtEntityRows.Close()
+				}
+			}
 		}
 
 		// ── Pre-flight validation: check every row BEFORE touching the DB ────────

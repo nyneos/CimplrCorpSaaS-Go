@@ -260,9 +260,11 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create", bID, map[string]interface{}{
 				"entity_id":   eID,
+				"EntityID":    eID,
 				"record_id":   bID,
 				"event":       "FD_BOOKING_SUBMITTED",
 				"actor_email": uEmail,
+				"UserID":      uEmail,
 				"amount":      amount,
 			})
 		}(bookingID, req.EntityID, userEmail, req.PrincipalAmount)
@@ -551,9 +553,11 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/create-bulk", bID, map[string]interface{}{
 					"entity_id":   eID,
+					"EntityID":    eID,
 					"record_id":   bID,
 					"event":       "FD_BOOKING_SUBMITTED",
 					"actor_email": uEmail,
+					"UserID":      uEmail,
 					"amount":      amount,
 				})
 			}(bookingID, row.EntityID, userEmail, row.PrincipalAmount)
@@ -766,9 +770,11 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}()
 			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/update", bID, map[string]interface{}{
 				"entity_id":   eID,
+				"EntityID":    eID,
 				"record_id":   bID,
 				"event":       "FD_BOOKING_EDIT_SUBMITTED",
 				"actor_email": uEmail,
+				"UserID":      uEmail,
 				"amount":      amount,
 			})
 		}(req.BookingID, entityID, userEmail, oldPrincipal)
@@ -933,9 +939,11 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}()
 				notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/booking/delete", bID, map[string]interface{}{
 					"entity_id":   eID,
+					"EntityID":    eID,
 					"record_id":   bID,
 					"event":       "FD_BOOKING_DELETE_SUBMITTED",
 					"actor_email": uEmail,
+					"UserID":      uEmail,
 				})
 			}(bm.id, bm.entity, userEmail)
 		}

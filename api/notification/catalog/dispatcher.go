@@ -61,6 +61,7 @@ package catalog
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	notificationFunctions "CimplrCorpSaas/api/notification/functions"
 	"context"
 	"encoding/json"
@@ -296,7 +297,9 @@ func dispatchNotification(
 	// accepted as fallbacks — see resolveActorEntity for the full priority chain.
 	actorValue := payloadString(payload,
 		"UserID",                           // ← preferred: stable CIMPLR00… ID
+		"user_id", "actor_user_id",         // ← lowercase aliases used by FD/booking callers
 		"ApprovedByEmail", "ApproverEmail", // ← preferred: email
+		"actor_email", "email",             // ← lowercase email aliases
 		"ApprovedBy", "CheckerBy", // may be email OR name depending on caller
 		"RejectedBy",
 		"RequestedBy",
@@ -309,6 +312,27 @@ func dispatchNotification(
 	// for the full tier chain and ambiguity rules.
 	resolution := resolveActorEntity(ctx, pool, actorValue)
 	actorEntity := resolution.Entity
+
+	// Step 1b-fallback — if actor resolution didn't yield an entity, try reading
+	// entity_name or entity_id directly from the payload. Booking/FD callers pass
+	// these keys so we can match the entity-scoped event without a user DB round-trip.
+	if actorEntity == "" {
+		if en := payloadString(payload, "EntityName", "entity_name"); en != "" {
+			actorEntity = en
+		} else if eid := payloadString(payload, "EntityID", "entity_id"); eid != "" {
+			// Resolve entity_id → entity_name via masterentitycash
+			var ename string
+			if err := pool.QueryRow(ctx,
+				`SELECT COALESCE(entity_name,'') FROM masterentitycash WHERE entity_id = $1 AND (is_deleted=false OR is_deleted IS NULL) LIMIT 1`,
+				eid,
+			).Scan(&ename); err == nil && ename != "" {
+				actorEntity = ename
+			}
+		}
+		if actorEntity != "" {
+			api.LogInfo("[NOTIF] entity resolved from payload key for correlation=%s: entity=%q", correlationID, actorEntity)
+		}
+	}
 
 	// If we got an actorValue but could not resolve it at all, warn the user in-app.
 	if actorValue != "" && resolution.UserID == "" {
@@ -324,10 +348,20 @@ func dispatchNotification(
 
 	// Step 1c — resolve events for this route filtered by actor's entity.
 	// Logic:
-	//   - If actor has an entity → prefer that entity's event; fall back to global (entity='') event.
-	//   - If actor has no entity → use only global (entity='') events.
-	//   - External/extra recipients (raw email in template_recipient, no users row) always get notified regardless.
-	events, err := lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
+	//   - Admin actors (IsAdminUser) → use lookupEvents (unrestricted, all entities), notification
+	//     is fired for ALL entities (org-wide broadcast).
+	//   - Non-admin actor with entity → org-pool match (entity + ancestors + descendants + global).
+	//   - Non-admin actor with no entity → global events only.
+	//   - External/extra recipients (raw email in template_recipient, no users row) always get notified.
+	isAdmin := resolution.UserID != "" && middlewares.IsAdminUser(resolution.UserID)
+	var events []resolvedEvent
+	var err error
+	if isAdmin {
+		api.LogInfo("[NOTIF] admin actor %q — using unrestricted event lookup (all entities) for route=%s", resolution.UserID, sourceRoute)
+		events, err = lookupEvents(ctx, pool, sourceRoute)
+	} else {
+		events, err = lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
+	}
 	if err != nil {
 		PushSystemNotification(resolution, SystemNotifParams{
 			Level:         LevelError,
@@ -705,33 +739,44 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 
 // lookupEventsForActor selects which event(s) to fire based on the triggering actor's entity.
 //
-// Uses a recursive CTE on cashentityrelationships to walk UP the hierarchy (ancestors)
-// so that a child-entity actor matches a parent-entity event.
+// Uses a BIDIRECTIONAL recursive CTE on cashentityrelationships to build the actor's full
+// "org pool": self + all ancestors + all descendants. Any event scoped to any entity in
+// this pool — or globally (entity_name='') — is eligible.
+//
+// This implements the org-pool model: a notification event created for a parent entity is
+// valid for children, and vice versa. The full organisation shares one notification pool.
 //
 // Rules:
-//  1. If actorEntity != "" → build the ancestor chain (entity + all parents).
-//     Return event(s) whose entity_name is IN that ancestor set (most-specific first).
-//     Also include global events (entity_name = ”) as final fallback.
-//  2. If actorEntity == "" → return only global events (entity_name = ” or NULL).
+//  1. If actorEntity != "" → build the full org pool (entity + all ancestors + all descendants).
+//     Return event(s) whose entity_name is IN that pool (self/closest match first).
+//     Also include global events (entity_name = "") as final fallback.
+//  2. If actorEntity == "" → return only global events (entity_name = "" or NULL).
 //
 // Example: actor is in "BU-North" (child of "APAC" which is child of "Global").
 //
-//	ancestor set = {"BU-North", "APAC", "Global"}
-//	→ fires BU-North event if it exists, else APAC event, else Global event, else entity-less event.
+//	org pool = {"BU-North", "APAC", "Global", <all siblings/cousins reachable via APAC/Global>}
+//	→ any event scoped to any entity in the pool (or global) fires.
+//	→ self-entity match (depth=0) is ranked first, then nearest relatives, then global.
 func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
 	q := `
-		WITH RECURSIVE actor_ancestors AS (
-			-- Anchor: the actor's own entity
+		WITH RECURSIVE org_pool AS (
+			-- Anchor: the actor's own entity (depth 0)
 			SELECT entity_name, 0 AS depth
 			FROM masterentitycash
 			WHERE entity_name = $2
 			  AND (is_deleted = false OR is_deleted IS NULL)
-			UNION ALL
-			-- Walk UP: find parents of the current entity
-			SELECT r.parent_entity_name, aa.depth + 1
+			UNION
+			-- Walk UP: find ancestors (parents) of entities already in the pool
+			SELECT r.parent_entity_name, op.depth - 1
 			FROM cashentityrelationships r
-			INNER JOIN actor_ancestors aa ON aa.entity_name = r.child_entity_name
-			WHERE aa.depth < 10  -- safety cap
+			INNER JOIN org_pool op ON op.entity_name = r.child_entity_name
+			WHERE op.depth > -10  -- safety cap upward
+			UNION
+			-- Walk DOWN: find descendants (children) of entities already in the pool
+			SELECT r.child_entity_name, op.depth + 1
+			FROM cashentityrelationships r
+			INNER JOIN org_pool op ON op.entity_name = r.parent_entity_name
+			WHERE op.depth < 10   -- safety cap downward
 		)
 		SELECT e.event_id, COALESCE(e.entity_name,'')
 		FROM notification_svc.event e
@@ -744,21 +789,20 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 		  )
 		  AND (
 			CASE
-			  -- Actor has a known entity: match if event entity_name is in the ancestor chain OR is global
+			  -- Actor has a known entity: match any event in the full org pool OR global
 			  WHEN $2 <> ''
-			  THEN COALESCE(e.entity_name,'') IN (SELECT entity_name FROM actor_ancestors)
+			  THEN COALESCE(e.entity_name,'') IN (SELECT entity_name FROM org_pool)
 			    OR COALESCE(e.entity_name,'') = ''
 			  -- Actor has no entity: only global events
 			  ELSE COALESCE(e.entity_name,'') = ''
 			END
 		  )
 		ORDER BY
-			-- Most-specific match first: prefer the event whose entity is deepest in hierarchy
-			-- (highest depth value = closest ancestor to actor)
-			COALESCE((
-				SELECT aa.depth FROM actor_ancestors aa
-				WHERE aa.entity_name = COALESCE(e.entity_name,'') LIMIT 1
-			), -1) DESC,
+			-- Self-entity (depth=0) first, then nearest relatives by absolute depth distance
+			ABS(COALESCE((
+				SELECT op.depth FROM org_pool op
+				WHERE op.entity_name = COALESCE(e.entity_name,'') LIMIT 1
+			), 999)) ASC,
 			-- prefer events with an enabled notification_config
 			(EXISTS (SELECT 1 FROM notification_svc.notification_config nc WHERE nc.event_id = e.event_id AND nc.is_enabled = true)) DESC,
 			-- then prefer events with an approved template

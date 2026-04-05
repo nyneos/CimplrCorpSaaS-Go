@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
@@ -33,6 +35,39 @@ func getRequesterEmail() string {
 		}
 	}
 	return ""
+}
+
+// callerContext extracts entity access info already computed by PreValidation middleware.
+//
+//   - isAdmin  → context key "is_admin_override" == true  (admin override loaded ALL entities)
+//   - buNames  → context key api.BusinessUnitsKey ([]string) — the full set of accessible
+//     entity names for this caller (self + all descendants for normal users, or ALL
+//     entities for admins).  Already resolved by middleware; zero extra DB calls needed.
+//
+// When isAdmin==true, buNames contains every entity in the system — callers MUST skip
+// entity filtering entirely (or at most pass an empty filter) so admins see everything.
+func callerContext(ctx context.Context) (buNames []string, isAdmin bool) {
+	if v, ok := ctx.Value("is_admin_override").(bool); ok && v {
+		isAdmin = true
+	}
+	if names, ok := ctx.Value(api.BusinessUnitsKey).([]string); ok {
+		buNames = names
+	}
+	return
+}
+
+// entityInPool returns true if entity is empty (global) or is present in the accessible list.
+// This is a pure in-memory check — NO database round-trip.
+func entityInPool(entity string, buNames []string) bool {
+	if entity == "" {
+		return true // global events are always accessible
+	}
+	for _, n := range buNames {
+		if n == entity {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateEventSingle creates a single event row and an audit record (PENDING_APPROVAL)
@@ -66,6 +101,15 @@ func CreateEventSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		userEmail := getRequesterEmail()
 		if userEmail == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+
+		// Entity scope check: non-admin callers may only create events for entities in their accessible pool.
+		// buNames comes from PreValidation middleware (context) — no extra DB query needed.
+		buNames, isAdminCaller := callerContext(r.Context())
+		if !isAdminCaller && req.EntityName != "" && !entityInPool(req.EntityName, buNames) {
+			respondWithError(w, http.StatusForbidden,
+				fmt.Sprintf("entity %q is not within your accessible org pool", req.EntityName))
 			return
 		}
 
@@ -148,6 +192,19 @@ func CreateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if userEmail == "" {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
+		}
+
+		// Entity scope check: non-admin callers may only create events for entities in their accessible pool.
+		// buNames comes from PreValidation middleware (context) — no extra DB query needed.
+		buNames, isAdminCaller := callerContext(r.Context())
+		if !isAdminCaller {
+			for _, rrow := range req.Rows {
+				if rrow.EntityName != "" && !entityInPool(rrow.EntityName, buNames) {
+					respondWithError(w, http.StatusForbidden,
+						fmt.Sprintf("entity %q is not within your accessible org pool", rrow.EntityName))
+					return
+				}
+			}
 		}
 
 		ctx := r.Context()
@@ -446,13 +503,19 @@ func BulkRejectEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetEventsApprovedActive returns active events with approved audit
+// GetEventsApprovedActive returns active events with approved audit, filtered by caller's entity pool.
+// Admin users (is_admin_override) see all events regardless of entity.
 func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		// Use EXISTS subquery to avoid duplicates when an event has multiple audit rows.
-		// COALESCE all nullable columns so pgx never tries to scan NULL into a plain string.
-		q := `
+		buNames, isAdmin := callerContext(ctx)
+
+		// Entity filter: match events whose entity_name is in the caller's accessible pool,
+		// OR whose entity_name is empty (global events visible to everyone).
+		// buNames is already resolved by PreValidation middleware — no extra DB call.
+		var q string
+		var args []interface{}
+		baseQ := `
 			SELECT
 				m.event_id,
 				COALESCE(m.module_code,'')        AS module_code,
@@ -467,12 +530,21 @@ func GetEventsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			  AND COALESCE(m.is_deleted, false) = false
 			  AND EXISTS (
 				  SELECT 1 FROM notification_svc.audit_event a
-				  WHERE a.event_id = m.event_id
-				    AND a.processing_status = 'APPROVED'
-			  )
-			ORDER BY m.event_display_name
-		`
-		rows, err := pgxPool.Query(ctx, q)
+				  WHERE a.event_id = m.event_id AND a.processing_status = 'APPROVED'
+			  )`
+		if isAdmin || len(buNames) == 0 {
+			q = baseQ + ` ORDER BY m.event_display_name`
+		} else {
+			q = baseQ + ` AND (COALESCE(m.entity_name,'') = '' OR COALESCE(m.entity_name,'') = ANY($1::text[])) ORDER BY m.event_display_name`
+			args = []interface{}{buNames}
+		}
+		var rows pgx.Rows
+		var err error
+		if len(args) > 0 {
+			rows, err = pgxPool.Query(ctx, q, args...)
+		} else {
+			rows, err = pgxPool.Query(ctx, q)
+		}
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -515,6 +587,19 @@ func GetEventAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// Access check: verify caller can see the event's entity.
+		// buNames is already resolved by PreValidation middleware — no extra DB call.
+		if !isAdmin && len(buNames) > 0 {
+			var evtEntity string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_name,'') FROM notification_svc.event WHERE event_id=$1`, req.EventID).Scan(&evtEntity)
+			if !entityInPool(evtEntity, buNames) {
+				respondWithError(w, http.StatusForbidden, "you do not have access to this event")
+				return
+			}
+		}
+
 		q := `SELECT audit_id, event_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment, old_event_display_name, old_description, old_is_active, old_entity_name FROM notification_svc.audit_event WHERE event_id = $1 ORDER BY requested_at DESC`
 		rows, err := pgxPool.Query(ctx, q, req.EventID)
 		if err != nil {
@@ -721,10 +806,22 @@ func BulkUpdateEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// GetEventsWithAudit returns all events with their audit history as a JSON array per row
+// GetEventsWithAudit returns all events with their audit history as a JSON array per row,
+// filtered to the caller's org pool (admin sees all).
 func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// Entity filter appended to WHERE only for non-admin callers.
+		// buNames is already resolved by PreValidation middleware — no extra DB call.
+		entityFilterSQL := ""
+		var entityArgs []interface{}
+		if !isAdmin && len(buNames) > 0 {
+			entityFilterSQL = ` AND (COALESCE(m.entity_name,'') = '' OR COALESCE(m.entity_name,'') = ANY($1::text[]))`
+			entityArgs = []interface{}{buNames}
+		}
+
 		q := `
 			WITH latest_audit AS (
 				SELECT DISTINCT ON (a.event_id)
@@ -793,9 +890,16 @@ func GetEventsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			      COALESCE(l.action_type, '') = 'DELETE'
 			      AND COALESCE(l.processing_status, '') = 'APPROVED'
 			  )
+		` + entityFilterSQL + `
 			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
 		`
-		rows, err := pgxPool.Query(ctx, q)
+		var rows pgx.Rows
+		var err error
+		if len(entityArgs) > 0 {
+			rows, err = pgxPool.Query(ctx, q, entityArgs...)
+		} else {
+			rows, err = pgxPool.Query(ctx, q)
+		}
 		if err != nil {
 			api.LogError("GetEventsWithAudit query failed: %v", err)
 			respondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
@@ -839,6 +943,15 @@ func GetEvent(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+		if !isAdmin && len(buNames) > 0 {
+			var evtEntity string
+			_ = pgxPool.QueryRow(ctx, `SELECT COALESCE(entity_name,'') FROM notification_svc.event WHERE event_id=$1`, req.EventID).Scan(&evtEntity)
+			if !entityInPool(evtEntity, buNames) {
+				respondWithError(w, http.StatusForbidden, "you do not have access to this event")
+				return
+			}
+		}
 		q := `
 			SELECT m.event_id, m.module_code, m.sub_module_code, m.event_code, m.event_display_name, m.description, m.source_route, m.is_active, m.is_deleted, COALESCE(m.entity_name,''),
 				   COALESCE((SELECT json_agg(json_build_object(
@@ -939,6 +1052,22 @@ func UploadEventSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
+
+		// Entity scope check: validate entity_name column for each row against caller's pool.
+		if !isAdmin && len(buNames) > 0 {
+			entityCol, hasEntityCol := colMap["entity_name"]
+			if hasEntityCol {
+				for i, row := range data {
+					if entityCol < len(row) && row[entityCol] != "" && !entityInPool(row[entityCol], buNames) {
+						respondWithError(w, http.StatusForbidden,
+							fmt.Sprintf("row %d: entity %q is not in your accessible org pool", i+1, row[entityCol]))
+						return
+					}
+				}
+			}
+		}
+
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())

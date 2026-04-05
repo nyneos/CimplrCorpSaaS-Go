@@ -239,10 +239,19 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req.Channel = strings.ToUpper(strings.TrimSpace(req.Channel))
 
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
 
 		var whereParts []string
 		var args []interface{}
 		pos := 1
+
+		// Entity filter: restrict to configs whose parent event is in caller's accessible pool.
+		// buNames is already resolved by PreValidation middleware \u2014 no extra DB call.
+		if !isAdmin && len(buNames) > 0 {
+			whereParts = append(whereParts, fmt.Sprintf("(COALESCE(e.entity_name,'') = '' OR COALESCE(e.entity_name,'') = ANY($%d::text[]))", pos))
+			args = append(args, buNames)
+			pos++
+		}
 		if req.EventID != "" {
 			whereParts = append(whereParts, fmt.Sprintf("nc.event_id = $%d", pos))
 			args = append(args, req.EventID)
