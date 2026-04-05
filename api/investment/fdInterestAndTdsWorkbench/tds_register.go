@@ -115,7 +115,7 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		var tdsID string
 		err := pool.QueryRow(ctx, `
 			INSERT INTO investment.fd_tds_receipt (
-				tds_id, receipt_id, fd_id, fd_ref_no, entity_id, entity_name, bank_id, bank_name,
+				tds_id, receipt_id, fd_id, fd_ref_no, entity_id, bank_id,
 				ingestion_source,
 				period_start, period_end, deduction_date,
 				gross_interest, tds_rate_applied, tds_rate_expected,
@@ -125,16 +125,16 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				is_active, is_deleted
 			) VALUES (
 				'TDSR-' || UPPER(SUBSTR(REPLACE(gen_random_uuid()::TEXT,'-',''),1,8)),
-				$1, $2, $3, $4, $5, $6, $7,
+				$1, $2, $3, $4, $5,
 				'TDS_WORKBENCH',
-				$8::date, $9::date, $10::date,
-				$11, $12, $12,
-				$13, $14, $15,
-				$16, $17,
-				'CAPTURED', $18,
+				$6::date, $7::date, $8::date,
+				$9, $10, $10,
+				$11, $12, $13,
+				$14, $15,
+				'CAPTURED', $16,
 				true, false
 			) RETURNING tds_id`,
-			receiptIDArg, req.FDID, fdRefNo, req.EntityID, entityName, bankID, bankName,
+			receiptIDArg, req.FDID, fdRefNo, req.EntityID, bankID,
 			req.PeriodStart, req.PeriodEnd, deductionDate,
 			req.GrossInterest, req.TDSRateApplied,
 			req.TDSExpected, req.TDSDeductedActual, tdsVariance,
