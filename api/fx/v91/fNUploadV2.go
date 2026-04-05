@@ -3,6 +3,7 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
@@ -75,6 +76,11 @@ type UploadResult struct {
 	Errors        []string              `json:"errors"`
 	Warnings      []string              `json:"warnings,omitempty"`
 	Info          []string              `json:"info,omitempty"`
+}
+
+type UploadRouteResult struct {
+	UploadResult
+	UploadLink string `json:"upload_link"`
 }
 
 type CanonicalPreviewRow struct {
@@ -174,114 +180,125 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		ctx := r.Context()
-
 		if err := r.ParseMultipartForm(1024 << 20); err != nil {
 			httpError(w, http.StatusBadRequest, "multipart parse error: "+err.Error())
 			return
 		}
+		results, elapsed, status, err := processBatchUploadStagingData(r.Context(), pool, r)
+		if err != nil {
+			httpError(w, status, err.Error())
+			return
+		}
+		writeJSON(w, map[string]interface{}{
+			constants.ValueSuccess: true,
+			"results":              results,
+			"duration": map[string]interface{}{
+				"seconds": elapsed.Seconds(),
+			},
+		})
+	}
+}
 
-		files := r.MultipartForm.File["files"]
-		sources := r.MultipartForm.Value["source"]
-		mappings := r.MultipartForm.Value["mapping"]
-		// ----- Logic modes and currency aliases -----
-		receivableLogic := strings.ToLower(strings.TrimSpace(r.FormValue("receivable_logic")))
-		payableLogic := strings.ToLower(strings.TrimSpace(r.FormValue("payable_logic")))
-		currencyAliasesJSON := r.FormValue("currency_aliases")
+func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *http.Request) ([]UploadRouteResult, time.Duration, int, error) {
+	start := time.Now()
+	files := r.MultipartForm.File["files"]
+	sources := r.MultipartForm.Value["source"]
+	mappings := r.MultipartForm.Value["mapping"]
+	// ----- Logic modes and currency aliases -----
+	receivableLogic := strings.ToLower(strings.TrimSpace(r.FormValue("receivable_logic")))
+	payableLogic := strings.ToLower(strings.TrimSpace(r.FormValue("payable_logic")))
+	currencyAliasesJSON := r.FormValue("currency_aliases")
 
-		currencyAliases := map[string]string{}
-		if strings.TrimSpace(currencyAliasesJSON) != "" {
-			if err := json.Unmarshal([]byte(currencyAliasesJSON), &currencyAliases); err != nil {
-				log.Printf("[WARN] invalid currency_aliases JSON: %v", err)
-			} else {
-				// normalize keys and values to uppercase to make lookups case-insensitive
-				norm := make(map[string]string, len(currencyAliases))
-				for k, v := range currencyAliases {
-					kk := strings.ToUpper(strings.TrimSpace(k))
-					vv := strings.ToUpper(strings.TrimSpace(v))
-					if kk == "" || vv == "" {
-						continue
-					}
-					norm[kk] = vv
+	currencyAliases := map[string]string{}
+	if strings.TrimSpace(currencyAliasesJSON) != "" {
+		if err := json.Unmarshal([]byte(currencyAliasesJSON), &currencyAliases); err != nil {
+			log.Printf("[WARN] invalid currency_aliases JSON: %v", err)
+		} else {
+			// normalize keys and values to uppercase to make lookups case-insensitive
+			norm := make(map[string]string, len(currencyAliases))
+			for k, v := range currencyAliases {
+				kk := strings.ToUpper(strings.TrimSpace(k))
+				vv := strings.ToUpper(strings.TrimSpace(v))
+				if kk == "" || vv == "" {
+					continue
 				}
-				currencyAliases = norm
+				norm[kk] = vv
 			}
+			currencyAliases = norm
 		}
+	}
 
-		// default fallbacks
-		if receivableLogic == "" {
-			receivableLogic = "standard"
-		}
-		if payableLogic == "" {
-			payableLogic = "standard"
-		}
+	// default fallbacks
+	if receivableLogic == "" {
+		receivableLogic = "standard"
+	}
+	if payableLogic == "" {
+		payableLogic = "standard"
+	}
 
-		userID := r.FormValue(constants.KeyUserID)
-		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
-			return
+	userID := r.FormValue(constants.KeyUserID)
+	if userID == "" {
+		return nil, 0, http.StatusBadRequest, errors.New(constants.ErrUserIDRequired)
+	}
+	userName := ""
+	for _, s := range auth.GetActiveSessions() {
+		if s.UserID == userID {
+			userName = s.Name
+			break
 		}
-		userName := ""
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == userID {
-				userName = s.Name
-				break
-			}
-		}
-		if len(files) == 0 {
-			httpError(w, http.StatusBadRequest, "no files uploaded")
-			return
-		}
+	}
+	if len(files) == 0 {
+		return nil, 0, http.StatusBadRequest, errors.New("no files uploaded")
+	}
 
-		// build entity map (use masterentitycash + canonical fields)
-		entityMap := map[string]string{}
-		{
-			allowedIDs := api.GetEntityIDsFromCtx(ctx)
-			// Base SQL
-			baseSQL := `
+	// build entity map (use masterentitycash + canonical fields)
+	entityMap := map[string]string{}
+	{
+		allowedIDs := api.GetEntityIDsFromCtx(ctx)
+		// Base SQL
+		baseSQL := `
 		SELECT COALESCE(NULLIF(me.unique_identifier,''), me.entity_id) AS uid,
 			   TRIM(me.entity_name),
 			   TRIM(COALESCE(me.entity_short_name, me.entity_name, '')) AS cname,
 			   TRIM(me.entity_id)
 		FROM public.masterentitycash me
 		WHERE COALESCE(me.is_deleted, false) IS NOT TRUE`
-			var rows pgx.Rows
-			var err error
-			if len(allowedIDs) > 0 {
-				// restrict masterentitycash load to approved entity ids from prevalidation middleware
-				rows, err = pool.Query(ctx, baseSQL+" AND me.entity_id = ANY($1)", allowedIDs)
-				log.Printf("[FBUP-ENT] restricting entityMap load to %d approved entity IDs", len(allowedIDs))
-			} else {
-				rows, err = pool.Query(ctx, baseSQL)
-			}
-			if err == nil {
-				for rows.Next() {
-					var uid, entityName, companyName, eid string
-					if err := rows.Scan(&uid, &entityName, &companyName, &eid); err == nil {
-						key1 := strings.TrimSpace(uid)
-						key2 := strings.TrimSpace(companyName)
-						key3 := strings.TrimSpace(eid)
-						if key1 != "" {
-							entityMap[key1] = entityName
-						}
-						if key2 != "" {
-							entityMap[key2] = entityName
-						}
-						if key3 != "" {
-							entityMap[key3] = entityName
-						}
+		var rows pgx.Rows
+		var err error
+		if len(allowedIDs) > 0 {
+			// restrict masterentitycash load to approved entity ids from prevalidation middleware
+			rows, err = pool.Query(ctx, baseSQL+" AND me.entity_id = ANY($1)", allowedIDs)
+			log.Printf("[FBUP-ENT] restricting entityMap load to %d approved entity IDs", len(allowedIDs))
+		} else {
+			rows, err = pool.Query(ctx, baseSQL)
+		}
+		if err == nil {
+			for rows.Next() {
+				var uid, entityName, companyName, eid string
+				if err := rows.Scan(&uid, &entityName, &companyName, &eid); err == nil {
+					key1 := strings.TrimSpace(uid)
+					key2 := strings.TrimSpace(companyName)
+					key3 := strings.TrimSpace(eid)
+					if key1 != "" {
+						entityMap[key1] = entityName
+					}
+					if key2 != "" {
+						entityMap[key2] = entityName
+					}
+					if key3 != "" {
+						entityMap[key3] = entityName
 					}
 				}
-				rows.Close()
-			} else {
-				log.Printf("[FUBG]: error querying masterentitycash: %v", err)
 			}
+			rows.Close()
+		} else {
+			log.Printf("[FUBG]: error querying masterentitycash: %v", err)
 		}
+	}
 
-		// Build currency map (active or with approved audit action)
-		currencyMap := map[string]struct{}{}
-		rowsCur, err := pool.Query(ctx, `
+	// Build currency map (active or with approved audit action)
+	currencyMap := map[string]struct{}{}
+	rowsCur, err := pool.Query(ctx, `
 			SELECT mc.currency_code
 			FROM public.mastercurrency mc
 			WHERE (lower(mc.status) = 'active'
@@ -291,369 +308,405 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 			   )
 			)
 		`)
-		if err == nil {
-			for rowsCur.Next() {
-				var code string
-				if err := rowsCur.Scan(&code); err == nil {
-					if code = strings.TrimSpace(code); code != "" {
-						currencyMap[strings.ToUpper(code)] = struct{}{}
-					}
+	if err == nil {
+		for rowsCur.Next() {
+			var code string
+			if err := rowsCur.Scan(&code); err == nil {
+				if code = strings.TrimSpace(code); code != "" {
+					currencyMap[strings.ToUpper(code)] = struct{}{}
 				}
 			}
-			rowsCur.Close()
+		}
+		rowsCur.Close()
+	}
+
+	// Debug: inspect entityMap contents and SQL-derived keys
+	{
+		log.Printf("[FBUP-ENT] entityMap built, count=%d", len(entityMap))
+		// presence check for common company codes seen in test files (e.g. '3700')
+		if v, ok := entityMap["3700"]; ok {
+			log.Printf("[FBUP-ENT] entityMap contains key '3700' -> %s", v)
+		} else {
+			log.Printf("[FBUP-ENT] entityMap does NOT contain key '3700' (this is likely why many rows are non-qualified)")
+		}
+		// print up to 12 sample entries to inspect format
+		sample := 0
+		for k, v := range entityMap {
+			if sample >= 12 {
+				break
+			}
+			log.Printf("[FBUP-ENT] sample[%d] key='%s' -> entity='%s'", sample, k, v)
+			sample++
+		}
+	}
+
+	results := make([]UploadRouteResult, 0, len(files))
+
+	for i, fh := range files {
+		src := ""
+		if i < len(sources) {
+			src = strings.ToUpper(strings.TrimSpace(sources[i]))
+		}
+		var mappingRaw []byte
+		if i < len(mappings) && strings.TrimSpace(mappings[i]) != "" {
+			mappingRaw = []byte(mappings[i])
 		}
 
-		// Debug: inspect entityMap contents and SQL-derived keys
-		{
-			log.Printf("[FBUP-ENT] entityMap built, count=%d", len(entityMap))
-			// presence check for common company codes seen in test files (e.g. '3700')
-			if v, ok := entityMap["3700"]; ok {
-				log.Printf("[FBUP-ENT] entityMap contains key '3700' -> %s", v)
-			} else {
-				log.Printf("[FBUP-ENT] entityMap does NOT contain key '3700' (this is likely why many rows are non-qualified)")
-			}
-			// print up to 12 sample entries to inspect format
-			sample := 0
-			for k, v := range entityMap {
-				if sample >= 12 {
-					break
-				}
-				log.Printf("[FBUP-ENT] sample[%d] key='%s' -> entity='%s'", sample, k, v)
-				sample++
-			}
+		fileWarnings := make([]string, 0)
+		fileErrors := make([]string, 0)
+		fileInfo := make([]string, 0)
+
+		f, err := fh.Open()
+		if err != nil {
+			return nil, 0, http.StatusBadRequest, fmt.Errorf("open file: %w", err)
+		}
+		tmpPath, fileHash, err := saveTempAndHash(f, fh.Filename)
+		f.Close()
+		if err != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("temp save: %w", err)
+		}
+		defer os.Remove(tmpPath)
+
+		tmpFile, err := os.Open(tmpPath)
+		if err != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("open tmp: %w", err)
+		}
+		defer tmpFile.Close()
+
+		fileExt := strings.ToLower(filepath.Ext(fh.Filename))
+		allRows, err := ubParseUploadFile(tmpFile, fileExt)
+		if err != nil {
+			return nil, 0, http.StatusBadRequest, fmt.Errorf("file parse error: %w", err)
+		}
+		if len(allRows) == 0 {
+			return nil, 0, http.StatusBadRequest, errors.New("empty file or no data rows")
 		}
 
-		results := make([]UploadResult, 0, len(files))
+		// headers
+		headersRec := allRows[0]
+		headers := make([]string, len(headersRec))
+		for idx, h := range headersRec {
+			headers[idx] = strings.TrimSpace(h)
+		}
+		headerLower := map[string]string{}
+		for _, h := range headers {
+			headerLower[strings.ToLower(h)] = h
+		}
 
-		for i, fh := range files {
-			src := ""
-			if i < len(sources) {
-				src = strings.ToUpper(strings.TrimSpace(sources[i]))
-			}
-			var mappingRaw []byte
-			if i < len(mappings) && strings.TrimSpace(mappings[i]) != "" {
-				mappingRaw = []byte(mappings[i])
-			}
-
-			fileWarnings := make([]string, 0)
-			fileErrors := make([]string, 0)
-			fileInfo := make([]string, 0)
-
-			f, err := fh.Open()
-			if err != nil {
-				httpError(w, http.StatusBadRequest, "open file: "+err.Error())
-				return
-			}
-			tmpPath, fileHash, err := saveTempAndHash(f, fh.Filename)
-			f.Close()
-			if err != nil {
-				httpError(w, http.StatusInternalServerError, "temp save: "+err.Error())
-				return
-			}
-			defer os.Remove(tmpPath)
-
-			tmpFile, err := os.Open(tmpPath)
-			if err != nil {
-				httpError(w, http.StatusInternalServerError, "open tmp: "+err.Error())
-				return
-			}
-			defer tmpFile.Close()
-
-			fileExt := strings.ToLower(filepath.Ext(fh.Filename))
-			allRows, err := ubParseUploadFile(tmpFile, fileExt)
-			if err != nil {
-				httpError(w, http.StatusBadRequest, "file parse error: "+err.Error())
-				return
-			}
-			if len(allRows) == 0 {
-				httpError(w, http.StatusBadRequest, "empty file or no data rows")
-				return
-			}
-
-			// headers
-			headersRec := allRows[0]
-			headers := make([]string, len(headersRec))
-			for idx, h := range headersRec {
-				headers[idx] = strings.TrimSpace(h)
-			}
-			headerLower := map[string]string{}
-			for _, h := range headers {
-				headerLower[strings.ToLower(h)] = h
-			}
-
-			headerMap := map[string]string{}
-			lineItemMap := map[string]string{}
-			if len(mappingRaw) > 0 {
-				var candidate map[string]interface{}
-				if err := json.Unmarshal(mappingRaw, &candidate); err == nil {
-					for k, v := range candidate {
-						if strings.EqualFold(k, "LineItems") {
-							if sub, ok := v.(map[string]interface{}); ok {
-								for sk, sv := range sub {
-									lineItemMap[sk] = fmt.Sprintf("%v", sv)
-								}
+		headerMap := map[string]string{}
+		lineItemMap := map[string]string{}
+		if len(mappingRaw) > 0 {
+			var candidate map[string]interface{}
+			if err := json.Unmarshal(mappingRaw, &candidate); err == nil {
+				for k, v := range candidate {
+					if strings.EqualFold(k, "LineItems") {
+						if sub, ok := v.(map[string]interface{}); ok {
+							for sk, sv := range sub {
+								lineItemMap[sk] = fmt.Sprintf("%v", sv)
 							}
-							continue
 						}
-						headerMap[k] = fmt.Sprintf("%v", v)
+						continue
 					}
-				} else {
-					var simple map[string]string
-					_ = json.Unmarshal(mappingRaw, &simple)
-					for k, v := range simple {
-						headerMap[k] = v
-					}
+					headerMap[k] = fmt.Sprintf("%v", v)
+				}
+			} else {
+				var simple map[string]string
+				_ = json.Unmarshal(mappingRaw, &simple)
+				for k, v := range simple {
+					headerMap[k] = v
 				}
 			}
+		}
 
-			// start DB tx
-			batchID := uuid.New()
-			conn, err := pool.Acquire(ctx)
+		// start DB tx
+		batchID := uuid.New()
+		s3Key := fxExposureS3Key(fileHash, fh.Filename)
+		s3URL := ""
+		uploadedNewObject := false
+		if bankstatement.IsS3UploadEnabled() {
+			fileBytes, err := os.ReadFile(tmpPath)
 			if err != nil {
-				httpError(w, 500, constants.ErrDBAcquire+err.Error())
-				return
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("read temp file for s3 upload: %w", err)
 			}
-			tx, err := conn.Begin(ctx)
+			s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, bankstatement.DetectContentType(fileBytes))
 			if err != nil {
-				conn.Release()
-				httpError(w, 500, constants.ErrTxBegin+err.Error())
-				return
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to store original file to s3: %w", err)
 			}
-			committed := false
-			defer func() {
-				if !committed {
-					_ = tx.Rollback(ctx)
-				}
-				conn.Release()
-			}()
-
-			// validate mapping JSON early to provide a clearer error than the DB
-			if len(mappingRaw) > 0 {
-				var temp interface{}
-				if err := json.Unmarshal(mappingRaw, &temp); err != nil {
-					httpError(w, http.StatusBadRequest, "invalid mapping JSON: "+err.Error())
-					return
+			uploadedNewObject = true
+		}
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			if uploadedNewObject {
+				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					log.Printf("[FBUP-S3] cleanup after acquire failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrDBAcquire, err.Error())
+		}
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			conn.Release()
+			if uploadedNewObject {
+				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					log.Printf("[FBUP-S3] cleanup after tx begin failure failed for key=%s: %v", s3Key, cleanupErr)
+				}
+			}
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrTxBegin, err.Error())
+		}
+		committed := false
+		cleanupUploadedObject := uploadedNewObject
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+			}
+			conn.Release()
+			if cleanupUploadedObject && s3Key != "" {
+				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					log.Printf("[FBUP-S3] cleanup failed for key=%s: %v", s3Key, cleanupErr)
+				}
+			}
+		}()
 
-			if _, err := tx.Exec(ctx, `
+		// validate mapping JSON early to provide a clearer error than the DB
+		if len(mappingRaw) > 0 {
+			var temp interface{}
+			if err := json.Unmarshal(mappingRaw, &temp); err != nil {
+				return nil, 0, http.StatusBadRequest, fmt.Errorf("invalid mapping JSON: %w", err)
+			}
+		}
+
+		if _, err := tx.Exec(ctx, `
 				INSERT INTO public.staging_batches_exposures
-				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json)
-				VALUES ($1,$2,'processing',$3,$4,$5,$6,$7)
-			`, batchID, src, 0, fileHash, fh.Filename, userName, string(mappingRaw)); err != nil {
-				httpError(w, 500, "insert batch: "+err.Error())
-				return
+				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json, upload_link)
+				VALUES ($1,$2,'processing',$3,$4,$5,$6,$7,$8)
+			`, batchID, src, 0, fileHash, fh.Filename, userName, string(mappingRaw), s3URL); err != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("insert batch: %w", err)
+		}
+
+		// staging copy
+		stagingCh := make(chan []any, 4096)
+		stagingSrc := &chanCopySource{ch: stagingCh}
+		var stagingErr error
+		wgCopy := sync.WaitGroup{}
+		wgCopy.Add(1)
+		go func() {
+			defer wgCopy.Done()
+			_, stagingErr = tx.CopyFrom(ctx,
+				pgx.Identifier{"public", "staging_exposures"},
+				[]string{"staging_id", "batch_id", "exposure_source", "raw_payload", "mapped_payload", "ingestion_timestamp", constants.KeyStatus},
+				stagingSrc)
+		}()
+
+		canonicals := make([]CanonicalRow, 0, 1024)
+		totalRows := 0
+		dn := newDateNormalizer()
+
+		// process rows
+		for rowIdx := 1; rowIdx < len(allRows); rowIdx++ {
+			rec := allRows[rowIdx]
+			totalRows++
+
+			rowMap := make(map[string]string, len(headers))
+			for idx, h := range headers {
+				val := ""
+				if idx < len(rec) {
+					val = strings.TrimSpace(rec[idx])
+				}
+				rowMap[h] = val
 			}
 
-			// staging copy
-			stagingCh := make(chan []any, 4096)
-			stagingSrc := &chanCopySource{ch: stagingCh}
-			var stagingErr error
-			wgCopy := sync.WaitGroup{}
-			wgCopy.Add(1)
-			go func() {
-				defer wgCopy.Done()
-				_, stagingErr = tx.CopyFrom(ctx,
-					pgx.Identifier{"public", "staging_exposures"},
-					[]string{"staging_id", "batch_id", "exposure_source", "raw_payload", "mapped_payload", "ingestion_timestamp", constants.KeyStatus},
-					stagingSrc)
-			}()
+			mapped := fastMapWithHeaderLower(rowMap, headerLower, headerMap)
 
-			canonicals := make([]CanonicalRow, 0, 1024)
-			totalRows := 0
-			dn := newDateNormalizer()
-
-			// process rows
-			for rowIdx := 1; rowIdx < len(allRows); rowIdx++ {
-				rec := allRows[rowIdx]
-				totalRows++
-
-				rowMap := make(map[string]string, len(headers))
-				for idx, h := range headers {
-					val := ""
-					if idx < len(rec) {
-						val = strings.TrimSpace(rec[idx])
+			if len(lineItemMap) > 0 {
+				li := make(map[string]interface{})
+				for liTarget, csvHeader := range lineItemMap {
+					v := ""
+					if mv, ok := mapped[csvHeader]; ok {
+						v = fmt.Sprintf("%v", mv)
+					} else if rawV, ok := rowMap[csvHeader]; ok {
+						v = rawV
+					} else if csvHeaderLower, ok := headerLower[strings.ToLower(csvHeader)]; ok {
+						v = rowMap[csvHeaderLower]
 					}
-					rowMap[h] = val
+					li[liTarget] = strings.TrimSpace(v)
 				}
+				mapped["LineItems"] = []map[string]interface{}{li}
+			}
 
-				mapped := fastMapWithHeaderLower(rowMap, headerLower, headerMap)
+			rawB, _ := json.Marshal(map[string]string(rowMap))
+			mappedB, _ := json.Marshal(mapped)
 
-				if len(lineItemMap) > 0 {
-					li := make(map[string]interface{})
-					for liTarget, csvHeader := range lineItemMap {
-						v := ""
-						if mv, ok := mapped[csvHeader]; ok {
-							v = fmt.Sprintf("%v", mv)
-						} else if rawV, ok := rowMap[csvHeader]; ok {
-							v = rawV
-						} else if csvHeaderLower, ok := headerLower[strings.ToLower(csvHeader)]; ok {
-							v = rowMap[csvHeaderLower]
-						}
-						li[liTarget] = strings.TrimSpace(v)
-					}
-					mapped["LineItems"] = []map[string]interface{}{li}
-				}
+			stagingRow := []any{uuid.New(), batchID, src, rawB, mappedB, time.Now(), "pending"}
+			select {
+			case stagingCh <- stagingRow:
+			default:
+				stagingCh <- stagingRow
+			}
 
-				rawB, _ := json.Marshal(map[string]string(rowMap))
-				mappedB, _ := json.Marshal(mapped)
+			c, _ := mapObjectToCanonical(mapped, src, currencyAliases)
 
-				stagingRow := []any{uuid.New(), batchID, src, rawB, mappedB, time.Now(), "pending"}
-				select {
-				case stagingCh <- stagingRow:
-				default:
-					stagingCh <- stagingRow
-				}
-
-				c, _ := mapObjectToCanonical(mapped, src, currencyAliases)
-
-				// parse amount into both decimal and float
-				if s := fmt.Sprintf("%v", mapped["AmountDoc"]); strings.TrimSpace(s) != "" {
-					s = strings.ReplaceAll(s, ",", "")
-					if f, err := strconv.ParseFloat(s, 64); err == nil {
-						c.AmountFloat = f
-						c.AmountDoc = decimal.NewFromFloat(f)
-					} else {
-						if d, derr := decimal.NewFromString(s); derr == nil {
-							c.AmountDoc = d
-							f2, _ := d.Float64()
-							c.AmountFloat = f2
-						} else {
-							c.AmountDoc = decimal.Zero
-							c.AmountFloat = 0.0
-						}
-					}
+			// parse amount into both decimal and float
+			if s := fmt.Sprintf("%v", mapped["AmountDoc"]); strings.TrimSpace(s) != "" {
+				s = strings.ReplaceAll(s, ",", "")
+				if f, err := strconv.ParseFloat(s, 64); err == nil {
+					c.AmountFloat = f
+					c.AmountDoc = decimal.NewFromFloat(f)
 				} else {
-					c.AmountDoc = decimal.Zero
-					c.AmountFloat = 0.0
-				}
-
-				// normalized date caching
-				if c.DocumentDate != "" {
-					c.DocumentDate = dn.NormalizeCached(c.DocumentDate)
-				}
-				if c.NetDueDate != "" {
-					c.NetDueDate = dn.NormalizeCached(c.NetDueDate)
-				}
-				if c.PostingDate != "" {
-					c.PostingDate = dn.NormalizeCached(c.PostingDate)
-				}
-
-				c._raw = mapped
-
-				_, _ = validateSingleExposure(c) // keep old behavior (we don't stop on single issues here)
-
-				canonicals = append(canonicals, c)
-			}
-
-			// finish staging copy
-			close(stagingCh)
-			wgCopy.Wait()
-			if stagingErr != nil {
-				httpError(w, http.StatusInternalServerError, "copy staging_exposures: "+stagingErr.Error())
-				return
-			}
-
-			if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET total_records=$1 WHERE batch_id=$2`, totalRows, batchID); err != nil {
-				httpError(w, 500, "update batch total_records: "+err.Error())
-				return
-			}
-
-			log.Printf("[DEBUG] After parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
-			if len(canonicals) > 0 {
-				sample := canonicals[0]
-				log.Printf("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
-					sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.AmountFloat, sample.NetDueDate)
-			}
-
-			// allocate (produces unallocated exposures and knockoffs)
-			exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
-
-			// ---- Informational Summary for Auto-Offset / Self-Allocation ----
-			autoKnockCount := len(knocksFloat)
-			selfKnockCount := 0
-			for _, k := range knocksFloat {
-				if k.BaseDoc == k.KnockDoc {
-					selfKnockCount++
-				}
-			}
-
-			if autoKnockCount > 0 {
-				msg := fmt.Sprintf(
-					"Auto-offset applied: %d knock-off(s) detected, including %d self-allocation(s). "+
-						"These were automatically netted within the same Company/Party/Currency group. "+
-						"Remaining open amounts, if any, were inserted as exposures.",
-					autoKnockCount, selfKnockCount)
-				fileInfo = append(fileInfo, msg)
-				log.Printf("[INFO] %s", msg)
-			}
-
-			log.Printf("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
-
-			// net-exposure non-qualified pass
-			netMap := make(map[string]float64)
-			for _, e := range exposuresFloat {
-				key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
-				netMap[key] += e.AmountFloat
-			}
-			flaggedCount := 0
-			for i := range exposuresFloat {
-				e := &exposuresFloat[i]
-				key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
-				net := netMap[key]
-				switch e.Source {
-				case "FBL1N", "FBL3N":
-					if net > 0 {
-						e.IsNonQualified = true
-						e.NonQualifiedReason = fmt.Sprintf("Vendor net exposure %.4f > 0", net)
-						if e._raw == nil {
-							e._raw = make(map[string]interface{})
-						}
-						e._raw["is_non_qualified"] = true
-						e._raw["non_qualified_reason"] = e.NonQualifiedReason
-						flaggedCount++
-					}
-				case "FBL5N":
-					if net < 0 {
-						e.IsNonQualified = true
-						e.NonQualifiedReason = fmt.Sprintf("Customer net exposure %.4f < 0", net)
-						if e._raw == nil {
-							e._raw = make(map[string]interface{})
-						}
-						e._raw["is_non_qualified"] = true
-						e._raw["non_qualified_reason"] = e.NonQualifiedReason
-						flaggedCount++
-					}
-				}
-			}
-			log.Printf("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
-
-			// build canonical exposures slice (decimal amounts) - ONLY documents with remaining > 0
-			exposures := make([]CanonicalRow, 0, len(exposuresFloat))
-			for _, e := range exposuresFloat {
-				if e.AmountFloat == 0 {
-					e.AmountDoc = decimal.Zero
-				} else {
-					efmt := strconv.FormatFloat(e.AmountFloat, 'f', 4, 64)
-					if d, derr := decimal.NewFromString(efmt); derr == nil {
-						e.AmountDoc = d
+					if d, derr := decimal.NewFromString(s); derr == nil {
+						c.AmountDoc = d
+						f2, _ := d.Float64()
+						c.AmountFloat = f2
 					} else {
-						e.AmountDoc = decimal.NewFromFloat(e.AmountFloat)
+						c.AmountDoc = decimal.Zero
+						c.AmountFloat = 0.0
 					}
 				}
-				exposures = append(exposures, e)
+			} else {
+				c.AmountDoc = decimal.Zero
+				c.AmountFloat = 0.0
 			}
 
-			// entity / currency non-qualified pass
-			entityMiss := 0
-			currencyMiss := 0
-			if len(exposures) > 0 {
-				for i := range exposures {
-					e := &exposures[i]
-					cc := strings.TrimSpace(e.CompanyCode)
-					if _, ok := entityMap[cc]; !ok || cc == "" {
+			// normalized date caching
+			if c.DocumentDate != "" {
+				c.DocumentDate = dn.NormalizeCached(c.DocumentDate)
+			}
+			if c.NetDueDate != "" {
+				c.NetDueDate = dn.NormalizeCached(c.NetDueDate)
+			}
+			if c.PostingDate != "" {
+				c.PostingDate = dn.NormalizeCached(c.PostingDate)
+			}
+
+			c._raw = mapped
+
+			_, _ = validateSingleExposure(c) // keep old behavior (we don't stop on single issues here)
+
+			canonicals = append(canonicals, c)
+		}
+
+		// finish staging copy
+		close(stagingCh)
+		wgCopy.Wait()
+		if stagingErr != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy staging_exposures: %w", stagingErr)
+		}
+
+		if _, err := tx.Exec(ctx, `UPDATE public.staging_batches_exposures SET total_records=$1 WHERE batch_id=$2`, totalRows, batchID); err != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("update batch total_records: %w", err)
+		}
+
+		log.Printf("[DEBUG] After parsing: canonicals=%d, batch=%s file=%s", len(canonicals), batchID.String(), fh.Filename)
+		if len(canonicals) > 0 {
+			sample := canonicals[0]
+			log.Printf("[DEBUG] Sample canonical[0]: CompanyCode='%s', Party='%s', Currency='%s', Amount=%s, AmountFloat=%f, NetDueDate='%s'",
+				sample.CompanyCode, sample.Party, sample.DocumentCurrency, sample.AmountDoc.String(), sample.AmountFloat, sample.NetDueDate)
+		}
+
+		// allocate (produces unallocated exposures and knockoffs)
+		exposuresFloat, knocksFloat := allocateFIFOFloat(canonicals, receivableLogic, payableLogic)
+
+		// ---- Informational Summary for Auto-Offset / Self-Allocation ----
+		autoKnockCount := len(knocksFloat)
+		selfKnockCount := 0
+		for _, k := range knocksFloat {
+			if k.BaseDoc == k.KnockDoc {
+				selfKnockCount++
+			}
+		}
+
+		if autoKnockCount > 0 {
+			msg := fmt.Sprintf(
+				"Auto-offset applied: %d knock-off(s) detected, including %d self-allocation(s). "+
+					"These were automatically netted within the same Company/Party/Currency group. "+
+					"Remaining open amounts, if any, were inserted as exposures.",
+				autoKnockCount, selfKnockCount)
+			fileInfo = append(fileInfo, msg)
+			log.Printf("[INFO] %s", msg)
+		}
+
+		log.Printf("[DEBUG] After allocation: exposuresFloat=%d, knocksFloat=%d, batch=%s", len(exposuresFloat), len(knocksFloat), batchID.String())
+
+		// net-exposure non-qualified pass
+		netMap := make(map[string]float64)
+		for _, e := range exposuresFloat {
+			key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
+			netMap[key] += e.AmountFloat
+		}
+		flaggedCount := 0
+		for i := range exposuresFloat {
+			e := &exposuresFloat[i]
+			key := fmt.Sprintf(constants.FormatPipelineTriple, e.Source, e.CompanyCode, e.Party)
+			net := netMap[key]
+			switch e.Source {
+			case "FBL1N", "FBL3N":
+				if net > 0 {
+					e.IsNonQualified = true
+					e.NonQualifiedReason = fmt.Sprintf("Vendor net exposure %.4f > 0", net)
+					if e._raw == nil {
+						e._raw = make(map[string]interface{})
+					}
+					e._raw["is_non_qualified"] = true
+					e._raw["non_qualified_reason"] = e.NonQualifiedReason
+					flaggedCount++
+				}
+			case "FBL5N":
+				if net < 0 {
+					e.IsNonQualified = true
+					e.NonQualifiedReason = fmt.Sprintf("Customer net exposure %.4f < 0", net)
+					if e._raw == nil {
+						e._raw = make(map[string]interface{})
+					}
+					e._raw["is_non_qualified"] = true
+					e._raw["non_qualified_reason"] = e.NonQualifiedReason
+					flaggedCount++
+				}
+			}
+		}
+		log.Printf("[DEBUG] After net-exposure pass: flagged=%d out of %d exposuresFloat, batch=%s", flaggedCount, len(exposuresFloat), batchID.String())
+
+		// build canonical exposures slice (decimal amounts) - ONLY documents with remaining > 0
+		exposures := make([]CanonicalRow, 0, len(exposuresFloat))
+		for _, e := range exposuresFloat {
+			if e.AmountFloat == 0 {
+				e.AmountDoc = decimal.Zero
+			} else {
+				efmt := strconv.FormatFloat(e.AmountFloat, 'f', 4, 64)
+				if d, derr := decimal.NewFromString(efmt); derr == nil {
+					e.AmountDoc = d
+				} else {
+					e.AmountDoc = decimal.NewFromFloat(e.AmountFloat)
+				}
+			}
+			exposures = append(exposures, e)
+		}
+
+		// entity / currency non-qualified pass
+		entityMiss := 0
+		currencyMiss := 0
+		if len(exposures) > 0 {
+			for i := range exposures {
+				e := &exposures[i]
+				cc := strings.TrimSpace(e.CompanyCode)
+				if _, ok := entityMap[cc]; !ok || cc == "" {
+					e.IsNonQualified = true
+					reason := fmt.Sprintf("No entity found for company_code: %s", cc)
+					if e.NonQualifiedReason != "" {
+						e.NonQualifiedReason = e.NonQualifiedReason + "; " + reason
+					} else {
+						e.NonQualifiedReason = reason
+					}
+					if e._raw == nil {
+						e._raw = make(map[string]interface{})
+					}
+					e._raw["is_non_qualified"] = true
+					e._raw["non_qualified_reason"] = e.NonQualifiedReason
+					entityMiss++
+				}
+				cur := strings.ToUpper(strings.TrimSpace(e.DocumentCurrency))
+				if len(currencyMap) > 0 {
+					if _, ok := currencyMap[cur]; !ok {
 						e.IsNonQualified = true
-						reason := fmt.Sprintf("No entity found for company_code: %s", cc)
+						reason := fmt.Sprintf("Currency '%s' is not recognized (inactive or not approved in master data)", cur)
 						if e.NonQualifiedReason != "" {
 							e.NonQualifiedReason = e.NonQualifiedReason + "; " + reason
 						} else {
@@ -664,519 +717,497 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 						}
 						e._raw["is_non_qualified"] = true
 						e._raw["non_qualified_reason"] = e.NonQualifiedReason
-						entityMiss++
-					}
-					cur := strings.ToUpper(strings.TrimSpace(e.DocumentCurrency))
-					if len(currencyMap) > 0 {
-						if _, ok := currencyMap[cur]; !ok {
-							e.IsNonQualified = true
-							reason := fmt.Sprintf("Currency '%s' is not recognized (inactive or not approved in master data)", cur)
-							if e.NonQualifiedReason != "" {
-								e.NonQualifiedReason = e.NonQualifiedReason + "; " + reason
-							} else {
-								e.NonQualifiedReason = reason
-							}
-							if e._raw == nil {
-								e._raw = make(map[string]interface{})
-							}
-							e._raw["is_non_qualified"] = true
-							e._raw["non_qualified_reason"] = e.NonQualifiedReason
-							currencyMiss++
-						}
+						currencyMiss++
 					}
 				}
-				if entityMiss > 0 || currencyMiss > 0 {
-					msg2 := fmt.Sprintf("%d row(s) marked as non-qualified due to unmapped entity codes and %d row(s) due to invalid or unrecognized currency codes.", entityMiss, currencyMiss)
-					fileWarnings = append(fileWarnings, msg2)
-					log.Printf(constants.LogWarn, msg2)
+			}
+			if entityMiss > 0 || currencyMiss > 0 {
+				msg2 := fmt.Sprintf("%d row(s) marked as non-qualified due to unmapped entity codes and %d row(s) due to invalid or unrecognized currency codes.", entityMiss, currencyMiss)
+				fileWarnings = append(fileWarnings, msg2)
+				log.Printf(constants.LogWarn, msg2)
+			}
+		}
+
+		// build knockMap for preview (knockoffs grouped by base doc)
+		knockMap := map[string][]KnockoffInfo{}
+		for _, kf := range knocksFloat {
+			afmt := strconv.FormatFloat(kf.AmtFloat, 'f', 4, 64)
+			d, _ := decimal.NewFromString(afmt)
+			k := KnockoffInfo{
+				BaseDoc:  kf.BaseDoc,
+				KnockDoc: kf.KnockDoc,
+				AmtAbs:   d,
+			}
+			knockMap[kf.BaseDoc] = append(knockMap[kf.BaseDoc], k)
+		}
+
+		// validation: separate qualified and nonQualified (struct NonQualified)
+		qualified, nonQualified := validateExposures(exposures)
+
+		log.Printf("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
+		if len(nonQualified) > 0 && len(nonQualified) <= 5 {
+			for i, nq := range nonQualified {
+				log.Printf("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
+			}
+		}
+
+		if len(exposures) == 0 {
+			if len(knocksFloat) > 0 {
+				msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
+				fileWarnings = append(fileWarnings, msg)
+				log.Printf(constants.LogWarn, msg)
+			} else {
+				msg := "No exposures were written: allocation produced no base or knock items. Likely causes: amounts all share the same sign (no debits or no credits), amounts parsed as zero, or mapping produced empty AmountDoc values. Check mapping, amount signs (+/-), and NetDueDate; try 'receivable_logic'/'payable_logic' = reverse to flip allocation direction or upload a small unbalanced test file."
+				fileWarnings = append(fileWarnings, msg)
+				log.Printf(constants.LogWarn, msg)
+			}
+		}
+
+		// ------------------ Prepare headers COPY (includes batch_id + file_hash) ------------------
+		headerCols := []string{
+			"exposure_header_id", "company_code", "entity", "entity1", "entity2", "entity3",
+			"exposure_type", "document_id", "document_date", "counterparty_type", "counterparty_code",
+			"counterparty_name", "currency", "total_original_amount", "total_open_amount",
+			"value_date", constants.KeyStatus, "is_active", "created_at", "updated_at", "approval_status",
+			"exposure_creation_status",
+			"approval_comment", "approved_by", "delete_comment", "requested_by", "rejection_comment",
+			"approved_at", "rejected_by", "rejected_at", "time_based", "amount_in_local_currency",
+			"posting_date", "text", "gl_account", "reference", "additional_header_details",
+			"exposure_category", "batch_id", "file_hash",
+		}
+
+		docToID := make(map[string]string, len(qualified))
+
+		debugLogLimit := 10
+		headerSrc := pgx.CopyFromSlice(len(qualified), func(i int) ([]any, error) {
+			q := qualified[i]
+			var docDate interface{}
+			var valDate interface{}
+			var postDate interface{}
+			if q.DocumentDate != "" {
+				if t, terr := time.Parse(constants.DateFormat, q.DocumentDate); terr == nil {
+					docDate = t
+				}
+			}
+			if q.NetDueDate != "" {
+				if t, terr := time.Parse(constants.DateFormat, q.NetDueDate); terr == nil {
+					valDate = t
+				}
+			}
+			if q.PostingDate != "" {
+				if t, terr := time.Parse(constants.DateFormat, q.PostingDate); terr == nil {
+					postDate = t
 				}
 			}
 
-			// build knockMap for preview (knockoffs grouped by base doc)
-			knockMap := map[string][]KnockoffInfo{}
-			for _, kf := range knocksFloat {
-				afmt := strconv.FormatFloat(kf.AmtFloat, 'f', 4, 64)
-				d, _ := decimal.NewFromString(afmt)
-				k := KnockoffInfo{
-					BaseDoc:  kf.BaseDoc,
-					KnockDoc: kf.KnockDoc,
-					AmtAbs:   d,
+			addtl, _ := json.Marshal(q._raw)
+
+			entityName := ""
+			cc := strings.TrimSpace(q.CompanyCode)
+			if n, ok := entityMap[cc]; ok {
+				entityName = n
+			} else {
+				candidates := []string{}
+				if v, ok := q._raw["unique_identifier"]; ok {
+					candidates = append(candidates, fmt.Sprintf("%v", v))
 				}
-				knockMap[kf.BaseDoc] = append(knockMap[kf.BaseDoc], k)
-			}
-
-			// validation: separate qualified and nonQualified (struct NonQualified)
-			qualified, nonQualified := validateExposures(exposures)
-
-			log.Printf("[DEBUG] After validation: qualified=%d, nonQualified=%d, batch=%s", len(qualified), len(nonQualified), batchID.String())
-			if len(nonQualified) > 0 && len(nonQualified) <= 5 {
-				for i, nq := range nonQualified {
-					log.Printf("[DEBUG] nonQualified[%d]: doc=%s, issues=%v", i, nq.Row.DocumentNumber, nq.Issues)
+				if v, ok := q._raw["company_name"]; ok {
+					candidates = append(candidates, fmt.Sprintf("%v", v))
 				}
-			}
-
-			if len(exposures) == 0 {
-				if len(knocksFloat) > 0 {
-					msg := fmt.Sprintf("No exposures were written: allocation fully matched all rows (knock events=%d). This commonly occurs when incoming debit/credit rows for the same Source|CompanyCode|Party fully net to zero, or because of receivable/payable logic settings (receivable_logic=%s, payable_logic=%s). If you expected inserts, check mapping, amount signs, and NetDueDate values; or run a small unbalanced test file to verify behavior.", len(knocksFloat), receivableLogic, payableLogic)
-					fileWarnings = append(fileWarnings, msg)
-					log.Printf(constants.LogWarn, msg)
-				} else {
-					msg := "No exposures were written: allocation produced no base or knock items. Likely causes: amounts all share the same sign (no debits or no credits), amounts parsed as zero, or mapping produced empty AmountDoc values. Check mapping, amount signs (+/-), and NetDueDate; try 'receivable_logic'/'payable_logic' = reverse to flip allocation direction or upload a small unbalanced test file."
-					fileWarnings = append(fileWarnings, msg)
-					log.Printf(constants.LogWarn, msg)
+				if v, ok := q._raw["entity_name"]; ok {
+					candidates = append(candidates, fmt.Sprintf("%v", v))
+				}
+				for _, c := range candidates {
+					if n, ok := entityMap[strings.TrimSpace(c)]; ok {
+						entityName = n
+						break
+					}
 				}
 			}
 
-			// ------------------ Prepare headers COPY (includes batch_id + file_hash) ------------------
-			headerCols := []string{
-				"exposure_header_id", "company_code", "entity", "entity1", "entity2", "entity3",
-				"exposure_type", "document_id", "document_date", "counterparty_type", "counterparty_code",
-				"counterparty_name", "currency", "total_original_amount", "total_open_amount",
-				"value_date", constants.KeyStatus, "is_active", "created_at", "updated_at", "approval_status",
-				"exposure_creation_status",
-				"approval_comment", "approved_by", "delete_comment", "requested_by", "rejection_comment",
-				"approved_at", "rejected_by", "rejected_at", "time_based", "amount_in_local_currency",
-				"posting_date", "text", "gl_account", "reference", "additional_header_details",
-				"exposure_category", "batch_id", "file_hash",
+			srcUpper := strings.ToUpper(strings.TrimSpace(q.Source))
+			exposureCategory := srcUpper
+			exposureType := detectExposureCategory(srcUpper)
+			counterpartyType := ""
+			switch srcUpper {
+			case "FBL1N", "FBL3N":
+				counterpartyType = "Vendor"
+			case "FBL5N":
+				counterpartyType = "Customer"
 			}
 
-			docToID := make(map[string]string, len(qualified))
-
-			debugLogLimit := 10
-			headerSrc := pgx.CopyFromSlice(len(qualified), func(i int) ([]any, error) {
-				q := qualified[i]
-				var docDate interface{}
-				var valDate interface{}
-				var postDate interface{}
-				if q.DocumentDate != "" {
-					if t, terr := time.Parse(constants.DateFormat, q.DocumentDate); terr == nil {
-						docDate = t
-					}
+			if v, ok := q._raw["Category"]; ok {
+				if s := strings.TrimSpace(fmt.Sprintf("%v", v)); s != "" && !strings.EqualFold(s, "Exposure") {
+					exposureType = s
 				}
-				if q.NetDueDate != "" {
-					if t, terr := time.Parse(constants.DateFormat, q.NetDueDate); terr == nil {
-						valDate = t
-					}
-				}
-				if q.PostingDate != "" {
-					if t, terr := time.Parse(constants.DateFormat, q.PostingDate); terr == nil {
-						postDate = t
-					}
-				}
+			}
 
-				addtl, _ := json.Marshal(q._raw)
-
-				entityName := ""
-				cc := strings.TrimSpace(q.CompanyCode)
-				if n, ok := entityMap[cc]; ok {
-					entityName = n
-				} else {
-					candidates := []string{}
-					if v, ok := q._raw["unique_identifier"]; ok {
-						candidates = append(candidates, fmt.Sprintf("%v", v))
-					}
-					if v, ok := q._raw["company_name"]; ok {
-						candidates = append(candidates, fmt.Sprintf("%v", v))
-					}
-					if v, ok := q._raw["entity_name"]; ok {
-						candidates = append(candidates, fmt.Sprintf("%v", v))
-					}
-					for _, c := range candidates {
-						if n, ok := entityMap[strings.TrimSpace(c)]; ok {
-							entityName = n
-							break
-						}
-					}
-				}
-
-				srcUpper := strings.ToUpper(strings.TrimSpace(q.Source))
-				exposureCategory := srcUpper
-				exposureType := detectExposureCategory(srcUpper)
-				counterpartyType := ""
-				switch srcUpper {
-				case "FBL1N", "FBL3N":
-					counterpartyType = "Vendor"
-				case "FBL5N":
-					counterpartyType = "Customer"
-				}
-
+			if i < debugLogLimit {
+				rawCat := ""
 				if v, ok := q._raw["Category"]; ok {
-					if s := strings.TrimSpace(fmt.Sprintf("%v", v)); s != "" && !strings.EqualFold(s, "Exposure") {
-						exposureType = s
+					rawCat = fmt.Sprintf("%v", v)
+				}
+				log.Printf("[FBUP] header-row[%d] doc=%s rawCategory='%s' source='%s' exposureType='%s' exposureCategory='%s' company='%s' amount=%s",
+					i, q.DocumentNumber, rawCat, q.Source, exposureType, exposureCategory, q.CompanyCode, q.AmountDoc.String())
+			}
+
+			id := uuid.New()
+			docToID[q.DocumentNumber] = id.String()
+
+			totalOrig := q.AmountDoc.Abs().StringFixed(4)
+			totalOpen := q.AmountDoc.StringFixed(4)
+
+			// order here must match headerCols above
+			var counterpartyVal interface{}
+			if counterpartyType != "" {
+				counterpartyVal = counterpartyType
+			}
+			return []any{
+				id,                     // exposure_header_id
+				q.CompanyCode,          // company_code
+				entityName,             // entity
+				entityName,             // entity1
+				nil,                    // entity2
+				nil,                    // entity3
+				exposureType,           // exposure_type
+				q.DocumentNumber,       // document_id
+				docDate,                // document_date
+				counterpartyVal,        // counterparty_type
+				q.Party,                // counterparty_code
+				nil,                    // counterparty_name
+				q.DocumentCurrency,     // currency
+				totalOrig,              // total_original_amount
+				totalOpen,              // total_open_amount
+				valDate,                // value_date
+				"Open",                 // status
+				true,                   // is_active
+				time.Now(), time.Now(), // created_at, updated_at
+				"Pending",               // approval_status
+				"Approved",              // exposure_creation_status
+				nil, nil, nil, nil, nil, // approval_comment, approved_by, delete_comment, requested_by, rejection_comment
+				nil, nil, // approved_at, rejected_by
+				nil,           // rejected_at
+				time.Now(),    // time_based
+				nil,           // amount_in_local_currency
+				postDate,      // posting_date
+				nil, nil, nil, // text, gl_account, reference
+				addtl,            // additional_header_details
+				exposureCategory, // exposure_category
+				batchID,          // batch_id (new)
+				fileHash,         // file_hash (new)
+			}, nil
+		})
+
+		log.Printf("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_headers"}, headerCols, headerSrc); err != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy headers: %w", err)
+		}
+		log.Printf("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
+
+		// Build line items (unchanged) - we'll keep insertion code in Part 3
+		lineItemCols := []string{
+			"line_item_id", "exposure_header_id", "line_number", "product_id", "product_description",
+			"quantity", "unit_of_measure", "unit_price", "line_item_amount", "plant_code",
+			"delivery_date", "payment_terms", "inco_terms", "additional_line_details", "created_at",
+		}
+
+		liRows := make([][]any, 0)
+		for _, q := range qualified {
+			hidStr, ok := docToID[q.DocumentNumber]
+			if !ok {
+				continue
+			}
+			hid, _ := uuid.Parse(hidStr)
+
+			if len(q.LineItems) > 0 {
+				for _, lit := range q.LineItems {
+					// build columns
+					lineNumber := asString(lit["line_number"])
+					productID := asString(lit["product_id"])
+					productDesc := asString(lit["product_description"])
+					cleanQuantity := strings.ReplaceAll(asString(lit["quantity"]), ",", "")
+					cleanUnitPrice := strings.ReplaceAll(asString(lit["unit_price"]), ",", "")
+					cleanLineAmount := strings.ReplaceAll(asString(lit["line_item_amount"]), ",", "")
+
+					quantity := asDecimalOrZero(cleanQuantity)
+					unitOfMeasure := asString(lit["unit_of_measure"])
+					unitPrice := asDecimalOrZero(cleanUnitPrice)
+					lineAmount := asDecimalOrZero(cleanLineAmount)
+
+					plant := asString(lit["plant_code"])
+					deliveryDate := parseDateOrNil(asString(lit["delivery_date"]))
+					paymentTerms := asString(lit["payment_terms"])
+					inco := asString(lit["inco_terms"])
+
+					addtlJSON, _ := json.Marshal(lit)
+					addtlJSON = sanitizeUTF8(addtlJSON)
+					row := []any{
+						uuid.New(), // line_item_id
+						hid,        // exposure_header_id
+						lineNumber,
+						productID,
+						productDesc,
+						nullableNumeric(quantity),
+						unitOfMeasure,
+						nullableNumeric(unitPrice),
+						nullableNumeric(lineAmount),
+						plant,
+						deliveryDate,
+						paymentTerms,
+						inco,
+						addtlJSON,
+						time.Now(),
 					}
+					liRows = append(liRows, row)
 				}
+			}
+		}
 
-				if i < debugLogLimit {
-					rawCat := ""
-					if v, ok := q._raw["Category"]; ok {
-						rawCat = fmt.Sprintf("%v", v)
-					}
-					log.Printf("[FBUP] header-row[%d] doc=%s rawCategory='%s' source='%s' exposureType='%s' exposureCategory='%s' company='%s' amount=%s",
-						i, q.DocumentNumber, rawCat, q.Source, exposureType, exposureCategory, q.CompanyCode, q.AmountDoc.String())
+		log.Printf("[FBUP] about to COPY %d exposure_line_items for batch %s", len(liRows), batchID.String())
+		if len(liRows) > 0 {
+			if _, err := tx.CopyFrom(ctx,
+				pgx.Identifier{"public", "exposure_line_items"},
+				lineItemCols,
+				pgx.CopyFromRows(liRows)); err != nil {
+				fileErrors = append(fileErrors, "copy line items: "+err.Error())
+				log.Printf("[ERROR] copy line items: %v", err)
+				tx.Rollback(ctx)
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy line items failed: %w", err)
+			}
+		}
+		log.Printf("[FBUP] finished COPY exposure_line_items for batch %s", batchID.String())
+
+		// ------------------ Build and COPY exposure_allocations ------------------
+		docCompany := make(map[string]string, len(canonicals))
+		docParty := make(map[string]string, len(canonicals))
+		// additional per-doc metadata maps used when inserting allocation rows
+		docSource := make(map[string]string, len(canonicals))
+		docDocDate := make(map[string]string, len(canonicals))
+		docPostingDate := make(map[string]string, len(canonicals))
+		docNetDue := make(map[string]string, len(canonicals))
+		docEffDue := make(map[string]string, len(canonicals))
+		docMappedPayload := make(map[string][]byte, len(canonicals))
+
+		for _, c := range canonicals {
+			docCompany[c.DocumentNumber] = c.CompanyCode
+			docParty[c.DocumentNumber] = c.Party
+			docSource[c.DocumentNumber] = c.Source
+			docDocDate[c.DocumentNumber] = c.DocumentDate
+			docPostingDate[c.DocumentNumber] = c.PostingDate
+			docNetDue[c.DocumentNumber] = c.NetDueDate
+			docEffDue[c.DocumentNumber] = c.NetDueDate
+			if c._raw != nil {
+				if b, err := json.Marshal(c._raw); err == nil {
+					docMappedPayload[c.DocumentNumber] = sanitizeUTF8(b)
 				}
+			}
+		}
+		for _, q := range qualified {
+			if q.DocumentNumber != "" {
+				docCompany[q.DocumentNumber] = q.CompanyCode
+				docParty[q.DocumentNumber] = q.Party
+			}
+		}
 
-				id := uuid.New()
-				docToID[q.DocumentNumber] = id.String()
+		allocCols := []string{
+			"allocation_id", "batch_id", "file_hash",
+			"base_document_id", "knockoff_document_id",
+			"allocation_amount", "allocation_currency",
+			"allocation_amount_signed", "allocation_date",
+			"created_at", "created_by", "notes",
+			"company_code", "counterparty_code",
+			// additional metadata columns added to table
+			"source", "document_date", "posting_date", "net_due_date", "effective_due_date",
+			"exchange_rate", "amount_local_signed", "mapped_payload",
+		}
+		allocRows := make([][]any, 0, len(knocksFloat))
+		for _, k := range knocksFloat {
+			if k.AmtFloat == 0 {
+				continue
+			}
+			var companyVal interface{}
+			var partyVal interface{}
+			if cc, ok := docCompany[k.BaseDoc]; ok && strings.TrimSpace(cc) != "" {
+				companyVal = cc
+			}
+			if pp, ok := docParty[k.BaseDoc]; ok && strings.TrimSpace(pp) != "" {
+				partyVal = pp
+			}
+			// lookup additional metadata (source, dates, mapped payload) from doc maps if available
+			var srcVal interface{}
+			var docDateVal interface{}
+			var postDateVal interface{}
+			var netDueVal interface{}
+			var effDueVal interface{}
+			var mappedPayload interface{}
+			if v, ok := docSource[k.BaseDoc]; ok && v != "" {
+				srcVal = v
+			} else if v, ok := docSource[k.KnockDoc]; ok && v != "" {
+				srcVal = v
+			}
+			if v, ok := docDocDate[k.BaseDoc]; ok && v != "" {
+				docDateVal = parseDateOrNil(v)
+			} else if v, ok := docDocDate[k.KnockDoc]; ok && v != "" {
+				docDateVal = parseDateOrNil(v)
+			}
+			if v, ok := docPostingDate[k.BaseDoc]; ok && v != "" {
+				postDateVal = parseDateOrNil(v)
+			} else if v, ok := docPostingDate[k.KnockDoc]; ok && v != "" {
+				postDateVal = parseDateOrNil(v)
+			}
+			if v, ok := docNetDue[k.BaseDoc]; ok && v != "" {
+				netDueVal = parseDateOrNil(v)
+			} else if v, ok := docNetDue[k.KnockDoc]; ok && v != "" {
+				netDueVal = parseDateOrNil(v)
+			}
+			if v, ok := docEffDue[k.BaseDoc]; ok && v != "" {
+				effDueVal = parseDateOrNil(v)
+			} else if v, ok := docEffDue[k.KnockDoc]; ok && v != "" {
+				effDueVal = parseDateOrNil(v)
+			}
+			if v, ok := docMappedPayload[k.BaseDoc]; ok {
+				mappedPayload = v
+			} else if v, ok := docMappedPayload[k.KnockDoc]; ok {
+				mappedPayload = v
+			}
 
-				totalOrig := q.AmountDoc.Abs().StringFixed(4)
-				totalOpen := q.AmountDoc.StringFixed(4)
-
-				// order here must match headerCols above
-				var counterpartyVal interface{}
-				if counterpartyType != "" {
-					counterpartyVal = counterpartyType
-				}
-				return []any{
-					id,                     // exposure_header_id
-					q.CompanyCode,          // company_code
-					entityName,             // entity
-					entityName,             // entity1
-					nil,                    // entity2
-					nil,                    // entity3
-					exposureType,           // exposure_type
-					q.DocumentNumber,       // document_id
-					docDate,                // document_date
-					counterpartyVal,        // counterparty_type
-					q.Party,                // counterparty_code
-					nil,                    // counterparty_name
-					q.DocumentCurrency,     // currency
-					totalOrig,              // total_original_amount
-					totalOpen,              // total_open_amount
-					valDate,                // value_date
-					"Open",                 // status
-					true,                   // is_active
-					time.Now(), time.Now(), // created_at, updated_at
-					"Pending",               // approval_status
-					"Approved",              // exposure_creation_status
-					nil, nil, nil, nil, nil, // approval_comment, approved_by, delete_comment, requested_by, rejection_comment
-					nil, nil, // approved_at, rejected_by
-					nil,           // rejected_at
-					time.Now(),    // time_based
-					nil,           // amount_in_local_currency
-					postDate,      // posting_date
-					nil, nil, nil, // text, gl_account, reference
-					addtl,            // additional_header_details
-					exposureCategory, // exposure_category
-					batchID,          // batch_id (new)
-					fileHash,         // file_hash (new)
-				}, nil
+			allocRows = append(allocRows, []any{
+				uuid.New(),
+				batchID,
+				fileHash,
+				k.BaseDoc,
+				k.KnockDoc,
+				decimal.NewFromFloat(math.Abs(k.AmtFloat)).StringFixed(4),
+				k.Currency,
+				decimal.NewFromFloat(k.AmtFloat).StringFixed(4),
+				time.Now(),
+				time.Now(),
+				userName,
+				nil,
+				companyVal,
+				partyVal,
+				srcVal,
+				docDateVal,
+				postDateVal,
+				netDueVal,
+				effDueVal,
+				nil, // exchange_rate (not available at upload time)
+				nil, // amount_local_signed (not available at upload time)
+				mappedPayload,
 			})
-
-			log.Printf("[FBUP] about to COPY %d exposure_headers for batch %s file=%s", len(qualified), batchID.String(), fh.Filename)
-			if _, err := tx.CopyFrom(ctx, pgx.Identifier{"public", "exposure_headers"}, headerCols, headerSrc); err != nil {
-				httpError(w, 500, "copy headers: "+err.Error())
-				return
+		}
+		if len(allocRows) > 0 {
+			if _, err := tx.CopyFrom(ctx,
+				pgx.Identifier{"public", "exposure_allocations"},
+				allocCols,
+				pgx.CopyFromRows(allocRows)); err != nil {
+				fileErrors = append(fileErrors, "copy allocations: "+err.Error())
+				log.Printf("[ERROR] copy allocations: %v", err)
+				tx.Rollback(ctx)
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy allocations failed: %w", err)
 			}
-			log.Printf("[FBUP] finished COPY exposure_headers for batch %s file=%s", batchID.String(), fh.Filename)
+		}
 
-			// Build line items (unchanged) - we'll keep insertion code in Part 3
-			lineItemCols := []string{
-				"line_item_id", "exposure_header_id", "line_number", "product_id", "product_description",
-				"quantity", "unit_of_measure", "unit_price", "line_item_amount", "plant_code",
-				"delivery_date", "payment_terms", "inco_terms", "additional_line_details", "created_at",
-			}
-
-			liRows := make([][]any, 0)
-			for _, q := range qualified {
-				hidStr, ok := docToID[q.DocumentNumber]
-				if !ok {
-					continue
-				}
-				hid, _ := uuid.Parse(hidStr)
-
-				if len(q.LineItems) > 0 {
-					for _, lit := range q.LineItems {
-						// build columns
-						lineNumber := asString(lit["line_number"])
-						productID := asString(lit["product_id"])
-						productDesc := asString(lit["product_description"])
-						cleanQuantity := strings.ReplaceAll(asString(lit["quantity"]), ",", "")
-						cleanUnitPrice := strings.ReplaceAll(asString(lit["unit_price"]), ",", "")
-						cleanLineAmount := strings.ReplaceAll(asString(lit["line_item_amount"]), ",", "")
-
-						quantity := asDecimalOrZero(cleanQuantity)
-						unitOfMeasure := asString(lit["unit_of_measure"])
-						unitPrice := asDecimalOrZero(cleanUnitPrice)
-						lineAmount := asDecimalOrZero(cleanLineAmount)
-
-						plant := asString(lit["plant_code"])
-						deliveryDate := parseDateOrNil(asString(lit["delivery_date"]))
-						paymentTerms := asString(lit["payment_terms"])
-						inco := asString(lit["inco_terms"])
-
-						addtlJSON, _ := json.Marshal(lit)
-						addtlJSON = sanitizeUTF8(addtlJSON)
-						row := []any{
-							uuid.New(), // line_item_id
-							hid,        // exposure_header_id
-							lineNumber,
-							productID,
-							productDesc,
-							nullableNumeric(quantity),
-							unitOfMeasure,
-							nullableNumeric(unitPrice),
-							nullableNumeric(lineAmount),
-							plant,
-							deliveryDate,
-							paymentTerms,
-							inco,
-							addtlJSON,
-							time.Now(),
-						}
-						liRows = append(liRows, row)
-					}
-				}
+		// ------------------ Build and COPY exposure_unallocated ------------------
+		unallocCols := []string{
+			"unallocated_id", "batch_id", "file_hash",
+			"document_number", "company_code", "party",
+			"currency", "source", "document_date",
+			"posting_date", "net_due_date", "effective_due_date",
+			"amount", "amount_signed", "exchange_rate",
+			"amount_local_signed", "allocation_status",
+			"mapped_payload", "created_at",
+		}
+		unallocRows := make([][]any, 0, len(exposures))
+		for _, e := range exposures {
+			// Determine allocation status based on knockoffs
+			allocStatus := "unallocated"
+			if len(knockMap[e.DocumentNumber]) > 0 {
+				allocStatus = "partially_allocated"
 			}
 
-			log.Printf("[FBUP] about to COPY %d exposure_line_items for batch %s", len(liRows), batchID.String())
-			if len(liRows) > 0 {
-				if _, err := tx.CopyFrom(ctx,
-					pgx.Identifier{"public", "exposure_line_items"},
-					lineItemCols,
-					pgx.CopyFromRows(liRows)); err != nil {
-					fileErrors = append(fileErrors, "copy line items: "+err.Error())
-					log.Printf("[ERROR] copy line items: %v", err)
-					tx.Rollback(ctx)
-					httpError(w, 500, "copy line items failed: "+err.Error())
-					return
-				}
+			mp, _ := json.Marshal(e._raw)
+			mp = sanitizeUTF8(mp)
+			unallocRows = append(unallocRows, []any{
+				uuid.New(),
+				batchID,
+				fileHash,
+				e.DocumentNumber,
+				e.CompanyCode,
+				e.Party,
+				e.DocumentCurrency,
+				e.Source,
+				parseDateOrNil(e.DocumentDate),
+				parseDateOrNil(e.PostingDate),
+				parseDateOrNil(e.NetDueDate),
+				parseDateOrNil(e.NetDueDate), // effective_due_date (same now)
+				e.AmountDoc.Abs().StringFixed(4),
+				e.AmountDoc.StringFixed(4),
+				nil, // exchange_rate
+				nil, // amount_local_signed
+				allocStatus,
+				mp,
+				time.Now(),
+			})
+		}
+		if len(unallocRows) > 0 {
+			if _, err := tx.CopyFrom(ctx,
+				pgx.Identifier{"public", "exposure_unallocated"},
+				unallocCols,
+				pgx.CopyFromRows(unallocRows)); err != nil {
+				fileErrors = append(fileErrors, "copy unallocated: "+err.Error())
+				log.Printf("[ERROR] copy unallocated: %v", err)
+				tx.Rollback(ctx)
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy unallocated failed: %w", err)
 			}
-			log.Printf("[FBUP] finished COPY exposure_line_items for batch %s", batchID.String())
+		}
 
-			// ------------------ Build and COPY exposure_allocations ------------------
-			docCompany := make(map[string]string, len(canonicals))
-			docParty := make(map[string]string, len(canonicals))
-			// additional per-doc metadata maps used when inserting allocation rows
-			docSource := make(map[string]string, len(canonicals))
-			docDocDate := make(map[string]string, len(canonicals))
-			docPostingDate := make(map[string]string, len(canonicals))
-			docNetDue := make(map[string]string, len(canonicals))
-			docEffDue := make(map[string]string, len(canonicals))
-			docMappedPayload := make(map[string][]byte, len(canonicals))
+		// ------------------ Build and COPY exposure_unqualified ------------------
+		unqualCols := []string{
+			"unqualified_id", "batch_id", "file_hash",
+			"document_number", "company_code", "party",
+			"currency", "source", "document_date",
+			"posting_date", "net_due_date", "amount",
+			"issues", "non_qualified_reason",
+			"mapped_payload", "created_at",
+		}
+		unqualRows := make([][]any, 0, len(nonQualified))
+		for _, nq := range nonQualified {
+			mp, _ := json.Marshal(nq.Row._raw)
+			mp = sanitizeUTF8(mp)
+			reason := strings.Join(nq.Issues, "; ")
+			unqualRows = append(unqualRows, []any{
+				uuid.New(),
+				batchID,
+				fileHash,
+				nq.Row.DocumentNumber,
+				nq.Row.CompanyCode,
+				nq.Row.Party,
+				nq.Row.DocumentCurrency,
+				nq.Row.Source,
+				parseDateOrNil(nq.Row.DocumentDate),
+				parseDateOrNil(nq.Row.PostingDate),
+				parseDateOrNil(nq.Row.NetDueDate),
+				nq.Row.AmountDoc.StringFixed(4),
+				nq.Issues,
+				reason,
+				mp,
+				time.Now(),
+			})
+		}
+		if len(unqualRows) > 0 {
+			if _, err := tx.CopyFrom(ctx,
+				pgx.Identifier{"public", "exposure_unqualified"},
+				unqualCols,
+				pgx.CopyFromRows(unqualRows)); err != nil {
+				fileErrors = append(fileErrors, "copy unqualified: "+err.Error())
+				log.Printf("[ERROR] copy unqualified: %v", err)
+				tx.Rollback(ctx)
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("copy unqualified failed: %w", err)
+			}
+		}
 
-			for _, c := range canonicals {
-				docCompany[c.DocumentNumber] = c.CompanyCode
-				docParty[c.DocumentNumber] = c.Party
-				docSource[c.DocumentNumber] = c.Source
-				docDocDate[c.DocumentNumber] = c.DocumentDate
-				docPostingDate[c.DocumentNumber] = c.PostingDate
-				docNetDue[c.DocumentNumber] = c.NetDueDate
-				docEffDue[c.DocumentNumber] = c.NetDueDate
-				if c._raw != nil {
-					if b, err := json.Marshal(c._raw); err == nil {
-						docMappedPayload[c.DocumentNumber] = sanitizeUTF8(b)
-					}
-				}
-			}
-			for _, q := range qualified {
-				if q.DocumentNumber != "" {
-					docCompany[q.DocumentNumber] = q.CompanyCode
-					docParty[q.DocumentNumber] = q.Party
-				}
-			}
-
-			allocCols := []string{
-				"allocation_id", "batch_id", "file_hash",
-				"base_document_id", "knockoff_document_id",
-				"allocation_amount", "allocation_currency",
-				"allocation_amount_signed", "allocation_date",
-				"created_at", "created_by", "notes",
-				"company_code", "counterparty_code",
-				// additional metadata columns added to table
-				"source", "document_date", "posting_date", "net_due_date", "effective_due_date",
-				"exchange_rate", "amount_local_signed", "mapped_payload",
-			}
-			allocRows := make([][]any, 0, len(knocksFloat))
-			for _, k := range knocksFloat {
-				if k.AmtFloat == 0 {
-					continue
-				}
-				var companyVal interface{}
-				var partyVal interface{}
-				if cc, ok := docCompany[k.BaseDoc]; ok && strings.TrimSpace(cc) != "" {
-					companyVal = cc
-				}
-				if pp, ok := docParty[k.BaseDoc]; ok && strings.TrimSpace(pp) != "" {
-					partyVal = pp
-				}
-				// lookup additional metadata (source, dates, mapped payload) from doc maps if available
-				var srcVal interface{}
-				var docDateVal interface{}
-				var postDateVal interface{}
-				var netDueVal interface{}
-				var effDueVal interface{}
-				var mappedPayload interface{}
-				if v, ok := docSource[k.BaseDoc]; ok && v != "" {
-					srcVal = v
-				} else if v, ok := docSource[k.KnockDoc]; ok && v != "" {
-					srcVal = v
-				}
-				if v, ok := docDocDate[k.BaseDoc]; ok && v != "" {
-					docDateVal = parseDateOrNil(v)
-				} else if v, ok := docDocDate[k.KnockDoc]; ok && v != "" {
-					docDateVal = parseDateOrNil(v)
-				}
-				if v, ok := docPostingDate[k.BaseDoc]; ok && v != "" {
-					postDateVal = parseDateOrNil(v)
-				} else if v, ok := docPostingDate[k.KnockDoc]; ok && v != "" {
-					postDateVal = parseDateOrNil(v)
-				}
-				if v, ok := docNetDue[k.BaseDoc]; ok && v != "" {
-					netDueVal = parseDateOrNil(v)
-				} else if v, ok := docNetDue[k.KnockDoc]; ok && v != "" {
-					netDueVal = parseDateOrNil(v)
-				}
-				if v, ok := docEffDue[k.BaseDoc]; ok && v != "" {
-					effDueVal = parseDateOrNil(v)
-				} else if v, ok := docEffDue[k.KnockDoc]; ok && v != "" {
-					effDueVal = parseDateOrNil(v)
-				}
-				if v, ok := docMappedPayload[k.BaseDoc]; ok {
-					mappedPayload = v
-				} else if v, ok := docMappedPayload[k.KnockDoc]; ok {
-					mappedPayload = v
-				}
-
-				allocRows = append(allocRows, []any{
-					uuid.New(),
-					batchID,
-					fileHash,
-					k.BaseDoc,
-					k.KnockDoc,
-					decimal.NewFromFloat(math.Abs(k.AmtFloat)).StringFixed(4),
-					k.Currency,
-					decimal.NewFromFloat(k.AmtFloat).StringFixed(4),
-					time.Now(),
-					time.Now(),
-					userName,
-					nil,
-					companyVal,
-					partyVal,
-					srcVal,
-					docDateVal,
-					postDateVal,
-					netDueVal,
-					effDueVal,
-					nil, // exchange_rate (not available at upload time)
-					nil, // amount_local_signed (not available at upload time)
-					mappedPayload,
-				})
-			}
-			if len(allocRows) > 0 {
-				if _, err := tx.CopyFrom(ctx,
-					pgx.Identifier{"public", "exposure_allocations"},
-					allocCols,
-					pgx.CopyFromRows(allocRows)); err != nil {
-					fileErrors = append(fileErrors, "copy allocations: "+err.Error())
-					log.Printf("[ERROR] copy allocations: %v", err)
-					tx.Rollback(ctx)
-					httpError(w, 500, "copy allocations failed: "+err.Error())
-					return
-				}
-			}
-
-			// ------------------ Build and COPY exposure_unallocated ------------------
-			unallocCols := []string{
-				"unallocated_id", "batch_id", "file_hash",
-				"document_number", "company_code", "party",
-				"currency", "source", "document_date",
-				"posting_date", "net_due_date", "effective_due_date",
-				"amount", "amount_signed", "exchange_rate",
-				"amount_local_signed", "allocation_status",
-				"mapped_payload", "created_at",
-			}
-			unallocRows := make([][]any, 0, len(exposures))
-			for _, e := range exposures {
-				// Determine allocation status based on knockoffs
-				allocStatus := "unallocated"
-				if len(knockMap[e.DocumentNumber]) > 0 {
-					allocStatus = "partially_allocated"
-				}
-
-				mp, _ := json.Marshal(e._raw)
-				mp = sanitizeUTF8(mp)
-				unallocRows = append(unallocRows, []any{
-					uuid.New(),
-					batchID,
-					fileHash,
-					e.DocumentNumber,
-					e.CompanyCode,
-					e.Party,
-					e.DocumentCurrency,
-					e.Source,
-					parseDateOrNil(e.DocumentDate),
-					parseDateOrNil(e.PostingDate),
-					parseDateOrNil(e.NetDueDate),
-					parseDateOrNil(e.NetDueDate), // effective_due_date (same now)
-					e.AmountDoc.Abs().StringFixed(4),
-					e.AmountDoc.StringFixed(4),
-					nil, // exchange_rate
-					nil, // amount_local_signed
-					allocStatus,
-					mp,
-					time.Now(),
-				})
-			}
-			if len(unallocRows) > 0 {
-				if _, err := tx.CopyFrom(ctx,
-					pgx.Identifier{"public", "exposure_unallocated"},
-					unallocCols,
-					pgx.CopyFromRows(unallocRows)); err != nil {
-					fileErrors = append(fileErrors, "copy unallocated: "+err.Error())
-					log.Printf("[ERROR] copy unallocated: %v", err)
-					tx.Rollback(ctx)
-					httpError(w, 500, "copy unallocated failed: "+err.Error())
-					return
-				}
-			}
-
-			// ------------------ Build and COPY exposure_unqualified ------------------
-			unqualCols := []string{
-				"unqualified_id", "batch_id", "file_hash",
-				"document_number", "company_code", "party",
-				"currency", "source", "document_date",
-				"posting_date", "net_due_date", "amount",
-				"issues", "non_qualified_reason",
-				"mapped_payload", "created_at",
-			}
-			unqualRows := make([][]any, 0, len(nonQualified))
-			for _, nq := range nonQualified {
-				mp, _ := json.Marshal(nq.Row._raw)
-				mp = sanitizeUTF8(mp)
-				reason := strings.Join(nq.Issues, "; ")
-				unqualRows = append(unqualRows, []any{
-					uuid.New(),
-					batchID,
-					fileHash,
-					nq.Row.DocumentNumber,
-					nq.Row.CompanyCode,
-					nq.Row.Party,
-					nq.Row.DocumentCurrency,
-					nq.Row.Source,
-					parseDateOrNil(nq.Row.DocumentDate),
-					parseDateOrNil(nq.Row.PostingDate),
-					parseDateOrNil(nq.Row.NetDueDate),
-					nq.Row.AmountDoc.StringFixed(4),
-					nq.Issues,
-					reason,
-					mp,
-					time.Now(),
-				})
-			}
-			if len(unqualRows) > 0 {
-				if _, err := tx.CopyFrom(ctx,
-					pgx.Identifier{"public", "exposure_unqualified"},
-					unqualCols,
-					pgx.CopyFromRows(unqualRows)); err != nil {
-					fileErrors = append(fileErrors, "copy unqualified: "+err.Error())
-					log.Printf("[ERROR] copy unqualified: %v", err)
-					tx.Rollback(ctx)
-					httpError(w, 500, "copy unqualified failed: "+err.Error())
-					return
-				}
-			}
-
-			if _, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 				UPDATE public.staging_batches_exposures
 				SET status='completed',
 					processed_records=$1,
@@ -1184,56 +1215,58 @@ func BatchUploadStagingData(pool *pgxpool.Pool) http.HandlerFunc {
 					error_message=$3
 				WHERE batch_id=$4
 			`, len(qualified), len(nonQualified), strings.Join(fileErrors, "; "), batchID); err != nil {
-				httpError(w, 500, "update batch: "+err.Error())
-				return
-			}
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("update batch: %w", err)
+		}
 
-			if err := tx.Commit(ctx); err != nil {
-				httpError(w, 500, constants.ErrCommitFailed+err.Error())
-				return
+		if err := tx.Commit(ctx); err != nil {
+			persisted, persistErr := exposureBatchUploadLinkPersisted(ctx, pool, batchID, s3URL)
+			if persistErr != nil {
+				cleanupUploadedObject = false
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_link: %v)", constants.ErrCommitFailed, err.Error(), persistErr)
 			}
-			committed = true
+			if persisted {
+				cleanupUploadedObject = false
+			}
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s", constants.ErrCommitFailed, err.Error())
+		}
+		committed = true
+		cleanupUploadedObject = false
 
-			log.Printf("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
+		log.Printf("[FBUP] committed batch %s for file %s", batchID.String(), fh.Filename)
 
-			// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
-			// The old in-memory preview (based on canonicals) is intentionally removed to ensure
-			// upload responses match the edit/preview responses produced after persisting data.
-			previewRes, _, err := buildPreviewForBatch(pool, ctx, batchID, nil)
-			if err != nil {
-				httpError(w, 500, "preview build after commit: "+err.Error())
-				return
-			}
-			// merge file-level warnings/info into preview result for visibility
-			if len(fileWarnings) > 0 {
-				previewRes.Warnings = append(previewRes.Warnings, fileWarnings...)
-			}
-			if len(fileInfo) > 0 {
-				previewRes.Info = append(previewRes.Info, fileInfo...)
-			}
-			if len(fileErrors) > 0 {
-				previewRes.Errors = append(previewRes.Errors, fileErrors...)
-			}
-			// ensure filename/source reflect the uploaded file
-			if previewRes.FileName == "" {
-				previewRes.FileName = fh.Filename
-			}
-			if previewRes.Source == "" {
-				previewRes.Source = src
-			}
-			results = append(results, previewRes)
-		} // end per-file loop
-
-		elapsed := time.Since(start)
-		log.Printf("[FBUP] total upload completed in %s, files=%d", elapsed.String(), len(results))
-		writeJSON(w, map[string]interface{}{
-			constants.ValueSuccess: true,
-			"results":              results,
-			"duration": map[string]interface{}{
-				"seconds": elapsed.Seconds(),
-			},
+		// Authoritative preview: use DB-driven preview builder instead of in-memory approximation.
+		// The old in-memory preview (based on canonicals) is intentionally removed to ensure
+		// upload responses match the edit/preview responses produced after persisting data.
+		previewRes, _, err := buildPreviewForBatch(pool, ctx, batchID, nil)
+		if err != nil {
+			return nil, 0, http.StatusInternalServerError, fmt.Errorf("preview build after commit: %w", err)
+		}
+		// merge file-level warnings/info into preview result for visibility
+		if len(fileWarnings) > 0 {
+			previewRes.Warnings = append(previewRes.Warnings, fileWarnings...)
+		}
+		if len(fileInfo) > 0 {
+			previewRes.Info = append(previewRes.Info, fileInfo...)
+		}
+		if len(fileErrors) > 0 {
+			previewRes.Errors = append(previewRes.Errors, fileErrors...)
+		}
+		// ensure filename/source reflect the uploaded file
+		if previewRes.FileName == "" {
+			previewRes.FileName = fh.Filename
+		}
+		if previewRes.Source == "" {
+			previewRes.Source = src
+		}
+		results = append(results, UploadRouteResult{
+			UploadResult: previewRes,
+			UploadLink:   s3URL,
 		})
-	}
+	} // end per-file loop
+
+	elapsed := time.Since(start)
+	log.Printf("[FBUP] total upload completed in %s, files=%d", elapsed.String(), len(results))
+	return results, elapsed, 0, nil
 }
 
 func allocateFIFOFloat(rows []CanonicalRow, receivableLogic, payableLogic string) ([]CanonicalRow, []knockFloatInput) {
@@ -1381,6 +1414,55 @@ func saveTempAndHash(f multipart.File, filename string) (string, string, error) 
 		return "", "", err
 	}
 	return tmp.Name(), hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func fxExposureS3Bucket() string {
+	if b := strings.TrimSpace(os.Getenv("BANK_STMT_S3_BUCKET")); b != "" {
+		return b
+	}
+	return "cimplr"
+}
+
+func fxExposureS3Region() string {
+	if r := strings.TrimSpace(os.Getenv("BANK_STMT_S3_REGION")); r != "" {
+		return r
+	}
+	return "ap-south-1"
+}
+
+func fxExposureS3PresignExpiry() time.Duration {
+	expiryDuration := 7 * 24 * time.Hour
+	if envExpiry := strings.TrimSpace(os.Getenv("BANK_STMT_URL_EXPIRY_HOURS")); envExpiry != "" {
+		if hours, parseErr := strconv.Atoi(envExpiry); parseErr == nil && hours > 0 {
+			expiryDuration = time.Duration(hours) * time.Hour
+			max := 7 * 24 * time.Hour
+			if expiryDuration > max {
+				expiryDuration = max
+			}
+		}
+	}
+	return expiryDuration
+}
+
+func fxExposureS3Key(fileHash, filename string) string {
+	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filename)))
+	return bankstatement.BuildS3Key("fx/exposures", "v91", fileHash, ext)
+}
+
+func exposureBatchUploadLinkPersisted(ctx context.Context, pool *pgxpool.Pool, batchID uuid.UUID, uploadLink string) (bool, error) {
+	var exists bool
+	err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM public.staging_batches_exposures
+			WHERE batch_id = $1
+			  AND COALESCE(upload_link, '') = $2
+		)
+	`, batchID, uploadLink).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func fastMapWithHeaderLower(row map[string]string, headerLower map[string]string, headerMap map[string]string) map[string]interface{} {

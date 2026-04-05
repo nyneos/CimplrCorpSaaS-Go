@@ -489,6 +489,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DueDate          string  `json:"due_date"`
 			Amount           float64 `json:"amount"`
 			CurrencyCode     string  `json:"currency_code"`
+			UploadLink       string  `json:"upload_link"`
 			// old values
 			OldEntityName   string  `json:"old_entity_name"`
 			OldCounterparty string  `json:"old_counterparty_name"`
@@ -514,6 +515,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DueDate          string  `json:"due_date"`
 			Amount           float64 `json:"invoice_amount"`
 			CurrencyCode     string  `json:"currency_code"`
+			UploadLink       string  `json:"upload_link"`
 			// old values
 			OldEntityName   string  `json:"old_entity_name"`
 			OldCounterparty string  `json:"old_counterparty_name"`
@@ -532,7 +534,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 1. Fetch all payables (new table tr_payables)
-		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
+		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, upload_link, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
@@ -544,14 +546,20 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for payableRows.Next() {
 			var p Payable
 			var invoiceDate, dueDate *time.Time
+			var uploadLink *string
 			var oldEntityPtr, oldCounterPtr, oldInvoicePtr *string
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadLink, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
+			}
+			if uploadLink != nil {
+				p.UploadLink = *uploadLink
+			} else {
+				p.UploadLink = ""
 			}
 			// populate old fields safely
 			if oldEntityPtr != nil {
@@ -602,7 +610,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 2. Fetch all receivables (new table tr_receivables)
-		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
+		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, upload_link, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
@@ -614,14 +622,20 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for receivableRows.Next() {
 			var rcv Receivable
 			var invoiceDate, dueDate *time.Time
+			var uploadLink *string
 			var oldEntityPtr, oldCounterPtr, oldInvoicePtr *string
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadLink, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
+			}
+			if uploadLink != nil {
+				rcv.UploadLink = *uploadLink
+			} else {
+				rcv.UploadLink = ""
 			}
 			if oldEntityPtr != nil {
 				rcv.OldEntityName = *oldEntityPtr

@@ -1,0 +1,7 @@
+{
+  "go.useLanguageServer": true,
+  "go.toolsManagement.autoUpdate": true,
+  "go.languageServerFlags": [
+    "-rpc.trace"
+  ]
+}

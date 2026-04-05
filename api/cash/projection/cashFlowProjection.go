@@ -3,18 +3,17 @@ package projection
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"CimplrCorpSaas/api/constants"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func ifaceToBool(v interface{}) bool {
@@ -77,7 +76,6 @@ func ifaceToTimeString(v interface{}) string {
 	}
 }
 
-// Capitalize capitalizes first letter and lowercases the rest (ASCII-safe)
 func Capitalize(s string) string {
 	if s == "" {
 		return s
@@ -95,7 +93,6 @@ func Capitalize(s string) string {
 	return strings.ToUpper(first) + strings.ToLower(rest)
 }
 
-// DeleteCashFlowProposal inserts DELETE audit actions for proposals (bulk)
 func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -141,7 +138,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		// Insert audit actions for each proposal_id
-		q := `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
+		q := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'DELETE','PENDING_DELETE_APPROVAL',$2,$3,now())`
 		for _, pid := range req.ProposalIDs {
 			if strings.TrimSpace(pid) == "" {
 				continue
@@ -199,7 +196,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}()
 
 		// Fetch latest audit per proposal_id
-		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, processing_status FROM audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
@@ -246,7 +243,7 @@ func BulkRejectCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Update to REJECTED
-		upd := `UPDATE audit_action_cashflow_proposal SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
+		upd := `UPDATE cimplrcorpsaas.audit_action_cashflow_proposal SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE action_id = ANY($3)`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
 			api.RespondWithResult(w, false, "Failed to update audit rows: "+err.Error())
 			return
@@ -307,7 +304,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		}()
 
 		// Fetch latest audit per proposal_id
-		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, action_type, processing_status FROM audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC`
+		sel := `SELECT DISTINCT ON (proposal_id) action_id, proposal_id, action_type, processing_status FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = ANY($1) ORDER BY proposal_id, requested_at DESC`
 		rows, err := tx.Query(ctx, sel, req.ProposalIDs)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to fetch audit rows: "+err.Error())
@@ -357,13 +354,13 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 
 		// Update to APPROVED
 		upd := `
-    UPDATE audit_action_cashflow_proposal 
+    UPDATE cimplrcorpsaas.audit_action_cashflow_proposal 
     SET processing_status='APPROVED', 
         checker_by=$1, 
         checker_at=now(), 
         checker_comment=$2 
     WHERE action_id = ANY($3)
-`
+	`
 		if _, err := tx.Exec(ctx, upd, checkerBy, req.Comment, actionIDs); err != nil {
 			api.RespondWithResult(w, false, "Failed to update audit rows: "+err.Error())
 			return
@@ -377,7 +374,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 		if len(deleteProposalIDs) > 0 {
-			delQ := `DELETE FROM cashflow_proposal WHERE proposal_id = ANY($1)`
+			delQ := `DELETE FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = ANY($1)`
 			var err error
 			for retries := 0; retries < 3; retries++ {
 				if _, err = tx.Exec(ctx, delQ, deleteProposalIDs); err == nil {
@@ -480,7 +477,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		recurrenceType := strings.TrimSpace(req.Header.ProjectionType)
 
-		insProp := `INSERT INTO cashflow_proposal (proposal_id, proposal_name, currency_code, effective_date, recurrence_type, status) VALUES ($1,$2,$3,$4,$5,$6)`
+		insProp := `INSERT INTO cimplrcorpsaas.cashflow_proposal (proposal_id, proposal_name, currency_code, effective_date, recurrence_type, status) VALUES ($1,$2,$3,$4,$5,$6)`
 		if _, err := tx.Exec(ctx, insProp, proposalID, propName, currency, effDate, recurrenceType, "Active"); err != nil {
 			api.RespondWithResult(w, false, "Failed to create proposal: "+err.Error())
 			return
@@ -537,7 +534,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if description == "" {
 				description = entry.CategoryName
 			}
-			insItem := `INSERT INTO cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date, entity_name, department_id, counterparty_name, old_counterparty_name, recurrence_frequency) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
+			insItem := `INSERT INTO cimplrcorpsaas.cashflow_proposal_item (item_id, proposal_id, description, cashflow_type, category_id, expected_amount, is_recurring, recurrence_pattern, start_date, end_date, entity_name, department_id, counterparty_name, old_counterparty_name, recurrence_frequency) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
 			cp := strings.TrimSpace(entry.CounterpartyName)
 			if cp == "" {
 				cp = "Generic"
@@ -616,7 +613,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 
 				projID := fmt.Sprintf("PROJ-%06d", time.Now().UnixNano()%1000000)
-				insMonthly := `INSERT INTO cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`
+				insMonthly := `INSERT INTO cimplrcorpsaas.cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`
 				if _, err := tx.Exec(ctx, insMonthly, projID, itemID, year, mInt, amt); err != nil {
 					api.RespondWithResult(w, false, "Failed to create monthly projection: "+err.Error())
 					return
@@ -627,7 +624,7 @@ func AbsorbFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// audit - one per proposal
-		auditQ := `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
+		auditQ := `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, reason, requested_by, requested_at) VALUES ($1,'CREATE','PENDING_APPROVAL', $2, $3, now())`
 		if _, err := tx.Exec(ctx, auditQ, proposalID, "Imported", createdBy); err != nil {
 			api.RespondWithResult(w, false, "Failed to create audit: "+err.Error())
 			return
@@ -697,8 +694,8 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				cpi.end_date,
 				cpi.counterparty_name,
 				cpi.old_counterparty_name
-			FROM cashflow_proposal cp
-			JOIN cashflow_proposal_item cpi ON cp.proposal_id = cpi.proposal_id
+			FROM cimplrcorpsaas.cashflow_proposal cp
+			JOIN cimplrcorpsaas.cashflow_proposal_item cpi ON cp.proposal_id = cpi.proposal_id
 			WHERE 1=1
 		`
 
@@ -816,7 +813,7 @@ func GetFlattenedProjections(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				year,
 				month,
 				projected_amount
-			FROM cashflow_projection_monthly
+			FROM cimplrcorpsaas.cashflow_projection_monthly
 			WHERE item_id = ANY($1)
 			ORDER BY item_id, year, month
 		`
@@ -962,10 +959,10 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.recurrence_type AS proposal_type,
 				p.old_recurrence_type,
 				a.processing_status
-			FROM cashflow_proposal p
+			FROM cimplrcorpsaas.cashflow_proposal p
 			LEFT JOIN LATERAL (
 				SELECT processing_status
-				FROM audit_action_cashflow_proposal a2
+				FROM cimplrcorpsaas.audit_action_cashflow_proposal a2
 				WHERE a2.proposal_id = p.proposal_id
 				ORDER BY requested_at DESC
 				LIMIT 1
@@ -1009,7 +1006,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		actions := make([]map[string]interface{}, 0)
-		aq := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment FROM audit_action_cashflow_proposal WHERE proposal_id = $1 ORDER BY requested_at DESC`
+		aq := `SELECT action_id, proposal_id, action_type, processing_status, reason, requested_by, requested_at, checker_by, checker_at, checker_comment FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = $1 ORDER BY requested_at DESC`
 		if aRows, aErr := pgxPool.Query(ctx, aq, req.ProposalID); aErr == nil {
 			defer aRows.Close()
 			for aRows.Next() {
@@ -1043,7 +1040,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   start_date, old_start_date, end_date, old_end_date, entity_name, old_entity_name,
 				   department_id, old_department_id, recurrence_frequency, old_recurrence_frequency,
 				   counterparty_name, old_counterparty_name
-			FROM cashflow_proposal_item
+			FROM cimplrcorpsaas.cashflow_proposal_item
 			WHERE proposal_id = $1
 			ORDER BY created_at
 		`
@@ -1126,7 +1123,7 @@ func GetProposalVersion(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		projQuery := `
 			SELECT item_id, year, month, projected_amount
-			FROM cashflow_projection_monthly
+			FROM cimplrcorpsaas.cashflow_projection_monthly
 			WHERE item_id = ANY($1)
 			ORDER BY item_id, year, month
 		`
@@ -1256,6 +1253,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.proposal_name,
 				p.effective_date,
 				p.currency_code,
+				p.upload_link,
 				a.processing_status
 			FROM cashflow_proposal p
 			LEFT JOIN LATERAL (
@@ -1278,8 +1276,8 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var (
-				proposalID, recurrenceType, proposalName, currencyCode, processingStatus interface{}
-				effectiveDate                                                            interface{}
+				proposalID, recurrenceType, proposalName, currencyCode, uploadLink, processingStatus interface{}
+				effectiveDate                                                                        interface{}
 			)
 
 			if err := rows.Scan(
@@ -1288,6 +1286,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&proposalName,
 				&effectiveDate,
 				&currencyCode,
+				&uploadLink,
 				&processingStatus,
 			); err != nil {
 				continue
@@ -1299,6 +1298,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"proposal_name":     ifaceToString(proposalName),
 				"effective_date":    ifaceToTimeString(effectiveDate),
 				"currency":          ifaceToString(currencyCode),
+				"upload_link":       ifaceToString(uploadLink),
 				"processing_status": ifaceToString(processingStatus),
 			}
 
@@ -1340,12 +1340,11 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		// --- Update proposal header ---
 		proposalID := ifaceToString(req.Header["proposal_id"])
-		// Fetch current proposal
+
 		var curName, curCurrency, curType string
 		var curEffDate time.Time
-		err = tx.QueryRow(ctx, `SELECT proposal_name, currency_code, effective_date, recurrence_type FROM cashflow_proposal WHERE proposal_id=$1`, proposalID).Scan(&curName, &curCurrency, &curEffDate, &curType)
+		err = tx.QueryRow(ctx, `SELECT proposal_name, currency_code, effective_date, recurrence_type FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id=$1`, proposalID).Scan(&curName, &curCurrency, &curEffDate, &curType)
 		if err != nil {
 			api.RespondWithResult(w, false, "Proposal not found: "+err.Error())
 			return
@@ -1364,7 +1363,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			oldEffDate = oldEffDateStr
 		}
-		_, err = tx.Exec(ctx, `UPDATE cashflow_proposal SET old_proposal_name=$1, proposal_name=$2, old_currency_code=$3, currency_code=$4, old_effective_date=$5, effective_date=$6, old_recurrence_type=$7, recurrence_type=$8 WHERE proposal_id=$9`,
+		_, err = tx.Exec(ctx, `UPDATE cimplrcorpsaas.cashflow_proposal SET old_proposal_name=$1, proposal_name=$2, old_currency_code=$3, currency_code=$4, old_effective_date=$5, effective_date=$6, old_recurrence_type=$7, recurrence_type=$8 WHERE proposal_id=$9`,
 			curName,
 			ifaceToString(req.Header["proposal_name"]),
 			curCurrency,
@@ -1392,7 +1391,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var curRec interface{}
 			var curStart interface{}
 			var curEnd interface{}
-			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name FROM cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
+			err = tx.QueryRow(ctx, `SELECT category_id, department_id, entity_name, expected_amount, cashflow_type, recurrence_pattern, recurrence_frequency, description, is_recurring, start_date, end_date, counterparty_name FROM cimplrcorpsaas.cashflow_proposal_item WHERE item_id=$1`, itemID).Scan(
 				&curCat, &curDept, &curEnt, &curAmt, &curType, &curRecPat, &curRecFreq, &curDesc, &curRec, &curStart, &curEnd, &curCP)
 			if err != nil {
 				api.RespondWithResult(w, false, "Item not found: "+err.Error())
@@ -1432,7 +1431,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			curRecVal := ifaceToBool(curRec)
 			curCPVal := ifaceToString(curCP)
 
-			_, err = tx.Exec(ctx, `UPDATE cashflow_proposal_item SET old_category_id=$1, category_id=$2, old_department_id=$3, department_id=$4, old_entity_name=$5, entity_name=$6, old_expected_amount=$7, expected_amount=$8, old_cashflow_type=$9, cashflow_type=$10, old_recurrence_pattern=$11, recurrence_pattern=$12, old_recurrence_frequency=$13, recurrence_frequency=$14, old_is_recurring=$15, is_recurring=$16, old_start_date=$17, start_date=$18, old_end_date=$19, end_date=$20, description=$21, old_counterparty_name=$22, counterparty_name=$23 WHERE item_id=$24`,
+			_, err = tx.Exec(ctx, `UPDATE cimplrcorpsaas.cashflow_proposal_item SET old_category_id=$1, category_id=$2, old_department_id=$3, department_id=$4, old_entity_name=$5, entity_name=$6, old_expected_amount=$7, expected_amount=$8, old_cashflow_type=$9, cashflow_type=$10, old_recurrence_pattern=$11, recurrence_pattern=$12, old_recurrence_frequency=$13, recurrence_frequency=$14, old_is_recurring=$15, is_recurring=$16, old_start_date=$17, start_date=$18, old_end_date=$19, end_date=$20, description=$21, old_counterparty_name=$22, counterparty_name=$23 WHERE item_id=$24`,
 				curCat,
 				ifaceToString(entry["categoryName"]),
 				curDept,
@@ -1463,7 +1462,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if ifaceToFloat(entry["expectedAmount"]) != ifaceToFloat(curAmt) {
-				_, err = tx.Exec(ctx, `DELETE FROM cashflow_projection_monthly WHERE item_id=$1`, itemID)
+				_, err = tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.cashflow_projection_monthly WHERE item_id=$1`, itemID)
 				if err != nil {
 					api.RespondWithResult(w, false, "Failed to delete monthly projections: "+err.Error())
 					return
@@ -1483,7 +1482,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						yearNum, _ := strconv.Atoi("20" + yearStr)
 						amt := ifaceToFloat(v)
 						projectionID := fmt.Sprintf("PROJ-%d", time.Now().UnixNano())
-						_, err = tx.Exec(ctx, `INSERT INTO cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`,
+						_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.cashflow_projection_monthly (projection_id, item_id, year, month, projected_amount) VALUES ($1,$2,$3,$4,$5)`,
 							projectionID, itemID, yearNum, monthNum, amt)
 						if err != nil {
 							api.RespondWithResult(w, false, "Failed to insert monthly projection: "+err.Error())
@@ -1493,7 +1492,7 @@ func UpdateCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now())`, proposalID, req.UserID)
+		_, err = tx.Exec(ctx, `INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now())`, proposalID, req.UserID)
 		if err != nil {
 			api.RespondWithResult(w, false, "Failed to insert audit action: "+err.Error())
 			return

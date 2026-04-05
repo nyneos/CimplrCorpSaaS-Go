@@ -264,6 +264,7 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		// fetch forward_bookings with upload links for /all endpoint
 		query := `
 			SELECT 
 				system_transaction_id,
@@ -274,7 +275,9 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 				maturity_date,
 				order_type,
 				entity_level_0,
-				counterparty
+				counterparty,
+				upload_link,
+				confirmation_upload_link
 			FROM forward_bookings
 			WHERE entity_level_0 = ANY($1)
 				AND status NOT IN ('Cancelled', 'Pending Confirmation')
@@ -358,6 +361,17 @@ func GetForwardBookingList(db *sql.DB) http.HandlerFunc {
 						}
 					default:
 						rowMap[col] = v
+					}
+				case "upload_link", "confirmation_upload_link":
+					switch val := v.(type) {
+					case nil:
+						rowMap[col] = ""
+					case string:
+						rowMap[col] = val
+					case []byte:
+						rowMap[col] = string(val)
+					default:
+						rowMap[col] = fmt.Sprintf("%v", v)
 					}
 				default:
 					rowMap[col] = v

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 
@@ -136,7 +137,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
 					}
 					// audit log
-					log.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
+					fmt.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
 					adminOverrideApplied = true
 				}
 			}
@@ -182,7 +183,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				for i, dp := range dps {
 					log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
 				}
-				log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+				fmt.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
 				for i, acc := range bankAccounts {
 					log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
 						i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])

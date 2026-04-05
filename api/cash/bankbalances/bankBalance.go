@@ -147,6 +147,8 @@ func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 		return false
 	}
 	v := ctx.Value("ApprovedBankAccounts")
+	fmt.Printf("CHECK ACCOUNT: %q\n", accountNumber)
+	fmt.Printf("CTX ApprovedBankAccounts: %v\n", v)
 	if v == nil {
 		return true
 	}
@@ -168,6 +170,7 @@ func ctxHasApprovedBankName(ctx context.Context, bankName string) bool {
 		return false
 	}
 	v := ctx.Value("BankInfo")
+	fmt.Println("CTX BANK INFO:", v)
 	if v == nil {
 		return true
 	}
@@ -616,6 +619,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		baseSelect := `
 			SELECT b.balance_id, b.bank_name, b.account_no, b.iban, b.currency_code, b.nickname, b.country,
 				   b.as_of_date, b.as_of_time, b.balance_type, b.balance_amount, b.statement_type, b.source_channel,
+				   b.upload_link,
 				   b.opening_balance, b.total_credits, b.total_debits, b.closing_balance,
 				   b.old_bank_name, b.old_account_no, b.old_iban, b.old_currency_code, b.old_nickname,
 				   b.old_as_of_date, b.old_as_of_time, b.old_balance_type, b.old_balance_amount, b.old_statement_type, b.old_source_channel,
@@ -721,7 +725,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					asOfTime                                                          sqlNullString
 					balanceType                                                       sqlNullString
 					balanceAmount                                                     sqlNullFloat
-					statementType, sourceChannel                                      sqlNullString
+					statementType, sourceChannel, uploadLink                          sqlNullString
 					opening, credits, debits, closing                                 sqlNullFloat
 					oldBankName, oldAccountNo, oldIban, oldCurrency, oldNickname      sqlNullString
 					oldAsOfDate                                                       sqlNullTime
@@ -734,7 +738,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// use Scan with many nullable types
 				err := rows.Scan(&balanceID, &bankName, &accountNo, &iban, &currency, &nickname, &country,
 					&asOfDate, &asOfTime, &balanceType, &balanceAmount, &statementType, &sourceChannel,
-					&opening, &credits, &debits, &closing,
+					&uploadLink, &opening, &credits, &debits, &closing,
 					&oldBankName, &oldAccountNo, &oldIban, &oldCurrency, &oldNickname,
 					&oldAsOfDate, &oldAsOfTime, &oldBalanceType, &oldBalanceAmount, &oldStatementType, &oldSourceChannel,
 					&oldOpening, &oldCredits, &oldDebits, &oldClosing, &entityName)
@@ -759,6 +763,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"balance_amount":      balanceAmount.ValueOrZero(),
 					"statement_type":      statementType.ValueOrZero(),
 					"source_channel":      sourceChannel.ValueOrZero(),
+					"upload_link":         uploadLink.ValueOrZero(),
 					"opening_balance":     opening.ValueOrZero(),
 					"total_credits":       credits.ValueOrZero(),
 					"total_debits":        debits.ValueOrZero(),

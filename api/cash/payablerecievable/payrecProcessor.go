@@ -480,7 +480,7 @@ func getDateFromTransactionData(data map[string]interface{}, fieldNames []string
 }
 
 // ProcessStagingTransactionsToCanonicalV2WithTx - Transaction-aware version for atomic operations
-func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.Tx, batchID uuid.UUID, userName string) error {
+func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.Tx, batchID uuid.UUID, userName string, uploadLink string) error {
 	log.Printf("PERFORMANCE: Starting transaction-aware batch processing for batch %s", batchID)
 
 	// Check for context cancellation before starting
@@ -629,6 +629,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 						payableData[mapping.TargetField] = convertTransactionValueByDataType(value, mapping.TargetField)
 					}
 				}
+				payableData["upload_link"] = uploadLink
 
 				if len(payableData) > 0 {
 					var fields []string
@@ -662,6 +663,7 @@ func ProcessStagingTransactionsToCanonicalV2WithTx(ctx context.Context, tx pgx.T
 						receivableData[mapping.TargetField] = convertTransactionValueByDataType(value, mapping.TargetField)
 					}
 				}
+				receivableData["upload_link"] = uploadLink
 
 				if len(receivableData) > 0 {
 					var fields []string

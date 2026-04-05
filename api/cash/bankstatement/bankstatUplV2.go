@@ -47,7 +47,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	contentType := detectContentType(tmpFile)
+	contentType := DetectContentType(tmpFile)
 
 	var rows [][]string
 	var isCSV bool
@@ -451,10 +451,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	s3Key := buildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	s3Key := BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
 	var s3URL string
-	if isS3UploadEnabled() {
-		s3URL, err = uploadToS3(ctx, s3Key, tmpFile, contentType)
+	if IsS3UploadEnabled() {
+		s3URL, err = UploadToS3(ctx, s3Key, tmpFile, contentType)
 		if err != nil {
 			return nil, fmt.Errorf("failed to store original file to s3: %w", err)
 		}
@@ -2557,7 +2557,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
-	contentType := detectContentType(tmpFile)
+	contentType := DetectContentType(tmpFile)
 	fileExt := ".xlsx"
 	xl, err := excelize.OpenReader(bytes.NewReader(tmpFile))
 	if err != nil {
@@ -2611,8 +2611,8 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		}
 	}
 
-	s3Key := buildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
-	s3URL, err := uploadToS3(ctx, s3Key, tmpFile, contentType)
+	s3Key := BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	s3URL, err := UploadToS3(ctx, s3Key, tmpFile, contentType)
 	if err != nil {
 		return fmt.Errorf("failed to store original file to s3: %w", err)
 	}

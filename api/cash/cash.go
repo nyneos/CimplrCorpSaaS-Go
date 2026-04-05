@@ -183,6 +183,7 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-balances/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.BulkRejectBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.BulkRequestDeleteBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/all", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalances(pgxPool)))
+	// mux.Handle("/cash/bank-balances/upload",(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/upload", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/update", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UpdateBankBalance(pgxPool)))
 

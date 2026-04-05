@@ -103,9 +103,93 @@ func sanitizePathSegment(s string) string {
 	return replacer.Replace(s)
 }
 
+func storagePrefixEnvVar(module string) string {
+	moduleKey := strings.ToLower(strings.TrimSpace(module))
+	switch moduleKey {
+	case "bankbalance":
+		return "BANK_BALANCE_S3_PREFIX"
+	case "bankstatement":
+		return "BANK_STATEMENT_S3_PREFIX"
+	case "projection":
+		return "PROJECTION_S3_PREFIX"
+	case "payables", "receivables":
+		return "TRANSACTION_S3_PREFIX"
+	}
+
+	normalized := strings.NewReplacer(" ", "_", "-", "_").Replace(moduleKey)
+	return strings.ToUpper(normalized) + "_S3_PREFIX"
+}
+
+func moduleDefaultPrefix(module string) string {
+	switch strings.ToLower(strings.TrimSpace(module)) {
+	case "bankstatement":
+		return "cash/bankstatements/"
+	case "bankbalance":
+		return "cash/bank-balance/"
+	case "projection":
+		return "cash/projections/"
+	case "payables":
+		return "cash/transactions/payables/"
+	case "receivables":
+		return "cash/transactions/receivables/"
+	default:
+		return ""
+	}
+}
+
+func normalizePrefix(p string) string {
+	return ensureTrailingSlash(strings.Trim(strings.TrimSpace(p), "/"))
+}
+
+func transactionModulePrefix(base, module string) string {
+	base = strings.Trim(strings.TrimSpace(base), "/")
+	moduleKey := strings.ToLower(strings.TrimSpace(module))
+	if base == "" {
+		return moduleDefaultPrefix(moduleKey)
+	}
+	if moduleKey != "payables" && moduleKey != "receivables" {
+		return ensureTrailingSlash(base)
+	}
+
+	lowerBase := strings.ToLower(base)
+	if lowerBase == moduleKey || strings.HasSuffix(lowerBase, "/"+moduleKey) {
+		return ensureTrailingSlash(base)
+	}
+
+	return ensureTrailingSlash(base + "/" + moduleKey)
+}
+
+// GetStoragePrefix returns the S3 folder prefix for a given module.
+func GetStoragePrefix(module string) string {
+	moduleKey := strings.ToLower(strings.TrimSpace(module))
+	if prefix := moduleDefaultPrefix(moduleKey); prefix != "" {
+		return prefix
+	}
+	return modulePrefix(moduleKey)
+}
+
+// BuildS3Key builds an S3 key with a custom folder prefix.
+// If folder is empty, file goes to root of bucket.
+func BuildS3Key(folder, subject, fileHash, fileExt string) string {
+	folder = strings.Trim(strings.TrimSpace(folder), "/")
+	if folder != "" {
+		folder = folder + "/"
+	}
+	ext := strings.TrimSpace(fileExt)
+	if ext == "" {
+		ext = ".bin"
+	}
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	subjectSafe := sanitizePathSegment(subject)
+	return fmt.Sprintf("%s%s/%s%s", folder, subjectSafe, fileHash, ext)
+}
+
 // buildModuleS3Key builds an S3 object key under the module's folder.
-func buildModuleS3Key(module, subject, fileHash, fileExt string) string {
-	prefix := modulePrefix(module)
+// Kept for backward compatibility with existing callers.
+func BuildModuleS3Key(module, subject, fileHash, fileExt string) string {
+	prefix := GetStoragePrefix(module)
 	ext := strings.TrimSpace(fileExt)
 	if ext == "" {
 		ext = ".bin"
@@ -119,7 +203,7 @@ func buildModuleS3Key(module, subject, fileHash, fileExt string) string {
 
 // isS3UploadEnabled reads env var BANK_STMT_S3_ENABLED to determine whether to
 // upload files to S3. Defaults to true when unset.
-func isS3UploadEnabled() bool {
+func IsS3UploadEnabled() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("BANK_STMT_S3_ENABLED")))
 	if v == "" {
 		return true
@@ -127,7 +211,7 @@ func isS3UploadEnabled() bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-func detectContentType(data []byte) string {
+func DetectContentType(data []byte) string {
 	if len(data) == 0 {
 		return "application/octet-stream"
 	}
@@ -169,7 +253,7 @@ func contentDispositionForKey(key string) string {
 	return fmt.Sprintf("attachment; filename=%q", name)
 }
 
-func uploadToS3(ctx context.Context, key string, body []byte, contentType string) (string, error) {
+func UploadToS3(ctx context.Context, key string, body []byte, contentType string) (string, error) {
 	bucket := storageBucket()
 	region := storageRegion()
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
@@ -214,4 +298,21 @@ func uploadToS3(ctx context.Context, key string, body []byte, contentType string
 	}
 
 	return presignedReq.URL, nil
+}
+
+func DeleteFromS3(ctx context.Context, key string) error {
+	bucket := storageBucket()
+	region := storageRegion()
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return fmt.Errorf("load AWS config: %w", err)
+	}
+	client := s3.NewFromConfig(cfg)
+	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		return fmt.Errorf("delete s3 object %s from bucket %s: %w", key, bucket, err)
+	}
+	return nil
 }

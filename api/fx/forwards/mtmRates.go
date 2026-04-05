@@ -2,11 +2,16 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -68,254 +73,10 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		results := []map[string]interface{}{}
-		for _, fileHeader := range files {
-			file, err := fileHeader.Open()
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"filename":           fileHeader.Filename,
-					constants.ValueError: constants.ErrFailedToOpenFile,
-				})
-				continue
-			}
-			defer file.Close()
-
-			ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-			var rowsData []map[string]interface{}
-			if ext == ".csv" {
-				reader := csv.NewReader(file)
-				headers, err := reader.Read()
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"filename":           fileHeader.Filename,
-						constants.ValueError: constants.ErrFailedToReadCSVHeaders,
-					})
-					continue
-				}
-				for {
-					row, err := reader.Read()
-					if err == io.EOF {
-						break
-					}
-					if err != nil {
-						continue
-					}
-					obj := map[string]interface{}{}
-					for i, h := range headers {
-						obj[h] = row[i]
-					}
-					rowsData = append(rowsData, obj)
-				}
-			} else if ext == ".xls" || ext == ".xlsx" {
-				xl, err := excelize.OpenReader(file)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"filename":           fileHeader.Filename,
-						constants.ValueError: "Failed to read Excel file",
-					})
-					continue
-				}
-				sheet := xl.GetSheetName(0)
-				xRows, err := xl.GetRows(sheet)
-				if err != nil || len(xRows) < 1 {
-					results = append(results, map[string]interface{}{
-						"filename":           fileHeader.Filename,
-						constants.ValueError: "No data in Excel file",
-					})
-					continue
-				}
-				headers := xRows[0]
-				for _, row := range xRows[1:] {
-					obj := map[string]interface{}{}
-					for i, h := range headers {
-						if i < len(row) {
-							obj[h] = row[i]
-						} else {
-							obj[h] = nil
-						}
-					}
-					rowsData = append(rowsData, obj)
-				}
-			} else {
-				results = append(results, map[string]interface{}{
-					"filename":           fileHeader.Filename,
-					constants.ValueError: constants.ErrUnsupportedFileType,
-				})
-				continue
-			}
-
-			if len(rowsData) == 0 {
-				results = append(results, map[string]interface{}{
-					"filename":           fileHeader.Filename,
-					constants.ValueError: constants.ErrNoDataToUpload,
-				})
-				continue
-			}
-
-			var fileError error
-			validRows := [][]interface{}{}
-			refIds := []string{}
-			for _, row := range rowsData {
-				if v, ok := row["internal_reference_id"].(string); ok && v != "" {
-					refIds = append(refIds, v)
-				}
-			}
-			bookingMap := map[string]string{}
-			bookingDetailsMap := map[string]map[string]interface{}{}
-			bookingIdList := []string{}
-			if len(refIds) > 0 {
-				query := `SELECT system_transaction_id, internal_reference_id, order_type, booking_amount, maturity_date, total_rate, currency_pair FROM forward_bookings WHERE internal_reference_id = ANY($1)`
-				rows, err := db.Query(query, pq.Array(refIds))
-				if err == nil {
-					for rows.Next() {
-						var systemTransactionId, internal_reference_id, order_type, currency_pair string
-						var bookingAmount, total_rate float64
-						var maturityDate string
-						rows.Scan(&systemTransactionId, &internal_reference_id, &order_type, &bookingAmount, &maturityDate, &total_rate, &currency_pair)
-						bookingMap[internal_reference_id] = systemTransactionId
-						bookingDetailsMap[internal_reference_id] = map[string]interface{}{
-							"order_type":     order_type,
-							"booking_amount": bookingAmount,
-							"maturity_date":  maturityDate,
-							"total_rate":     total_rate,
-							"currency_pair":  currency_pair,
-						}
-						bookingIdList = append(bookingIdList, systemTransactionId)
-					}
-					rows.Close()
-				}
-			}
-			ledgerMap := map[string]map[string]interface{}{}
-			if len(bookingIdList) > 0 {
-				query := `SELECT booking_id, running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = ANY($1)`
-				rows, err := db.Query(query, pq.Array(bookingIdList))
-				if err == nil {
-					for rows.Next() {
-						var bookingId string
-						var runningOpenAmount float64
-						var ledgerSequence int
-						rows.Scan(&bookingId, &runningOpenAmount, &ledgerSequence)
-						if lm, ok := ledgerMap[bookingId]; !ok || ledgerSequence > lm["ledger_sequence"].(int) {
-							ledgerMap[bookingId] = map[string]interface{}{
-								"running_open_amount": runningOpenAmount,
-								"ledger_sequence":     ledgerSequence,
-							}
-						}
-					}
-					rows.Close()
-				}
-			}
-			for i, row := range rowsData {
-				entity, _ := row["entity"].(string)
-				if !containsString(buNames, entity) {
-					fileError = fmt.Errorf("business unit not allowed: %s (row %d)", entity, i+1)
-					break
-				}
-				internalRef, _ := row["internal_reference_id"].(string)
-				bookingId := bookingMap[internalRef]
-				if bookingId == "" {
-					fileError = fmt.Errorf("booking not found for internal_reference_id: %s (row %d)", internalRef, i+1)
-					break
-				}
-				booking := bookingDetailsMap[internalRef]
-				if booking == nil {
-					fileError = fmt.Errorf("booking details not found for internal_reference_id: %s (row %d)", internalRef, i+1)
-					break
-				}
-				openAmount := booking["booking_amount"].(float64)
-				if lm, ok := ledgerMap[bookingId]; ok {
-					openAmount = lm["running_open_amount"].(float64)
-				}
-				mismatchFields := []string{}
-				if str(row["buy_sell"]) != str(booking["order_type"]) {
-					mismatchFields = append(mismatchFields, "buy_sell/order_type")
-				}
-				if num(row["notional_amount"]) != openAmount {
-					mismatchFields = append(mismatchFields, "notional_amount/open_amount")
-				}
-				if num(row["contract_rate"]) != booking["total_rate"].(float64) {
-					mismatchFields = append(mismatchFields, "contract_rate/total_rate")
-				}
-				if str(row["currency_pair"]) != str(booking["currency_pair"]) {
-					mismatchFields = append(mismatchFields, "currency_pair")
-				}
-				if len(mismatchFields) > 0 {
-					fileError = fmt.Errorf("reconciliation failed for internal_reference_id: %s (row %d). Mismatched fields: %s", internalRef, i+1, strings.Join(mismatchFields, ", "))
-					break
-				}
-				mtmRate := num(row["mtm_rate"])
-				contractRate := num(row["contract_rate"])
-				notionalAmount := num(row["notional_amount"])
-				mtmValue := (mtmRate - contractRate) * notionalAmount
-				dealDate := str(row["deal_date"])
-				maturityDate := str(row["maturity_date"])
-				daysToMaturity := calcDaysToMaturity(dealDate, maturityDate, row["days_to_maturity"])
-				status := str(row[constants.KeyStatus])
-				if status == "" {
-					status = "pending"
-				}
-				validRows = append(validRows, []interface{}{
-					uuid.New().String(),
-					bookingId,
-					dealDate,
-					maturityDate,
-					str(row["currency_pair"]),
-					str(row["buy_sell"]),
-					notionalAmount,
-					contractRate,
-					mtmRate,
-					mtmValue,
-					daysToMaturity,
-					status,
-					internalRef,
-					entity,
-				})
-			}
-			if fileError != nil {
-				results = append(results, map[string]interface{}{
-					"filename":           fileHeader.Filename,
-					constants.ValueError: fileError.Error(),
-				})
-				continue
-			}
-			tx, err := db.Begin()
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"filename":           fileHeader.Filename,
-					constants.ValueError: "Failed to start DB transaction",
-				})
-				continue
-			}
-			if len(validRows) > 0 {
-				valueStrings := []string{}
-				valueArgs := []interface{}{}
-				for i, row := range validRows {
-					valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", i*14+1, i*14+2, i*14+3, i*14+4, i*14+5, i*14+6, i*14+7, i*14+8, i*14+9, i*14+10, i*14+11, i*14+12, i*14+13, i*14+14))
-					valueArgs = append(valueArgs, row...)
-				}
-				insertQuery := "INSERT INTO forward_mtm (mtm_id, booking_id, deal_date, maturity_date, currency_pair, buy_sell, notional_amount, contract_rate, mtm_rate, mtm_value, days_to_maturity, status, internal_reference_id, entity) VALUES " + strings.Join(valueStrings, ",")
-				_, err := tx.Exec(insertQuery, valueArgs...)
-				if err != nil {
-					tx.Rollback()
-					results = append(results, map[string]interface{}{
-						"filename":           fileHeader.Filename,
-						constants.ValueError: "Failed to insert data: " + err.Error(),
-					})
-					continue
-				}
-			}
-			err = tx.Commit()
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"filename":           fileHeader.Filename,
-					constants.ValueError: constants.ErrTxCommitFailed + err.Error(),
-				})
-				continue
-			}
-			results = append(results, map[string]interface{}{
-				"filename": fileHeader.Filename,
-				"inserted": len(validRows),
-			})
+		results, err := processUploadMTMFiles(r.Context(), db, r, buNames)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 
 		hasErrors := false
@@ -331,6 +92,303 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 			"results":              results,
 		})
 	}
+}
+
+func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+	files := r.MultipartForm.File["files"]
+	results := []map[string]interface{}{}
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: constants.ErrFailedToOpenFile,
+			})
+			continue
+		}
+
+		fileBytes, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: "Failed to read file",
+			})
+			continue
+		}
+
+		fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
+		ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+		s3Key := "fx/mtm-rates/" + fileHash + ext
+
+		var rowsData []map[string]interface{}
+		if ext == ".csv" {
+			reader := csv.NewReader(bytes.NewReader(fileBytes))
+			headers, err := reader.Read()
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"filename":           fileHeader.Filename,
+					constants.ValueError: constants.ErrFailedToReadCSVHeaders,
+				})
+				continue
+			}
+			for {
+				row, err := reader.Read()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					continue
+				}
+				obj := map[string]interface{}{}
+				for i, h := range headers {
+					obj[h] = row[i]
+				}
+				rowsData = append(rowsData, obj)
+			}
+		} else if ext == ".xls" || ext == ".xlsx" {
+			xl, err := excelize.OpenReader(bytes.NewReader(fileBytes))
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"filename":           fileHeader.Filename,
+					constants.ValueError: "Failed to read Excel file",
+				})
+				continue
+			}
+			sheet := xl.GetSheetName(0)
+			xRows, err := xl.GetRows(sheet)
+			if err != nil || len(xRows) < 1 {
+				results = append(results, map[string]interface{}{
+					"filename":           fileHeader.Filename,
+					constants.ValueError: "No data in Excel file",
+				})
+				continue
+			}
+			headers := xRows[0]
+			for _, row := range xRows[1:] {
+				obj := map[string]interface{}{}
+				for i, h := range headers {
+					if i < len(row) {
+						obj[h] = row[i]
+					} else {
+						obj[h] = nil
+					}
+				}
+				rowsData = append(rowsData, obj)
+			}
+		} else {
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: constants.ErrUnsupportedFileType,
+			})
+			continue
+		}
+
+		if len(rowsData) == 0 {
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: constants.ErrNoDataToUpload,
+			})
+			continue
+		}
+
+		var fileError error
+		validRows := [][]interface{}{}
+		refIds := []string{}
+		for _, row := range rowsData {
+			if v, ok := row["internal_reference_id"].(string); ok && v != "" {
+				refIds = append(refIds, v)
+			}
+		}
+		bookingMap := map[string]string{}
+		bookingDetailsMap := map[string]map[string]interface{}{}
+		bookingIdList := []string{}
+		if len(refIds) > 0 {
+			query := `SELECT system_transaction_id, internal_reference_id, order_type, booking_amount, maturity_date, total_rate, currency_pair FROM forward_bookings WHERE internal_reference_id = ANY($1)`
+			rows, err := db.Query(query, pq.Array(refIds))
+			if err == nil {
+				for rows.Next() {
+					var systemTransactionId, internal_reference_id, order_type, currency_pair string
+					var bookingAmount, total_rate float64
+					var maturityDate string
+					rows.Scan(&systemTransactionId, &internal_reference_id, &order_type, &bookingAmount, &maturityDate, &total_rate, &currency_pair)
+					bookingMap[internal_reference_id] = systemTransactionId
+					bookingDetailsMap[internal_reference_id] = map[string]interface{}{
+						"order_type":     order_type,
+						"booking_amount": bookingAmount,
+						"maturity_date":  maturityDate,
+						"total_rate":     total_rate,
+						"currency_pair":  currency_pair,
+					}
+					bookingIdList = append(bookingIdList, systemTransactionId)
+				}
+				rows.Close()
+			}
+		}
+		ledgerMap := map[string]map[string]interface{}{}
+		if len(bookingIdList) > 0 {
+			query := `SELECT booking_id, running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = ANY($1)`
+			rows, err := db.Query(query, pq.Array(bookingIdList))
+			if err == nil {
+				for rows.Next() {
+					var bookingId string
+					var runningOpenAmount float64
+					var ledgerSequence int
+					rows.Scan(&bookingId, &runningOpenAmount, &ledgerSequence)
+					if lm, ok := ledgerMap[bookingId]; !ok || ledgerSequence > lm["ledger_sequence"].(int) {
+						ledgerMap[bookingId] = map[string]interface{}{
+							"running_open_amount": runningOpenAmount,
+							"ledger_sequence":     ledgerSequence,
+						}
+					}
+				}
+				rows.Close()
+			}
+		}
+		for i, row := range rowsData {
+			entity, _ := row["entity"].(string)
+			if !containsString(buNames, entity) {
+				fileError = fmt.Errorf("business unit not allowed: %s (row %d)", entity, i+1)
+				break
+			}
+			internalRef, _ := row["internal_reference_id"].(string)
+			bookingId := bookingMap[internalRef]
+			if bookingId == "" {
+				fileError = fmt.Errorf("booking not found for internal_reference_id: %s (row %d)", internalRef, i+1)
+				break
+			}
+			booking := bookingDetailsMap[internalRef]
+			if booking == nil {
+				fileError = fmt.Errorf("booking details not found for internal_reference_id: %s (row %d)", internalRef, i+1)
+				break
+			}
+			openAmount := booking["booking_amount"].(float64)
+			if lm, ok := ledgerMap[bookingId]; ok {
+				openAmount = lm["running_open_amount"].(float64)
+			}
+			mismatchFields := []string{}
+			if str(row["buy_sell"]) != str(booking["order_type"]) {
+				mismatchFields = append(mismatchFields, "buy_sell/order_type")
+			}
+			if num(row["notional_amount"]) != openAmount {
+				mismatchFields = append(mismatchFields, "notional_amount/open_amount")
+			}
+			if num(row["contract_rate"]) != booking["total_rate"].(float64) {
+				mismatchFields = append(mismatchFields, "contract_rate/total_rate")
+			}
+			if str(row["currency_pair"]) != str(booking["currency_pair"]) {
+				mismatchFields = append(mismatchFields, "currency_pair")
+			}
+			if len(mismatchFields) > 0 {
+				fileError = fmt.Errorf("reconciliation failed for internal_reference_id: %s (row %d). Mismatched fields: %s", internalRef, i+1, strings.Join(mismatchFields, ", "))
+				break
+			}
+			mtmRate := num(row["mtm_rate"])
+			contractRate := num(row["contract_rate"])
+			notionalAmount := num(row["notional_amount"])
+			mtmValue := (mtmRate - contractRate) * notionalAmount
+			dealDate := str(row["deal_date"])
+			maturityDate := str(row["maturity_date"])
+			daysToMaturity := calcDaysToMaturity(dealDate, maturityDate, row["days_to_maturity"])
+			status := str(row[constants.KeyStatus])
+			if status == "" {
+				status = "pending"
+			}
+			validRows = append(validRows, []interface{}{
+				uuid.New().String(),
+				bookingId,
+				dealDate,
+				maturityDate,
+				str(row["currency_pair"]),
+				str(row["buy_sell"]),
+				notionalAmount,
+				contractRate,
+				mtmRate,
+				mtmValue,
+				daysToMaturity,
+				status,
+				internalRef,
+				entity,
+			})
+		}
+		if fileError != nil {
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: fileError.Error(),
+			})
+			continue
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: "Failed to start DB transaction",
+			})
+			continue
+		}
+
+		s3URL := ""
+		s3Uploaded := false
+		if bankstatement.IsS3UploadEnabled() {
+			contentType := bankstatement.DetectContentType(fileBytes)
+			s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
+			if err != nil {
+				_ = tx.Rollback()
+				results = append(results, map[string]interface{}{
+					"filename":           fileHeader.Filename,
+					constants.ValueError: "Failed to upload file to S3: " + err.Error(),
+				})
+				continue
+			}
+			s3Uploaded = true
+		}
+
+		if len(validRows) > 0 {
+			valueStrings := []string{}
+			valueArgs := []interface{}{}
+			for i, row := range validRows {
+				offset := i*15 + 1
+				valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", offset, offset+1, offset+2, offset+3, offset+4, offset+5, offset+6, offset+7, offset+8, offset+9, offset+10, offset+11, offset+12, offset+13, offset+14))
+				valueArgs = append(valueArgs, row...)
+				valueArgs = append(valueArgs, s3URL)
+			}
+			insertQuery := "INSERT INTO forward_mtm (mtm_id, booking_id, deal_date, maturity_date, currency_pair, buy_sell, notional_amount, contract_rate, mtm_rate, mtm_value, days_to_maturity, status, internal_reference_id, entity, upload_link) VALUES " + strings.Join(valueStrings, ",")
+			_, err := tx.Exec(insertQuery, valueArgs...)
+			if err != nil {
+				_ = tx.Rollback()
+				if s3Uploaded {
+					if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+						log.Printf("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
+					}
+				}
+				results = append(results, map[string]interface{}{
+					"filename":           fileHeader.Filename,
+					constants.ValueError: "Failed to insert data: " + err.Error(),
+				})
+				continue
+			}
+		}
+		err = tx.Commit()
+		if err != nil {
+			if s3Uploaded {
+				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					log.Printf("[mtm-upload] failed to cleanup S3 object after commit failure for %s: %v", fileHeader.Filename, cleanupErr)
+				}
+			}
+			results = append(results, map[string]interface{}{
+				"filename":           fileHeader.Filename,
+				constants.ValueError: constants.ErrTxCommitFailed + err.Error(),
+			})
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"filename": fileHeader.Filename,
+			"inserted": len(validRows),
+		})
+	}
+
+	return results, nil
 }
 
 // Helper functions

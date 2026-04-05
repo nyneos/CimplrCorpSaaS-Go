@@ -1034,6 +1034,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				s.withdrawalamount,
 				s.depositamount,
 				s.modeoftransaction,
+				bs.upload_link,
 				e.entity_name,
 				mb.bank_name,
 				a.processing_status,
@@ -1046,6 +1047,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN masterbankaccount mba ON s.account_number = mba.account_number
 			LEFT JOIN masterentity e ON s.entityid = e.entity_id
 			LEFT JOIN masterbank mb ON mba.bank_id = mb.bank_id
+			LEFT JOIN cimplrcorpsaas.bank_statements bs ON bs.bank_statement_id = s.bankstatementid
 			LEFT JOIN LATERAL (
 				SELECT processing_status, requested_by, requested_at, checker_by, checker_at ,reason
 				FROM auditactionbankstatement ab
@@ -1082,6 +1084,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WithdrawalAmount *float64   `json:"withdrawalamount"`
 			DepositAmount    *float64   `json:"depositamount"`
 			ModeOfTxn        string     `json:"modeoftransaction"`
+			UploadLink       string     `json:"upload_link"`
 			EntityName       string     `json:"entity_name"`
 			BankName         string     `json:"bank_name"`
 			ProcessingStatus string     `json:"processing_status"`
@@ -1125,7 +1128,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var rrow Row
 			// scan nullable strings into pointers
-			var desc, branch, ifsc, stmtPeriod, chequeRef, modeOfTxn, entName, bankName, procStatus, reqBy, chkBy *string
+			var desc, branch, ifsc, stmtPeriod, chequeRef, modeOfTxn, uploadLink, entName, bankName, procStatus, reqBy, chkBy *string
 			var isDeleted *bool
 			var reasonRaw *string
 			// DB-backed old_* scan targets
@@ -1177,6 +1180,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&rrow.WithdrawalAmount,
 				&rrow.DepositAmount,
 				&modeOfTxn,
+				&uploadLink,
 				&entName,
 				&bankName,
 				&procStatus,
@@ -1219,6 +1223,11 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				rrow.ModeOfTxn = *modeOfTxn
 			} else {
 				rrow.ModeOfTxn = ""
+			}
+			if uploadLink != nil {
+				rrow.UploadLink = *uploadLink
+			} else {
+				rrow.UploadLink = ""
 			}
 			if entName != nil {
 				rrow.EntityName = *entName
