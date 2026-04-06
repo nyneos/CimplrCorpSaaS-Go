@@ -22,7 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
+func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/investment/health", func(w http.ResponseWriter, r *http.Request) {
@@ -179,8 +179,8 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
-	log.Println("Investment Service started on :7143")
-	err := http.ListenAndServe(":7143", mux)
+	log.Printf("Investment Service started on :%s", port)
+	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("Investment service failed: %v", err)
 	}

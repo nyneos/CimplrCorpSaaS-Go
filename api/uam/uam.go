@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartUAMService(db *sql.DB) {
+func StartUAMService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
 
 	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
@@ -88,8 +88,8 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/permissions/get-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
-	log.Println("UAM Service started on :5143")
-	err := http.ListenAndServe(":5143", mux)
+	log.Printf("UAM Service started on :%s", port)
+	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("UAM Service failed: %v", err)
 	}

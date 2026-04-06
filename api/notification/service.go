@@ -3,6 +3,7 @@ package notification
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,7 +23,20 @@ func (s *NotificationService) Name() string {
 }
 
 func (s *NotificationService) Start() error {
-	go StartNotificationService(s.pool, s.db)
+	port := "9111"
+	if s.config != nil {
+		if v, ok := s.config["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartNotificationService(s.pool, s.db, port)
 	return nil
 }
 

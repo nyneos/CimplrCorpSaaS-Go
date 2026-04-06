@@ -22,14 +22,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartCashService(db *sql.DB) {
+func StartCashService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
+	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
@@ -200,8 +200,8 @@ func StartCashService(db *sql.DB) {
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))
 	})
-	log.Println("Cash Service started on :6143")
-	err = http.ListenAndServe(":6143", mux)
+	log.Printf("Cash Service started on :%s", port)
+	err = http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("Cash Service failed: %v", err)
 	}

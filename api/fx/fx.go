@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartFXService(db *sql.DB) {
+func StartFXService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fx/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("FX Service is active"))
@@ -26,10 +26,10 @@ func StartFXService(db *sql.DB) {
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
+	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	if user != "" && pass != "" && host != "" && port != "" && name != "" {
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
 
 		// create a shared pgx pool once for the v91 and prevalidation middleware
 		pgxPool, err := pgxpool.New(context.Background(), dsn)
@@ -262,8 +262,8 @@ func StartFXService(db *sql.DB) {
 	// mux.Handle("/fx/forwards/upload-confirmations-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadForwardConfirmationsMulti(db)))
 	// mux.Handle("/fx/forwards/upload-bank-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
 
-	log.Println("FX Service started on :3143")
-	err := http.ListenAndServe(":3143", mux)
+	log.Printf("FX Service started on :%s", port)
+	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("FX Service failed: %v", err)
 	}

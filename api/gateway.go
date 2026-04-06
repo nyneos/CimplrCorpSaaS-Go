@@ -51,11 +51,13 @@ const (
 	errMethodNotAllowed             = constants.ErrMethodNotAllowed
 )
 
-// stripPathPrefix removes /cimplrapigateway from the request path before routing
-func stripPathPrefix(next http.Handler) http.Handler {
+// stripPathPrefix removes the configured path prefix from the request path before routing.
+// The prefix is passed from services.yaml gateway config (path_prefix key).
+func stripPathPrefix(next http.Handler, pathPrefix string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/cimplrapigateway/") {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/cimplrapigateway")
+		prefix := strings.TrimRight(pathPrefix, "/")
+		if prefix != "" && strings.HasPrefix(r.URL.Path, prefix+"/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
 			if !strings.HasPrefix(r.URL.Path, "/") {
 				r.URL.Path = "/" + r.URL.Path
 			}
@@ -542,7 +544,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 }
 
 // StartGateway starts the API gateway server
-func StartGateway() {
+func StartGateway(port string, pathPrefix string) {
 	mux := http.NewServeMux()
 
 	// Initialize and register the SSE server at /events
@@ -778,13 +780,8 @@ func StartGateway() {
 		w.Write([]byte("404 - Route not found"))
 	})
 
-	log.Println("API Gateway started on :8081")
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-	log.Printf("API Gateway listening on :%s", port)
-	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
+	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
+	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix))))
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
 	var err error

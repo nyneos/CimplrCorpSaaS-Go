@@ -34,14 +34,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartDashService(db *sql.DB) {
+func StartDashService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
+	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
@@ -222,8 +222,8 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/notification/failure-reasons", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetFailureReasons(pgxPool)))
 	mux.Handle("/dash/notification/overview", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
-	log.Println("Dashboard Service started on :4143")
-	err = http.ListenAndServe(":4143", mux)
+	log.Printf("Dashboard Service started on :%s", port)
+	err = http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
