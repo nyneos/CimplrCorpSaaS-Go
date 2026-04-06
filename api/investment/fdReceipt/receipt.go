@@ -1894,10 +1894,6 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 		if req.ReconcileRunID == "" {
 			req.ReconcileRunID = r.URL.Query().Get("reconcile_run_id")
 		}
-		// if req.Limit <= 0 {
-		// 	req.Limit = 50
-		// }
-
 		ctx := r.Context()
 
 		baseSQL := `
@@ -1947,8 +1943,7 @@ func GetReconcileRunStatus(pool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 
-		baseSQL += fmt.Sprintf(" ORDER BY triggered_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
-		args = append(args, req.Limit, req.Offset)
+		baseSQL += " ORDER BY triggered_at DESC"
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
@@ -1999,9 +1994,6 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
 		}
-		// if req.Limit <= 0 {
-		// 	req.Limit = 100
-		// }
 		if req.MatchingBasis == "" {
 			req.MatchingBasis = "BOTH"
 		}
@@ -2077,8 +2069,7 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			argIdx++
 		}
 
-		baseSQL += fmt.Sprintf(" ORDER BY rr.created_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
-		args = append(args, req.Limit, req.Offset)
+		baseSQL += " ORDER BY rr.created_at DESC"
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
