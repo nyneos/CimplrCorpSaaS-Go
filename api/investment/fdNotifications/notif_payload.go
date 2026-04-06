@@ -78,12 +78,15 @@ package fdNotifications
 // ─────────────────────────────────────────────────────────────────────────────
 // TEMPLATE VARIABLES — INTEREST RECEIPT
 // ─────────────────────────────────────────────────────────────────────────────
-// Scalars : Action, ActorEmail, Count, TotalReceiptAmount, ActionAt
+// Scalars : Action, ActorEmail, Count, TotalGrossInterest, TotalNetAmount, ActionAt
 // Lists   :
 //   Receipts        — []map  — receipt_id, fd_id, fd_ref_no, entity_name,
-//                              bank_name, receipt_date, receipt_amount, receipt_type,
-//                              reconciliation_status
-//   ByEntityKPIs    — []map{group_name, count, total_receipt_amount}
+//                              bank_name, receipt_date, period_start, period_end,
+//                              gross_interest_received, tds_amount_deducted, 
+//                              other_charges, net_amount_received, receipt_status,
+//                              reconcile_status, bank_reference_no, narration
+//   ByEntityKPIs    — []map{group_name, count, total_gross_interest}
+//   ByBankKPIs      — []map{group_name, count, total_gross_interest}
 
 import (
 	"context"
@@ -894,15 +897,16 @@ func BuildAccrualNotifPayload(
 
 // ReceiptNotifPayload is the rich notification payload for FD interest receipt events.
 type ReceiptNotifPayload struct {
-	Action              string                   `json:"Action"`
-	ActorEmail          string                   `json:"ActorEmail"`
-	Count               int                      `json:"Count"`
-	TotalReceiptAmount  float64                  `json:"TotalReceiptAmount"`
-	ActionAt            string                   `json:"ActionAt"`
-	Receipts            []map[string]interface{} `json:"Receipts"`
-	ReceiptIDs          []string                 `json:"ReceiptIDs"`
-	ByEntityKPIs        []FDKPIRow               `json:"ByEntityKPIs"`
-	ByBankKPIs          []FDKPIRow               `json:"ByBankKPIs"`
+	Action             string                   `json:"Action"`
+	ActorEmail         string                   `json:"ActorEmail"`
+	Count              int                      `json:"Count"`
+	TotalGrossInterest float64                  `json:"TotalGrossInterest"`
+	TotalNetAmount     float64                  `json:"TotalNetAmount"`
+	ActionAt           string                   `json:"ActionAt"`
+	Receipts           []map[string]interface{} `json:"Receipts"`
+	ReceiptIDs         []string                 `json:"ReceiptIDs"`
+	ByEntityKPIs       []FDKPIRow               `json:"ByEntityKPIs"`
+	ByBankKPIs         []FDKPIRow               `json:"ByBankKPIs"`
 }
 
 // ToMap converts ReceiptNotifPayload to map[string]interface{} for TriggerNotification.
@@ -911,7 +915,8 @@ func (p *ReceiptNotifPayload) ToMap() map[string]interface{} {
 		"Action":             p.Action,
 		"ActorEmail":         p.ActorEmail,
 		"Count":              p.Count,
-		"TotalReceiptAmount": p.TotalReceiptAmount,
+		"TotalGrossInterest": p.TotalGrossInterest,
+		"TotalNetAmount":     p.TotalNetAmount,
 		"ActionAt":           p.ActionAt,
 		"Receipts":           p.Receipts,
 		"ReceiptIDs":         p.ReceiptIDs,
@@ -928,21 +933,46 @@ func fetchReceiptRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 		SELECT
 			r.receipt_id,
 			COALESCE(r.fd_id,'')                                                AS fd_id,
-			COALESCE(m.bank_fd_ref_no,'')                                       AS fd_ref_no,
-			COALESCE(m.entity_name,'')                                          AS entity_name,
-			COALESCE(m.bank_name,'')                                            AS bank_name,
+			COALESCE(r.fd_ref_no,'')                                            AS fd_ref_no,
+			COALESCE(r.entity_id,'')                                            AS entity_id,
+			COALESCE(r.entity_name,'')                                          AS entity_name,
+			COALESCE(r.bank_id,'')                                              AS bank_id,
+			COALESCE(r.bank_name,'')                                            AS bank_name,
 			COALESCE(TO_CHAR(r.receipt_date,'YYYY-MM-DD'),'')                   AS receipt_date,
-			COALESCE(r.receipt_amount,0)                                        AS receipt_amount,
-			COALESCE(r.receipt_type,'')                                         AS receipt_type,
-			COALESCE(r.reconciliation_status,'')                                AS reconciliation_status,
-			COALESCE(r.tds_amount,0)                                            AS tds_amount,
-			COALESCE(r.net_amount,0)                                            AS net_amount,
-			COALESCE(r.bank_reference,'')                                       AS bank_reference,
-			COALESCE(r.remarks,'')                                              AS remarks,
+			COALESCE(TO_CHAR(r.period_start,'YYYY-MM-DD'),'')                   AS period_start,
+			COALESCE(TO_CHAR(r.period_end,'YYYY-MM-DD'),'')                     AS period_end,
+			COALESCE(r.gross_interest_received,0)                               AS gross_interest_received,
+			COALESCE(r.tds_amount_deducted,0)                                   AS tds_amount_deducted,
+			COALESCE(r.other_charges,0)                                         AS other_charges,
+			COALESCE(r.net_amount_received,0)                                   AS net_amount_received,
+			COALESCE(r.currency,'INR')                                          AS currency,
+			COALESCE(r.bank_reference_no,'')                                    AS bank_reference_no,
+			COALESCE(r.narration,'')                                            AS narration,
+			COALESCE(r.receipt_status,'')                                       AS receipt_status,
+			COALESCE(r.reconcile_status,'')                                     AS reconcile_status,
+			COALESCE(r.reconcile_run_id,'')                                     AS reconcile_run_id,
+			COALESCE(r.journal_entry_id,'')                                     AS journal_entry_id,
+			COALESCE(r.is_active,true)                                          AS is_active,
 			COALESCE(TO_CHAR(r.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS created_at,
-			COALESCE(r.created_by,'')                                           AS created_by
-		FROM investment.fd_receipt r
-		LEFT JOIN investment.fd_master m ON m.fd_id = r.fd_id AND COALESCE(m.is_deleted,false)=false
+			COALESCE(r.created_by,'')                                           AS created_by,
+			-- latest audit
+			COALESCE(la.processing_status,'')                                   AS processing_status,
+			COALESCE(la.action_type,'')                                         AS action_type,
+			COALESCE(la.requested_by,'')                                        AS requested_by,
+			COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS requested_at,
+			COALESCE(la.checker_by,'')                                          AS checker_by,
+			COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')        AS checker_at,
+			COALESCE(la.checker_comment,'')                                     AS checker_comment
+		FROM investment.fd_interest_receipt r
+		LEFT JOIN LATERAL (
+			SELECT processing_status, action_type, requested_by, requested_at,
+				   checker_by, checker_at, checker_comment
+			FROM investment.fd_interest_receipt_audit
+			WHERE receipt_id = r.receipt_id
+			ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),
+							  COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
+			LIMIT 1
+		) la ON true
 		WHERE r.receipt_id IN (%s)
 		  AND COALESCE(r.is_deleted,false) = false
 		ORDER BY r.receipt_date DESC
@@ -971,7 +1001,7 @@ func fetchReceiptRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]
 }
 
 // BuildReceiptNotifPayload constructs a rich notification payload for receipt events.
-// Pass action = "POST" | "RECONCILE" | "REJECT".
+// Pass action = "CREATE" | "UPDATE" | "APPROVE" | "REJECT" | "POST_JOURNAL" | "RECONCILE".
 func BuildReceiptNotifPayload(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -998,8 +1028,8 @@ func BuildReceiptNotifPayload(
 		return p
 	}
 	p.Receipts = rows
-	p.ByEntityKPIs = computeKPIs(rows, "entity_name", "receipt_amount")
-	p.ByBankKPIs = computeKPIs(rows, "bank_name", "receipt_amount")
+	p.ByEntityKPIs = computeKPIs(rows, "entity_name", "gross_interest_received")
+	p.ByBankKPIs = computeKPIs(rows, "bank_name", "gross_interest_received")
 	seen := map[string]bool{}
 	ids := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -1007,7 +1037,8 @@ func BuildReceiptNotifPayload(
 			seen[id] = true
 			ids = append(ids, id)
 		}
-		p.TotalReceiptAmount += fdAnyToFloat64(row["receipt_amount"])
+		p.TotalGrossInterest += fdAnyToFloat64(row["gross_interest_received"])
+		p.TotalNetAmount += fdAnyToFloat64(row["net_amount_received"])
 	}
 	p.ReceiptIDs = ids
 	return p

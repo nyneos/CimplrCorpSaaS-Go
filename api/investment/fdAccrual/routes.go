@@ -104,26 +104,30 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 	)
 	mux.Handle(
 		"/investment/fd/accrual/schedule/all",
-		mid(http.HandlerFunc(GetScheduleConfigs(pool))),
+		mid(http.HandlerFunc(GetScheduleConfigsWithAudit(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/detail",
+		mid(http.HandlerFunc(GetScheduleConfigDetail(pool))),
 	)
 	mux.Handle(
 		"/investment/fd/accrual/schedule/disable",
 		mid(http.HandlerFunc(DisableSchedule(pool))),
 	)
 	mux.Handle(
-			"/investment/fd/accrual/schedule/enable",
-			mid(http.HandlerFunc(EnableSchedule(pool))),
-		)
-		mux.Handle(
-			"/investment/fd/accrual/schedule/approve",
-			mid(http.HandlerFunc(ApproveAccrualSchedule(pool))),
-		)
-		mux.Handle(
-			"/investment/fd/accrual/schedule/reject",
-			mid(http.HandlerFunc(RejectAccrualSchedule(pool))),
-		)
-		mux.Handle(
-			"/investment/fd/accrual/schedule/delete",
-			mid(http.HandlerFunc(DeleteScheduleConfig(pool))),
-		)
+		"/investment/fd/accrual/schedule/enable",
+		mid(http.HandlerFunc(EnableSchedule(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/approve",
+		mid(http.HandlerFunc(ApproveAccrualSchedule(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/reject",
+		mid(http.HandlerFunc(RejectAccrualSchedule(pool))),
+	)
+	mux.Handle(
+		"/investment/fd/accrual/schedule/delete",
+		mid(http.HandlerFunc(DeleteScheduleConfig(pool))),
+	)
 }

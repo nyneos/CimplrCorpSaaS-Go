@@ -148,6 +148,16 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Create audit entry
+		_, auditErr := pool.Exec(ctx, `
+			INSERT INTO investment.fd_tds_receipt_audit (
+				tds_id, action_type, processing_status, requested_by, requested_at
+			) VALUES ($1, 'CREATE', 'PENDING_APPROVAL', $2, now())`, tdsID, userEmail)
+		if auditErr != nil {
+			api.LogError("[TDSRegister] Audit insert failed for %s: %v", tdsID, auditErr)
+			// Don't fail the request — audit is non-critical for workbench entries
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,

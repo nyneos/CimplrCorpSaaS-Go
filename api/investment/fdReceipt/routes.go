@@ -29,8 +29,13 @@ func RegisterFDReceiptRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		mid(http.HandlerFunc(DeleteReceipt(pool))))
 	mux.Handle("/investment/fd/receipt/all",
 		mid(http.HandlerFunc(GetReceiptsWithAudit(pool))))
+	// Approved-only list views
+	mux.Handle("/investment/fd/receipt/approved-active",
+		mid(http.HandlerFunc(GetApprovedActiveReceipts(pool))))
 	mux.Handle("/investment/fd/receipt/tds/all",
 		mid(http.HandlerFunc(GetTDSReceiptsAll(pool))))
+	mux.Handle("/investment/fd/receipt/tds/approved-active",
+		mid(http.HandlerFunc(GetApprovedActiveTDS(pool))))
 	mux.Handle("/investment/fd/receipt/detail",
 		mid(http.HandlerFunc(GetReceiptDetail(pool))))
 	mux.Handle("/investment/fd/receipt/audit",

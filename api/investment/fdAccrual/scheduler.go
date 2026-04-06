@@ -890,3 +890,317 @@ func joinStrings(parts []string, sep string) string {
 	}
 	return result
 }
+
+// ─── NEW: GetScheduleConfigsWithAudit ────────────────────────────────────────
+// Enhanced version that includes audit trail and latest action details
+func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			EntityID string `json:"entity_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		ctx := r.Context()
+		
+		// Main query with LATERAL join for latest audit
+		query := `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (a.config_id)
+				a.config_id, a.action_type, a.processing_status,
+				a.requested_by, a.requested_at,
+				a.checker_by, a.checker_at, a.checker_comment
+			FROM investment.fd_accrual_schedule_config_audit a
+			ORDER BY a.config_id,
+				GREATEST(
+					COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+					COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+				) DESC
+		)
+		SELECT
+			c.config_id,
+			COALESCE(c.entity_id,'')                    AS entity_id,
+			COALESCE(c.entity_name,'')                  AS entity_name,
+			c.schedule_frequency,
+			COALESCE(c.run_day_of_month,1)              AS run_day_of_month,
+			COALESCE(c.default_bank_id_filter,'')       AS default_bank_id_filter,
+			COALESCE(c.default_fd_status_filter,'ACTIVE') AS default_fd_status_filter,
+			c.default_run_mode,
+			c.auto_submit_for_approval,
+			COALESCE(c.accrual_granularity,'MONTHLY')   AS accrual_granularity,
+			COALESCE(c.last_run_id,'')                  AS last_run_id,
+			COALESCE(c.last_run_status,'')              AS last_run_status,
+			c.last_run_at,
+			c.next_run_at,
+			c.is_active,
+			c.created_at,
+			COALESCE(c.created_by,'')                   AS created_by,
+			c.updated_at,
+			COALESCE(c.updated_by,'')                   AS updated_by,
+			-- Audit fields
+			COALESCE(l.action_type,'')                  AS audit_action_type,
+			COALESCE(l.processing_status,'')            AS audit_processing_status,
+			COALESCE(l.requested_by,'')                 AS audit_requested_by,
+			l.requested_at                              AS audit_requested_at,
+			COALESCE(l.checker_by,'')                   AS audit_checker_by,
+			l.checker_at                                AS audit_checker_at,
+			COALESCE(l.checker_comment,'')              AS audit_checker_comment,
+			-- Stats: count of runs created by this schedule
+			(SELECT COUNT(*) FROM investment.fd_accrual_run r
+			 WHERE r.entity_id = c.entity_id
+			   AND r.created_by = 'SCHEDULER'
+			   AND r.run_type LIKE 'SCHEDULED_%') AS total_runs_created
+		FROM investment.fd_accrual_schedule_config c
+		LEFT JOIN latest_audit l ON l.config_id = c.config_id
+		WHERE 1=1`
+		
+		args := []interface{}{}
+		argIdx := 1
+		
+		if req.EntityID != "" {
+			query += fmt.Sprintf(" AND c.entity_id = $%d", argIdx)
+			args = append(args, req.EntityID)
+			argIdx++
+		}
+		query += " ORDER BY c.created_at DESC"
+
+		rows, err := pgxPool.Query(ctx, query, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		configs := make([]map[string]interface{}, 0)
+		fields := rows.FieldDescriptions()
+		for rows.Next() {
+			vals, _ := rows.Values()
+			row := make(map[string]interface{}, len(fields))
+			for i, f := range fields {
+				if vals[i] == nil {
+					row[string(f.Name)] = ""
+				} else {
+					row[string(f.Name)] = vals[i]
+				}
+			}
+			configs = append(configs, row)
+		}
+		if err := rows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			return
+		}
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"count":   len(configs),
+			"configs": configs,
+		})
+	}
+}
+
+// ─── NEW: GetScheduleConfigDetail ────────────────────────────────────────────
+// Comprehensive detail view showing config + all runs + aggregated execution data
+func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			ConfigID string `json:"config_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.ConfigID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfigIDRequired)
+			return
+		}
+
+		ctx := r.Context()
+		
+		// ── 1. Config base data with audit ──────────────────────────────────
+		var configData map[string]interface{}
+		configRow := pgxPool.QueryRow(ctx, `
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (a.config_id)
+					a.config_id, a.action_type, a.processing_status,
+					a.requested_by, a.requested_at,
+					a.checker_by, a.checker_at, a.checker_comment
+				FROM investment.fd_accrual_schedule_config_audit a
+				WHERE a.config_id = $1
+				ORDER BY a.config_id,
+					GREATEST(
+						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+					) DESC
+			)
+			SELECT
+				c.config_id,
+				COALESCE(c.entity_id,''),
+				COALESCE(c.entity_name,''),
+				c.schedule_frequency,
+				c.run_day_of_month,
+				COALESCE(c.default_bank_id_filter,''),
+				COALESCE(c.default_fd_status_filter,''),
+				c.default_run_mode,
+				c.auto_submit_for_approval,
+				COALESCE(c.accrual_granularity,''),
+				COALESCE(c.last_run_id,''),
+				COALESCE(c.last_run_status,''),
+				c.last_run_at,
+				c.next_run_at,
+				c.is_active,
+				c.created_at,
+				COALESCE(c.created_by,''),
+				c.updated_at,
+				COALESCE(c.updated_by,''),
+				COALESCE(l.action_type,''),
+				COALESCE(l.processing_status,''),
+				COALESCE(l.requested_by,''),
+				l.requested_at,
+				COALESCE(l.checker_by,''),
+				l.checker_at,
+				COALESCE(l.checker_comment,'')
+			FROM investment.fd_accrual_schedule_config c
+			LEFT JOIN latest_audit l ON l.config_id = c.config_id
+			WHERE c.config_id = $1`, req.ConfigID)
+		
+		var configID, entityID, entityName, scheduleFreq, bankFilter, fdFilter, runMode, granularity string
+		var lastRunID, lastRunStatus, createdBy, updatedBy string
+		var auditAction, auditStatus, auditReqBy, auditChkBy, auditComment string
+		var runDay int
+		var autoSubmit, isActive bool
+		var lastRunAt, nextRunAt, createdAt, updatedAt, auditReqAt, auditChkAt interface{}
+		
+		if err := configRow.Scan(
+			&configID, &entityID, &entityName, &scheduleFreq, &runDay,
+			&bankFilter, &fdFilter, &runMode, &autoSubmit, &granularity,
+			&lastRunID, &lastRunStatus, &lastRunAt, &nextRunAt,
+			&isActive, &createdAt, &createdBy, &updatedAt, &updatedBy,
+			&auditAction, &auditStatus, &auditReqBy, &auditReqAt,
+			&auditChkBy, &auditChkAt, &auditComment,
+		); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "Schedule config not found: "+err.Error())
+			return
+		}
+		
+		configData = map[string]interface{}{
+			"config_id":                 configID,
+			"entity_id":                 entityID,
+			"entity_name":               entityName,
+			"schedule_frequency":        scheduleFreq,
+			"run_day_of_month":          runDay,
+			"default_bank_id_filter":    bankFilter,
+			"default_fd_status_filter":  fdFilter,
+			"default_run_mode":          runMode,
+			"auto_submit_for_approval":  autoSubmit,
+			"accrual_granularity":       granularity,
+			"last_run_id":               lastRunID,
+			"last_run_status":           lastRunStatus,
+			"last_run_at":               lastRunAt,
+			"next_run_at":               nextRunAt,
+			"is_active":                 isActive,
+			"created_at":                createdAt,
+			"created_by":                createdBy,
+			"updated_at":                updatedAt,
+			"updated_by":                updatedBy,
+			"audit_action_type":         auditAction,
+			"audit_processing_status":   auditStatus,
+			"audit_requested_by":        auditReqBy,
+			"audit_requested_at":        auditReqAt,
+			"audit_checker_by":          auditChkBy,
+			"audit_checker_at":          auditChkAt,
+			"audit_checker_comment":     auditComment,
+		}
+
+		// ── 2. All runs created by this schedule ────────────────────────────
+		runsRows, err := pgxPool.Query(ctx, `
+			SELECT
+				r.run_id,
+				r.run_type,
+				r.run_mode,
+				r.run_status,
+				r.accrual_period_start,
+				r.accrual_period_end,
+				COALESCE(r.financial_period,''),
+				COALESCE(r.fds_in_scope,0),
+				COALESCE(r.fds_calculated,0),
+				COALESCE(r.fds_failed,0),
+				COALESCE(r.total_interest_accrued,0),
+				COALESCE(r.total_tds_deducted,0),
+				r.created_at,
+				r.submitted_at,
+				r.posting_completed_at,
+				(SELECT COUNT(*) FROM investment.fd_accrual_ledger l
+				 WHERE l.run_id = r.run_id AND COALESCE(l.is_deleted,false) = false) AS ledger_count,
+				(SELECT COUNT(*) FROM investment.fd_accrual_validation_finding f
+				 WHERE f.run_id = r.run_id) AS findings_count,
+				(SELECT COUNT(*) FROM investment.fd_accrual_exception e
+				 WHERE e.run_id = r.run_id AND COALESCE(e.is_deleted,false) = false) AS exceptions_count
+			FROM investment.fd_accrual_run r
+			WHERE r.entity_id = $1
+			  AND r.created_by = 'SCHEDULER'
+			  AND r.run_type LIKE 'SCHEDULED_%'
+			  AND COALESCE(r.is_deleted,false) = false
+			ORDER BY r.created_at DESC`, entityID)
+		
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Runs query failed: "+err.Error())
+			return
+		}
+		defer runsRows.Close()
+		
+		runs := make([]map[string]interface{}, 0)
+		runsFields := runsRows.FieldDescriptions()
+		for runsRows.Next() {
+			vals, _ := runsRows.Values()
+			row := make(map[string]interface{}, len(runsFields))
+			for i, f := range runsFields {
+				if vals[i] == nil {
+					row[string(f.Name)] = ""
+				} else {
+					row[string(f.Name)] = vals[i]
+				}
+			}
+			runs = append(runs, row)
+		}
+
+		// ── 3. Global execution stats for this schedule ─────────────────────
+		var globalStats map[string]interface{}
+		var totalRuns, totalLedgers, totalFindings, totalExceptions int
+		var totalInterest, totalTDS float64
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT
+				COUNT(DISTINCT r.run_id),
+				COALESCE(SUM(r.fds_calculated),0),
+				COALESCE(SUM(r.total_interest_accrued),0),
+				COALESCE(SUM(r.total_tds_deducted),0),
+				(SELECT COUNT(*) FROM investment.fd_accrual_validation_finding f
+				 JOIN investment.fd_accrual_run r2 ON r2.run_id = f.run_id
+				 WHERE r2.entity_id = $1 AND r2.created_by = 'SCHEDULER'),
+				(SELECT COUNT(*) FROM investment.fd_accrual_exception e
+				 JOIN investment.fd_accrual_run r3 ON r3.run_id = e.run_id
+				 WHERE r3.entity_id = $1 AND r3.created_by = 'SCHEDULER'
+				   AND COALESCE(e.is_deleted,false) = false)
+			FROM investment.fd_accrual_run r
+			WHERE r.entity_id = $1
+			  AND r.created_by = 'SCHEDULER'
+			  AND COALESCE(r.is_deleted,false) = false`, entityID,
+		).Scan(&totalRuns, &totalLedgers, &totalInterest, &totalTDS, &totalFindings, &totalExceptions)
+		
+		globalStats = map[string]interface{}{
+			"total_runs":            totalRuns,
+			"total_ledgers":         totalLedgers,
+			"total_interest":        totalInterest,
+			"total_tds":             totalTDS,
+			"total_findings":        totalFindings,
+			"total_exceptions":      totalExceptions,
+		}
+
+		// ── 4. Build complete response ──────────────────────────────────────
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"config":        configData,
+			"runs":          runs,
+			"runs_count":    len(runs),
+			"global_stats":  globalStats,
+		})
+	}
+}

@@ -732,6 +732,27 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// Step 2b: Approve TDS audit rows for these receipts
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_tds_receipt_audit
+			SET processing_status='APPROVED', checker_by=$1,
+			    checker_at=now(), checker_comment=$2
+			WHERE receipt_id=ANY($3) AND processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
+			return
+		}
+
+		// Step 2c: Update TDS status to APPROVED
+		_, err = tx.Exec(ctx, `
+			UPDATE investment.fd_tds_receipt
+			SET tds_status='APPROVED'
+			WHERE receipt_id=ANY($1) AND tds_status='CAPTURED'`, req.ReceiptIDs)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "TDS status update failed: "+err.Error())
+			return
+		}
+
 		// Step 3: Flip is_deleted for approved DELETEs
 		_, err = tx.Exec(ctx, `
 			UPDATE investment.fd_interest_receipt SET is_deleted=true
@@ -1055,6 +1076,208 @@ WHERE r.is_deleted = false`
 	}
 }
 
+// GetApprovedActiveReceipts returns receipts whose latest audit row is APPROVED
+// Useful for listing receipts that have completed approval and are active.
+func GetApprovedActiveReceipts(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			EntityID string `json:"entity_id"`
+			FDID     string `json:"fd_id"`
+			BankID   string `json:"bank_id"`
+		}
+		// Accept filters from either query-string or JSON body
+		_ = json.NewDecoder(r.Body).Decode(&req) // ignore error; fall back to query params
+		if req.UserID == "" {
+			req.UserID = r.URL.Query().Get("user_id")
+		}
+		if req.EntityID == "" {
+			req.EntityID = r.URL.Query().Get("entity_id")
+		}
+		if req.FDID == "" {
+			req.FDID = r.URL.Query().Get("fd_id")
+		}
+		if req.BankID == "" {
+			req.BankID = r.URL.Query().Get("bank_id")
+		}
+
+		ctx := r.Context()
+		baseSQL := `
+WITH latest_audit AS (
+  SELECT DISTINCT ON (a.receipt_id)
+	a.receipt_id, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.processing_status
+  FROM investment.fd_interest_receipt_audit a
+  WHERE a.processing_status = 'APPROVED'
+  ORDER BY a.receipt_id,
+	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+)
+SELECT
+  r.receipt_id,
+  COALESCE(r.fd_id,'')                AS fd_id,
+  COALESCE(r.fd_ref_no,'')            AS fd_ref_no,
+  COALESCE(r.entity_id,'')            AS entity_id,
+  COALESCE(r.entity_name,'')          AS entity_name,
+  COALESCE(r.bank_id,'')              AS bank_id,
+  COALESCE(r.bank_name,'')            AS bank_name,
+  TO_CHAR(r.receipt_date,'YYYY-MM-DD') AS receipt_date,
+  COALESCE(r.gross_interest_received,0) AS gross_interest_received,
+  COALESCE(r.tds_amount_deducted,0)    AS tds_amount_deducted,
+  COALESCE(r.net_amount_received,0)    AS net_amount_received,
+  COALESCE(r.receipt_status,'')        AS receipt_status,
+  COALESCE(l.requested_by,'')          AS requested_by,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(l.checker_by,'')            AS checker_by,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(l.processing_status,'')     AS processing_status
+FROM investment.fd_interest_receipt r
+LEFT JOIN latest_audit l ON l.receipt_id = r.receipt_id
+WHERE r.is_deleted = false AND l.processing_status = 'APPROVED'`
+
+		args := []interface{}{}
+		argIdx := 1
+		if req.EntityID != "" {
+			baseSQL += fmt.Sprintf(" AND r.entity_id = $%d", argIdx)
+			args = append(args, req.EntityID)
+			argIdx++
+		}
+		if req.FDID != "" {
+			baseSQL += fmt.Sprintf(" AND r.fd_id = $%d", argIdx)
+			args = append(args, req.FDID)
+			argIdx++
+		}
+		if req.BankID != "" {
+			baseSQL += fmt.Sprintf(" AND r.bank_id = $%d", argIdx)
+			args = append(args, req.BankID)
+			argIdx++
+		}
+
+		baseSQL += ` ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC`
+
+		rows, err := pool.Query(ctx, baseSQL, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out, err := rowsToMapSlice(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			return
+		}
+		if out == nil {
+			out = []map[string]interface{}{}
+		}
+
+		// Return consistent list shape: { success, count, rows }
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"count":   len(out),
+			"rows":    out,
+		})
+	}
+}
+
+// GetApprovedActiveTDS returns TDS receipts whose latest audit row is APPROVED
+func GetApprovedActiveTDS(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID   string `json:"user_id"`
+			EntityID string `json:"entity_id"`
+			FDID     string `json:"fd_id"`
+			BankID   string `json:"bank_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.UserID == "" {
+			req.UserID = r.URL.Query().Get("user_id")
+		}
+		if req.EntityID == "" {
+			req.EntityID = r.URL.Query().Get("entity_id")
+		}
+		if req.FDID == "" {
+			req.FDID = r.URL.Query().Get("fd_id")
+		}
+		if req.BankID == "" {
+			req.BankID = r.URL.Query().Get("bank_id")
+		}
+
+		ctx := r.Context()
+		baseSQL := `
+WITH latest_audit AS (
+  SELECT DISTINCT ON (a.tds_id)
+	a.tds_id, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.processing_status
+  FROM investment.fd_tds_receipt_audit a
+  WHERE a.processing_status = 'APPROVED'
+  ORDER BY a.tds_id,
+	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+)
+SELECT
+  t.tds_id,
+  COALESCE(t.fd_id,'')                AS fd_id,
+  COALESCE(t.fd_ref_no,'')            AS fd_ref_no,
+  COALESCE(t.entity_id,'')            AS entity_id,
+  COALESCE(m.entity_name,'')          AS entity_name,
+  COALESCE(t.bank_id,'')              AS bank_id,
+  COALESCE(m.bank_name,'')            AS bank_name,
+  TO_CHAR(t.deduction_date,'YYYY-MM-DD') AS deduction_date,
+  COALESCE(t.tds_deducted_actual,0)    AS actual_amount,
+  COALESCE(t.tds_status,'')            AS tds_status,
+  COALESCE(l.requested_by,'')          AS requested_by,
+  COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+  COALESCE(l.checker_by,'')            AS checker_by,
+  COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+  COALESCE(l.processing_status,'')     AS processing_status
+FROM investment.fd_tds_receipt t
+LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND COALESCE(m.is_deleted,false) = false
+LEFT JOIN latest_audit l ON l.tds_id = t.tds_id
+WHERE t.is_deleted = false AND l.processing_status = 'APPROVED'`
+
+		args := []interface{}{}
+		argIdx := 1
+		if req.EntityID != "" {
+			baseSQL += fmt.Sprintf(" AND t.entity_id = $%d", argIdx)
+			args = append(args, req.EntityID)
+			argIdx++
+		}
+		if req.FDID != "" {
+			baseSQL += fmt.Sprintf(" AND t.fd_id = $%d", argIdx)
+			args = append(args, req.FDID)
+			argIdx++
+		}
+		if req.BankID != "" {
+			baseSQL += fmt.Sprintf(" AND t.bank_id = $%d", argIdx)
+			args = append(args, req.BankID)
+			argIdx++
+		}
+
+		baseSQL += ` ORDER BY GREATEST(COALESCE(l.requested_at,'1970-01-01'::timestamptz), COALESCE(l.checker_at,'1970-01-01'::timestamptz)) DESC`
+
+		rows, err := pool.Query(ctx, baseSQL, args...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer rows.Close()
+
+		out, err := rowsToMapSlice(rows)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
+			return
+		}
+		if out == nil {
+			out = []map[string]interface{}{}
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"count":   len(out),
+			"rows":    out,
+		})
+	}
+}
+
 // ─── HANDLER 7b: GetTDSReceiptsAll ───────────────────────────────────────────
 // POST /investment/fd/receipt/tds/all
 // Returns ALL TDS receipts (any status) enriched with fd_master data.
@@ -1085,38 +1308,54 @@ func GetTDSReceiptsAll(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		baseSQL := `
 SELECT
-  t.tds_id,
-  COALESCE(t.receipt_id,'')              AS receipt_id,
-  t.fd_id,
-  COALESCE(t.fd_ref_no,'')               AS fd_ref_no,
-  t.entity_id,
-  COALESCE(t.entity_name, m.entity_name, t.entity_id, '') AS entity_name,
-  COALESCE(t.bank_id,'')                 AS bank_id,
-  COALESCE(t.bank_name, m.bank_name, '') AS bank_name,
-  COALESCE(m.principal_amount, 0)        AS fd_principal_amount,
-  COALESCE(m.interest_rate, 0)           AS fd_interest_rate,
-  COALESCE(m.maturity_date::text,'')     AS fd_maturity_date,
-  COALESCE(m.fd_status,'')               AS fd_status,
-  TO_CHAR(t.period_start,'YYYY-MM-DD')   AS period_start,
-  TO_CHAR(t.period_end,'YYYY-MM-DD')     AS period_end,
-  TO_CHAR(t.deduction_date,'YYYY-MM-DD') AS deduction_date,
-  COALESCE(t.gross_interest, 0)          AS gross_interest,
-  COALESCE(t.tds_rate_applied, 0)        AS tds_rate_applied,
-  COALESCE(t.tds_expected, 0)            AS tds_expected,
-  COALESCE(t.tds_deducted_actual, 0)     AS tds_deducted_actual,
-  COALESCE(t.tds_variance, 0)            AS tds_variance,
-  COALESCE(t.tds_section,'')             AS tds_section,
-  COALESCE(t.tds_plan_id,'')             AS tds_plan_id,
-  COALESCE(t.has_pan, false)             AS has_pan,
-  COALESCE(t.tds_status,'CAPTURED')      AS tds_status,
-  COALESCE(t.exception_raised, false)    AS exception_raised,
-  COALESCE(t.reconcile_status,'')        AS reconcile_status,
-  COALESCE(t.reconcile_run_id,'')        AS reconcile_run_id,
-  COALESCE(t.ingestion_source,'')        AS ingestion_source,
-  COALESCE(t.is_active, true)            AS is_active,
-  TO_CHAR(t.created_at,'YYYY-MM-DD HH24:MI:SS') AS created_at
+	t.tds_id,
+	COALESCE(t.receipt_id,'')              AS receipt_id,
+	t.fd_id,
+	COALESCE(t.fd_ref_no,'')               AS fd_ref_no,
+	t.entity_id,
+	COALESCE(m.entity_name, t.entity_id, '') AS entity_name,
+	COALESCE(t.bank_id,'')                 AS bank_id,
+	COALESCE(m.bank_name, t.bank_id, '')   AS bank_name,
+	COALESCE(m.principal_amount, 0)        AS fd_principal_amount,
+	COALESCE(m.interest_rate, 0)           AS fd_interest_rate,
+	COALESCE(m.maturity_date::text,'')     AS fd_maturity_date,
+	COALESCE(m.fd_status,'')               AS fd_status,
+	TO_CHAR(t.period_start,'YYYY-MM-DD')   AS period_start,
+	TO_CHAR(t.period_end,'YYYY-MM-DD')     AS period_end,
+	TO_CHAR(t.deduction_date,'YYYY-MM-DD') AS deduction_date,
+	COALESCE(t.gross_interest, 0)          AS gross_interest,
+	COALESCE(t.tds_rate_applied, 0)        AS tds_rate_applied,
+	COALESCE(t.tds_expected, 0)            AS tds_expected,
+	COALESCE(t.tds_deducted_actual, 0)     AS tds_deducted_actual,
+	COALESCE(t.tds_variance, 0)            AS tds_variance,
+	COALESCE(t.tds_section,'')             AS tds_section,
+	COALESCE(t.tds_plan_id,'')             AS tds_plan_id,
+	COALESCE(t.has_pan, false)             AS has_pan,
+	COALESCE(t.tds_status,'CAPTURED')      AS tds_status,
+	COALESCE(t.exception_raised, false)    AS exception_raised,
+	COALESCE(t.reconcile_status,'')        AS reconcile_status,
+	COALESCE(t.reconcile_run_id,'')        AS reconcile_run_id,
+	COALESCE(t.ingestion_source,'')        AS ingestion_source,
+	COALESCE(t.is_active, true)            AS is_active,
+	-- latest audit snapshot
+	COALESCE(la.processing_status,'')      AS processing_status,
+	COALESCE(la.action_type,'')            AS action_type,
+	COALESCE(la.requested_by,'')           AS requested_by,
+	COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+	COALESCE(la.checker_by,'')             AS checker_by,
+	COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+	COALESCE(la.checker_comment,'')        AS checker_comment,
+	COALESCE(la.reason,'')                 AS reason
 FROM investment.fd_tds_receipt t
 LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+LEFT JOIN LATERAL (
+	SELECT processing_status, action_type, requested_by, requested_at,
+				 checker_by, checker_at, checker_comment, reason
+	FROM investment.fd_tds_receipt_audit a
+	WHERE a.tds_id = t.tds_id
+	ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
+	LIMIT 1
+) la ON true
 WHERE t.is_deleted = false`
 
 		args := []interface{}{}
@@ -1152,7 +1391,7 @@ WHERE t.is_deleted = false`
 			args = append(args, req.ToDate)
 			argIdx++
 		}
-		baseSQL += " ORDER BY t.deduction_date DESC, t.created_at DESC"
+		baseSQL += " ORDER BY t.deduction_date  DESC"
 
 		rows, err := pool.Query(ctx, baseSQL, args...)
 		if err != nil {
@@ -1849,18 +2088,18 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		type ExceptionLine struct {
-			ExceptionID      string  `json:"exception_id"`
-			ExceptionType    string  `json:"exception_type"`
-			Severity         string  `json:"severity"`
-			ExceptionStatus  string  `json:"exception_status"`
-			ExpectedAmount   float64 `json:"expected_amount"`
-			ReceivedAmount   float64 `json:"received_amount"`
-			VarianceAmount   float64 `json:"variance_amount"`
-			RaisedBy         string  `json:"raised_by"`
-			RaisedAt         string  `json:"raised_at"`
-			ResolvedBy       string  `json:"resolved_by,omitempty"`
-			ResolvedAt       string  `json:"resolved_at,omitempty"`
-			ResolutionRemarks string `json:"resolution_remarks,omitempty"`
+			ExceptionID       string  `json:"exception_id"`
+			ExceptionType     string  `json:"exception_type"`
+			Severity          string  `json:"severity"`
+			ExceptionStatus   string  `json:"exception_status"`
+			ExpectedAmount    float64 `json:"expected_amount"`
+			ReceivedAmount    float64 `json:"received_amount"`
+			VarianceAmount    float64 `json:"variance_amount"`
+			RaisedBy          string  `json:"raised_by"`
+			RaisedAt          string  `json:"raised_at"`
+			ResolvedBy        string  `json:"resolved_by,omitempty"`
+			ResolvedAt        string  `json:"resolved_at,omitempty"`
+			ResolutionRemarks string  `json:"resolution_remarks,omitempty"`
 		}
 
 		type ResultLine struct {

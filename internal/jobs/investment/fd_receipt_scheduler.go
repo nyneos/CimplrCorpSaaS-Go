@@ -65,7 +65,7 @@ func runAutoReconcile(db *pgxpool.Pool) {
 			INSERT INTO investment.fd_receipt_reconcile_run
 			  (reconcile_run_id, entity_id, entity_name, period_start, period_end,
 			   run_status, trigger_mode, triggered_by, triggered_at)
-			VALUES ($1,$2,$3,$4,$5,'RUNNING','AUTO','system',NOW())
+			VALUES ($1,$2,$3,$4,$5,'RUNNING','MANUAL','system',NOW())
 			ON CONFLICT DO NOTHING`,
 			runID, e.EntityID, e.EntityName, e.PeriodStart, e.PeriodEnd,
 		)

@@ -956,8 +956,11 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID   string `json:"user_id"`
-			EntityID string `json:"entity_id"`
+			UserID        string `json:"user_id"`
+			EntityID      string `json:"entity_id"`
+			RunType       string `json:"run_type"`        // filter: MANUAL, SCHEDULED_MONTHLY, SCHEDULED_QUARTERLY, SCHEDULED_YEARLY
+			ScheduleID    string `json:"schedule_id"`     // filter by config_id (gets all runs from that schedule)
+			OnlyScheduled bool   `json:"only_scheduled"`  // if true, show only scheduled runs (any frequency)
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -988,10 +991,36 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_accrual_run r
 			WHERE COALESCE(r.is_deleted, false) = false`
 		args := []interface{}{}
+		argIdx := 1
+
 		if req.EntityID != "" {
-			query += " AND r.entity_id = $1"
+			query += fmt.Sprintf(" AND r.entity_id = $%d", argIdx)
 			args = append(args, req.EntityID)
+			argIdx++
 		}
+
+		if req.RunType != "" {
+			query += fmt.Sprintf(" AND r.run_type = $%d", argIdx)
+			args = append(args, req.RunType)
+			argIdx++
+		}
+
+		if req.OnlyScheduled {
+			query += " AND r.created_by = 'SCHEDULER'"
+		}
+
+		if req.ScheduleID != "" {
+			// Get all runs that match the schedule's entity
+			query += fmt.Sprintf(` AND EXISTS (
+				SELECT 1 FROM investment.fd_accrual_schedule_config sc
+				WHERE sc.config_id = $%d
+				  AND sc.entity_id = r.entity_id
+				  AND r.created_by = 'SCHEDULER'
+			)`, argIdx)
+			args = append(args, req.ScheduleID)
+			argIdx++
+		}
+
 		query += " ORDER BY r.created_at DESC"
 
 		rows, err := pgxPool.Query(ctx, query, args...)
@@ -1087,28 +1116,64 @@ func GetValidationFindings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetExecutionLog(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			RunID  string `json:"run_id"`
+			UserID     string `json:"user_id"`
+			RunID      string `json:"run_id"`      // optional - filter by specific run
+			ScheduleID string `json:"schedule_id"` // optional - filter by schedule config (gets all runs from that schedule)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.RunID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDRequired)
-			return
-		}
 
 		ctx := r.Context()
-		rows, err := pgxPool.Query(ctx, `
-			SELECT log_id, run_id,
-			       COALESCE(fd_id,'') AS fd_id,
-			       log_level, event_type, message,
-			       COALESCE(detail::text,'{}') AS detail,
-			       logged_at
-			FROM investment.fd_accrual_run_execution_log
-			WHERE run_id = $1
-			ORDER BY logged_at`, req.RunID)
+
+		// Build query based on filters provided
+		var query string
+		var args []interface{}
+
+		if req.RunID != "" {
+			// Single run - original behavior
+			query = `
+				SELECT log_id, run_id,
+				       COALESCE(fd_id,'') AS fd_id,
+				       log_level, event_type, message,
+				       COALESCE(detail::text,'{}') AS detail,
+				       logged_at
+				FROM investment.fd_accrual_run_execution_log
+				WHERE run_id = $1
+				ORDER BY logged_at DESC`
+			args = append(args, req.RunID)
+		} else if req.ScheduleID != "" {
+			// All runs from a schedule
+			query = `
+				SELECT el.log_id, el.run_id,
+				       COALESCE(el.fd_id,'') AS fd_id,
+				       el.log_level, el.event_type, el.message,
+				       COALESCE(el.detail::text,'{}') AS detail,
+				       el.logged_at
+				FROM investment.fd_accrual_run_execution_log el
+				JOIN investment.fd_accrual_run r ON r.run_id = el.run_id
+				WHERE r.created_by = 'SCHEDULER'
+				  AND EXISTS (
+					SELECT 1 FROM investment.fd_accrual_schedule_config sc
+					WHERE sc.config_id = $1
+					  AND sc.entity_id = r.entity_id
+				  )
+				ORDER BY el.logged_at DESC`
+			args = append(args, req.ScheduleID)
+		} else {
+			// No filter - dump ALL execution logs across all runs
+			query = `
+				SELECT log_id, run_id,
+				       COALESCE(fd_id,'') AS fd_id,
+				       log_level, event_type, message,
+				       COALESCE(detail::text,'{}') AS detail,
+				       logged_at
+				FROM investment.fd_accrual_run_execution_log
+				ORDER BY logged_at DESC`
+		}
+
+		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
