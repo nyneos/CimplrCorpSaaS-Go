@@ -66,6 +66,12 @@ func RegisterFDReceiptRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		mid(http.HandlerFunc(GetReconcileRunStatus(pool))))
 	mux.Handle("/investment/fd/reconcile/results",
 		mid(http.HandlerFunc(GetReconcileResults(pool))))
+	// /detail → single run: full metadata + enriched result rows (receipt_type, audit, period, exceptions)
+	mux.Handle("/investment/fd/reconcile/detail",
+		mid(http.HandlerFunc(GetReconcileDetail(pool))))
+	// /candidates → feeder API: APPROVED receipts+TDS not yet in any reconcile result (safe to run)
+	mux.Handle("/investment/fd/reconcile/candidates",
+		mid(http.HandlerFunc(GetReconcileCandidates(pool))))
 
 	// ── Exceptions ────────────────────────────────────────────────────────────
 	mux.Handle("/investment/fd/exception/all",

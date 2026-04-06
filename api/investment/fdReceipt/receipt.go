@@ -981,6 +981,7 @@ SELECT
   COALESCE(r.reconcile_run_id,'')      AS reconcile_run_id,
   COALESCE(r.journal_entry_id,'')      AS journal_entry_id,
   COALESCE(r.is_active,true)           AS is_active,
+  'INTEREST'                           AS receipt_type,
   COALESCE(l.processing_status,'')     AS processing_status,
   COALESCE(l.action_type,'')           AS action_type,
   COALESCE(l.audit_id::text,'')        AS audit_id,
@@ -1337,6 +1338,7 @@ SELECT
 	COALESCE(t.reconcile_run_id,'')        AS reconcile_run_id,
 	COALESCE(t.ingestion_source,'')        AS ingestion_source,
 	COALESCE(t.is_active, true)            AS is_active,
+	'TDS'                                  AS receipt_type,
 	-- latest audit snapshot
 	COALESCE(la.processing_status,'')      AS processing_status,
 	COALESCE(la.action_type,'')            AS action_type,
@@ -2224,6 +2226,596 @@ func GetReconcileResults(pool *pgxpool.Pool) http.HandlerFunc {
 			"success": true,
 			"rows":    results,
 			"count":   len(results),
+		})
+	}
+}
+
+// ─── HANDLER 13b: GetReconcileDetail ────────────────────────────────────────
+// POST /investment/fd/reconcile/detail
+// Returns full run metadata + every enriched result row for a given reconcile_run_id.
+// Includes:
+//   - run header: entity, period, trigger info, counters, audit snapshot
+//   - is_rerunnable: false once run_status=COMPLETED or any row has match_status=MATCHED
+//   - per-result: receipt_type (INTEREST/TDS), period dates, audit snapshot,
+//                 fd_master enrichment, cashflows, accrual ledger, exceptions
+
+func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID         string `json:"user_id"`
+			ReconcileRunID string `json:"reconcile_run_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		if req.ReconcileRunID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "reconcile_run_id is required")
+			return
+		}
+		userEmail := resolveUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		// ── 1. Run header ────────────────────────────────────────────────────────
+		type RunHeader struct {
+			ReconcileRunID       string  `json:"reconcile_run_id"`
+			EntityID             string  `json:"entity_id"`
+			EntityName           string  `json:"entity_name"`
+			BankIDFilter         string  `json:"bank_id_filter"`
+			PeriodStart          string  `json:"period_start"`
+			PeriodEnd            string  `json:"period_end"`
+			MatchingBasis        string  `json:"matching_basis"`
+			RunStatus            string  `json:"run_status"`
+			TriggerMode          string  `json:"trigger_mode"`
+			TriggeredBy          string  `json:"triggered_by"`
+			TriggeredAt          string  `json:"triggered_at"`
+			CompletedAt          string  `json:"completed_at"`
+			ErrorMessage         string  `json:"error_message"`
+			InterestProcessed    int     `json:"interest_processed"`
+			InterestMatched      int     `json:"interest_matched"`
+			InterestPartial      int     `json:"interest_partial"`
+			InterestUnmatched    int     `json:"interest_unmatched"`
+			InterestException    int     `json:"interest_exception"`
+			TDSProcessed         int     `json:"tds_processed"`
+			TDSMatched           int     `json:"tds_matched"`
+			TDSPartial           int     `json:"tds_partial"`
+			TDSUnmatched         int     `json:"tds_unmatched"`
+			TDSException         int     `json:"tds_exception"`
+			TotalExpectedInt     float64 `json:"total_expected_interest"`
+			TotalReceivedInt     float64 `json:"total_received_interest"`
+			TotalIntVariance     float64 `json:"total_interest_variance"`
+			TotalExpectedTDS     float64 `json:"total_expected_tds"`
+			TotalReceivedTDS     float64 `json:"total_received_tds"`
+			TotalTDSVariance     float64 `json:"total_tds_variance"`
+			// Derived flag
+			IsRerunnable         bool    `json:"is_rerunnable"`
+		}
+
+		var run RunHeader
+		err := pool.QueryRow(ctx, `
+			SELECT
+				reconcile_run_id,
+				COALESCE(entity_id,'')              AS entity_id,
+				COALESCE(entity_name,'')             AS entity_name,
+				COALESCE(bank_id_filter,'')          AS bank_id_filter,
+				COALESCE(period_start::text,'')      AS period_start,
+				COALESCE(period_end::text,'')        AS period_end,
+				COALESCE(matching_basis,'BOTH')      AS matching_basis,
+				COALESCE(run_status,'')              AS run_status,
+				COALESCE(trigger_mode,'')            AS trigger_mode,
+				COALESCE(triggered_by,'')            AS triggered_by,
+				COALESCE(triggered_at::text,'')      AS triggered_at,
+				COALESCE(completed_at::text,'')      AS completed_at,
+				COALESCE(error_message,'')           AS error_message,
+				COALESCE(interest_processed,0),
+				COALESCE(interest_matched,0),
+				COALESCE(interest_partial,0),
+				COALESCE(interest_unmatched,0),
+				COALESCE(interest_exception,0),
+				COALESCE(tds_processed,0),
+				COALESCE(tds_matched,0),
+				COALESCE(tds_partial,0),
+				COALESCE(tds_unmatched,0),
+				COALESCE(tds_exception,0),
+				COALESCE(total_expected_interest,0),
+				COALESCE(total_received_interest,0),
+				COALESCE(total_interest_variance,0),
+				COALESCE(total_expected_tds,0),
+				COALESCE(total_received_tds,0),
+				COALESCE(total_tds_variance,0)
+			FROM investment.fd_receipt_reconcile_run
+			WHERE reconcile_run_id=$1`, req.ReconcileRunID).Scan(
+			&run.ReconcileRunID, &run.EntityID, &run.EntityName, &run.BankIDFilter,
+			&run.PeriodStart, &run.PeriodEnd, &run.MatchingBasis,
+			&run.RunStatus, &run.TriggerMode, &run.TriggeredBy, &run.TriggeredAt,
+			&run.CompletedAt, &run.ErrorMessage,
+			&run.InterestProcessed, &run.InterestMatched, &run.InterestPartial,
+			&run.InterestUnmatched, &run.InterestException,
+			&run.TDSProcessed, &run.TDSMatched, &run.TDSPartial,
+			&run.TDSUnmatched, &run.TDSException,
+			&run.TotalExpectedInt, &run.TotalReceivedInt, &run.TotalIntVariance,
+			&run.TotalExpectedTDS, &run.TotalReceivedTDS, &run.TotalTDSVariance,
+		)
+		if err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "Reconcile run not found: "+err.Error())
+			return
+		}
+
+		// is_rerunnable = false if COMPLETED or any result row is already MATCHED
+		run.IsRerunnable = run.RunStatus != "COMPLETED" && run.InterestMatched == 0 && run.TDSMatched == 0
+
+		// ── 2. Result rows fully enriched ───────────────────────────────────────
+		resultRows, err := pool.Query(ctx, `
+			SELECT
+				rr.result_id,
+				rr.reconcile_run_id,
+				-- receipt_type flag: INTEREST or TDS
+				rr.result_type                              AS receipt_type,
+				rr.fd_id,
+				COALESCE(m.bank_fd_ref_no, rr.fd_ref_no,'') AS fd_ref_no,
+				rr.entity_id,
+				COALESCE(m.entity_name, rr.entity_id,'')   AS entity_name,
+				COALESCE(rr.bank_id,'')                    AS bank_id,
+				COALESCE(m.bank_name,'')                   AS bank_name,
+				COALESCE(m.principal_amount,0)             AS principal_amount,
+				COALESCE(m.interest_rate,0)                AS interest_rate,
+				COALESCE(m.maturity_date::text,'')         AS maturity_date,
+				COALESCE(m.fd_status,'')                   AS fd_status,
+				-- period dates from result row
+				COALESCE(rr.period_start::text,'')         AS period_start,
+				COALESCE(rr.period_end::text,'')           AS period_end,
+				rr.matching_basis,
+				COALESCE(rr.receipt_id,'')                 AS receipt_id,
+				COALESCE(rr.tds_id,'')                    AS tds_id,
+				COALESCE(rr.expected_amount,0)             AS expected_amount,
+				COALESCE(rr.received_amount,0)             AS received_amount,
+				COALESCE(rr.amount_variance,0)             AS variance,
+				COALESCE(rr.amount_variance_pct,0)         AS variance_pct,
+				rr.match_status,
+				COALESCE(rr.match_type,'')                 AS match_type,
+				COALESCE(rr.has_exception,false)           AS has_exception,
+				COALESCE(rr.exception_id,'')               AS exception_id,
+				COALESCE(rr.created_at::text,'')           AS created_at,
+				-- audit snapshot for the underlying receipt/tds row
+				COALESCE(la.processing_status,'')          AS audit_processing_status,
+				COALESCE(la.action_type,'')                AS audit_action_type,
+				COALESCE(la.requested_by,'')               AS audit_requested_by,
+				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+				COALESCE(la.checker_by,'')                 AS audit_checker_by,
+				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+				COALESCE(la.checker_comment,'')            AS audit_checker_comment,
+				COALESCE(la.reason,'')                     AS audit_reason
+			FROM investment.fd_receipt_reconcile_result rr
+			LEFT JOIN investment.fd_master m ON m.fd_id = rr.fd_id AND m.is_deleted = false
+			LEFT JOIN LATERAL (
+				-- pick audit from the correct audit table based on result_type
+				SELECT processing_status, action_type, requested_by, requested_at,
+				       checker_by, checker_at, checker_comment, reason
+				FROM investment.fd_interest_receipt_audit a
+				WHERE rr.result_type = 'INTEREST' AND a.receipt_id = rr.receipt_id
+				UNION ALL
+				SELECT processing_status, action_type, requested_by, requested_at,
+				       checker_by, checker_at, checker_comment, reason
+				FROM investment.fd_tds_receipt_audit a
+				WHERE rr.result_type = 'TDS' AND a.tds_id = rr.tds_id
+				ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamptz),
+				                  COALESCE(checker_at,'1970-01-01'::timestamptz)) DESC
+				LIMIT 1
+			) la ON true
+			WHERE rr.reconcile_run_id = $1
+			ORDER BY rr.result_type, rr.created_at`, req.ReconcileRunID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer resultRows.Close()
+
+		type ExLine struct {
+			ExceptionID       string  `json:"exception_id"`
+			ExceptionType     string  `json:"exception_type"`
+			Severity          string  `json:"severity"`
+			ExceptionStatus   string  `json:"exception_status"`
+			ExpectedAmount    float64 `json:"expected_amount"`
+			ReceivedAmount    float64 `json:"received_amount"`
+			VarianceAmount    float64 `json:"variance_amount"`
+			RaisedBy          string  `json:"raised_by"`
+			RaisedAt          string  `json:"raised_at"`
+			ResolvedBy        string  `json:"resolved_by"`
+			ResolvedAt        string  `json:"resolved_at"`
+			ResolutionRemarks string  `json:"resolution_remarks"`
+		}
+
+		type ResultRow struct {
+			ResultID             string  `json:"result_id"`
+			ReconcileRunID       string  `json:"reconcile_run_id"`
+			ReceiptType          string  `json:"receipt_type"`
+			FDID                 string  `json:"fd_id"`
+			FdRefNo              string  `json:"fd_ref_no"`
+			EntityID             string  `json:"entity_id"`
+			EntityName           string  `json:"entity_name"`
+			BankID               string  `json:"bank_id"`
+			BankName             string  `json:"bank_name"`
+			PrincipalAmount      float64 `json:"principal_amount"`
+			InterestRate         float64 `json:"interest_rate"`
+			MaturityDate         string  `json:"maturity_date"`
+			FDStatus             string  `json:"fd_status"`
+			PeriodStart          string  `json:"period_start"`
+			PeriodEnd            string  `json:"period_end"`
+			MatchingBasis        string  `json:"matching_basis"`
+			ReceiptID            string  `json:"receipt_id"`
+			TDSID                string  `json:"tds_id"`
+			ExpectedAmount       float64 `json:"expected_amount"`
+			ReceivedAmount       float64 `json:"received_amount"`
+			Variance             float64 `json:"variance"`
+			VariancePct          float64 `json:"variance_pct"`
+			MatchStatus          string  `json:"match_status"`
+			MatchType            string  `json:"match_type"`
+			HasException         bool    `json:"has_exception"`
+			ExceptionID          string  `json:"exception_id"`
+			CreatedAt            string  `json:"created_at"`
+			AuditProcessingStatus string `json:"audit_processing_status"`
+			AuditActionType      string  `json:"audit_action_type"`
+			AuditRequestedBy     string  `json:"audit_requested_by"`
+			AuditRequestedAt     string  `json:"audit_requested_at"`
+			AuditCheckerBy       string  `json:"audit_checker_by"`
+			AuditCheckerAt       string  `json:"audit_checker_at"`
+			AuditCheckerComment  string  `json:"audit_checker_comment"`
+			AuditReason          string  `json:"audit_reason"`
+			Cashflows            []CashflowLine      `json:"cashflows"`
+			AccrualLedger        []AccrualLedgerLine `json:"accrual_ledger"`
+			Exceptions           []ExLine            `json:"exceptions"`
+		}
+
+		var results []ResultRow
+		for resultRows.Next() {
+			var rr ResultRow
+			if e := resultRows.Scan(
+				&rr.ResultID, &rr.ReconcileRunID, &rr.ReceiptType,
+				&rr.FDID, &rr.FdRefNo, &rr.EntityID, &rr.EntityName,
+				&rr.BankID, &rr.BankName, &rr.PrincipalAmount, &rr.InterestRate,
+				&rr.MaturityDate, &rr.FDStatus, &rr.PeriodStart, &rr.PeriodEnd,
+				&rr.MatchingBasis, &rr.ReceiptID, &rr.TDSID,
+				&rr.ExpectedAmount, &rr.ReceivedAmount, &rr.Variance, &rr.VariancePct,
+				&rr.MatchStatus, &rr.MatchType, &rr.HasException, &rr.ExceptionID, &rr.CreatedAt,
+				&rr.AuditProcessingStatus, &rr.AuditActionType,
+				&rr.AuditRequestedBy, &rr.AuditRequestedAt,
+				&rr.AuditCheckerBy, &rr.AuditCheckerAt,
+				&rr.AuditCheckerComment, &rr.AuditReason,
+			); e == nil {
+				rr.Cashflows = []CashflowLine{}
+				rr.AccrualLedger = []AccrualLedgerLine{}
+				rr.Exceptions = []ExLine{}
+				results = append(results, rr)
+			}
+		}
+		resultRows.Close()
+
+		// ── 3. Enrich each result with cashflows + accrual + exceptions ─────────
+		for i := range results {
+			row := &results[i]
+			if row.FDID == "" || row.PeriodStart == "" || row.PeriodEnd == "" {
+				continue
+			}
+			ps, pe := parseDateRange(row.PeriodStart, row.PeriodEnd)
+			forTDS := row.ReceiptType == "TDS"
+			basis := row.MatchingBasis
+			if basis == "" {
+				basis = run.MatchingBasis
+			}
+
+			if basis == "CASHFLOW" || basis == "BOTH" {
+				if cf := loadCashflowsForReceipt(ctx, pool, row.FDID, ps, pe, forTDS); cf != nil {
+					row.Cashflows = cf
+				}
+			}
+			if basis == "ACCRUAL" || basis == "BOTH" {
+				if al := loadAccrualLedgerForReceipt(ctx, pool, row.FDID, ps, pe, forTDS); al != nil {
+					row.AccrualLedger = al
+				}
+			}
+
+			if row.HasException || row.ExceptionID != "" {
+				exRows, exErr := pool.Query(ctx, `
+					SELECT
+						exception_id,
+						COALESCE(exception_type,'')     AS exception_type,
+						COALESCE(severity,'')           AS severity,
+						COALESCE(exception_status,'')   AS exception_status,
+						COALESCE(expected_amount,0)     AS expected_amount,
+						COALESCE(received_amount,0)     AS received_amount,
+						COALESCE(variance_amount,0)     AS variance_amount,
+						COALESCE(raised_by,'')          AS raised_by,
+						COALESCE(raised_at::text,'')    AS raised_at,
+						COALESCE(resolved_by,'')        AS resolved_by,
+						COALESCE(resolved_at::text,'')  AS resolved_at,
+						COALESCE(resolution_remarks,'') AS resolution_remarks
+					FROM investment.fd_receipt_exception
+					WHERE result_id = $1 AND is_deleted = false
+					ORDER BY raised_at DESC`, row.ResultID)
+				if exErr == nil {
+					for exRows.Next() {
+						var ex ExLine
+						if se := exRows.Scan(
+							&ex.ExceptionID, &ex.ExceptionType, &ex.Severity, &ex.ExceptionStatus,
+							&ex.ExpectedAmount, &ex.ReceivedAmount, &ex.VarianceAmount,
+							&ex.RaisedBy, &ex.RaisedAt,
+							&ex.ResolvedBy, &ex.ResolvedAt, &ex.ResolutionRemarks,
+						); se == nil {
+							row.Exceptions = append(row.Exceptions, ex)
+						}
+					}
+					exRows.Close()
+				}
+			}
+		}
+
+		if results == nil {
+			results = []ResultRow{}
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"run":          run,
+			"result_count": len(results),
+			"results":      results,
+		})
+	}
+}
+
+// ─── HANDLER 13c: GetReconcileCandidates ────────────────────────────────────
+// POST /investment/fd/reconcile/candidates
+//
+// Feeder API for /reconcile/run and /reconcile/ingest.
+// Takes only user_id + optional filters (entity_id, fd_id, bank_id,
+// period_start, period_end).
+//
+// Returns:
+//   - All APPROVED interest receipts that have NO row in fd_receipt_reconcile_result
+//     (i.e. never been reconciled or all prior runs for them are non-COMPLETED).
+//   - All APPROVED TDS receipts in the same state.
+//
+// Each row carries:
+//   - receipt_type:          INTEREST | TDS
+//   - is_already_reconciled: false  (always false here — filtered out)
+//   - period_start/end, fd enrichment from fd_master
+//   - full latest audit snapshot
+//
+// Validation rule enforced:
+//   Once a receipt/TDS ID appears in fd_receipt_reconcile_result it is
+//   excluded — it CANNOT be re-run through /reconcile/ingest.
+
+func GetReconcileCandidates(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string `json:"user_id"`
+			EntityID    string `json:"entity_id"`
+			FDID        string `json:"fd_id"`
+			BankID      string `json:"bank_id"`
+			PeriodStart string `json:"period_start"`
+			PeriodEnd   string `json:"period_end"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
+			return
+		}
+		userEmail := resolveUserEmail(req.UserID)
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		ctx := r.Context()
+
+		// ── INTEREST receipts: APPROVED + never reconciled ───────────────────────
+		interestSQL := `
+SELECT
+  r.receipt_id                            AS id,
+  'INTEREST'                              AS receipt_type,
+  false                                   AS is_already_reconciled,
+  r.fd_id,
+  COALESCE(m.bank_fd_ref_no, r.fd_ref_no,'') AS fd_ref_no,
+  r.entity_id,
+  COALESCE(m.entity_name, r.entity_name,'')  AS entity_name,
+  COALESCE(r.bank_id,'')                  AS bank_id,
+  COALESCE(m.bank_name, r.bank_name,'')   AS bank_name,
+  COALESCE(m.principal_amount,0)          AS fd_principal_amount,
+  COALESCE(m.interest_rate,0)             AS fd_interest_rate,
+  COALESCE(m.maturity_date::text,'')      AS fd_maturity_date,
+  COALESCE(m.fd_status,'')               AS fd_status,
+  TO_CHAR(r.receipt_date,'YYYY-MM-DD')   AS receipt_date,
+  TO_CHAR(r.period_start,'YYYY-MM-DD')   AS period_start,
+  TO_CHAR(r.period_end,'YYYY-MM-DD')     AS period_end,
+  COALESCE(r.gross_interest_received,0)  AS gross_interest_received,
+  COALESCE(r.tds_amount_deducted,0)      AS tds_amount_deducted,
+  COALESCE(r.net_amount_received,0)      AS net_amount_received,
+  COALESCE(r.receipt_status,'')          AS receipt_status,
+  COALESCE(r.reconcile_status,'')        AS reconcile_status,
+  COALESCE(r.bank_reference_no,'')       AS bank_reference_no,
+  COALESCE(r.narration,'')              AS narration,
+  COALESCE(r.ingestion_mode,'')         AS ingestion_mode,
+  -- latest audit snapshot
+  COALESCE(la.processing_status,'')     AS audit_processing_status,
+  COALESCE(la.action_type,'')           AS audit_action_type,
+  COALESCE(la.requested_by,'')          AS audit_requested_by,
+  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+  COALESCE(la.checker_by,'')            AS audit_checker_by,
+  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+  COALESCE(la.checker_comment,'')       AS audit_checker_comment,
+  COALESCE(la.reason,'')               AS audit_reason
+FROM investment.fd_interest_receipt r
+LEFT JOIN investment.fd_master m ON m.fd_id = r.fd_id AND m.is_deleted = false
+LEFT JOIN LATERAL (
+  SELECT processing_status, action_type, requested_by, requested_at,
+         checker_by, checker_at, checker_comment, reason
+  FROM investment.fd_interest_receipt_audit a
+  WHERE a.receipt_id = r.receipt_id
+  ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+                    COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+  LIMIT 1
+) la ON true
+WHERE r.is_deleted = false
+  AND la.processing_status = 'APPROVED'
+  -- not yet in any reconcile result
+  AND NOT EXISTS (
+    SELECT 1 FROM investment.fd_receipt_reconcile_result rr
+    WHERE rr.receipt_id = r.receipt_id
+  )`
+
+		iArgs := []interface{}{}
+		iIdx := 1
+		if req.EntityID != "" {
+			interestSQL += fmt.Sprintf(" AND r.entity_id=$%d", iIdx)
+			iArgs = append(iArgs, req.EntityID)
+			iIdx++
+		}
+		if req.FDID != "" {
+			interestSQL += fmt.Sprintf(" AND r.fd_id=$%d", iIdx)
+			iArgs = append(iArgs, req.FDID)
+			iIdx++
+		}
+		if req.BankID != "" {
+			interestSQL += fmt.Sprintf(" AND r.bank_id=$%d", iIdx)
+			iArgs = append(iArgs, req.BankID)
+			iIdx++
+		}
+		if req.PeriodStart != "" {
+			interestSQL += fmt.Sprintf(" AND r.period_start>=$%d::date", iIdx)
+			iArgs = append(iArgs, req.PeriodStart)
+			iIdx++
+		}
+		if req.PeriodEnd != "" {
+			interestSQL += fmt.Sprintf(" AND r.period_end<=$%d::date", iIdx)
+			iArgs = append(iArgs, req.PeriodEnd)
+			iIdx++
+		}
+		interestSQL += " ORDER BY r.receipt_date DESC"
+		_ = iIdx
+
+		iRows, err := pool.Query(ctx, interestSQL, iArgs...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer iRows.Close()
+		interestCandidates, _ := rowsToMapSlice(iRows)
+		if interestCandidates == nil {
+			interestCandidates = []map[string]interface{}{}
+		}
+		iRows.Close()
+
+		// ── TDS receipts: APPROVED + never reconciled ────────────────────────────
+		tdsSQL := `
+SELECT
+  t.tds_id                                AS id,
+  'TDS'                                   AS receipt_type,
+  false                                   AS is_already_reconciled,
+  t.fd_id,
+  COALESCE(m.bank_fd_ref_no, t.fd_ref_no,'') AS fd_ref_no,
+  t.entity_id,
+  COALESCE(m.entity_name, t.entity_id,'') AS entity_name,
+  COALESCE(t.bank_id,'')                  AS bank_id,
+  COALESCE(m.bank_name, t.bank_id,'')     AS bank_name,
+  COALESCE(m.principal_amount,0)          AS fd_principal_amount,
+  COALESCE(m.interest_rate,0)             AS fd_interest_rate,
+  COALESCE(m.maturity_date::text,'')      AS fd_maturity_date,
+  COALESCE(m.fd_status,'')               AS fd_status,
+  TO_CHAR(t.deduction_date,'YYYY-MM-DD') AS receipt_date,
+  TO_CHAR(t.period_start,'YYYY-MM-DD')   AS period_start,
+  TO_CHAR(t.period_end,'YYYY-MM-DD')     AS period_end,
+  COALESCE(t.gross_interest,0)           AS gross_interest,
+  COALESCE(t.tds_rate_applied,0)         AS tds_rate_applied,
+  COALESCE(t.tds_expected,0)             AS tds_expected,
+  COALESCE(t.tds_deducted_actual,0)      AS tds_deducted_actual,
+  COALESCE(t.tds_variance,0)             AS tds_variance,
+  COALESCE(t.tds_section,'')            AS tds_section,
+  COALESCE(t.tds_status,'')             AS tds_status,
+  COALESCE(t.reconcile_status,'')       AS reconcile_status,
+  COALESCE(t.ingestion_source,'')       AS ingestion_source,
+  -- latest audit snapshot
+  COALESCE(la.processing_status,'')     AS audit_processing_status,
+  COALESCE(la.action_type,'')           AS audit_action_type,
+  COALESCE(la.requested_by,'')          AS audit_requested_by,
+  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS audit_requested_at,
+  COALESCE(la.checker_by,'')            AS audit_checker_by,
+  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS audit_checker_at,
+  COALESCE(la.checker_comment,'')       AS audit_checker_comment,
+  COALESCE(la.reason,'')               AS audit_reason
+FROM investment.fd_tds_receipt t
+LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+LEFT JOIN LATERAL (
+  SELECT processing_status, action_type, requested_by, requested_at,
+         checker_by, checker_at, checker_comment, reason
+  FROM investment.fd_tds_receipt_audit a
+  WHERE a.tds_id = t.tds_id
+  ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+                    COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+  LIMIT 1
+) la ON true
+WHERE t.is_deleted = false
+  AND la.processing_status = 'APPROVED'
+  -- not yet in any reconcile result
+  AND NOT EXISTS (
+    SELECT 1 FROM investment.fd_receipt_reconcile_result rr
+    WHERE rr.tds_id = t.tds_id
+  )`
+
+		tArgs := []interface{}{}
+		tIdx := 1
+		if req.EntityID != "" {
+			tdsSQL += fmt.Sprintf(" AND t.entity_id=$%d", tIdx)
+			tArgs = append(tArgs, req.EntityID)
+			tIdx++
+		}
+		if req.FDID != "" {
+			tdsSQL += fmt.Sprintf(" AND t.fd_id=$%d", tIdx)
+			tArgs = append(tArgs, req.FDID)
+			tIdx++
+		}
+		if req.BankID != "" {
+			tdsSQL += fmt.Sprintf(" AND t.bank_id=$%d", tIdx)
+			tArgs = append(tArgs, req.BankID)
+			tIdx++
+		}
+		if req.PeriodStart != "" {
+			tdsSQL += fmt.Sprintf(" AND t.period_start>=$%d::date", tIdx)
+			tArgs = append(tArgs, req.PeriodStart)
+			tIdx++
+		}
+		if req.PeriodEnd != "" {
+			tdsSQL += fmt.Sprintf(" AND t.period_end<=$%d::date", tIdx)
+			tArgs = append(tArgs, req.PeriodEnd)
+			tIdx++
+		}
+		tdsSQL += " ORDER BY t.deduction_date DESC"
+		_ = tIdx
+
+		tRows, err := pool.Query(ctx, tdsSQL, tArgs...)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
+			return
+		}
+		defer tRows.Close()
+		tdsCandidates, _ := rowsToMapSlice(tRows)
+		if tdsCandidates == nil {
+			tdsCandidates = []map[string]interface{}{}
+		}
+		tRows.Close()
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":              true,
+			"interest_candidates": interestCandidates,
+			"interest_count":      len(interestCandidates),
+			"tds_candidates":      tdsCandidates,
+			"tds_count":           len(tdsCandidates),
+			"total_count":         len(interestCandidates) + len(tdsCandidates),
+			"note":                "Only APPROVED receipts/TDS with no prior reconcile result. Feed receipt_ids/tds_ids from here into /reconcile/run or /reconcile/ingest.",
 		})
 	}
 }
