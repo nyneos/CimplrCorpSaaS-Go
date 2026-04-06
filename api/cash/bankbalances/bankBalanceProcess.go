@@ -145,7 +145,7 @@ func UploadBankBalancesProcess(
 	// 7. S3 upload must succeed before any DB write is persisted for this batch.
 	var s3URL string
 	folder := bankstatement.GetStoragePrefix("bankbalance")
-	s3Key = bankstatement.BuildS3Key(folder, batchID, fileHash, ext)
+	s3Key = bankstatement.BuildS3Key(folder, "bank-balance", fileHash, ext)
 	if bankstatement.IsS3UploadEnabled() {
 		s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
 		if err != nil {

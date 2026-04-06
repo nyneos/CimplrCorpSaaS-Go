@@ -99,7 +99,7 @@ func uploadCashflowProposalService(
 		hash := sha256.Sum256(fileBytes)
 		fileHash := fmt.Sprintf("%x", hash[:])
 		folder := bankstatement.GetStoragePrefix("projection")
-		s3Key = bankstatement.BuildS3Key(folder, proposalID, fileHash, fileExt)
+		s3Key = bankstatement.BuildS3Key(folder, "cashflow-projection", fileHash, fileExt)
 		contentType := bankstatement.DetectContentType(fileBytes)
 		uploadLink, uploadErr := bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
 		if uploadErr != nil {

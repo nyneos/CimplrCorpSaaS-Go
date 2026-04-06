@@ -145,7 +145,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
 	contentType := bankstatement.DetectContentType(fileBytes)
 	folder := bankstatement.GetStoragePrefix(fileField)
-	s3Key = bankstatement.BuildS3Key(folder, batchID.String(), fileHashHex, ext)
+	s3Key = bankstatement.BuildS3Key(folder, fileField, fileHashHex, ext)
 	s3URL := ""
 	if bankstatement.IsS3UploadEnabled() {
 		s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
