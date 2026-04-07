@@ -39,8 +39,8 @@ type fdAuditDashRequest struct {
 	Period     string `json:"period"`     // "Today" | "This Week" | "This Month" | "CUSTOM"
 	StartDate  string `json:"start_date"` // ISO date for CUSTOM
 	EndDate    string `json:"end_date"`
-	FDID       string `json:"fd_id"`      // optional — activates transaction_trace
-	ActionType string `json:"action_type"`// optional filter: CREATE/EDIT/DELETE/ACTIVATE/STATUS_CHANGE
+	FDID       string `json:"fd_id"`       // optional — activates transaction_trace
+	ActionType string `json:"action_type"` // optional filter: CREATE/EDIT/DELETE/ACTIVATE/STATUS_CHANGE
 }
 
 // ─── handler ──────────────────────────────────────────────────────────────────
@@ -72,23 +72,23 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			startDate = req.StartDate
 			endDate = req.EndDate
 		case "Today":
-			startDate = now.Format("2006-01-02")
-			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+			startDate = now.Format(constants.DateFormat)
+			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		case "This Week":
-			startDate = periodStartDate("This Week", now).Format("2006-01-02")
-			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+			startDate = periodStartDate("This Week", now).Format(constants.DateFormat)
+			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		case "This Month":
-			startDate = periodStartDate("This Month", now).Format("2006-01-02")
-			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+			startDate = periodStartDate("This Month", now).Format(constants.DateFormat)
+			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		default: // blank / "Last 30 Days" / anything unrecognised → last 30 days
-			startDate = now.AddDate(0, 0, -30).Format("2006-01-02")
-			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
+			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		}
 		if startDate == "" {
-			startDate = now.AddDate(0, 0, -30).Format("2006-01-02")
+			startDate = now.AddDate(0, 0, -30).Format(constants.DateFormat)
 		}
 		if endDate == "" {
-			endDate = now.AddDate(0, 0, 1).Format("2006-01-02")
+			endDate = now.AddDate(0, 0, 1).Format(constants.DateFormat)
 		}
 		ctx := r.Context()
 
@@ -114,12 +114,12 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── 1. Audit summary counts ───────────────────────────────────────────
 		run("audit_summary", func(ctx context.Context) (interface{}, error) {
 			type summaryRow struct {
-				Source  string `json:"source"`
-				Total   int64  `json:"total"`
-				Pending int64  `json:"pending"`
-				Approved int64 `json:"approved"`
-				Rejected int64 `json:"rejected"`
-				Checked  int64 `json:"checked"` // checker_by IS NOT NULL
+				Source   string `json:"source"`
+				Total    int64  `json:"total"`
+				Pending  int64  `json:"pending"`
+				Approved int64  `json:"approved"`
+				Rejected int64  `json:"rejected"`
+				Checked  int64  `json:"checked"` // checker_by IS NOT NULL
 			}
 
 			queries := []struct {
@@ -261,11 +261,11 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				mcRate = fdRound(float64(totalChecked)/float64(totalAll)*100, 1)
 			}
 			return map[string]interface{}{
-				"by_source":           out,
-				"total_records":       totalAll,
-				"total_pending":       totalPending,
-				"total_checked":       totalChecked,
-				"maker_checker_rate":  mcRate,
+				"by_source":          out,
+				"total_records":      totalAll,
+				"total_pending":      totalPending,
+				"total_checked":      totalChecked,
+				"maker_checker_rate": mcRate,
 			}, nil
 		})
 
@@ -588,19 +588,19 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type logRow struct {
-				Source          string `json:"source"`
-				AuditID         string `json:"audit_id"`
-				RefID           string `json:"ref_id"`
-				ActionType      string `json:"action_type"`
+				Source           string `json:"source"`
+				AuditID          string `json:"audit_id"`
+				RefID            string `json:"ref_id"`
+				ActionType       string `json:"action_type"`
 				ProcessingStatus string `json:"processing_status"`
-				Reason          string `json:"reason"`
-				RequestedBy     string `json:"requested_by"`
-				RequestedAt     string `json:"requested_at"`
-				CheckerBy       string `json:"checker_by"`
-				CheckerAt       string `json:"checker_at"`
-				CheckerComment  string `json:"checker_comment"`
-				OldValue        string `json:"old_value"`
-				NewValue        string `json:"new_value"`
+				Reason           string `json:"reason"`
+				RequestedBy      string `json:"requested_by"`
+				RequestedAt      string `json:"requested_at"`
+				CheckerBy        string `json:"checker_by"`
+				CheckerAt        string `json:"checker_at"`
+				CheckerComment   string `json:"checker_comment"`
+				OldValue         string `json:"old_value"`
+				NewValue         string `json:"new_value"`
 			}
 			out := []logRow{}
 			for rows.Next() {
@@ -674,24 +674,24 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			out := []overrideRow{}
 			missingEvidence := 0
 			for rows.Next() {
-				var or_ overrideRow
+				var or overrideRow
 				if err2 := rows.Scan(
-					&or_.LedgerID, &or_.FDID, &or_.EntityID, &or_.BankID,
-					&or_.AccrualPeriod, &or_.OverrideAmount, &or_.OriginalAmount,
-					&or_.ReasonCode, &or_.ReasonText, &or_.OverrideStatus,
-					&or_.ProposedBy, &or_.ApprovedBy, &or_.HasEvidence,
-					&or_.ProposedAt, &or_.LedgerRowStatus,
+					&or.LedgerID, &or.FDID, &or.EntityID, &or.BankID,
+					&or.AccrualPeriod, &or.OverrideAmount, &or.OriginalAmount,
+					&or.ReasonCode, &or.ReasonText, &or.OverrideStatus,
+					&or.ProposedBy, &or.ApprovedBy, &or.HasEvidence,
+					&or.ProposedAt, &or.LedgerRowStatus,
 				); err2 != nil {
 					api.LogError("[AuditDash] overrides scan error: %v", err2)
 					continue
 				}
-				or_.OverrideAmount = fdRound(or_.OverrideAmount, 2)
-				or_.OriginalAmount = fdRound(or_.OriginalAmount, 2)
-				or_.Delta = fdRound(or_.OverrideAmount-or_.OriginalAmount, 2)
-				if !or_.HasEvidence {
+				or.OverrideAmount = fdRound(or.OverrideAmount, 2)
+				or.OriginalAmount = fdRound(or.OriginalAmount, 2)
+				or.Delta = fdRound(or.OverrideAmount-or.OriginalAmount, 2)
+				if !or.HasEvidence {
 					missingEvidence++
 				}
-				out = append(out, or_)
+				out = append(out, or)
 			}
 			return map[string]interface{}{
 				"rows":                   out,
@@ -744,15 +744,15 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type periodRow struct {
-				LockID         string `json:"lock_id"`
-				EntityID       string `json:"entity_id"`
+				LockID          string `json:"lock_id"`
+				EntityID        string `json:"entity_id"`
 				FinancialPeriod string `json:"financial_period"`
-				LockedAt       string `json:"locked_at"`
-				LockedBy       string `json:"locked_by"`
-				UnlockedAt     string `json:"unlocked_at"`
-				UnlockedBy     string `json:"unlocked_by"`
-				UnlockReason   string `json:"unlock_reason"`
-				IsLocked       bool   `json:"is_locked"`
+				LockedAt        string `json:"locked_at"`
+				LockedBy        string `json:"locked_by"`
+				UnlockedAt      string `json:"unlocked_at"`
+				UnlockedBy      string `json:"unlocked_by"`
+				UnlockReason    string `json:"unlock_reason"`
+				IsLocked        bool   `json:"is_locked"`
 			}
 			out := []periodRow{}
 			for rows.Next() {
@@ -1093,7 +1093,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return map[string]interface{}{
 				"open_variance_confirmations": openVariance,
 				"open_accrual_exceptions":     openAccrualExc,
-				"total":                        openVariance + openAccrualExc,
+				"total":                       openVariance + openAccrualExc,
 			}, nil
 		})
 
@@ -1166,17 +1166,17 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Actions           []eyeActionRow `json:"actions"`
 			}
 			type instanceRow struct {
-				InstanceID      string    `json:"instance_id"`
-				ModuleCode      string    `json:"module_code"`
-				TransactionType string    `json:"transaction_type"`
-				RecordID        string    `json:"record_id"`
-				ActionType      string    `json:"action_type"`
-				InstanceStatus  string    `json:"instance_status"`
-				SubmittedBy     string    `json:"submitted_by"`
-				SubmittedAt     time.Time `json:"submitted_at"`
-				ResolvedBy      string    `json:"resolved_by,omitempty"`
+				InstanceID      string     `json:"instance_id"`
+				ModuleCode      string     `json:"module_code"`
+				TransactionType string     `json:"transaction_type"`
+				RecordID        string     `json:"record_id"`
+				ActionType      string     `json:"action_type"`
+				InstanceStatus  string     `json:"instance_status"`
+				SubmittedBy     string     `json:"submitted_by"`
+				SubmittedAt     time.Time  `json:"submitted_at"`
+				ResolvedBy      string     `json:"resolved_by,omitempty"`
 				ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
-				Eyes            []eyeRow  `json:"eyes"`
+				Eyes            []eyeRow   `json:"eyes"`
 			}
 
 			// Build nested map: instance_id → instanceRow, eye_id → eyeRow
@@ -1187,17 +1187,17 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			for instRows.Next() {
 				var (
 					instID, moduleCode, txType, recordID, actionType, instStatus string
-					submittedByEmail, resolvedByEmail string
-					submittedAt time.Time
-					resolvedAt  *time.Time
-					eyeID string
-					eyePos, eyeCount, appReq, appRcvd int
-					eyeStatus string
-					eyeActivatedAt, slaDeadline *time.Time
-					isEscalated bool
-					actionID, actorEmail, actionTaken, actionComment string
-					actedAt *time.Time
-					isSystem bool
+					submittedByEmail, resolvedByEmail                            string
+					submittedAt                                                  time.Time
+					resolvedAt                                                   *time.Time
+					eyeID                                                        string
+					eyePos, eyeCount, appReq, appRcvd                            int
+					eyeStatus                                                    string
+					eyeActivatedAt, slaDeadline                                  *time.Time
+					isEscalated                                                  bool
+					actionID, actorEmail, actionTaken, actionComment             string
+					actedAt                                                      *time.Time
+					isSystem                                                     bool
 				)
 				if err2 := instRows.Scan(
 					&instID, &moduleCode, &txType, &recordID, &actionType, &instStatus,
@@ -1359,12 +1359,12 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			// map by email — one profile per email, accumulate roles
 			profileMap := make(map[string]*userProfile)
-			emailOrder  := []string{}
+			emailOrder := []string{}
 
 			for rows.Next() {
 				var (
 					email, userID, empName, empCode, buName, mobile, uStatus, authType string
-					roleID, roleName, roleCode, roleDesc, roleStatus string
+					roleID, roleName, roleCode, roleDesc, roleStatus                   string
 				)
 				if err2 := rows.Scan(
 					&email, &userID, &empName, &empCode, &buName, &mobile, &uStatus, &authType,
@@ -1412,13 +1412,13 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			run("transaction_trace", func(ctx context.Context) (interface{}, error) {
 				// A. Master FD state
 				type fdState struct {
-					FDID          string  `json:"fd_id"`
-					Bank          string  `json:"bank"`
-					Entity        string  `json:"entity"`
-					Principal     float64 `json:"principal"`
-					InterestRate  float64 `json:"interest_rate"`
-					Status        string  `json:"status"`
-					MaturityDate  string  `json:"maturity_date"`
+					FDID         string  `json:"fd_id"`
+					Bank         string  `json:"bank"`
+					Entity       string  `json:"entity"`
+					Principal    float64 `json:"principal"`
+					InterestRate float64 `json:"interest_rate"`
+					Status       string  `json:"status"`
+					MaturityDate string  `json:"maturity_date"`
 				}
 				var fs fdState
 				pool.QueryRow(ctx, `
@@ -1532,34 +1532,34 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					WHERE fd_id=$1 AND is_overridden=true AND is_deleted=false
 					ORDER BY accrual_period_start ASC`, fdFilter)
 				type overrideTraceRow struct {
-					LedgerID      string  `json:"ledger_id"`
-					Period        string  `json:"period"`
-					OverrideAmt   float64 `json:"override_amount"`
-					OriginalAmt   float64 `json:"original_amount"`
-					ReasonCode    string  `json:"reason_code"`
-					Status        string  `json:"status"`
-					ProposedBy    string  `json:"proposed_by"`
-					HasEvidence   bool    `json:"has_evidence"`
+					LedgerID    string  `json:"ledger_id"`
+					Period      string  `json:"period"`
+					OverrideAmt float64 `json:"override_amount"`
+					OriginalAmt float64 `json:"original_amount"`
+					ReasonCode  string  `json:"reason_code"`
+					Status      string  `json:"status"`
+					ProposedBy  string  `json:"proposed_by"`
+					HasEvidence bool    `json:"has_evidence"`
 				}
 				overrides := []overrideTraceRow{}
 				if overrideRows != nil {
 					defer overrideRows.Close()
 					for overrideRows.Next() {
-						var or_ overrideTraceRow
-						overrideRows.Scan(&or_.LedgerID, &or_.Period, &or_.OverrideAmt, &or_.OriginalAmt,
-							&or_.ReasonCode, &or_.Status, &or_.ProposedBy, &or_.HasEvidence)
-						or_.OverrideAmt = fdRound(or_.OverrideAmt, 2)
-						or_.OriginalAmt = fdRound(or_.OriginalAmt, 2)
-						overrides = append(overrides, or_)
+						var or overrideTraceRow
+						overrideRows.Scan(&or.LedgerID, &or.Period, &or.OverrideAmt, &or.OriginalAmt,
+							&or.ReasonCode, &or.Status, &or.ProposedBy, &or.HasEvidence)
+						or.OverrideAmt = fdRound(or.OverrideAmt, 2)
+						or.OriginalAmt = fdRound(or.OriginalAmt, 2)
+						overrides = append(overrides, or)
 					}
 				}
 
 				return map[string]interface{}{
-					"fd":        fs,
-					"bookings":  bookings,
-					"cashflows": cashflows,
+					"fd":          fs,
+					"bookings":    bookings,
+					"cashflows":   cashflows,
 					"audit_trail": auditTrail,
-					"overrides": overrides,
+					"overrides":   overrides,
 				}, nil
 			})
 		}
@@ -1608,25 +1608,25 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"fd_id":       fdFilter,
 			},
 			"kpis": map[string]interface{}{
-				"total_audit_records":      totalRecords,
-				"total_pending_approvals":  totalPending,
-				"maker_checker_rate_pct":   makerCheckerRate,
-				"missing_evidence_count":   missingEvCount,
-				"period_reopens":           countSlice(get("period_reopens")),
-				"open_policy_exceptions":   getNestedInt64(get("policy_exceptions"), "total"),
+				"total_audit_records":     totalRecords,
+				"total_pending_approvals": totalPending,
+				"maker_checker_rate_pct":  makerCheckerRate,
+				"missing_evidence_count":  missingEvCount,
+				"period_reopens":          countSlice(get("period_reopens")),
+				"open_policy_exceptions":  getNestedInt64(get("policy_exceptions"), "total"),
 			},
-			"audit_summary":       get("audit_summary"),
-			"maker_checker_rate":  get("maker_checker_rate"),
-			"audit_log":           get("audit_log"),
-			"overrides":           get("overrides"),
-			"missing_evidence":    get("missing_evidence"),
-			"period_reopens":      get("period_reopens"),
-			"approvals_register":  get("approvals_register"),
-			"evidence_packs":      get("evidence_packs"),
-			"policy_exceptions":   get("policy_exceptions"),
-			"approval_matrix":     get("approval_matrix"),
-			"user_directory":      get("user_directory"),
-			"transaction_trace":   get("transaction_trace"),
+			"audit_summary":      get("audit_summary"),
+			"maker_checker_rate": get("maker_checker_rate"),
+			"audit_log":          get("audit_log"),
+			"overrides":          get("overrides"),
+			"missing_evidence":   get("missing_evidence"),
+			"period_reopens":     get("period_reopens"),
+			"approvals_register": get("approvals_register"),
+			"evidence_packs":     get("evidence_packs"),
+			"policy_exceptions":  get("policy_exceptions"),
+			"approval_matrix":    get("approval_matrix"),
+			"user_directory":     get("user_directory"),
+			"transaction_trace":  get("transaction_trace"),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)

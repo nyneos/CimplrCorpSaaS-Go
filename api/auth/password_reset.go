@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -155,7 +156,7 @@ func generateShortID() string {
 func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -220,7 +221,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 
 		// In dev mode, also include token + link in response for testing
 		if strings.EqualFold(os.Getenv("DEVEL_MODE"), "true") {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":    true,
 				"message":    "Reset token generated (dev mode — email also enqueued)",
@@ -240,7 +241,7 @@ func ForgotPasswordHandler(db *sql.DB) http.HandlerFunc {
 func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -333,7 +334,7 @@ func ResetPasswordHandler(db *sql.DB) http.HandlerFunc {
 func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -371,7 +372,7 @@ func ValidateResetTokenHandler(db *sql.DB) http.HandlerFunc {
 		var email string
 		_ = db.QueryRow(`SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":    true,
 			"valid":      true,
@@ -392,7 +393,7 @@ func generateResetToken() (string, error) {
 }
 
 func writeResetJSON(w http.ResponseWriter, status int, success bool, message string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": success,

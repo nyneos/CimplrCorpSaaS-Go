@@ -7,13 +7,14 @@ import (
 	"strconv"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/varianceengine"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const MatchTolerancePct = 1.0  // <= 1%  → MATCHED
-const MatchPartialPct = 10.0   // <= 10% → PARTIAL  (> 10% → UNMATCHED)
+const MatchTolerancePct = 1.0 // <= 1%  → MATCHED
+const MatchPartialPct = 10.0  // <= 10% → PARTIAL  (> 10% → UNMATCHED)
 
 // ReceiptRow holds minimal interest receipt data used during reconciliation.
 type ReceiptRow struct {
@@ -51,18 +52,18 @@ type TDSRow struct {
 
 // CashflowLine is a single fd_cashflow_schedule row returned inside a preview line.
 type CashflowLine struct {
-	CashflowID      string  `json:"cashflow_id"`
-	EventType       string  `json:"event_type"`
-	EventDate       string  `json:"event_date"`
-	PeriodStartDate string  `json:"period_start_date"`
-	PeriodEndDate   string  `json:"period_end_date"`
-	PeriodDays      int     `json:"period_days"`
+	CashflowID       string  `json:"cashflow_id"`
+	EventType        string  `json:"event_type"`
+	EventDate        string  `json:"event_date"`
+	PeriodStartDate  string  `json:"period_start_date"`
+	PeriodEndDate    string  `json:"period_end_date"`
+	PeriodDays       int     `json:"period_days"`
 	OpeningPrincipal float64 `json:"opening_principal"`
-	InterestAccrued float64 `json:"interest_accrued"`
-	TDSAmount       float64 `json:"tds_amount"`
-	NetCashFlow     float64 `json:"net_cash_flow"`
-	PostingStatus   string  `json:"posting_status"`
-	Amount          float64 `json:"amount"` // the value used for matching (CASE-selected)
+	InterestAccrued  float64 `json:"interest_accrued"`
+	TDSAmount        float64 `json:"tds_amount"`
+	NetCashFlow      float64 `json:"net_cash_flow"`
+	PostingStatus    string  `json:"posting_status"`
+	Amount           float64 `json:"amount"` // the value used for matching (CASE-selected)
 }
 
 // AccrualLedgerLine is a single fd_accrual_ledger row returned inside a preview line.
@@ -83,11 +84,11 @@ type AccrualLedgerLine struct {
 
 // ReconcilePreviewLine is one receipt's projected result (no DB writes).
 type ReconcilePreviewLine struct {
-	ReceiptID      string  `json:"receipt_id,omitempty"`
-	TDSID          string  `json:"tds_id,omitempty"`
-	ResultType     string  `json:"result_type"`
-	FDID           string  `json:"fd_id"`
-	FdRefNo        string  `json:"fd_ref_no"`
+	ReceiptID  string `json:"receipt_id,omitempty"`
+	TDSID      string `json:"tds_id,omitempty"`
+	ResultType string `json:"result_type"`
+	FDID       string `json:"fd_id"`
+	FdRefNo    string `json:"fd_ref_no"`
 	// FD / entity / bank metadata
 	EntityID       string  `json:"entity_id"`
 	EntityName     string  `json:"entity_name"`
@@ -110,16 +111,16 @@ type ReconcilePreviewLine struct {
 
 // ReconcilePreviewSummary is the dry-run response returned by /reconcile/run.
 type ReconcilePreviewSummary struct {
-	EntityID         string                            `json:"entity_id"`
-	PeriodStart      string                            `json:"period_start"`
-	PeriodEnd        string                            `json:"period_end"`
-	MatchingBasis    string                            `json:"matching_basis"`
-	Interest         ReconcilePassSummary              `json:"interest"`
-	TDS              ReconcilePassSummary              `json:"tds"`
-	Lines            []ReconcilePreviewLine            `json:"lines"`
+	EntityID      string                 `json:"entity_id"`
+	PeriodStart   string                 `json:"period_start"`
+	PeriodEnd     string                 `json:"period_end"`
+	MatchingBasis string                 `json:"matching_basis"`
+	Interest      ReconcilePassSummary   `json:"interest"`
+	TDS           ReconcilePassSummary   `json:"tds"`
+	Lines         []ReconcilePreviewLine `json:"lines"`
 	// Keyed lookups: each receipt_id / tds_id maps to its full detail
-	InterestReceipts map[string]*ReconcilePreviewLine  `json:"interest_receipts"`
-	TDSReceipts      map[string]*ReconcilePreviewLine  `json:"tds_receipts"`
+	InterestReceipts map[string]*ReconcilePreviewLine `json:"interest_receipts"`
+	TDSReceipts      map[string]*ReconcilePreviewLine `json:"tds_receipts"`
 }
 
 // ReconcilePassSummary aggregates counts for one pass (interest or TDS).
@@ -190,7 +191,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				expectedCF += cf.Amount
 			}
 			if !dryRun {
-				buildCashflowMap(ctx, pool, runID, rec.FDID, rec.ReceiptID, "", rec.PeriodStart, rec.PeriodEnd) //nolint:errcheck
+				buildCashflowMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: rec.FDID, ReceiptID: rec.ReceiptID, TDSID: "", PeriodStart: rec.PeriodStart, PeriodEnd: rec.PeriodEnd}) //nolint:errcheck
 			}
 		}
 		if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
@@ -199,7 +200,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				expectedAcc += al.Amount
 			}
 			if !dryRun {
-				buildAccrualMap(ctx, pool, runID, rec.FDID, rec.ReceiptID, "", rec.PeriodStart, rec.PeriodEnd) //nolint:errcheck
+				buildAccrualMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: rec.FDID, ReceiptID: rec.ReceiptID, TDSID: "", PeriodStart: rec.PeriodStart, PeriodEnd: rec.PeriodEnd}) //nolint:errcheck
 			}
 		}
 
@@ -215,8 +216,8 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 			EntityName:     rec.EntityName,
 			BankID:         rec.BankID,
 			BankName:       rec.BankName,
-			PeriodStart:    rec.PeriodStart.Format("2006-01-02"),
-			PeriodEnd:      rec.PeriodEnd.Format("2006-01-02"),
+			PeriodStart:    rec.PeriodStart.Format(constants.DateFormat),
+			PeriodEnd:      rec.PeriodEnd.Format(constants.DateFormat),
 			ReceivedAmount: rec.Gross,
 			ExpectedCF:     expectedCF,
 			ExpectedAcc:    expectedAcc,
@@ -235,8 +236,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 
 		if !dryRun {
 			// ── Insert result row ─────────────────────────────────────────────
-			resultID, _ := insertInterestResult(ctx, pool, rec, runID, matchingBasis,
-				expected, variance, variancePct, matchStatus)
+			resultID, _ := insertInterestResult(ctx, InterestResultParams{Pool: pool, Rec: rec, RunID: runID, MatchingBasis: matchingBasis, Expected: expected, Variance: variance, VariancePct: variancePct, MatchStatus: matchStatus})
 
 			// ── Stamp receipt ─────────────────────────────────────────────────
 			pool.Exec(ctx, //nolint:errcheck
@@ -257,9 +257,9 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				SystemComment: fmt.Sprintf("Reconcile run %s (basis=%s)", runID, matchingBasis),
 			}}
 			veItems := varianceengine.Compare("FD_INTEREST_RECEIPT", rec.ReceiptID, rec.EntityID, veRunID, veRules)
-			varianceengine.PersistVariances(ctx, pool, veItems)                                             //nolint:errcheck
+			varianceengine.PersistVariances(ctx, pool, veItems)                                                                          //nolint:errcheck
 			varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_interest_receipt", "receipt_id", rec.ReceiptID, veRunID, veItems) //nolint:errcheck
-			varianceengine.AutoResolveCleared(ctx, pool, rec.ReceiptID, veItems, triggeredBy, triggeredBy) //nolint:errcheck
+			varianceengine.AutoResolveCleared(ctx, pool, rec.ReceiptID, veItems, triggeredBy, triggeredBy)                               //nolint:errcheck
 
 			// ── Exception ─────────────────────────────────────────────────────
 			if matchStatus != "MATCHED" && resultID != "" {
@@ -316,7 +316,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 					expectedCF += cf.Amount
 				}
 				if !dryRun {
-					buildCashflowMap(ctx, pool, runID, tds.FDID, "", tds.TDSID, tds.PeriodStart, tds.PeriodEnd) //nolint:errcheck
+					buildCashflowMap(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: tds.FDID, ReceiptID: "", TDSID: tds.TDSID, PeriodStart: tds.PeriodStart, PeriodEnd: tds.PeriodEnd}) //nolint:errcheck
 				}
 			}
 			if matchingBasis == "ACCRUAL" || matchingBasis == "BOTH" {
@@ -325,7 +325,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 					expectedAcc += al.Amount
 				}
 				if !dryRun {
-					buildAccrualMapTDS(ctx, pool, runID, tds.FDID, "", tds.TDSID, tds.PeriodStart, tds.PeriodEnd) //nolint:errcheck
+					buildAccrualMapTDS(ctx, MapLookupParams{Pool: pool, RunID: runID, FDID: tds.FDID, ReceiptID: "", TDSID: tds.TDSID, PeriodStart: tds.PeriodStart, PeriodEnd: tds.PeriodEnd}) //nolint:errcheck
 				}
 			}
 
@@ -341,8 +341,8 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 				EntityName:     tds.EntityName,
 				BankID:         tds.BankID,
 				BankName:       tds.BankName,
-				PeriodStart:    tds.PeriodStart.Format("2006-01-02"),
-				PeriodEnd:      tds.PeriodEnd.Format("2006-01-02"),
+				PeriodStart:    tds.PeriodStart.Format(constants.DateFormat),
+				PeriodEnd:      tds.PeriodEnd.Format(constants.DateFormat),
 				ReceivedAmount: tds.Actual,
 				ExpectedCF:     expectedCF,
 				ExpectedAcc:    expectedAcc,
@@ -360,8 +360,7 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 			preview.TDSReceipts[tds.TDSID] = &preview.Lines[len(preview.Lines)-1]
 
 			if !dryRun {
-				tdsResultID, _ := insertTDSResult(ctx, pool, tds, runID, matchingBasis,
-					expected, variance, variancePct, matchStatus)
+				tdsResultID, _ := insertTDSResult(ctx, TDSResultParams{Pool: pool, TDS: tds, RunID: runID, MatchingBasis: matchingBasis, Expected: expected, Variance: variance, VariancePct: variancePct, MatchStatus: matchStatus})
 
 				pool.Exec(ctx, //nolint:errcheck
 					`UPDATE investment.fd_tds_receipt
@@ -380,9 +379,9 @@ func reconcileEngine(ctx context.Context, pool *pgxpool.Pool, runID string, dryR
 					SystemComment: fmt.Sprintf("TDS reconcile run %s (basis=%s)", runID, matchingBasis),
 				}}
 				tItems := varianceengine.Compare("FD_TDS_RECEIPT", tds.TDSID, tds.EntityID, tveRunID, tRules)
-				varianceengine.PersistVariances(ctx, pool, tItems)                                              //nolint:errcheck
+				varianceengine.PersistVariances(ctx, pool, tItems)                                                              //nolint:errcheck
 				varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_tds_receipt", "tds_id", tds.TDSID, tveRunID, tItems) //nolint:errcheck
-				varianceengine.AutoResolveCleared(ctx, pool, tds.TDSID, tItems, triggeredBy, triggeredBy)       //nolint:errcheck
+				varianceengine.AutoResolveCleared(ctx, pool, tds.TDSID, tItems, triggeredBy, triggeredBy)                       //nolint:errcheck
 
 				if matchStatus != "MATCHED" && tdsResultID != "" {
 					exID, _ := insertException(ctx, pool, ExceptionParams{
@@ -492,8 +491,8 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 	// Derive entity+period from the supplied IDs by querying the receipt tables.
 	// We use the widest possible period that covers all supplied records.
 	entityID := ""
-	periodStart := "2099-12-31"
-	periodEnd := "2000-01-01"
+	periodStart := constants.DateMax
+	periodEnd := constants.DateMin
 
 	if len(filterReceiptIDs) > 0 {
 		rows, err := pool.Query(ctx, `
@@ -542,11 +541,11 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 		}
 	}
 	// Fallback sentinels if nothing was found
-	if periodStart == "2099-12-31" {
-		periodStart = "2000-01-01"
+	if periodStart == constants.DateMax {
+		periodStart = constants.DateMin
 	}
-	if periodEnd == "2000-01-01" {
-		periodEnd = "2099-12-31"
+	if periodEnd == constants.DateMin {
+		periodEnd = constants.DateMax
 	}
 	if matchingBasis == "" {
 		matchingBasis = "BOTH"
@@ -592,10 +591,10 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 			FDID: rec.FDID, FdRefNo: rec.FdRefNo,
 			EntityID: rec.EntityID, EntityName: rec.EntityName,
 			BankID: rec.BankID, BankName: rec.BankName,
-			PeriodStart: rec.PeriodStart.Format("2006-01-02"),
-			PeriodEnd:   rec.PeriodEnd.Format("2006-01-02"),
+			PeriodStart:    rec.PeriodStart.Format(constants.DateFormat),
+			PeriodEnd:      rec.PeriodEnd.Format(constants.DateFormat),
 			ReceivedAmount: rec.Gross,
-			ExpectedCF: expectedCF, ExpectedAcc: expectedAcc, ExpectedFinal: expected,
+			ExpectedCF:     expectedCF, ExpectedAcc: expectedAcc, ExpectedFinal: expected,
 			Variance: variance, VariancePct: variancePct, MatchStatus: matchStatus,
 			Cashflows: cfLines, AccrualLedger: acLines,
 		}
@@ -645,10 +644,10 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 			FDID: tds.FDID, FdRefNo: tds.FdRefNo,
 			EntityID: tds.EntityID, EntityName: tds.EntityName,
 			BankID: tds.BankID, BankName: tds.BankName,
-			PeriodStart: tds.PeriodStart.Format("2006-01-02"),
-			PeriodEnd:   tds.PeriodEnd.Format("2006-01-02"),
+			PeriodStart:    tds.PeriodStart.Format(constants.DateFormat),
+			PeriodEnd:      tds.PeriodEnd.Format(constants.DateFormat),
 			ReceivedAmount: tds.Actual,
-			ExpectedCF: expectedCF, ExpectedAcc: expectedAcc, ExpectedFinal: expected,
+			ExpectedCF:     expectedCF, ExpectedAcc: expectedAcc, ExpectedFinal: expected,
 			Variance: variance, VariancePct: variancePct, MatchStatus: matchStatus,
 			Cashflows: tdsCFLines, AccrualLedger: tdsACLines,
 		}
@@ -672,14 +671,14 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 	}
 
 	preview.Interest = ReconcilePassSummary{
-		Processed:     iProcessed, Matched: iMatched, Partial: iPartial,
-		Unmatched:     iUnmatched, Exception: iException,
+		Processed: iProcessed, Matched: iMatched, Partial: iPartial,
+		Unmatched: iUnmatched, Exception: iException,
 		TotalExpected: iTotalExpected, TotalReceived: iTotalReceived,
 		TotalVariance: iTotalReceived - iTotalExpected,
 	}
 	preview.TDS = ReconcilePassSummary{
-		Processed:     tProcessed, Matched: tMatched, Partial: tPartial,
-		Unmatched:     tUnmatched, Exception: tException,
+		Processed: tProcessed, Matched: tMatched, Partial: tPartial,
+		Unmatched: tUnmatched, Exception: tException,
 		TotalExpected: tTotalExpected, TotalReceived: tTotalReceived,
 		TotalVariance: tTotalReceived - tTotalExpected,
 	}
@@ -689,7 +688,12 @@ func reconcilePreviewDirect(ctx context.Context, pool *pgxpool.Pool,
 // ─── Data loaders ─────────────────────────────────────────────────────────────
 
 func loadInterestReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodStart, periodEnd string, filterIDs []string) ([]ReceiptRow, error) {
-	var rows interface{ Next() bool; Scan(...any) error; Close(); Err() error }
+	var rows interface {
+		Next() bool
+		Scan(...any) error
+		Close()
+		Err() error
+	}
 	var err error
 	if len(filterIDs) > 0 {
 		// Specific receipt IDs requested — ignore entity+period filter
@@ -737,7 +741,12 @@ func loadInterestReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, per
 }
 
 func loadTDSReceipts(ctx context.Context, pool *pgxpool.Pool, entityID, periodStart, periodEnd string, filterIDs []string) ([]TDSRow, error) {
-	var rows interface{ Next() bool; Scan(...any) error; Close(); Err() error }
+	var rows interface {
+		Next() bool
+		Scan(...any) error
+		Close()
+		Err() error
+	}
 	var err error
 	if len(filterIDs) > 0 {
 		rows, err = pool.Query(ctx, `
@@ -833,9 +842,9 @@ func loadCashflowsForReceipt(ctx context.Context, pool *pgxpool.Pool,
 			&c.InterestAccrued, &c.TDSAmount, &c.NetCashFlow,
 			&c.PostingStatus, &c.Amount,
 		); e == nil {
-			c.EventDate = evDate.Format("2006-01-02")
-			c.PeriodStartDate = psDate.Format("2006-01-02")
-			c.PeriodEndDate = peDate.Format("2006-01-02")
+			c.EventDate = evDate.Format(constants.DateFormat)
+			c.PeriodStartDate = psDate.Format(constants.DateFormat)
+			c.PeriodEndDate = peDate.Format(constants.DateFormat)
 			out = append(out, c)
 		}
 	}
@@ -888,8 +897,8 @@ func loadAccrualLedgerForReceipt(ctx context.Context, pool *pgxpool.Pool,
 			&al.OpeningAccruedBalance, &al.ClosingAccruedBalance,
 			&al.LedgerRowStatus, &al.Amount,
 		); e == nil {
-			al.AccrualPeriodStart = psDate.Format("2006-01-02")
-			al.AccrualPeriodEnd = peDate.Format("2006-01-02")
+			al.AccrualPeriodStart = psDate.Format(constants.DateFormat)
+			al.AccrualPeriodEnd = peDate.Format(constants.DateFormat)
 			out = append(out, al)
 		}
 	}
@@ -898,12 +907,29 @@ func loadAccrualLedgerForReceipt(ctx context.Context, pool *pgxpool.Pool,
 
 // ─── Junction table builders ──────────────────────────────────────────────────
 
+// MapLookupParams holds common inputs for buildCashflowMap, buildAccrualMap,
+// and buildAccrualMapTDS.
+type MapLookupParams struct {
+	Pool        *pgxpool.Pool
+	RunID       string
+	FDID        string
+	ReceiptID   string
+	TDSID       string
+	PeriodStart time.Time
+	PeriodEnd   time.Time
+}
+
 // buildCashflowMap loads ALL interest/accrual cashflow rows for the receipt's
 // fd_id within its period, inserts one fd_receipt_cashflow_map row per cashflow,
 // and returns the SUM of amounts. Pass receiptID or tdsID; leave the other empty.
-func buildCashflowMap(ctx context.Context, pool *pgxpool.Pool,
-	runID, fdID, receiptID, tdsID string,
-	periodStart, periodEnd time.Time) float64 {
+func buildCashflowMap(ctx context.Context, p MapLookupParams) float64 {
+	pool := p.Pool
+	runID := p.RunID
+	fdID := p.FDID
+	receiptID := p.ReceiptID
+	tdsID := p.TDSID
+	periodStart := p.PeriodStart
+	periodEnd := p.PeriodEnd
 
 	eventTypes := []string{"INTEREST_RECEIPT", "ACCRUAL"}
 	if tdsID != "" {
@@ -964,9 +990,14 @@ func buildCashflowMap(ctx context.Context, pool *pgxpool.Pool,
 // buildAccrualMap loads ALL accrual ledger rows for the receipt's fd_id within its
 // period, inserts one fd_receipt_accrual_map row per ledger row, and returns the SUM
 // of period_interest_accrued. For interest receipts; use buildAccrualMapTDS for TDS.
-func buildAccrualMap(ctx context.Context, pool *pgxpool.Pool,
-	runID, fdID, receiptID, tdsID string,
-	periodStart, periodEnd time.Time) float64 {
+func buildAccrualMap(ctx context.Context, p MapLookupParams) float64 {
+	pool := p.Pool
+	runID := p.RunID
+	fdID := p.FDID
+	receiptID := p.ReceiptID
+	tdsID := p.TDSID
+	periodStart := p.PeriodStart
+	periodEnd := p.PeriodEnd
 
 	acRows, err := pool.Query(ctx, `
 		SELECT ledger_id,
@@ -1016,9 +1047,14 @@ func buildAccrualMap(ctx context.Context, pool *pgxpool.Pool,
 
 // buildAccrualMapTDS is like buildAccrualMap but uses tds_deducted_in_period
 // from the accrual ledger — used when reconciling TDS receipts.
-func buildAccrualMapTDS(ctx context.Context, pool *pgxpool.Pool,
-	runID, fdID, receiptID, tdsID string,
-	periodStart, periodEnd time.Time) float64 {
+func buildAccrualMapTDS(ctx context.Context, p MapLookupParams) float64 {
+	pool := p.Pool
+	runID := p.RunID
+	fdID := p.FDID
+	receiptID := p.ReceiptID
+	tdsID := p.TDSID
+	periodStart := p.PeriodStart
+	periodEnd := p.PeriodEnd
 
 	acRows, err := pool.Query(ctx, `
 		SELECT ledger_id,
@@ -1136,9 +1172,27 @@ func priorityFromStatus(s string) string {
 
 // ─── Result row inserts ───────────────────────────────────────────────────────
 
-func insertInterestResult(ctx context.Context, pool *pgxpool.Pool,
-	rec ReceiptRow, runID, matchingBasis string,
-	expected, variance, variancePct float64, matchStatus string) (string, error) {
+// InterestResultParams holds all inputs for insertInterestResult.
+type InterestResultParams struct {
+	Pool          *pgxpool.Pool
+	Rec           ReceiptRow
+	RunID         string
+	MatchingBasis string
+	Expected      float64
+	Variance      float64
+	VariancePct   float64
+	MatchStatus   string
+}
+
+func insertInterestResult(ctx context.Context, p InterestResultParams) (string, error) {
+	pool := p.Pool
+	rec := p.Rec
+	runID := p.RunID
+	matchingBasis := p.MatchingBasis
+	expected := p.Expected
+	variance := p.Variance
+	variancePct := p.VariancePct
+	matchStatus := p.MatchStatus
 
 	var bankID, fdRefNo string
 	_ = pool.QueryRow(ctx,
@@ -1184,9 +1238,27 @@ func insertInterestResult(ctx context.Context, pool *pgxpool.Pool,
 	return resultID, err
 }
 
-func insertTDSResult(ctx context.Context, pool *pgxpool.Pool,
-	tds TDSRow, runID, matchingBasis string,
-	expected, variance, variancePct float64, matchStatus string) (string, error) {
+// TDSResultParams holds all inputs for insertTDSResult.
+type TDSResultParams struct {
+	Pool          *pgxpool.Pool
+	TDS           TDSRow
+	RunID         string
+	MatchingBasis string
+	Expected      float64
+	Variance      float64
+	VariancePct   float64
+	MatchStatus   string
+}
+
+func insertTDSResult(ctx context.Context, p TDSResultParams) (string, error) {
+	pool := p.Pool
+	tds := p.TDS
+	runID := p.RunID
+	matchingBasis := p.MatchingBasis
+	expected := p.Expected
+	variance := p.Variance
+	variancePct := p.VariancePct
+	matchStatus := p.MatchStatus
 
 	var bankID, fdRefNo string
 	_ = pool.QueryRow(ctx,
@@ -1297,7 +1369,7 @@ func insertException(ctx context.Context, pool *pgxpool.Pool, p ExceptionParams)
 // parseDateRange parses two "YYYY-MM-DD" strings into time.Time values.
 // On parse error it falls back to sensible sentinel dates so callers never panic.
 func parseDateRange(start, end string) (time.Time, time.Time) {
-	const layout = "2006-01-02"
+	const layout = constants.DateFormat
 	ps, err1 := time.Parse(layout, start)
 	pe, err2 := time.Parse(layout, end)
 	if err1 != nil {

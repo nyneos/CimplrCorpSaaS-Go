@@ -205,7 +205,7 @@ func validateBankConfigFields(input BankConfigInput) error {
 		return fmt.Errorf("bank_code is required")
 	}
 	if strings.TrimSpace(input.DayCountCode) == "" {
-		return fmt.Errorf("day_count_code is required")
+		return fmt.Errorf(constants.ErrDayCountCodeRequired)
 	}
 	if strings.TrimSpace(input.HolidayCalendarCode) == "" {
 		return fmt.Errorf("holiday_calendar_code is required")
@@ -580,7 +580,7 @@ func UploadBankConfigSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// uniqueness pre-check (fail-fast)
 			if exists, existingID, err := bankConfigExists(ctx, pgxPool, input); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
 			} else if exists {
 				cols := "bank_code, product_type, minimum_amount, maximum_amount, day_count_code, capitalization_schedule_type, capitalization_date_adjustment, accrual_start_convention, accrual_end_convention, period_boundary_definition, holiday_calendar_code, broken_period_method, broken_period_location, rounding_method, rounding_frequency, tds_deduction_timing, effective_from, effective_to"

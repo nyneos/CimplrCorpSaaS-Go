@@ -87,7 +87,9 @@ const (
 	ErrAuditRecordNotFound                 = "audit record not found"
 	ErrMakerCheckerSamePerson              = "maker and checker cannot be the same person"
 	ErrReceiptIDRequired                   = "receipt_id is required"
-	// ErrUpdateFailed                        = "Update failed: "
+	ErrClosureRequestIDRequired            = "closure_request_id is required"
+	ErrClosureRequestNotFound              = "closure request not found"
+	ErrDayCountCodeRequired                = "day_count_code is required"
 )
 
 // Additional common messages used across handlers
@@ -129,6 +131,8 @@ const (
 	ErrDBConnection                       = "internal server error: db connection"
 	ErrNoFrequencyIDsProvided             = "No frequency IDs provided"
 	ErrEventIDChannelTemplateNameRequired = "event_id, channel and template_name are required"
+	ErrFailedToValidateUniqueness         = "failed to validate uniqueness: "
+	ErrCompoundingPeriodsPerYear          = "compounding_periods_per_year must be >= 1"
 )
 
 // DB / SQL error templates
@@ -188,14 +192,19 @@ const (
 
 // Date formats
 const (
-	DateTimeFormat      = "2006-01-02 15:04:05"
-	DateFormat          = "2006-01-02"
-	DateFormatAlt       = "02-01-2006"
-	DateFormatISO       = "2006-01-02T15:04:05"
-	DateFormatSlash     = "02/Jan/2006"
-	DateFormatDash      = "02-Jan-2006"
-	DateFormatCustom    = "01-01-1"
-	DateFormatYearMonth = "2006-01"
+	DateTimeFormat         = "2006-01-02 15:04:05"
+	DateFormat             = "2006-01-02"
+	DateFormatAlt          = "02-01-2006"
+	DateFormatISO          = "2006-01-02T15:04:05"
+	DateFormatSlash        = "02/Jan/2006"
+	DateFormatDash         = "02-Jan-2006"
+	DateFormatCustom       = "01-01-1"
+	DateFormatYearMonth    = "2006-01"
+	DateRange0To1Days      = "0-1 Days"
+	DateRange2To3Days      = "2-3 Days"
+	DateRangeMoreThan3Days = ">3 Days"
+	DateMax                = "2099-12-31"
+	DateMin                = "2000-01-01"
 )
 
 const (
@@ -225,6 +234,9 @@ const (
 	ErrUnableToUpdateParentAccountBalance = "Unable to update parent account balance"
 	ErrUnableToLogSweepExecution          = "Unable to log sweep execution"
 	ErrUserIDAndInitiationIDsRequired     = "user_id and initiation_ids required"
+	ErrUpdateConfirmationFailed           = "Update confirmation failed"
+	ErrUserIDAndCodeRequired              = "user_id and code are required"
+	ErrInvalidCode                        = "invalid code"
 	ErrClosingBalance                     = "closing balance"
 	ErrAllRowsFailedValidation            = "All rows failed validation"
 	ErrBatchAuditFailed                   = "Batch audit failed"
@@ -274,6 +286,7 @@ const (
 	QuerryCashflow                 = "investment.fd_cashflow"
 	QuerryInterestReceipt          = "investment.fd_interest_receipt"
 	QuerryMasterCashflowSchedule   = "investment.fd_master_cashflow_schedule"
+	QuerryAuditClosureRequest      = "investment.fd_audit_closure_request"
 	FormatInvestmentID             = "INV-%s"
 	FormatFDActivation             = "FD activation %s"
 	ErrLoadFDRecord                = "load FD record: %w"

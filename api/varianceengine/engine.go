@@ -8,6 +8,7 @@ package varianceengine
 //   varianceengine.UpdateRecordFlags(ctx, pool, "investment.fd_closure_request", "closure_request_id", closureID, runID, items)
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"math"
@@ -52,7 +53,7 @@ type Rule struct {
 
 // VarianceItem is one evaluated rule — whether clean or flagged.
 type VarianceItem struct {
-	VarianceID    string  // populated after PersistVariances
+	VarianceID    string // populated after PersistVariances
 	ModuleCode    string
 	RecordID      string
 	EntityID      string
@@ -63,10 +64,10 @@ type VarianceItem struct {
 	ActualValue   string
 	VarianceDelta float64
 	Priority      string
-	Status        string  // OPEN initially
+	Status        string // OPEN initially
 	IsException   bool
 	SystemComment string
-	HasVariance   bool    // false = values match within tolerance
+	HasVariance   bool // false = values match within tolerance
 }
 
 // ResolveRequest marks a variance row RESOLVED or EXCEPTION.
@@ -225,8 +226,9 @@ func UpdateRecordFlags(ctx context.Context, pool *pgxpool.Pool, table, pkCol, pk
 // AutoResolveCleared scans items for fields that are now clean (HasVariance=false).
 // For each clean field it finds the existing OPEN variance row (if any) and marks it RESOLVED.
 // This is the core of the "re-validate = resolve" workflow:
-//   the user fixes a value → re-calls /validate → engine produces HasVariance=false for that field
-//   → AutoResolveCleared fires → OPEN row becomes RESOLVED automatically.
+//
+//	the user fixes a value → re-calls /validate → engine produces HasVariance=false for that field
+//	→ AutoResolveCleared fires → OPEN row becomes RESOLVED automatically.
 func AutoResolveCleared(ctx context.Context, pool *pgxpool.Pool, recordID string, items []VarianceItem, resolvedBy, resolvedByEmail string) error {
 	for _, item := range items {
 		if item.HasVariance {
@@ -328,7 +330,7 @@ func parseFloat(s string) float64 {
 
 func parseDate(s string) time.Time {
 	for _, layout := range []string{
-		"2006-01-02",
+		constants.DateFormat,
 		"2006-01-02T15:04:05Z07:00",
 		"2006-01-02T15:04:05Z",
 	} {

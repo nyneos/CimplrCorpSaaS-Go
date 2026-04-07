@@ -56,12 +56,12 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			UserID            string  `json:"user_id"`
 			EntityID          string  `json:"entity_id"`
 			FDID              string  `json:"fd_id"`
-			ReceiptID         string  `json:"receipt_id"`         // optional
+			ReceiptID         string  `json:"receipt_id"` // optional
 			PeriodStart       string  `json:"period_start"`
 			PeriodEnd         string  `json:"period_end"`
 			TDSExpected       float64 `json:"tds_expected"`
 			TDSDeductedActual float64 `json:"tds_deducted_actual"`
-			GrossInterest     float64 `json:"gross_interest"`     // renamed from interest_amount
+			GrossInterest     float64 `json:"gross_interest"` // renamed from interest_amount
 			TDSDeductionDate  string  `json:"tds_deduction_date"`
 			TDSRateApplied    float64 `json:"tds_rate_applied"`
 			TDSSection        string  `json:"tds_section"`
@@ -392,7 +392,7 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err = tx.Commit(ctx); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "Transaction commit failed")
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
 			return
 		}
 

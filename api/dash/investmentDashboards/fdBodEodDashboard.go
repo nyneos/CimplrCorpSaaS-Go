@@ -73,8 +73,8 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
-		today := now.Format("2006-01-02")
-		threeDaysOut := now.AddDate(0, 0, 3).Format("2006-01-02")
+		today := now.Format(constants.DateFormat)
+		threeDaysOut := now.AddDate(0, 0, 3).Format(constants.DateFormat)
 		ctx := r.Context()
 		entityFilter := req.EntityID
 
@@ -251,14 +251,14 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type confRow struct {
-				BookingID  string  `json:"booking_id"`
-				Entity     string  `json:"entity"`
-				Bank       string  `json:"bank"`
-				Principal  float64 `json:"principal"`
-				Status     string  `json:"status"`
-				AgingDays  int     `json:"aging_days"`
-				BookingDate string `json:"booking_date"`
-				SLAStatus  string  `json:"sla_status"`
+				BookingID   string  `json:"booking_id"`
+				Entity      string  `json:"entity"`
+				Bank        string  `json:"bank"`
+				Principal   float64 `json:"principal"`
+				Status      string  `json:"status"`
+				AgingDays   int     `json:"aging_days"`
+				BookingDate string  `json:"booking_date"`
+				SLAStatus   string  `json:"sla_status"`
 			}
 			out := []confRow{}
 			overdue := 0
@@ -318,19 +318,19 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type runRow struct {
-				RunID               string  `json:"run_id"`
-				RunType             string  `json:"run_type"`
-				RunMode             string  `json:"run_mode"`
-				RunStatus           string  `json:"run_status"`
-				Entity              string  `json:"entity"`
-				PeriodStart         string  `json:"period_start"`
-				PeriodEnd           string  `json:"period_end"`
-				FDsInScope          int64   `json:"fds_in_scope"`
-				FDsCalculated       int64   `json:"fds_calculated"`
-				FDsFailed           int64   `json:"fds_failed"`
+				RunID                string  `json:"run_id"`
+				RunType              string  `json:"run_type"`
+				RunMode              string  `json:"run_mode"`
+				RunStatus            string  `json:"run_status"`
+				Entity               string  `json:"entity"`
+				PeriodStart          string  `json:"period_start"`
+				PeriodEnd            string  `json:"period_end"`
+				FDsInScope           int64   `json:"fds_in_scope"`
+				FDsCalculated        int64   `json:"fds_calculated"`
+				FDsFailed            int64   `json:"fds_failed"`
 				TotalInterestAccrued float64 `json:"total_interest_accrued"`
-				PostingStatus       string  `json:"posting_status"`
-				RunDate             string  `json:"run_date"`
+				PostingStatus        string  `json:"posting_status"`
+				RunDate              string  `json:"run_date"`
 			}
 			out := []runRow{}
 			for rows.Next() {
@@ -721,10 +721,10 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				return map[string]interface{}{"posted": 0, "failed": 0, "not_posted": 0, "total_posted_amount": 0}, nil
 			}
 			return map[string]interface{}{
-				"posted":               posted,
-				"failed":               failed,
-				"not_posted":           notPosted,
-				"total_posted_amount":  fdRound(totalPosted, 2),
+				"posted":              posted,
+				"failed":              failed,
+				"not_posted":          notPosted,
+				"total_posted_amount": fdRound(totalPosted, 2),
 			}, nil
 		})
 
@@ -1015,29 +1015,29 @@ func GetFDBodEodDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			},
 			// ── BOD KPIs ──────────────────────────────────────────────────────
 			"bod_kpis": map[string]interface{}{
-				"maturities_today_count":    todayMaturityCount,
-				"maturities_today_total":    todayMaturityTotal,
-				"maturities_next_3d_count":  next3Count,
-				"confirmations_due":         confDueCount,
-				"confirmations_overdue":     confOverdue,
-				"expected_interest_today":   expectedInterestTotal,
-				"accrual_runs_today":        countSlice(get("accrual_scheduled")),
-				"sla_breaches_yesterday":    countSlice(get("sla_breach_yesterday")),
-				"action_items_total":        countSlice(get("action_list")),
+				"maturities_today_count":   todayMaturityCount,
+				"maturities_today_total":   todayMaturityTotal,
+				"maturities_next_3d_count": next3Count,
+				"confirmations_due":        confDueCount,
+				"confirmations_overdue":    confOverdue,
+				"expected_interest_today":  expectedInterestTotal,
+				"accrual_runs_today":       countSlice(get("accrual_scheduled")),
+				"sla_breaches_yesterday":   countSlice(get("sla_breach_yesterday")),
+				"action_items_total":       countSlice(get("action_list")),
 			},
 			// ── EOD KPIs ──────────────────────────────────────────────────────
 			"eod_kpis": map[string]interface{}{
-				"bookings_today_count":     bookingsTodayCount,
-				"bookings_today_amount":    bookingsTodayAmount,
-				"confirmations_today":      confTodayCount,
-				"receipts_ingested":        getNestedInt64(get("receipts_today"), "ingested"),
-				"receipts_matched":         getNestedInt64(get("receipts_today"), "matched"),
-				"receipts_unmatched":       getNestedInt64(get("receipts_today"), "unmatched"),
-				"receipt_match_rate_pct":   getNestedFloat(get("receipts_today"), "match_rate_pct"),
-				"exceptions_opened":        getNestedInt64(get("exceptions_today"), "opened"),
-				"exceptions_closed":        getNestedInt64(get("exceptions_today"), "closed"),
-				"gl_postings_success":      getNestedInt64(get("posting_today"), "posted"),
-				"gl_postings_failed":       getNestedInt64(get("posting_today"), "failed"),
+				"bookings_today_count":   bookingsTodayCount,
+				"bookings_today_amount":  bookingsTodayAmount,
+				"confirmations_today":    confTodayCount,
+				"receipts_ingested":      getNestedInt64(get("receipts_today"), "ingested"),
+				"receipts_matched":       getNestedInt64(get("receipts_today"), "matched"),
+				"receipts_unmatched":     getNestedInt64(get("receipts_today"), "unmatched"),
+				"receipt_match_rate_pct": getNestedFloat(get("receipts_today"), "match_rate_pct"),
+				"exceptions_opened":      getNestedInt64(get("exceptions_today"), "opened"),
+				"exceptions_closed":      getNestedInt64(get("exceptions_today"), "closed"),
+				"gl_postings_success":    getNestedInt64(get("posting_today"), "posted"),
+				"gl_postings_failed":     getNestedInt64(get("posting_today"), "failed"),
 			},
 			// ── Detail tables ─────────────────────────────────────────────────
 			"maturities_today":     get("maturities_today"),

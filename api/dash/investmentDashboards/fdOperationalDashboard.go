@@ -67,7 +67,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── period resolution (supports CUSTOM start/end dates) ──────────────────
 		var opPeriodStart time.Time
 		if req.Period == "CUSTOM" && req.StartDate != "" {
-			if parsed, pErr := time.Parse("2006-01-02", req.StartDate); pErr == nil {
+			if parsed, pErr := time.Parse(constants.DateFormat, req.StartDate); pErr == nil {
 				opPeriodStart = parsed
 			} else {
 				opPeriodStart = periodStartDate("MTD", now)
@@ -77,12 +77,12 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		opPeriodEnd := now
 		if req.Period == "CUSTOM" && req.EndDate != "" {
-			if parsed, pErr := time.Parse("2006-01-02", req.EndDate); pErr == nil {
+			if parsed, pErr := time.Parse(constants.DateFormat, req.EndDate); pErr == nil {
 				opPeriodEnd = parsed
 			}
 		}
-		startDateStr := opPeriodStart.Format("2006-01-02")
-		endDateStr := opPeriodEnd.Format("2006-01-02")
+		startDateStr := opPeriodStart.Format(constants.DateFormat)
+		endDateStr := opPeriodEnd.Format(constants.DateFormat)
 
 		type subResult struct {
 			data interface{}
@@ -463,8 +463,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				GROUP BY 1`
 
 			type bandMap = map[string]int64
-			confBands := bandMap{"0-1 Days": 0, "2-3 Days": 0, ">3 Days": 0}
-			excBands := bandMap{"0-1 Days": 0, "2-3 Days": 0, ">3 Days": 0}
+			confBands := bandMap{constants.DateRange0To1Days: 0, constants.DateRange2To3Days: 0, constants.DateRangeMoreThan3Days: 0}
+			excBands := bandMap{constants.DateRange0To1Days: 0, constants.DateRange2To3Days: 0, constants.DateRangeMoreThan3Days: 0}
 
 			if confRows, err2 := pool.Query(ctx, confSQL, entityFilter); err2 == nil {
 				defer confRows.Close()
@@ -493,9 +493,9 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Exceptions    int64  `json:"exceptions"`
 			}
 			out := []slaBandRow{
-				{SLA: "0-1 Days", Confirmations: confBands["0-1 Days"], Exceptions: excBands["0-1 Days"]},
-				{SLA: "2-3 Days", Confirmations: confBands["2-3 Days"], Exceptions: excBands["2-3 Days"]},
-				{SLA: ">3 Days", Confirmations: confBands[">3 Days"], Exceptions: excBands[">3 Days"]},
+				{SLA: constants.DateRange0To1Days, Confirmations: confBands[constants.DateRange0To1Days], Exceptions: excBands[constants.DateRange0To1Days]},
+				{SLA: constants.DateRange2To3Days, Confirmations: confBands[constants.DateRange2To3Days], Exceptions: excBands[constants.DateRange2To3Days]},
+				{SLA: constants.DateRangeMoreThan3Days, Confirmations: confBands[constants.DateRangeMoreThan3Days], Exceptions: excBands[constants.DateRangeMoreThan3Days]},
 			}
 			return out, nil
 		})
@@ -660,14 +660,14 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"failed_posting_batches":   failedPostings,
 				"total_work_items":         bookingCount + confirmCount + unmatchedCount + tdsCount + excCount,
 			},
-		"tables": map[string]interface{}{
-			"booking_requests":      get("booking_requests"),
-			"pending_confirmations": get("pending_confirmations"),
-			"unmatched_receipts":    get("unmatched_receipts"),
-			"exceptions":            get("exceptions"),
-			"posting_queue":         get("posting_queue"),
-			"fd_list":               get("fd_list"),
-		},
+			"tables": map[string]interface{}{
+				"booking_requests":      get("booking_requests"),
+				"pending_confirmations": get("pending_confirmations"),
+				"unmatched_receipts":    get("unmatched_receipts"),
+				"exceptions":            get("exceptions"),
+				"posting_queue":         get("posting_queue"),
+				"fd_list":               get("fd_list"),
+			},
 			"accrual_run":      get("accrual_run"),
 			"tds_pending":      get("tds_pending"),
 			"sla_distribution": get("sla_distribution"),

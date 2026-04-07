@@ -23,7 +23,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidJSONPrefix+err.Error(), http.StatusBadRequest)
 			return
 		}
 

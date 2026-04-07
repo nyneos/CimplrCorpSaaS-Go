@@ -34,7 +34,7 @@ func InitDB() (*sql.DB, error) {
 }
 
 func main() {
-	_ = godotenv.Load("../.env")
+	_ = godotenv.Load(".env")
 
 	fmt.Println("ENV CHECK:")
 	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
@@ -69,7 +69,7 @@ func main() {
 		sslMode = "disable"
 	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=20&pool_min_conns=2&statement_timeout=30000",
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=30&pool_min_conns=2&statement_timeout=30000",
 		user, pass, host, port, name, sslMode,
 	)
 

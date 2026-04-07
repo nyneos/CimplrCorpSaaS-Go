@@ -732,7 +732,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			var afTime time.Time
-			if t, err := time.Parse("2006-01-02", afStr); err == nil {
+			if t, err := time.Parse(constants.DateFormat, afStr); err == nil {
 				afTime = t
 			} else if t, err := time.Parse(time.RFC3339, afStr); err == nil {
 				afTime = t
@@ -745,7 +745,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			atStr := get("applicable_to")
 			if atStr != "" {
 				var atTime time.Time
-				if t, err := time.Parse("2006-01-02", atStr); err == nil {
+				if t, err := time.Parse(constants.DateFormat, atStr); err == nil {
 					atTime = t
 				} else if t, err := time.Parse(time.RFC3339, atStr); err == nil {
 					atTime = t

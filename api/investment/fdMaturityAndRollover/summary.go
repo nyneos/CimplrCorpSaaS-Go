@@ -12,6 +12,7 @@ package fdMaturityAndRollover
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,49 +26,49 @@ import (
 
 type maturitySummaryRequest struct {
 	UserID      string   `json:"user_id"`
-	EntityIDs   []string `json:"entity_ids"`    // optional filter
-	BankIDs     []string `json:"bank_ids"`      // optional filter
-	FDStatuses  []string `json:"fd_statuses"`   // optional filter: ACTIVE / MATURED / PREMATURELY_CLOSED / ROLLED_OVER / CANCELLED
-	ClosureType string   `json:"closure_type"`  // optional: MATURITY / PREMATURE / ROLLOVER
-	FromDate    string   `json:"from_date"`     // maturity_date >= from_date
-	ToDate      string   `json:"to_date"`       // maturity_date <= to_date
+	EntityIDs   []string `json:"entity_ids"`   // optional filter
+	BankIDs     []string `json:"bank_ids"`     // optional filter
+	FDStatuses  []string `json:"fd_statuses"`  // optional filter: ACTIVE / MATURED / PREMATURELY_CLOSED / ROLLED_OVER / CANCELLED
+	ClosureType string   `json:"closure_type"` // optional: MATURITY / PREMATURE / ROLLOVER
+	FromDate    string   `json:"from_date"`    // maturity_date >= from_date
+	ToDate      string   `json:"to_date"`      // maturity_date <= to_date
 }
 
 type fdSummaryRow struct {
-	FDID                string   `json:"fd_id"`
-	FDRefNo             string   `json:"fd_ref_no"`
-	EntityID            string   `json:"entity_id"`
-	EntityName          string   `json:"entity_name"`
-	BankID              string   `json:"bank_id"`
-	BankName            string   `json:"bank_name"`
-	PrincipalAmount     float64  `json:"principal_amount"`
-	InterestRate        float64  `json:"interest_rate"`
-	TenureDays          int      `json:"tenure_days"`
-	StartDate           *string  `json:"start_date"`
-	MaturityDate        *string  `json:"maturity_date"`
-	FDStatus            string   `json:"fd_status"`
-	ClosureType         *string  `json:"closure_type"`
+	FDID                 string  `json:"fd_id"`
+	FDRefNo              string  `json:"fd_ref_no"`
+	EntityID             string  `json:"entity_id"`
+	EntityName           string  `json:"entity_name"`
+	BankID               string  `json:"bank_id"`
+	BankName             string  `json:"bank_name"`
+	PrincipalAmount      float64 `json:"principal_amount"`
+	InterestRate         float64 `json:"interest_rate"`
+	TenureDays           int     `json:"tenure_days"`
+	StartDate            *string `json:"start_date"`
+	MaturityDate         *string `json:"maturity_date"`
+	FDStatus             string  `json:"fd_status"`
+	ClosureType          *string `json:"closure_type"`
 	EffectiveClosureDate *string `json:"effective_closure_date"`
-	AccruedInterest     float64  `json:"accrued_interest"`
-	TDSDeducted         float64  `json:"tds_deducted"`
-	NetPayout           float64  `json:"net_payout"`
-	DaysHeld            int      `json:"days_held"`
-	ClosureRequestID    *string  `json:"closure_request_id"`
-	ApprovedAt          *string  `json:"approved_at"`
+	AccruedInterest      float64 `json:"accrued_interest"`
+	TDSDeducted          float64 `json:"tds_deducted"`
+	NetPayout            float64 `json:"net_payout"`
+	DaysHeld             int     `json:"days_held"`
+	ClosureRequestID     *string `json:"closure_request_id"`
+	ApprovedAt           *string `json:"approved_at"`
 }
 
 type statusTotals struct {
-	Count           int     `json:"count"`
-	TotalPrincipal  float64 `json:"total_principal"`
-	TotalInterest   float64 `json:"total_accrued_interest"`
-	TotalTDS        float64 `json:"total_tds"`
-	TotalNetPayout  float64 `json:"total_net_payout"`
+	Count          int     `json:"count"`
+	TotalPrincipal float64 `json:"total_principal"`
+	TotalInterest  float64 `json:"total_accrued_interest"`
+	TotalTDS       float64 `json:"total_tds"`
+	TotalNetPayout float64 `json:"total_net_payout"`
 }
 
 type maturitySummaryResponse struct {
-	Data    []fdSummaryRow              `json:"data"`
-	Summary map[string]*statusTotals   `json:"summary"`
-	Grand   statusTotals               `json:"grand_total"`
+	Data    []fdSummaryRow           `json:"data"`
+	Summary map[string]*statusTotals `json:"summary"`
+	Grand   statusTotals             `json:"grand_total"`
 }
 
 // ─── Handler ────────────────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req maturitySummaryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 

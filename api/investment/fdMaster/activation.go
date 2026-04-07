@@ -876,7 +876,7 @@ func BulkApproveActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, fdID+": commit failed")
+					errors = append(errors, fdID+constants.ErrCommitFailed)
 					continue
 				}
 				directActed++
@@ -1007,7 +1007,7 @@ func BulkRejectActivation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, fdID+": commit failed")
+					errors = append(errors, fdID+constants.ErrCommitFailed)
 					continue
 				}
 				directActed++
@@ -2147,8 +2147,8 @@ func BulkDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID      string   `json:"user_id"`
-			FDID        string   `json:"fd_id"`        // single FD
-			FDIDs       []string `json:"fd_ids"`       // multiple FDs
+			FDID        string   `json:"fd_id"`  // single FD
+			FDIDs       []string `json:"fd_ids"` // multiple FDs
 			CashflowIDs []string `json:"cashflow_ids"`
 			Comment     string   `json:"comment"`
 		}

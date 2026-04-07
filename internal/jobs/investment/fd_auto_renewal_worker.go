@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"fmt"
 	"log"
@@ -14,10 +15,10 @@ import (
 // FD_CLOSURE_AUTO_RENEWAL) and logs the result in fd_auto_renewal_log.
 //
 // Fixed bugs (vs original):
-//   1. closure_type is now 'ROLLOVER' (was 'AUTO_RENEWAL' which had no approval hook).
-//   2. Reads accrued_interest and tds_deducted from fd_accrual_ledger so accounting
-//      entries reflect what was actually earned (was hardcoded 0, 0).
-//   3. rollover_amount = principal + net_interest (was just principal).
+//  1. closure_type is now 'ROLLOVER' (was 'AUTO_RENEWAL' which had no approval hook).
+//  2. Reads accrued_interest and tds_deducted from fd_accrual_ledger so accounting
+//     entries reflect what was actually earned (was hardcoded 0, 0).
+//  3. rollover_amount = principal + net_interest (was just principal).
 func StartAutoRenewalWorker(db *pgxpool.Pool) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
@@ -114,13 +115,14 @@ func runAutoRenewal(db *pgxpool.Pool) {
 			rolloverAmount = fd.PrincipalAmount
 		}
 
-		if processErr := processAutoRenewalFD(
-			ctx, db,
-			fd.FDID, fd.BookingID, fd.ConfirmationID,
-			fd.EntityID, fd.EntityName,
-			fd.PrincipalAmount, fd.AccruedInterest, fd.TDSDeducted, rolloverAmount,
-			fd.MaturityDate, fd.TenorDays,
-		); processErr != nil {
+		if processErr := processAutoRenewalFD(ctx, AutoRenewalFDParams{
+			DB: db,
+			FDID: fd.FDID, BookingID: fd.BookingID, ConfirmationID: fd.ConfirmationID,
+			EntityID: fd.EntityID, EntityName: fd.EntityName,
+			PrincipalAmount: fd.PrincipalAmount, AccruedInterest: fd.AccruedInterest,
+			TDSDeducted: fd.TDSDeducted, RolloverAmount: rolloverAmount,
+			MaturityDate: fd.MaturityDate, TenorDays: fd.TenorDays,
+		}); processErr != nil {
 			log.Printf("[AutoRenewal] Failed for FD %s: %v", fd.FDID, processErr)
 			_, _ = db.Exec(ctx, `
 				INSERT INTO investment.fd_auto_renewal_log (
@@ -138,12 +140,35 @@ func runAutoRenewal(db *pgxpool.Pool) {
 		processed, failed, len(fds), time.Now().Format(time.RFC3339))
 }
 
-func processAutoRenewalFD(
-	ctx context.Context, db *pgxpool.Pool,
-	fdID, bookingID, confirmationID, entityID, entityName string,
-	principalAmount, accruedInterest, tdsDeducted, rolloverAmount float64,
-	maturityDate time.Time, tenorDays int,
-) error {
+// AutoRenewalFDParams holds all inputs for processAutoRenewalFD.
+type AutoRenewalFDParams struct {
+	DB              *pgxpool.Pool
+	FDID            string
+	BookingID       string
+	ConfirmationID  string
+	EntityID        string
+	EntityName      string
+	PrincipalAmount float64
+	AccruedInterest float64
+	TDSDeducted     float64
+	RolloverAmount  float64
+	MaturityDate    time.Time
+	TenorDays       int
+}
+
+func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
+	db := p.DB
+	fdID := p.FDID
+	bookingID := p.BookingID
+	confirmationID := p.ConfirmationID
+	entityID := p.EntityID
+	entityName := p.EntityName
+	principalAmount := p.PrincipalAmount
+	accruedInterest := p.AccruedInterest
+	tdsDeducted := p.TDSDeducted
+	rolloverAmount := p.RolloverAmount
+	maturityDate := p.MaturityDate
+	tenorDays := p.TenorDays
 	// net_payout_amount = full rollover amount (principal + net interest)
 	netPayout := rolloverAmount
 
@@ -174,7 +199,7 @@ func processAutoRenewalFD(
 		  'SYSTEM', NOW(), 'SYSTEM', NOW()
 		) RETURNING closure_request_id`,
 		fdID, bookingID, confirmationID, entityID, entityName,
-		maturityDate.Format("2006-01-02"),
+		maturityDate.Format(constants.DateFormat),
 		principalAmount, accruedInterest, tdsDeducted, netPayout,
 		rolloverAmount, tenorDays,
 	).Scan(&closureRequestID)
@@ -189,7 +214,7 @@ func processAutoRenewalFD(
 		  rollover_amount, rollover_principal, interest_credited, tds_deducted,
 		  new_tenor_days, rollover_type, created_by
 		) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'FULL','SYSTEM')`,
-		closureRequestID, fdID, maturityDate.Format("2006-01-02"),
+		closureRequestID, fdID, maturityDate.Format(constants.DateFormat),
 		rolloverAmount, principalAmount, accruedInterest, tdsDeducted, tenorDays)
 
 	// Link closure request on fd_master

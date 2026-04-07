@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 )
 
@@ -99,7 +100,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.Code == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": "user_id and code are required",
+				"success": false, "error": constants.ErrUserIDAndCodeRequired,
 			})
 			return
 		}
@@ -113,7 +114,7 @@ func MFAConfirmHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(db, req.UserID, "mfa_confirm_failed", "invalid code", extractClientIPFromRequest(r))
+			LogSecurityEvent(db, req.UserID, "mfa_confirm_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid code. Please try again",
 			})
@@ -150,7 +151,7 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.Code == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": "user_id and code are required",
+				"success": false, "error": constants.ErrUserIDAndCodeRequired,
 			})
 			return
 		}
@@ -165,7 +166,7 @@ func MFAVerifyHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(db, req.UserID, "mfa_verify_failed", "invalid code", extractClientIPFromRequest(r))
+			LogSecurityEvent(db, req.UserID, "mfa_verify_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid MFA code",
 			})
@@ -209,7 +210,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.Code == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"success": false, "error": "user_id and code are required",
+				"success": false, "error": constants.ErrUserIDAndCodeRequired,
 			})
 			return
 		}
@@ -223,7 +224,7 @@ func MFADisableHandler(db *sql.DB) http.HandlerFunc {
 		}
 
 		if !ValidateTOTP(secret, req.Code) {
-			LogSecurityEvent(db, req.UserID, "mfa_disable_failed", "invalid code", extractClientIPFromRequest(r))
+			LogSecurityEvent(db, req.UserID, "mfa_disable_failed", constants.ErrInvalidCode, extractClientIPFromRequest(r))
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false, "error": "Invalid MFA code",
 			})

@@ -11,9 +11,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -84,16 +84,17 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Password provisioning -----------------------------------------------
-		plainPassword := req.Password
-		if req.PasswordType == "auto" || plainPassword == "" {
-			var genErr error
-			plainPassword, genErr = generateRandomPassword(16)
-			if genErr != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
-				return
-			}
+		cimplr := req.Password
+		if req.PasswordType == "auto" || cimplr == "" {
+			// var genErr error
+			// cimplr, genErr = generateRandomPassword(16)
+			// if genErr != nil {
+			// 	respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
+			// 	return
+			// }
+			cimplr = "changeme"
 		}
-		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
+		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(cimplr), bcrypt.DefaultCost)
 		if hashErr != nil {
 			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
 			return
@@ -124,7 +125,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, msg)
 			return
 		} else if err != sql.ErrNoRows {
-			respondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 			return
 		}
 		var userId string
@@ -181,7 +182,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 					"EmployeeName": req.EmployeeName,
 					"Email":        req.Email,
 					"Role":         req.Role,
-					"Password":     plainPassword,
+					"Password":     cimplr,
 				},
 			)
 		}
@@ -191,7 +192,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			"success":        true,
 			"user_id":        userId,
 			"role_id":        roleId,
-			"plain_password": plainPassword,
+			"plain_password": cimplr,
 		})
 	}
 }

@@ -45,9 +45,9 @@ import (
 
 // HolidayEntry is a single non-working date returned by GetHolidayListForRange.
 type HolidayEntry struct {
-	Date        string `json:"date"`         // YYYY-MM-DD
-	Type        string `json:"type"`         // "HOLIDAY" | "WEEKEND"
-	Description string `json:"description"`  // holiday name or weekday name
+	Date        string `json:"date"`        // YYYY-MM-DD
+	Type        string `json:"type"`        // "HOLIDAY" | "WEEKEND"
+	Description string `json:"description"` // holiday name or weekday name
 }
 
 // GetHolidayListForRange expands the full list of non-working dates for a
@@ -200,9 +200,9 @@ func PrevWorkingDay(date time.Time, cal HolidayCalendarInfo) time.Time {
 //     next_working_day, prev_working_day.
 type HolidayListRequest struct {
 	CalendarCode string `json:"calendar_code"` // required always
-	Date         string `json:"date"`           // YYYY-MM-DD — single-date mode
-	From         string `json:"from"`           // YYYY-MM-DD — range mode
-	To           string `json:"to"`             // YYYY-MM-DD — range mode
+	Date         string `json:"date"`          // YYYY-MM-DD — single-date mode
+	From         string `json:"from"`          // YYYY-MM-DD — range mode
+	To           string `json:"to"`            // YYYY-MM-DD — range mode
 }
 
 // GetHolidayListHandler handles both modes based on which fields are provided.
@@ -230,7 +230,7 @@ func GetHolidayListHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			req.To = r.URL.Query().Get("to")
 		} else {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 				return
 			}
 		}
@@ -244,7 +244,7 @@ func GetHolidayListHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusServiceUnavailable, "db connection error")
+			api.RespondWithError(w, http.StatusServiceUnavailable, constants.ErrDBConnection)
 			return
 		}
 		defer conn.Release()
@@ -281,14 +281,14 @@ func GetHolidayListHandler(pool *pgxpool.Pool) http.HandlerFunc {
 			prev := PrevWorkingDay(checkDate.AddDate(0, 0, -1), calInfo)
 
 			api.RespondWithPayload(w, true, "", map[string]interface{}{
-				"calendar_code":     req.CalendarCode,
-				"date":              dateStr,
-				"is_holiday":        isHol,
-				"is_weekend":        isWknd,
-				"is_working_day":    isWorking,
-				"holiday_name":      holName,
-				"next_working_day":  next.Format(constants.DateFormat),
-				"prev_working_day":  prev.Format(constants.DateFormat),
+				"calendar_code":    req.CalendarCode,
+				"date":             dateStr,
+				"is_holiday":       isHol,
+				"is_weekend":       isWknd,
+				"is_working_day":   isWorking,
+				"holiday_name":     holName,
+				"next_working_day": next.Format(constants.DateFormat),
+				"prev_working_day": prev.Format(constants.DateFormat),
 			})
 			return
 		}
@@ -350,24 +350,24 @@ type MaturityDateRequest struct {
 	// ── Calendar & adjustment ─────────────────────────────────────────────
 	// At least one of BankConfigID or CalendarCode should be provided for
 	// holiday-aware adjustment.
-	BankConfigID    string `json:"bank_config_id"`    // loads holiday calendar + adjustment rule
-	CalendarCode    string `json:"calendar_code"`     // direct calendar override
-	DateAdjustment  string `json:"date_adjustment"`   // FOLLOWING_WD | PRECEDING_WD | NO_ADJUST (overrides bank config)
+	BankConfigID   string `json:"bank_config_id"`  // loads holiday calendar + adjustment rule
+	CalendarCode   string `json:"calendar_code"`   // direct calendar override
+	DateAdjustment string `json:"date_adjustment"` // FOLLOWING_WD | PRECEDING_WD | NO_ADJUST (overrides bank config)
 }
 
 // MaturityDateResponse is what the endpoint returns.
 type MaturityDateResponse struct {
-	StartDate         string `json:"start_date"`
-	TenorDays         int    `json:"tenor_days"`          // resolved calendar days
-	RawMaturityDate   string `json:"raw_maturity_date"`   // start + tenor, unadjusted
-	MaturityDate      string `json:"maturity_date"`       // adjusted for holidays/weekends
-	IsAdjusted        bool   `json:"is_adjusted"`         // true when raw != adjusted
-	AdjustmentApplied string `json:"adjustment_applied"`  // FOLLOWING_WD / PRECEDING_WD / NO_ADJUST
-	CalendarCode      string `json:"calendar_code"`
-	IsRawMaturityHoliday  bool   `json:"is_raw_maturity_holiday"`
-	IsRawMaturityWeekend  bool   `json:"is_raw_maturity_weekend"`
-	NextWorkingDay    string `json:"next_working_day"`
-	PrevWorkingDay    string `json:"prev_working_day"`
+	StartDate            string `json:"start_date"`
+	TenorDays            int    `json:"tenor_days"`         // resolved calendar days
+	RawMaturityDate      string `json:"raw_maturity_date"`  // start + tenor, unadjusted
+	MaturityDate         string `json:"maturity_date"`      // adjusted for holidays/weekends
+	IsAdjusted           bool   `json:"is_adjusted"`        // true when raw != adjusted
+	AdjustmentApplied    string `json:"adjustment_applied"` // FOLLOWING_WD / PRECEDING_WD / NO_ADJUST
+	CalendarCode         string `json:"calendar_code"`
+	IsRawMaturityHoliday bool   `json:"is_raw_maturity_holiday"`
+	IsRawMaturityWeekend bool   `json:"is_raw_maturity_weekend"`
+	NextWorkingDay       string `json:"next_working_day"`
+	PrevWorkingDay       string `json:"prev_working_day"`
 }
 
 // MaturityDateHandler calculates the maturity date from a start date + tenor,
@@ -393,7 +393,7 @@ func MaturityDateHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req MaturityDateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
@@ -424,7 +424,7 @@ func MaturityDateHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusServiceUnavailable, "db connection error")
+			api.RespondWithError(w, http.StatusServiceUnavailable, constants.ErrDBConnection)
 			return
 		}
 		defer conn.Release()
@@ -495,22 +495,22 @@ type SimulateCashflowRequest struct {
 	StartDate       string  `json:"start_date"`       // YYYY-MM-DD
 
 	// Tenor — provide exactly one of:
-	TenorDays    int `json:"tenor_days"`    // calendar days
-	TenorMonths  int `json:"tenor_months"`  // months (converted → days)
-	TenorYears   int `json:"tenor_years"`   // years  (converted → days)
+	TenorDays   int `json:"tenor_days"`   // calendar days
+	TenorMonths int `json:"tenor_months"` // months (converted → days)
+	TenorYears  int `json:"tenor_years"`  // years  (converted → days)
 
 	// ── Config refs — at least bank_config_id is recommended ─────────────
-	BankConfigID    string `json:"bank_config_id"`    // resolved from investment.fd_bank_config_master
-	DayCountCode    string `json:"day_count_code"`    // override / standalone e.g. "DC-ACT-365"
-	InterestType    string `json:"interest_type"`     // code or id from fd_interest_type_master
-	FrequencyID     string `json:"frequency_id"`      // compounding / payout frequency id or code
-	FrequencyCode   string `json:"frequency_code"`    // alias for frequency_id (frontend compat)
+	BankConfigID      string `json:"bank_config_id"`      // resolved from investment.fd_bank_config_master
+	DayCountCode      string `json:"day_count_code"`      // override / standalone e.g. "DC-ACT-365"
+	InterestType      string `json:"interest_type"`       // code or id from fd_interest_type_master
+	FrequencyID       string `json:"frequency_id"`        // compounding / payout frequency id or code
+	FrequencyCode     string `json:"frequency_code"`      // alias for frequency_id (frontend compat)
 	PayoutFrequencyID string `json:"payout_frequency_id"` // separate cash-payout freq for COMPOUND FDs (e.g. half-yearly payout on quarterly compounding)
-	TDSPlanID       string `json:"tds_plan_id"`       // id from fd_tds_plan_master (optional)
+	TDSPlanID         string `json:"tds_plan_id"`         // id from fd_tds_plan_master (optional)
 
 	// ── Explicit maturity date override (overrides tenor calculation) ─────
 	// When provided together with tenor fields, maturity_date wins.
-	MaturityDate    string `json:"maturity_date"`     // YYYY-MM-DD — explicit maturity override
+	MaturityDate string `json:"maturity_date"` // YYYY-MM-DD — explicit maturity override
 
 	// ── Inline overrides (applied on top of bank config) ─────────────────
 	// These let the frontend test "what-if" scenarios without creating a config.
@@ -562,11 +562,11 @@ type SimulatedFDSummary struct {
 	HolidayCalendarCode string  `json:"holiday_calendar_code"`
 
 	// ── Resolved frequency (compounding / capitalization) ────────────────
-	FrequencyID         string `json:"frequency_id,omitempty"`
-	FrequencyCode       string `json:"frequency_code,omitempty"`
-	FrequencyName       string `json:"frequency_name,omitempty"`
-	FrequencyType       string `json:"frequency_type,omitempty"`
-	PayoutMonths        int    `json:"payout_months_per_period,omitempty"` // 0 = AT_MATURITY
+	FrequencyID   string `json:"frequency_id,omitempty"`
+	FrequencyCode string `json:"frequency_code,omitempty"`
+	FrequencyName string `json:"frequency_name,omitempty"`
+	FrequencyType string `json:"frequency_type,omitempty"`
+	PayoutMonths  int    `json:"payout_months_per_period,omitempty"` // 0 = AT_MATURITY
 
 	// ── Resolved payout frequency (separate cash payout for COMPOUND FDs) ─
 	PayoutFrequencyID   string `json:"payout_frequency_id,omitempty"`
@@ -578,9 +578,9 @@ type SimulatedFDSummary struct {
 	TDSPlanID          string  `json:"tds_plan_id,omitempty"`
 	TDSPlanCode        string  `json:"tds_plan_code,omitempty"`
 	TDSPlanName        string  `json:"tds_plan_name,omitempty"`
-	TDSRate            float64 `json:"tds_rate_pct,omitempty"`             // % e.g. 10.00
+	TDSRate            float64 `json:"tds_rate_pct,omitempty"` // % e.g. 10.00
 	TDSThreshold       float64 `json:"tds_threshold_amount,omitempty"`
-	TDSDeductionTiming string  `json:"tds_deduction_timing,omitempty"`     // ACCRUAL_ANNUAL|MATURITY|RECEIPT
+	TDSDeductionTiming string  `json:"tds_deduction_timing,omitempty"` // ACCRUAL_ANNUAL|MATURITY|RECEIPT
 }
 
 // SimulatedCashflowRow mirrors CashflowRow but with JSON-friendly date strings.
@@ -612,14 +612,14 @@ type SimulatedCashflowRow struct {
 
 // SimulateSummary holds aggregated metrics across the schedule.
 type SimulateSummary struct {
-	TotalInterestAccrued   float64 `json:"total_interest_accrued"`
-	TotalTDSDeducted       float64 `json:"total_tds_deducted"`
-	TotalCapitalized       float64 `json:"total_capitalized"`
-	MaturityAmount         float64 `json:"maturity_amount"`
-	EffectiveYield         float64 `json:"effective_yield_pct"`   // % post-TDS
-	AccrualPeriodCount     int     `json:"accrual_period_count"`
-	CapitalizationCount    int     `json:"capitalization_count"`
-	InterestReceiptCount   int     `json:"interest_receipt_count"`
+	TotalInterestAccrued float64 `json:"total_interest_accrued"`
+	TotalTDSDeducted     float64 `json:"total_tds_deducted"`
+	TotalCapitalized     float64 `json:"total_capitalized"`
+	MaturityAmount       float64 `json:"maturity_amount"`
+	EffectiveYield       float64 `json:"effective_yield_pct"` // % post-TDS
+	AccrualPeriodCount   int     `json:"accrual_period_count"`
+	CapitalizationCount  int     `json:"capitalization_count"`
+	InterestReceiptCount int     `json:"interest_receipt_count"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,7 +748,11 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	}
 
 	// ── Run the engine ────────────────────────────────────────────────────
-	rawRows := generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo, calInfo, payoutFreq)
+	rawRows := generateCashflowSchedule(CashflowScheduleParams{
+		FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds,
+		DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo,
+		PayoutFreqOverride: payoutFreq,
+	})
 
 	// ── Apply grace period extension ──────────────────────────────────────
 	rawRows = applyGracePeriod(fd, cfg, rawRows, dcInfo, calInfo)
@@ -803,11 +807,11 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 			BankConfigID:        req.BankConfigID,
 			HolidayCalendarCode: calCode,
 			// Compounding / capitalization frequency
-			FrequencyID:    freq.FrequencyID,
-			FrequencyCode:  freq.FrequencyCode,
-			FrequencyName:  freq.FrequencyName,
-			FrequencyType:  freq.FrequencyType,
-			PayoutMonths:   payoutMonths,
+			FrequencyID:   freq.FrequencyID,
+			FrequencyCode: freq.FrequencyCode,
+			FrequencyName: freq.FrequencyName,
+			FrequencyType: freq.FrequencyType,
+			PayoutMonths:  payoutMonths,
 			// Cash-payout frequency (same as comp freq when payout_frequency_id not supplied)
 			PayoutFrequencyID:   payoutFreq.FrequencyID,
 			PayoutFrequencyCode: payoutFreq.FrequencyCode,
@@ -852,14 +856,14 @@ func SimulateCashflowHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SimulateCashflowRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		ctx := r.Context()
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusServiceUnavailable, "db connection error")
+			api.RespondWithError(w, http.StatusServiceUnavailable, constants.ErrDBConnection)
 			return
 		}
 		defer conn.Release()
@@ -975,12 +979,12 @@ func applyGracePeriod(fd *FDRecord, cfg *BankConfig, rows []CashflowRow, dcInfo 
 	interest := roundByMethod(raw, decimals, cfg.RoundingMethod)
 
 	rows = append(rows, CashflowRow{
-		PeriodNumber:    len(rows) + 1,
-		EventType:       "GRACE_PERIOD",
-		EventDate:       graceEnd,
-		PeriodStartDate: graceStart,
-		PeriodEndDate:   graceEnd,
-		PeriodDays:      days,
+		PeriodNumber:     len(rows) + 1,
+		EventType:        "GRACE_PERIOD",
+		EventDate:        graceEnd,
+		PeriodStartDate:  graceStart,
+		PeriodEndDate:    graceEnd,
+		PeriodDays:       days,
 		OpeningPrincipal: fd.PrincipalAmount,
 		InterestAccrued:  interest,
 		ClosingPrincipal: fd.PrincipalAmount,
@@ -1159,10 +1163,10 @@ type SimulateDiffResponse struct {
 	ConfirmationSummary SimulateSummary `json:"confirmation_summary"`
 
 	// Convenience counts.
-	TotalRows    int `json:"total_rows"`
-	NewRows      int `json:"new_rows"`
-	ChangedRows  int `json:"changed_rows"`
-	RemovedRows  int `json:"removed_rows"`
+	TotalRows     int `json:"total_rows"`
+	NewRows       int `json:"new_rows"`
+	ChangedRows   int `json:"changed_rows"`
+	RemovedRows   int `json:"removed_rows"`
 	UnchangedRows int `json:"unchanged_rows"`
 
 	// Holidays from the confirmation schedule's calendar.
@@ -1407,14 +1411,14 @@ func SimulateDiffHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req SimulateDiffRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 
 		ctx := r.Context()
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
-			api.RespondWithError(w, http.StatusServiceUnavailable, "db connection error")
+			api.RespondWithError(w, http.StatusServiceUnavailable, constants.ErrDBConnection)
 			return
 		}
 		defer conn.Release()

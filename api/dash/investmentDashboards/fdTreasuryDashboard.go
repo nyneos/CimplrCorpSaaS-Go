@@ -35,7 +35,7 @@ type fdTreasuryDashRequest struct {
 	UserID    string `json:"user_id"`
 	EntityID  string `json:"entity_id"`
 	Currency  string `json:"currency"`
-	Period    string `json:"period"`    // MTD | QTD | YTD | CUSTOM
+	Period    string `json:"period"`     // MTD | QTD | YTD | CUSTOM
 	StartDate string `json:"start_date"` // YYYY-MM-DD when Period==CUSTOM
 	EndDate   string `json:"end_date"`   // YYYY-MM-DD when Period==CUSTOM
 }
@@ -67,7 +67,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		// Resolve period start / end for date-range filtering
 		var periodStart time.Time
 		if req.Period == "CUSTOM" && req.StartDate != "" {
-			if parsed, err := time.Parse("2006-01-02", req.StartDate); err == nil {
+			if parsed, err := time.Parse(constants.DateFormat, req.StartDate); err == nil {
 				periodStart = parsed
 			} else {
 				periodStart = periodStartDate("MTD", now)
@@ -77,12 +77,12 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		periodEnd := now
 		if req.Period == "CUSTOM" && req.EndDate != "" {
-			if parsed, err := time.Parse("2006-01-02", req.EndDate); err == nil {
+			if parsed, err := time.Parse(constants.DateFormat, req.EndDate); err == nil {
 				periodEnd = parsed
 			}
 		}
-		startDateStr := periodStart.Format("2006-01-02")
-		endDateStr := periodEnd.Format("2006-01-02")
+		startDateStr := periodStart.Format(constants.DateFormat)
+		endDateStr := periodEnd.Format(constants.DateFormat)
 
 		type subResult struct {
 			data interface{}
@@ -210,7 +210,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				if nr.OfferedRate > bestRate {
 					bestRate = nr.OfferedRate
 				}
-				if nr.ExpiresAt != "" && nr.ExpiresAt[:10] == time.Now().Format("2006-01-02") {
+				if nr.ExpiresAt != "" && nr.ExpiresAt[:10] == time.Now().Format(constants.DateFormat) {
 					offersToday = append(offersToday, nr)
 				}
 			}
@@ -256,15 +256,15 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			defer rows.Close()
 
 			type matRow struct {
-				FDID                string  `json:"fd_id"`
-				Entity              string  `json:"entity"`
-				Bank                string  `json:"bank"`
-				Principal           float64 `json:"principal"`
-				Rate                float64 `json:"rate"`
-				MaturityDate        string  `json:"maturity_date"`
-				MaturityInstructions string `json:"maturity_instructions"`
-				Status              string  `json:"status"`
-				DaysToMaturity      int     `json:"days_to_maturity"`
+				FDID                 string  `json:"fd_id"`
+				Entity               string  `json:"entity"`
+				Bank                 string  `json:"bank"`
+				Principal            float64 `json:"principal"`
+				Rate                 float64 `json:"rate"`
+				MaturityDate         string  `json:"maturity_date"`
+				MaturityInstructions string  `json:"maturity_instructions"`
+				Status               string  `json:"status"`
+				DaysToMaturity       int     `json:"days_to_maturity"`
 			}
 			out := []matRow{}
 			totalAmt := 0.0
@@ -509,10 +509,10 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			return map[string]interface{}{
-				"rows":         out,
-				"total":        len(out),
-				"overdue":      countSLAStatus(out, "Overdue"),
-				"at_risk":      countSLAStatus(out, "At Risk"),
+				"rows":    out,
+				"total":   len(out),
+				"overdue": countSLAStatus(out, "Overdue"),
+				"at_risk": countSLAStatus(out, "At Risk"),
 			}, nil
 		})
 
@@ -668,7 +668,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"negotiations":          get("negotiations"),
 				"fd_list":               get("fd_list"),
 			},
-			"period_start": periodStart.Format("2006-01-02"),
+			"period_start": periodStart.Format(constants.DateFormat),
 		}
 
 		api.RespondWithPayload(w, true, "", payload)

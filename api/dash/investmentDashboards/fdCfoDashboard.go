@@ -49,7 +49,7 @@ type fdCfoDashRequest struct {
 	UserID    string `json:"user_id"`
 	EntityID  string `json:"entity_id"`
 	Currency  string `json:"currency"`
-	Period    string `json:"period"`    // MTD | QTD | YTD | CUSTOM
+	Period    string `json:"period"`     // MTD | QTD | YTD | CUSTOM
 	StartDate string `json:"start_date"` // YYYY-MM-DD — used when Period=="CUSTOM"
 	EndDate   string `json:"end_date"`   // YYYY-MM-DD — used when Period=="CUSTOM"
 }
@@ -112,7 +112,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		now := time.Now().UTC()
 		var periodStart time.Time
 		if req.Period == "CUSTOM" && req.StartDate != "" {
-			if parsed, err2 := time.Parse("2006-01-02", req.StartDate); err2 == nil {
+			if parsed, err2 := time.Parse(constants.DateFormat, req.StartDate); err2 == nil {
 				periodStart = parsed
 			} else {
 				periodStart = periodStartDate("MTD", now)
@@ -291,8 +291,8 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			fyStart := periodStartDate("YTD", now)
 			qtdStart := periodStartDate("QTD", now)
 			var ytd, periodAcc, qtd, received float64
-			err := pool.QueryRow(ctx, sql, entityFilter, fyStart.Format("2006-01-02"),
-				periodStart.Format("2006-01-02"), qtdStart.Format("2006-01-02")).
+			err := pool.QueryRow(ctx, sql, entityFilter, fyStart.Format(constants.DateFormat),
+				periodStart.Format(constants.DateFormat), qtdStart.Format(constants.DateFormat)).
 				Scan(&ytd, &periodAcc, &qtd, &received)
 			if err != nil {
 				return nil, err
@@ -725,17 +725,17 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"period":    req.Period,
 			},
 			"kpis": map[string]interface{}{
-				"total_exposure":      get("total_exposure"),
-				"bank_concentration":  get("bank_concentration"),
-				"maturity":            get("maturity"),
-				"interest":            get("interest"),
-				"exceptions":          get("exceptions"),
+				"total_exposure":     get("total_exposure"),
+				"bank_concentration": get("bank_concentration"),
+				"maturity":           get("maturity"),
+				"interest":           get("interest"),
+				"exceptions":         get("exceptions"),
 			},
 			"charts": map[string]interface{}{
-				"maturity_ladder":     get("maturity_ladder"),
-				"interest_trend":      get("interest_trend"),
-				"rate_distribution":   get("rate_distribution"),
-				"bank_concentration":  bankConcChart,
+				"maturity_ladder":    get("maturity_ladder"),
+				"interest_trend":     get("interest_trend"),
+				"rate_distribution":  get("rate_distribution"),
+				"bank_concentration": bankConcChart,
 			},
 			"governance": map[string]interface{}{
 				"approvals":      get("governance_approvals"),

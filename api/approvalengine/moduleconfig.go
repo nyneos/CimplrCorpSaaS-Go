@@ -45,9 +45,9 @@ var txTypeRegistry = map[string]txTableConfig{
 	// ── Cash / Payables & Receivables ─────────────────────────────────────
 	// (add specific types here as the cash module is wired up)
 	// ── FD Closure ───────────────────────────────────────────────────────
-	"FD_CLOSURE_MATURITY":  {AuditTable: "investment.fd_audit_closure_request", AuditIDColumn: "closure_request_id"},
-	"FD_CLOSURE_PREMATURE": {AuditTable: "investment.fd_audit_closure_request", AuditIDColumn: "closure_request_id"},
-	"FD_CLOSURE_ROLLOVER":  {AuditTable: "investment.fd_audit_closure_request", AuditIDColumn: "closure_request_id"},
+	"FD_CLOSURE_MATURITY":  {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
+	"FD_CLOSURE_PREMATURE": {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
+	"FD_CLOSURE_ROLLOVER":  {AuditTable: constants.QuerryAuditClosureRequest, AuditIDColumn: "closure_request_id"},
 }
 
 // LookupTxTableConfig returns the audit table name and audit ID column for the

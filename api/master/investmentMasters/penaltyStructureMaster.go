@@ -303,19 +303,19 @@ func penaltyStructureFindConflict(ctx context.Context, querier interface {
 	}
 
 	m := map[string]interface{}{
-		"penalty_id":        pid,
-		"bank_code":         bcode,
-		"min_amount_range":  minAmt,
-		"max_amount_range":  maxAmt,
-		"min_tenor_days":    minTenor,
-		"max_tenor_days":    maxTenor,
-		"min_held_days":     minHeld,
-		"max_held_days":     maxHeld,
-		"penalty_type":      pType,
-		"penalty_value":     pValue,
+		"penalty_id":         pid,
+		"bank_code":          bcode,
+		"min_amount_range":   minAmt,
+		"max_amount_range":   maxAmt,
+		"min_tenor_days":     minTenor,
+		"max_tenor_days":     maxTenor,
+		"min_held_days":      minHeld,
+		"max_held_days":      maxHeld,
+		"penalty_type":       pType,
+		"penalty_value":      pValue,
 		"calculation_method": calcMethod,
-		"effective_from":    effFrom,
-		"effective_to":      effTo,
+		"effective_from":     effFrom,
+		"effective_to":       effTo,
 	}
 	return m, nil
 }
@@ -366,7 +366,7 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check uniqueness before attempting insert to provide a friendly error
 		if conflict, err := penaltyStructureFindConflict(ctx, tx, input); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 			return
 		} else if conflict != nil {
 			api.RespondWithPayload(w, false, fmt.Sprintf("Penalty create aborted: a matching active penalty structure already exists (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]), nil)
@@ -2007,14 +2007,14 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-				// Check unique constraint pre-insert to provide friendly error
-				if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
-					return
-				} else if conflict != nil {
-					sendFail(rowIdx+2, fmt.Sprintf("conflicts with existing active penalty structure (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]))
-					return
-				}
+			// Check unique constraint pre-insert to provide friendly error
+			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				return
+			} else if conflict != nil {
+				sendFail(rowIdx+2, fmt.Sprintf("conflicts with existing active penalty structure (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]))
+				return
+			}
 
 			validInputs = append(validInputs, input)
 		}

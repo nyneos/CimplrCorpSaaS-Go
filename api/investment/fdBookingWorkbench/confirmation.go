@@ -30,23 +30,23 @@ import (
 func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                   string  `json:"user_id"`
-			BookingID                string  `json:"booking_id"`
-			ConfirmedPrincipalAmount float64 `json:"confirmed_principal_amount"`
-			ConfirmedInterestRate    float64 `json:"confirmed_interest_rate"`
-			ConfirmedTenorDays       int     `json:"confirmed_tenor_days"`
-			ConfirmedTenorMonths     int     `json:"confirmed_tenor_months"`
-			ConfirmedTenorYears      int     `json:"confirmed_tenor_years"`
-			ConfirmedTenorType       string  `json:"confirmed_tenor_type"` // DAYS | MONTHS | YEARS
-			ConfirmedValueDate       string  `json:"confirmed_value_date"`
-			ConfirmedMaturityDate    string  `json:"confirmed_maturity_date"`
-			BankFDReference          string  `json:"bank_fd_reference"`
-			ReceiptDate              string  `json:"receipt_date"`
-			ConfirmedInterestType    string  `json:"confirmed_interest_type"` // SIMPLE | COMPOUND | STEPPED
-			ConfirmedFrequencyID     string  `json:"confirmed_frequency_id"`
+			UserID                   string           `json:"user_id"`
+			BookingID                string           `json:"booking_id"`
+			ConfirmedPrincipalAmount float64          `json:"confirmed_principal_amount"`
+			ConfirmedInterestRate    float64          `json:"confirmed_interest_rate"`
+			ConfirmedTenorDays       int              `json:"confirmed_tenor_days"`
+			ConfirmedTenorMonths     int              `json:"confirmed_tenor_months"`
+			ConfirmedTenorYears      int              `json:"confirmed_tenor_years"`
+			ConfirmedTenorType       string           `json:"confirmed_tenor_type"` // DAYS | MONTHS | YEARS
+			ConfirmedValueDate       string           `json:"confirmed_value_date"`
+			ConfirmedMaturityDate    string           `json:"confirmed_maturity_date"`
+			BankFDReference          string           `json:"bank_fd_reference"`
+			ReceiptDate              string           `json:"receipt_date"`
+			ConfirmedInterestType    string           `json:"confirmed_interest_type"` // SIMPLE | COMPOUND | STEPPED
+			ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
 			PayoutDates              *json.RawMessage `json:"payout_dates"`
 			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
-			Notes                    string  `json:"notes"`
+			Notes                    string           `json:"notes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -106,44 +106,44 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		runID := varianceengine.NewRunID()
 		varRules := []varianceengine.Rule{
 			{
-				FieldName:    "interest_rate",
-				VarianceType: varianceengine.TypeRate,
+				FieldName:     "interest_rate",
+				VarianceType:  varianceengine.TypeRate,
 				ExpectedValue: fmt.Sprintf("%g", bookedRate),
 				ActualValue:   fmt.Sprintf("%g", req.ConfirmedInterestRate),
-				Priority:     varianceengine.PriorityHigh,
-				Tolerance:    0,
+				Priority:      varianceengine.PriorityHigh,
+				Tolerance:     0,
 			},
 			{
-				FieldName:    "principal_amount",
-				VarianceType: varianceengine.TypeAmount,
+				FieldName:     "principal_amount",
+				VarianceType:  varianceengine.TypeAmount,
 				ExpectedValue: fmt.Sprintf("%g", bookedPrincipal),
 				ActualValue:   fmt.Sprintf("%g", req.ConfirmedPrincipalAmount),
-				Priority:     varianceengine.PriorityHigh,
-				Tolerance:    0,
+				Priority:      varianceengine.PriorityHigh,
+				Tolerance:     0,
 			},
 			{
-				FieldName:    "tenor_days",
-				VarianceType: varianceengine.TypeDays,
+				FieldName:     "tenor_days",
+				VarianceType:  varianceengine.TypeDays,
 				ExpectedValue: fmt.Sprintf("%d", bookedTenorDays),
 				ActualValue:   fmt.Sprintf("%d", req.ConfirmedTenorDays),
-				Priority:     varianceengine.PriorityMedium,
-				Tolerance:    0,
+				Priority:      varianceengine.PriorityMedium,
+				Tolerance:     0,
 			},
 			{
-				FieldName:    "value_date",
-				VarianceType: varianceengine.TypeDate,
+				FieldName:     "value_date",
+				VarianceType:  varianceengine.TypeDate,
 				ExpectedValue: bookedValueDate,
 				ActualValue:   req.ConfirmedValueDate,
-				Priority:     varianceengine.PriorityMedium,
-				Tolerance:    0,
+				Priority:      varianceengine.PriorityMedium,
+				Tolerance:     0,
 			},
 			{
-				FieldName:    "maturity_date",
-				VarianceType: varianceengine.TypeDate,
+				FieldName:     "maturity_date",
+				VarianceType:  varianceengine.TypeDate,
 				ExpectedValue: bookedMaturityDate,
 				ActualValue:   req.ConfirmedMaturityDate,
-				Priority:     varianceengine.PriorityHigh,
-				Tolerance:    0,
+				Priority:      varianceengine.PriorityHigh,
+				Tolerance:     0,
 			},
 		}
 		varItems := varianceengine.Compare("FD_CONFIRMATION", req.BookingID, entityID, runID, varRules)
@@ -247,7 +247,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				payoutJSON(req.PayoutDates), payoutJSON(req.CompoundingDates),
 				userEmail, confirmationID,
 			); err != nil {
-				msg, status := getUserFriendlyFDError(err, "Update confirmation failed")
+				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
 				api.RespondWithError(w, status, msg)
 				return
 			}
@@ -372,32 +372,33 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // POST /investment/fd/confirmation/variance-resolve
 //
 // Called when capture returned variance. Two sub-cases:
-//   (a) User corrected values: re-runs variance engine; if clean → resolve all OPEN variance_log rows.
-//   (b) User submits same/different values: inserts or updates fd_confirmation with VARIANCE_PENDING.
-//       Subsequent calls with corrected values will auto-resolve cleared fields.
+//
+//	(a) User corrected values: re-runs variance engine; if clean → resolve all OPEN variance_log rows.
+//	(b) User submits same/different values: inserts or updates fd_confirmation with VARIANCE_PENDING.
+//	    Subsequent calls with corrected values will auto-resolve cleared fields.
 //
 // Separate exception path: use /confirmation/variance-exception to accept as-is.
 func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID                   string  `json:"user_id"`
-			BookingID                string  `json:"booking_id"` // required on first call; optional on re-runs
-			ConfirmationID           string  `json:"confirmation_id"` // for re-runs
-			ConfirmedPrincipalAmount float64 `json:"confirmed_principal_amount"`
-			ConfirmedInterestRate    float64 `json:"confirmed_interest_rate"`
-			ConfirmedTenorDays       int     `json:"confirmed_tenor_days"`
-			ConfirmedTenorMonths     int     `json:"confirmed_tenor_months"`
-			ConfirmedTenorYears      int     `json:"confirmed_tenor_years"`
-			ConfirmedTenorType       string  `json:"confirmed_tenor_type"`
-			ConfirmedValueDate       string  `json:"confirmed_value_date"`
-			ConfirmedMaturityDate    string  `json:"confirmed_maturity_date"`
-			BankFDReference          string  `json:"bank_fd_reference"`
-			ReceiptDate              string  `json:"receipt_date"`
-			ConfirmedInterestType    string  `json:"confirmed_interest_type"`
-			ConfirmedFrequencyID     string  `json:"confirmed_frequency_id"`
+			UserID                   string           `json:"user_id"`
+			BookingID                string           `json:"booking_id"`      // required on first call; optional on re-runs
+			ConfirmationID           string           `json:"confirmation_id"` // for re-runs
+			ConfirmedPrincipalAmount float64          `json:"confirmed_principal_amount"`
+			ConfirmedInterestRate    float64          `json:"confirmed_interest_rate"`
+			ConfirmedTenorDays       int              `json:"confirmed_tenor_days"`
+			ConfirmedTenorMonths     int              `json:"confirmed_tenor_months"`
+			ConfirmedTenorYears      int              `json:"confirmed_tenor_years"`
+			ConfirmedTenorType       string           `json:"confirmed_tenor_type"`
+			ConfirmedValueDate       string           `json:"confirmed_value_date"`
+			ConfirmedMaturityDate    string           `json:"confirmed_maturity_date"`
+			BankFDReference          string           `json:"bank_fd_reference"`
+			ReceiptDate              string           `json:"receipt_date"`
+			ConfirmedInterestType    string           `json:"confirmed_interest_type"`
+			ConfirmedFrequencyID     string           `json:"confirmed_frequency_id"`
 			PayoutDates              *json.RawMessage `json:"payout_dates"`
 			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
-			Notes                    string  `json:"notes"`
+			Notes                    string           `json:"notes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -584,7 +585,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				hasVariance, varDetailsJSON, confStatus, userEmail, confirmationID,
 			); err != nil {
 				api.LogError("[VarianceResolve] UPDATE fd_confirmation error: %v", err)
-				msg, status := getUserFriendlyFDError(err, "Update confirmation failed")
+				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
 				api.RespondWithError(w, status, msg)
 				return
 			}
@@ -853,7 +854,7 @@ func VarianceException(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WHERE confirmation_id = $3`,
 			req.Reason, userEmail, req.ConfirmationID,
 		); err != nil {
-			msg, status := getUserFriendlyFDError(err, "Update confirmation failed")
+			msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1079,7 +1080,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							api.LogError("[FDConfirmation] booking status flip failed for %s: %v", cID, execErr)
 						}
 						if cerr := tx.Commit(ctx); cerr != nil {
-							errors = append(errors, cID+": commit failed")
+							errors = append(errors, cID+constants.ErrCommitFailed)
 							continue
 						}
 						directActed++
@@ -1090,7 +1091,7 @@ func BulkApproveConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, cID+": commit failed")
+					errors = append(errors, cID+constants.ErrCommitFailed)
 					continue
 				}
 				directActed++
@@ -1234,7 +1235,7 @@ func BulkRejectConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, cID+": commit failed")
+					errors = append(errors, cID+constants.ErrCommitFailed)
 					continue
 				}
 				directActed++

@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"context"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"context"
 )
 
 // getUserFriendlyRateCardError converts database errors to user-friendly messages
@@ -154,7 +155,9 @@ func validateRateCardFields(input BankRateCardInput) error {
 
 // rateCardExists checks whether an equivalent active (not deleted) rate card
 // already exists matching the unique index uniq_fd_rate_card_active semantics.
-func rateCardExists(ctx context.Context, querier interface{ QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row }, input BankRateCardInput) (bool, error) {
+func rateCardExists(ctx context.Context, querier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}, input BankRateCardInput) (bool, error) {
 	// Nullness flags for min/max amount
 	minAmtNull := input.MinAmount == nil
 	maxAmtNull := input.MaxAmount == nil
@@ -420,7 +423,7 @@ func UploadBankRateCardSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// uniqueness pre-check
 			exists, err := rateCardExists(ctx, pgxPool, input)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
 			}
 			if exists {
@@ -542,7 +545,7 @@ func CreateBankRateCardSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check uniqueness before attempting insert to provide a friendly error
 		if exists, err := rateCardExists(ctx, tx, req.BankRateCardInput); err != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 			return
 		} else if exists {
 			api.RespondWithPayload(w, false, "Rate card create aborted: a matching active rate card already exists", nil)
@@ -663,7 +666,7 @@ func CreateBankRateCard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			origIdx := validRowIndices[idx]
 			exists, err := rateCardExists(ctx, tx, input)
 			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to validate uniqueness: "+err.Error())
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
 				return
 			}
 			if exists {

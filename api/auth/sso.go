@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/internal/logger"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -515,7 +516,7 @@ func exchangeCodeForTokens(provider *SSOProvider, code string) (*tokenResponse, 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(constants.ContentTypeText, "application/x-www-form-urlencoded")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -591,7 +592,7 @@ func frontendRedirectError(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }

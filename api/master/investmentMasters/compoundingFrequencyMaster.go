@@ -183,11 +183,11 @@ func validateCompoundingFrequencyMap(m map[string]interface{}) string {
 			switch val := v.(type) {
 			case int:
 				if val < 1 {
-					return "compounding_periods_per_year must be >= 1"
+					return constants.ErrCompoundingPeriodsPerYear
 				}
 			case float64:
 				if int(val) < 1 {
-					return "compounding_periods_per_year must be >= 1"
+					return constants.ErrCompoundingPeriodsPerYear
 				}
 			default:
 				return "compounding_periods_per_year must be a number"
@@ -198,11 +198,11 @@ func validateCompoundingFrequencyMap(m map[string]interface{}) string {
 			switch val := v.(type) {
 			case int:
 				if val < 1 {
-					return "compounding_periods_per_year must be >= 1"
+					return constants.ErrCompoundingPeriodsPerYear
 				}
 			case float64:
 				if int(val) < 1 {
-					return "compounding_periods_per_year must be >= 1"
+					return constants.ErrCompoundingPeriodsPerYear
 				}
 			}
 		}

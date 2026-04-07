@@ -43,7 +43,7 @@ func userIDFromCtx(r *http.Request) string {
 
 // writeJSON is the low-level JSON writer — always sets Content-Type.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }

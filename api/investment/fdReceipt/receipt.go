@@ -1793,10 +1793,10 @@ func IngestReconciliation(pool *pgxpool.Pool) http.HandlerFunc {
 			req.MatchingBasis = "BOTH"
 		}
 		if req.PeriodStart == "" {
-			req.PeriodStart = "2000-01-01"
+			req.PeriodStart = constants.DateMin
 		}
 		if req.PeriodEnd == "" {
-			req.PeriodEnd = "2099-12-31"
+			req.PeriodEnd = constants.DateMax
 		}
 
 		ctx := r.Context()
@@ -2263,37 +2263,37 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// ── 1. Run header ────────────────────────────────────────────────────────
 		type RunHeader struct {
-			ReconcileRunID       string  `json:"reconcile_run_id"`
-			EntityID             string  `json:"entity_id"`
-			EntityName           string  `json:"entity_name"`
-			BankIDFilter         string  `json:"bank_id_filter"`
-			PeriodStart          string  `json:"period_start"`
-			PeriodEnd            string  `json:"period_end"`
-			MatchingBasis        string  `json:"matching_basis"`
-			RunStatus            string  `json:"run_status"`
-			TriggerMode          string  `json:"trigger_mode"`
-			TriggeredBy          string  `json:"triggered_by"`
-			TriggeredAt          string  `json:"triggered_at"`
-			CompletedAt          string  `json:"completed_at"`
-			ErrorMessage         string  `json:"error_message"`
-			InterestProcessed    int     `json:"interest_processed"`
-			InterestMatched      int     `json:"interest_matched"`
-			InterestPartial      int     `json:"interest_partial"`
-			InterestUnmatched    int     `json:"interest_unmatched"`
-			InterestException    int     `json:"interest_exception"`
-			TDSProcessed         int     `json:"tds_processed"`
-			TDSMatched           int     `json:"tds_matched"`
-			TDSPartial           int     `json:"tds_partial"`
-			TDSUnmatched         int     `json:"tds_unmatched"`
-			TDSException         int     `json:"tds_exception"`
-			TotalExpectedInt     float64 `json:"total_expected_interest"`
-			TotalReceivedInt     float64 `json:"total_received_interest"`
-			TotalIntVariance     float64 `json:"total_interest_variance"`
-			TotalExpectedTDS     float64 `json:"total_expected_tds"`
-			TotalReceivedTDS     float64 `json:"total_received_tds"`
-			TotalTDSVariance     float64 `json:"total_tds_variance"`
+			ReconcileRunID    string  `json:"reconcile_run_id"`
+			EntityID          string  `json:"entity_id"`
+			EntityName        string  `json:"entity_name"`
+			BankIDFilter      string  `json:"bank_id_filter"`
+			PeriodStart       string  `json:"period_start"`
+			PeriodEnd         string  `json:"period_end"`
+			MatchingBasis     string  `json:"matching_basis"`
+			RunStatus         string  `json:"run_status"`
+			TriggerMode       string  `json:"trigger_mode"`
+			TriggeredBy       string  `json:"triggered_by"`
+			TriggeredAt       string  `json:"triggered_at"`
+			CompletedAt       string  `json:"completed_at"`
+			ErrorMessage      string  `json:"error_message"`
+			InterestProcessed int     `json:"interest_processed"`
+			InterestMatched   int     `json:"interest_matched"`
+			InterestPartial   int     `json:"interest_partial"`
+			InterestUnmatched int     `json:"interest_unmatched"`
+			InterestException int     `json:"interest_exception"`
+			TDSProcessed      int     `json:"tds_processed"`
+			TDSMatched        int     `json:"tds_matched"`
+			TDSPartial        int     `json:"tds_partial"`
+			TDSUnmatched      int     `json:"tds_unmatched"`
+			TDSException      int     `json:"tds_exception"`
+			TotalExpectedInt  float64 `json:"total_expected_interest"`
+			TotalReceivedInt  float64 `json:"total_received_interest"`
+			TotalIntVariance  float64 `json:"total_interest_variance"`
+			TotalExpectedTDS  float64 `json:"total_expected_tds"`
+			TotalReceivedTDS  float64 `json:"total_received_tds"`
+			TotalTDSVariance  float64 `json:"total_tds_variance"`
 			// Derived flag
-			IsRerunnable         bool    `json:"is_rerunnable"`
+			IsRerunnable bool `json:"is_rerunnable"`
 		}
 
 		var run RunHeader
@@ -2431,44 +2431,44 @@ func GetReconcileDetail(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		type ResultRow struct {
-			ResultID             string  `json:"result_id"`
-			ReconcileRunID       string  `json:"reconcile_run_id"`
-			ReceiptType          string  `json:"receipt_type"`
-			FDID                 string  `json:"fd_id"`
-			FdRefNo              string  `json:"fd_ref_no"`
-			EntityID             string  `json:"entity_id"`
-			EntityName           string  `json:"entity_name"`
-			BankID               string  `json:"bank_id"`
-			BankName             string  `json:"bank_name"`
-			PrincipalAmount      float64 `json:"principal_amount"`
-			InterestRate         float64 `json:"interest_rate"`
-			MaturityDate         string  `json:"maturity_date"`
-			FDStatus             string  `json:"fd_status"`
-			PeriodStart          string  `json:"period_start"`
-			PeriodEnd            string  `json:"period_end"`
-			MatchingBasis        string  `json:"matching_basis"`
-			ReceiptID            string  `json:"receipt_id"`
-			TDSID                string  `json:"tds_id"`
-			ExpectedAmount       float64 `json:"expected_amount"`
-			ReceivedAmount       float64 `json:"received_amount"`
-			Variance             float64 `json:"variance"`
-			VariancePct          float64 `json:"variance_pct"`
-			MatchStatus          string  `json:"match_status"`
-			MatchType            string  `json:"match_type"`
-			HasException         bool    `json:"has_exception"`
-			ExceptionID          string  `json:"exception_id"`
-			CreatedAt            string  `json:"created_at"`
-			AuditProcessingStatus string `json:"audit_processing_status"`
-			AuditActionType      string  `json:"audit_action_type"`
-			AuditRequestedBy     string  `json:"audit_requested_by"`
-			AuditRequestedAt     string  `json:"audit_requested_at"`
-			AuditCheckerBy       string  `json:"audit_checker_by"`
-			AuditCheckerAt       string  `json:"audit_checker_at"`
-			AuditCheckerComment  string  `json:"audit_checker_comment"`
-			AuditReason          string  `json:"audit_reason"`
-			Cashflows            []CashflowLine      `json:"cashflows"`
-			AccrualLedger        []AccrualLedgerLine `json:"accrual_ledger"`
-			Exceptions           []ExLine            `json:"exceptions"`
+			ResultID              string              `json:"result_id"`
+			ReconcileRunID        string              `json:"reconcile_run_id"`
+			ReceiptType           string              `json:"receipt_type"`
+			FDID                  string              `json:"fd_id"`
+			FdRefNo               string              `json:"fd_ref_no"`
+			EntityID              string              `json:"entity_id"`
+			EntityName            string              `json:"entity_name"`
+			BankID                string              `json:"bank_id"`
+			BankName              string              `json:"bank_name"`
+			PrincipalAmount       float64             `json:"principal_amount"`
+			InterestRate          float64             `json:"interest_rate"`
+			MaturityDate          string              `json:"maturity_date"`
+			FDStatus              string              `json:"fd_status"`
+			PeriodStart           string              `json:"period_start"`
+			PeriodEnd             string              `json:"period_end"`
+			MatchingBasis         string              `json:"matching_basis"`
+			ReceiptID             string              `json:"receipt_id"`
+			TDSID                 string              `json:"tds_id"`
+			ExpectedAmount        float64             `json:"expected_amount"`
+			ReceivedAmount        float64             `json:"received_amount"`
+			Variance              float64             `json:"variance"`
+			VariancePct           float64             `json:"variance_pct"`
+			MatchStatus           string              `json:"match_status"`
+			MatchType             string              `json:"match_type"`
+			HasException          bool                `json:"has_exception"`
+			ExceptionID           string              `json:"exception_id"`
+			CreatedAt             string              `json:"created_at"`
+			AuditProcessingStatus string              `json:"audit_processing_status"`
+			AuditActionType       string              `json:"audit_action_type"`
+			AuditRequestedBy      string              `json:"audit_requested_by"`
+			AuditRequestedAt      string              `json:"audit_requested_at"`
+			AuditCheckerBy        string              `json:"audit_checker_by"`
+			AuditCheckerAt        string              `json:"audit_checker_at"`
+			AuditCheckerComment   string              `json:"audit_checker_comment"`
+			AuditReason           string              `json:"audit_reason"`
+			Cashflows             []CashflowLine      `json:"cashflows"`
+			AccrualLedger         []AccrualLedgerLine `json:"accrual_ledger"`
+			Exceptions            []ExLine            `json:"exceptions"`
 		}
 
 		var results []ResultRow
@@ -2809,7 +2809,7 @@ WHERE t.is_deleted = false
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":              true,
+			"success":             true,
 			"interest_candidates": interestCandidates,
 			"interest_count":      len(interestCandidates),
 			"tds_candidates":      tdsCandidates,

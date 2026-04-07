@@ -376,7 +376,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// validate code
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 		if len(req.DayCountCode) > 50 {
@@ -677,7 +677,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 		if len(req.Fields) == 0 {
@@ -1550,7 +1550,7 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 

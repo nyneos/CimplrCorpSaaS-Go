@@ -27,9 +27,9 @@ type FDRecord struct {
 	InterestRate            float64
 	InterestTypeCode        string // SIMPLE / COMPOUND / STEPPED
 	TenorDays               int
-	TenorMonths             int    // optional: tenor in months (may be 0)
-	TenureType              string // DAYS | MONTHS | YEARS
-	TenureYears             int    // optional: tenor in years (may be 0)
+	TenorMonths             int       // optional: tenor in months (may be 0)
+	TenureType              string    // DAYS | MONTHS | YEARS
+	TenureYears             int       // optional: tenor in years (may be 0)
 	ValueDate               time.Time // maps to start_date
 	MaturityDate            time.Time
 	MaturityAmount          float64
@@ -631,8 +631,8 @@ func expandRRule(seed time.Time, rrule string, from, to time.Time) []time.Time {
 	}
 
 	freq := parts["FREQ"]
-	byMonthStr := parts["BYMONTH"]     // e.g. "1", "8", "12"
-	byDayStr := parts["BYDAY"]         // e.g. "MO", "MON", "WED"
+	byMonthStr := parts["BYMONTH"]       // e.g. "1", "8", "12"
+	byDayStr := parts["BYDAY"]           // e.g. "MO", "MON", "WED"
 	byMonthDayStr := parts["BYMONTHDAY"] // e.g. "15", "26"
 
 	switch freq {
@@ -1248,7 +1248,26 @@ func buildPayoutDates(fd *FDRecord, monthsPerPeriod int) []time.Time {
 	return deduplicateDates(dates)
 }
 
-func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFreq, tdsCfg *TDSConfig, dcInfo DayCountInfo, itInfo InterestTypeInfo, calInfo HolidayCalendarInfo, payoutFreqOverride ...*CompoundingFreq) []CashflowRow {
+// CashflowScheduleParams holds all inputs for generateCashflowSchedule.
+type CashflowScheduleParams struct {
+	FD                  *FDRecord
+	Cfg                 *BankConfig
+	Freq                *CompoundingFreq
+	TDSCfg              *TDSConfig
+	DCInfo              DayCountInfo
+	ITInfo              InterestTypeInfo
+	CalInfo             HolidayCalendarInfo
+	PayoutFreqOverride  *CompoundingFreq // optional; nil means use Freq
+}
+
+func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
+	fd := p.FD
+	cfg := p.Cfg
+	freq := p.Freq
+	tdsCfg := p.TDSCfg
+	dcInfo := p.DCInfo
+	itInfo := p.ITInfo
+	calInfo := p.CalInfo
 	if fd == nil || fd.ValueDate.IsZero() || fd.MaturityDate.IsZero() {
 		return nil
 	}
@@ -1283,13 +1302,19 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 		// payoutFreqOverride[0] is set when the simulator passes a separate payout frequency.
 		// For real FDs loaded from DB, payout freq is the same as compounding freq (freq).
 		var payoutFreq *CompoundingFreq
-		if len(payoutFreqOverride) > 0 && payoutFreqOverride[0] != nil && payoutFreqOverride[0].FrequencyID != "" {
-			payoutFreq = payoutFreqOverride[0]
+		if p.PayoutFreqOverride != nil && p.PayoutFreqOverride.FrequencyID != "" {
+			payoutFreq = p.PayoutFreqOverride
 		} else {
 			payoutFreq = freq
 		}
-		return generateCompoundSchedule(fd, cfg, freq, payoutFreq, tdsCfg, dcInfo, itInfo, calInfo,
-			effectiveConvention, effectiveDayCountCode, decimals, hasTDS, tdsDeductionTiming)
+		return generateCompoundSchedule(CompoundScheduleParams{
+			FD: fd, Cfg: cfg, Freq: freq, PayoutFreq: payoutFreq,
+			TDSCfg: tdsCfg, CalInfo: calInfo,
+			EffectiveConvention:   effectiveConvention,
+			EffectiveDayCountCode: effectiveDayCountCode,
+			Decimals:              decimals, HasTDS: hasTDS,
+			TDSDeductionTiming: tdsDeductionTiming,
+		})
 	}
 
 	// BRD: Build ACCRUAL rows first (monthly), then CAPITALIZATION/TDS/MATURITY.
@@ -1508,20 +1533,33 @@ func generateCashflowSchedule(fd *FDRecord, cfg *BankConfig, freq *CompoundingFr
 // generateCompoundSchedule handles COMPOUND FDs — interest is capitalized each period.
 // freq drives capitalization boundaries; payoutFreq drives INTEREST_RECEIPT cash events.
 // When payoutFreq is nil or empty, no periodic cash payout is generated (pure accumulation).
-func generateCompoundSchedule(
-	fd *FDRecord,
-	cfg *BankConfig,
-	freq *CompoundingFreq,
-	payoutFreq *CompoundingFreq,
-	tdsCfg *TDSConfig,
-	_ DayCountInfo,
-	_ InterestTypeInfo,
-	calInfo HolidayCalendarInfo,
-	effectiveConvention, effectiveDayCountCode string,
-	decimals int,
-	hasTDS bool,
-	tdsDeductionTiming string,
-) []CashflowRow {
+// CompoundScheduleParams holds all inputs for generateCompoundSchedule.
+type CompoundScheduleParams struct {
+	FD                    *FDRecord
+	Cfg                   *BankConfig
+	Freq                  *CompoundingFreq
+	PayoutFreq            *CompoundingFreq
+	TDSCfg                *TDSConfig
+	CalInfo               HolidayCalendarInfo
+	EffectiveConvention   string
+	EffectiveDayCountCode string
+	Decimals              int
+	HasTDS                bool
+	TDSDeductionTiming    string
+}
+
+func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
+	fd := p.FD
+	cfg := p.Cfg
+	freq := p.Freq
+	payoutFreq := p.PayoutFreq
+	tdsCfg := p.TDSCfg
+	calInfo := p.CalInfo
+	effectiveConvention := p.EffectiveConvention
+	effectiveDayCountCode := p.EffectiveDayCountCode
+	decimals := p.Decimals
+	hasTDS := p.HasTDS
+	tdsDeductionTiming := p.TDSDeductionTiming
 	// Build monthly accrual entries first
 	accrualDates := buildMonthlyAccrualDates(fd)
 	type aEntry struct {
@@ -1696,7 +1734,7 @@ func generateCompoundSchedule(
 		}
 
 		// record closing principal after this capitalization for use by payout computation
-		capPrincipal[capEnd.Format("2006-01-02")] = closingPrincipal
+		capPrincipal[capEnd.Format(constants.DateFormat)] = closingPrincipal
 
 		// advance
 		openingPrincipal = closingPrincipal
@@ -1744,7 +1782,7 @@ func generateCompoundSchedule(
 					// find latest cap date <= payoutDate
 					var latestCap time.Time
 					for k := range capPrincipal {
-						if d, err := time.Parse("2006-01-02", k); err == nil {
+						if d, err := time.Parse(constants.DateFormat, k); err == nil {
 							if d.Before(payoutDate) || d.Equal(payoutDate) {
 								if d.After(latestCap) {
 									latestCap = d
@@ -1753,7 +1791,7 @@ func generateCompoundSchedule(
 						}
 					}
 					if !latestCap.IsZero() {
-						opPrincipal = capPrincipal[latestCap.Format("2006-01-02")]
+						opPrincipal = capPrincipal[latestCap.Format(constants.DateFormat)]
 					}
 
 					rows = append(rows, CashflowRow{
@@ -1891,7 +1929,7 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 	calInfo := loadHolidayCalendar(ctx, exec, cfg.HolidayCalendarCode, fd.ValueDate, fd.MaturityDate)
 	log.Printf("[CFGEN][%s] ✓ loadHolidayCalendar (+%s) holidays=%d", fd.ConfirmationID, time.Since(t5).Round(time.Millisecond), len(calInfo.HolidayDates))
 
-	rows := generateCashflowSchedule(fd, cfg, freq, tds, dcInfo, itInfo, calInfo)
+	rows := generateCashflowSchedule(CashflowScheduleParams{FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds, DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo})
 	log.Printf("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
 	return rows, fd, nil
 }
@@ -1940,8 +1978,13 @@ func SaveCashflowScheduleWithRecord(ctx context.Context, exec queryExecutor, fdI
 		masterSourceAccount = rec.BankAccountID
 	}
 
-	return saveCashflowBatch(ctx, exec, table, fdCol, cols, fdID, rows, createdBy,
-		masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount)
+	return saveCashflowBatch(ctx, SaveCashflowBatchParams{
+		Exec: exec, Table: table, FDCol: fdCol, Cols: cols,
+		FDID: fdID, Rows: rows, CreatedBy: createdBy,
+		MasterEntityID: masterEntityID, MasterEntityName: masterEntityName,
+		MasterBankID: masterBankID, MasterBankName: masterBankName,
+		MasterSourceAccount: masterSourceAccount,
+	})
 }
 
 func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow, createdBy string) error {
@@ -1985,15 +2028,46 @@ func SaveCashflowScheduleWithCreator(ctx context.Context, exec queryExecutor, fd
 	var masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount string
 	_ = exec.QueryRow(ctx, `SELECT COALESCE(entity_id,''), COALESCE(entity_name,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(source_account_id,'') FROM investment.fd_master WHERE fd_id = $1 LIMIT 1`, fdID).Scan(&masterEntityID, &masterEntityName, &masterBankID, &masterBankName, &masterSourceAccount)
 
-	return saveCashflowBatch(ctx, exec, table, fdCol, cols, fdID, rows, createdBy,
-		masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount)
+	return saveCashflowBatch(ctx, SaveCashflowBatchParams{
+		Exec: exec, Table: table, FDCol: fdCol, Cols: cols,
+		FDID: fdID, Rows: rows, CreatedBy: createdBy,
+		MasterEntityID: masterEntityID, MasterEntityName: masterEntityName,
+		MasterBankID: masterBankID, MasterBankName: masterBankName,
+		MasterSourceAccount: masterSourceAccount,
+	})
+}
+
+// SaveCashflowBatchParams holds all inputs for saveCashflowBatch.shflowBatch.
+type SaveCashflowBatchParams struct {
+	Exec                queryExecutor
+	Table               string
+	FDCol               string
+	Cols                map[string]bool
+	FDID                string
+	Rows                []CashflowRow
+	CreatedBy           string
+	MasterEntityID      string
+	MasterEntityName    string
+	MasterBankID        string
+	MasterBankName      string
+	MasterSourceAccount string
 }
 
 // saveCashflowBatch is the shared batch-INSERT engine used by both
 // SaveCashflowScheduleWithCreator and SaveCashflowScheduleWithRecord.
-func saveCashflowBatch(ctx context.Context, exec queryExecutor, table, fdCol string, cols map[string]bool, fdID string, rows []CashflowRow, createdBy string,
-	masterEntityID, masterEntityName, masterBankID, masterBankName, masterSourceAccount string,
-) error {
+func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
+	exec := p.Exec
+	table := p.Table
+	fdCol := p.FDCol
+	cols := p.Cols
+	fdID := p.FDID
+	rows := p.Rows
+	createdBy := p.CreatedBy
+	masterEntityID := p.MasterEntityID
+	masterEntityName := p.MasterEntityName
+	masterBankID := p.MasterBankID
+	masterBankName := p.MasterBankName
+	masterSourceAccount := p.MasterSourceAccount
 	_, _ = exec.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s = $1", table, fdCol), fdID)
 
 	// ── Determine the fixed column list for the batch INSERT ───────────────

@@ -30,14 +30,14 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			BankConfigID        string  `json:"bank_config_id"`
 			PrincipalAmount     float64 `json:"principal_amount"`
 			InterestRate        float64 `json:"interest_rate"`
-			TenorDays           int     `json:"tenor_days"`                // → tenure_days
-			TenorMonths         int     `json:"tenor_months"`              // → tenure_months
-            TenorType           string  `json:"tenor_type"`
-            TenureYears         int     `json:"tenure_years"`
-			ExpectedStartDate   string  `json:"expected_start_date"`       // NOT NULL
-			ValueDate           string  `json:"value_date"`                // NOT NULL
-			MaturityDate        string  `json:"maturity_date"`             // → expected_maturity_date NOT NULL
-			InterestType        string  `json:"interest_type"`             // → interest_type_code NOT NULL
+			TenorDays           int     `json:"tenor_days"`   // → tenure_days
+			TenorMonths         int     `json:"tenor_months"` // → tenure_months
+			TenorType           string  `json:"tenor_type"`
+			TenureYears         int     `json:"tenure_years"`
+			ExpectedStartDate   string  `json:"expected_start_date"` // NOT NULL
+			ValueDate           string  `json:"value_date"`          // NOT NULL
+			MaturityDate        string  `json:"maturity_date"`       // → expected_maturity_date NOT NULL
+			InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
 			InterestTypeID      string  `json:"interest_type_id"`
 			FrequencyID         string  `json:"frequency_id"`              // → frequency_id
 			InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
@@ -294,15 +294,15 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				BankConfigID        string  `json:"bank_config_id"`
 				PrincipalAmount     float64 `json:"principal_amount"`
 				InterestRate        float64 `json:"interest_rate"`
-				TenorDays           int     `json:"tenor_days"`          // → tenure_days
-				TenorMonths         int     `json:"tenor_months"`        // → tenure_months
-                TenorType           string  `json:"tenor_type"`
-                TenureYears         int     `json:"tenure_years"`
+				TenorDays           int     `json:"tenor_days"`   // → tenure_days
+				TenorMonths         int     `json:"tenor_months"` // → tenure_months
+				TenorType           string  `json:"tenor_type"`
+				TenureYears         int     `json:"tenure_years"`
 				ExpectedStartDate   string  `json:"expected_start_date"` // NOT NULL
 				ValueDate           string  `json:"value_date"`          // NOT NULL
 				MaturityDate        string  `json:"maturity_date"`       // → expected_maturity_date NOT NULL
-					InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
-					InterestTypeID      string  `json:"interest_type_id"`
+				InterestType        string  `json:"interest_type"`       // → interest_type_code NOT NULL
+				InterestTypeID      string  `json:"interest_type_id"`
 				FrequencyID         string  `json:"frequency_id"`
 				InterestPayoutFreq  string  `json:"interest_payout_frequency"` // alias for frequency_id
 				DayCountCode        string  `json:"day_count_code"`
@@ -434,8 +434,8 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"tenure_months":          row.TenorMonths,
 				"tenor_type":             nullIfEmpty(tenorTypeNorm),
 				"tenure_years":           row.TenureYears,
-						"interest_type_code":     row.InterestType,
-						"interest_type_id":       nullIfEmpty(row.InterestTypeID),
+				"interest_type_code":     row.InterestType,
+				"interest_type_id":       nullIfEmpty(row.InterestTypeID),
 				"expected_start_date":    coerceDateValue(expectedStartDate),
 				"expected_maturity_date": coerceDateValue(row.MaturityDate),
 				"value_date":             coerceDateValue(row.ValueDate),
@@ -453,7 +453,7 @@ func CreateBookingBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"source_account_number", "bank_config_id",
 				"principal_amount", "interest_rate", "tenure_days", "tenure_months",
 				"tenor_type", "tenure_years",
-						"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
+				"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 				"frequency_id", "day_count_code", "tds_plan_id", "product_code",
 				"auto_renewal", "booking_remarks", "booking_status", "created_by",
 			}
@@ -626,14 +626,14 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx) //nolint:errcheck
 
 		// Select FOR UPDATE and verify status gate
-			var currentStatus, entityID string
-			var oldPrincipal, oldRate float64
+		var currentStatus, entityID string
+		var oldPrincipal, oldRate float64
 		var oldTenorDays int
 		var oldTenorMonths int
 		var oldTenureYears int
 		var oldTenorType string
-			var oldValueDate, oldMaturityDate, oldBankID, oldBankAccountID string
-			var oldInterestTypeID string
+		var oldValueDate, oldMaturityDate, oldBankID, oldBankAccountID string
+		var oldInterestTypeID string
 		accountExpr, err := resolveFDBookingAccountExpression(ctx, tx, "fd_booking_request")
 		if err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrLoadBookingSchemaFailed)
@@ -1150,7 +1150,7 @@ func DeleteBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // 			}
 
 // 			if err := tx.Commit(ctx); err != nil {
-// 				errors = append(errors, bID+": commit failed")
+// 				errors = append(errors, bID+constants.ErrCommitFailed)
 // 				continue
 // 			}
 
@@ -1311,7 +1311,7 @@ func BulkApproveBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, bID+": commit failed")
+					errors = append(errors, bID+constants.ErrCommitFailed)
 					continue
 				}
 				directActed++
@@ -1445,7 +1445,7 @@ func BulkRejectBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					continue
 				}
 				if cerr := tx.Commit(ctx); cerr != nil {
-					errors = append(errors, bID+": commit failed")
+					errors = append(errors, bID+constants.ErrCommitFailed)
 					continue
 				}
 				directActed++
