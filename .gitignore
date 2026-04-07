@@ -5,3 +5,8 @@
 *.pem
 SSO_MFA_INTEGRATION_CONTEXT.md
 *.sql
+*/.sdfx
+*/.sdfx/*
+# Salesforce DX generated files
+.sfdx/
+*.bak
