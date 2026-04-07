@@ -61,11 +61,16 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	// Supabase pooler (aws-1) requires SSL. Also set connect_timeout and
-	// statement_timeout so a hung connection fails fast rather than blocking forever.
+	// Use sslmode=disable when connecting directly to RDS (no SSL terminator).
+	// Switch to sslmode=require only when routing through a Supabase/pgBouncer pooler.
+	// connect_timeout and statement_timeout guard against hung connections.
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=require&connect_timeout=10&pool_max_conns=10&statement_timeout=20000",
-		user, pass, host, port, name,
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=20&pool_min_conns=2&statement_timeout=30000",
+		user, pass, host, port, name, sslMode,
 	)
 
 	ctx := context.Background()
@@ -74,6 +79,13 @@ func main() {
 		log.Fatal("failed to create pgx pool:", err)
 	}
 	defer pgxPool.Close()
+
+	// Fail fast: verify the pool can actually reach the DB before starting services.
+	if pingErr := pgxPool.Ping(ctx); pingErr != nil {
+		log.Fatalf("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
+	}
+	log.Printf("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
+
 	appmanager.SetPgxPool(pgxPool)
 
 	manager := appmanager.NewAppManager()
