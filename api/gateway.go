@@ -763,12 +763,19 @@ func StartGateway(port string, pathPrefix string) {
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("API Gateway is active"))
-	})
+	}))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
+		w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
+		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		logr := logger.GlobalLogger
 		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
 		if logr != nil {
