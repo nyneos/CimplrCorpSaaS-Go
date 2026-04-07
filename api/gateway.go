@@ -779,8 +779,10 @@ func StartGateway(port string, pathPrefix string) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))
 	})
-	port = os.Getenv("PORT")
-
+	if port != os.Getenv("PORT") {
+		log.Printf("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)
+		port = os.Getenv("PORT")
+	}
 	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
 	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix))))
 	cert := os.Getenv("TLS_CERT")
