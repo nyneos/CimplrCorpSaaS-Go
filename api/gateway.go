@@ -55,13 +55,32 @@ const (
 // The prefix is passed from services.yaml gateway config (path_prefix key).
 func stripPathPrefix(next http.Handler, pathPrefix string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		prefix := strings.TrimRight(pathPrefix, "/")
-		if prefix != "" && strings.HasPrefix(r.URL.Path, prefix+"/") {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
-			if !strings.HasPrefix(r.URL.Path, "/") {
-				r.URL.Path = "/" + r.URL.Path
+		// originalPath := r.URL.Path
+
+		prefix := strings.TrimSpace(pathPrefix)
+		prefix = strings.TrimRight(prefix, "/")
+
+		if prefix != "" {
+			// Case 1: exact match → "/cimplrapigateway"
+			if r.URL.Path == prefix {
+				r.URL.Path = "/"
+			} else if strings.HasPrefix(r.URL.Path, prefix+"/") {
+				// Case 2: "/cimplrapigateway/anything"
+				r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
 			}
 		}
+
+		// Normalize path (ensure leading slash)
+		if !strings.HasPrefix(r.URL.Path, "/") {
+			r.URL.Path = "/" + r.URL.Path
+		}
+
+		// Clean double slashes (// → /)
+		r.URL.Path = strings.ReplaceAll(r.URL.Path, "//", "/")
+
+		// Optional: debug log (REMOVE in prod if noisy)
+		// log.Printf("[PREFIX] %s → %s", originalPath, r.URL.Path)
+
 		next.ServeHTTP(w, r)
 	})
 }
