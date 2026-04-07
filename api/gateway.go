@@ -55,32 +55,13 @@ const (
 // The prefix is passed from services.yaml gateway config (path_prefix key).
 func stripPathPrefix(next http.Handler, pathPrefix string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// originalPath := r.URL.Path
-
-		prefix := strings.TrimSpace(pathPrefix)
-		prefix = strings.TrimRight(prefix, "/")
-
-		if prefix != "" {
-			// Case 1: exact match → "/cimplrapigateway"
-			if r.URL.Path == prefix {
-				r.URL.Path = "/"
-			} else if strings.HasPrefix(r.URL.Path, prefix+"/") {
-				// Case 2: "/cimplrapigateway/anything"
-				r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+		prefix := strings.TrimRight(pathPrefix, "/")
+		if prefix != "" && strings.HasPrefix(r.URL.Path, prefix+"/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+			if !strings.HasPrefix(r.URL.Path, "/") {
+				r.URL.Path = "/" + r.URL.Path
 			}
 		}
-
-		// Normalize path (ensure leading slash)
-		if !strings.HasPrefix(r.URL.Path, "/") {
-			r.URL.Path = "/" + r.URL.Path
-		}
-
-		// Clean double slashes (// → /)
-		r.URL.Path = strings.ReplaceAll(r.URL.Path, "//", "/")
-
-		// Optional: debug log (REMOVE in prod if noisy)
-		// log.Printf("[PREFIX] %s → %s", originalPath, r.URL.Path)
-
 		next.ServeHTTP(w, r)
 	})
 }
@@ -782,19 +763,12 @@ func StartGateway(port string, pathPrefix string) {
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
 
-	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("API Gateway is active"))
-	}))
+	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(headerAccessControlAllowOrigin, allowOriginAll)
-		w.Header().Set(headerAccessControlAllowMethods, allowMethodsAll)
-		w.Header().Set(headerAccessControlAllowHeaders, allowHeadersAll)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
 		logr := logger.GlobalLogger
 		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
 		if logr != nil {
@@ -805,6 +779,7 @@ func StartGateway(port string, pathPrefix string) {
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))
 	})
+	port = os.Getenv("PORT")
 
 	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
 	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix))))
