@@ -74,7 +74,7 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				is_active, next_run_at,
 				accrual_granularity,
 				created_by, created_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$11,$10,now())
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,now())
 			RETURNING config_id`,
 			req.EntityID, nullIfEmpty(req.EntityName),
 			req.ScheduleFrequency, req.RunDayOfMonth,
@@ -732,31 +732,36 @@ func fireScheduledRun(
 	}
 	financialPeriod := buildAccrualPeriod(periodStart)
 
-	// Dynamic run_type reflects schedule frequency
-	runType := "SCHEDULED_MONTHLY"
+	// run_type must match the DB check constraint: MONTHLY / QUARTERLY / SCHEDULED / AD_HOC / MANUAL
+	// Scheduler-fired runs always use the constraint-allowed values.
+	runType := "MONTHLY"
 	switch scheduleFreq {
 	case "QUARTERLY":
-		runType = "SCHEDULED_QUARTERLY"
+		runType = "QUARTERLY"
 	case "YEARLY":
-		runType = "SCHEDULED_YEARLY"
+		runType = "SCHEDULED" // no YEARLY in constraint; SCHEDULED is the closest
 	}
 
-	// Skip if a FINAL run already exists for this entity+period
-	var existingFinalRun string
+	// ── Duplicate guard ─────────────────────────────────────────────────────
+	// Skip if ANY scheduler-created run already exists for this entity+period+mode
+	// that is not in a terminal failure state.  This prevents server restarts or
+	// tick races from creating multiple runs for the same period.
+	var existingRun string
 	_ = pool.QueryRow(ctx, `
 		SELECT COALESCE(run_id,'') FROM investment.fd_accrual_run
 		WHERE entity_id=$1
 		  AND accrual_period_start=$2
 		  AND accrual_period_end=$3
-		  AND run_mode='FINAL'
+		  AND run_mode=$4
+		  AND created_by='SCHEDULER'
 		  AND run_status NOT IN ('FAILED','VALIDATION_FAILED')
 		LIMIT 1`,
-		entityID, periodStart, periodEnd,
-	).Scan(&existingFinalRun)
-	if existingFinalRun != "" {
-		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s — FINAL run %s already exists",
-			entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat), existingFinalRun)
-		updateLastRunStatus(ctx, pool, configID, existingFinalRun, "SKIPPED_DUPLICATE", scheduleFreq, runDay)
+		entityID, periodStart, periodEnd, runMode,
+	).Scan(&existingRun)
+	if existingRun != "" {
+		api.LogInfo("[FDAccrual] Scheduler skip entity=%s period=%s→%s mode=%s — run %s already exists",
+			entityID, periodStart.Format(constants.DateFormat), periodEnd.Format(constants.DateFormat), runMode, existingRun)
+		updateLastRunStatus(ctx, pool, configID, existingRun, "SKIPPED_DUPLICATE", scheduleFreq, runDay)
 		return
 	}
 
@@ -848,7 +853,9 @@ func updateLastRunStatus(ctx context.Context, pool *pgxpool.Pool, configID, runI
 		runIDArg, status, nextRun, configID)
 }
 
-// computeNextRunForConfig calculates the next fire time from the current time.
+// computeNextRunForConfig calculates the next fire time from the given reference time.
+// It tries the current period's run_day first; only advances to the next period if
+// that day has already passed (or is today, in which case it fires immediately).
 func computeNextRunForConfig(frequency string, runDay int, from time.Time) time.Time {
 	if runDay < 1 {
 		runDay = 1
@@ -856,22 +863,72 @@ func computeNextRunForConfig(frequency string, runDay int, from time.Time) time.
 	if runDay > 28 {
 		runDay = 28
 	}
-	var next time.Time
+	from = from.UTC()
+
 	switch frequency {
 	case "QUARTERLY":
-		next = from.AddDate(0, 3, 0)
+		// Find the start of the current quarter
+		currentQStartMonth := time.Month(((int(from.Month())-1)/3)*3 + 1)
+		candidateInCurrentQ := time.Date(from.Year(), currentQStartMonth, 1, 0, 0, 0, 0, time.UTC)
+		// run_day within the quarter = day of the first month of that quarter
+		maxDay := daysInMonth(candidateInCurrentQ.Year(), candidateInCurrentQ.Month())
+		day := runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		candidate := time.Date(candidateInCurrentQ.Year(), candidateInCurrentQ.Month(), day, 0, 0, 0, 0, time.UTC)
+		if !candidate.Before(from) {
+			return candidate
+		}
+		// Advance one quarter
+		next := candidateInCurrentQ.AddDate(0, 3, 0)
+		maxDay = daysInMonth(next.Year(), next.Month())
+		day = runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		return time.Date(next.Year(), next.Month(), day, 0, 0, 0, 0, time.UTC)
+
 	case "YEARLY":
-		next = from.AddDate(1, 0, 0)
+		// Try current year first
+		maxDay := daysInMonth(from.Year(), time.January)
+		day := runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		candidate := time.Date(from.Year(), time.January, day, 0, 0, 0, 0, time.UTC)
+		if !candidate.Before(from) {
+			return candidate
+		}
+		// Advance one year
+		next := time.Date(from.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+		maxDay = daysInMonth(next.Year(), next.Month())
+		day = runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		return time.Date(next.Year(), next.Month(), day, 0, 0, 0, 0, time.UTC)
+
 	default: // MONTHLY
-		next = from.AddDate(0, 1, 0)
+		// Try current month's run_day first
+		maxDay := daysInMonth(from.Year(), from.Month())
+		day := runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		candidate := time.Date(from.Year(), from.Month(), day, 0, 0, 0, 0, time.UTC)
+		if !candidate.Before(from) {
+			return candidate
+		}
+		// Day already passed this month — advance to next month
+		next := time.Date(from.Year(), from.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+		maxDay = daysInMonth(next.Year(), next.Month())
+		day = runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		return time.Date(next.Year(), next.Month(), day, 0, 0, 0, 0, time.UTC)
 	}
-	// clamp day
-	maxDay := daysInMonth(next.Year(), next.Month())
-	day := runDay
-	if day > maxDay {
-		day = maxDay
-	}
-	return time.Date(next.Year(), next.Month(), day, 0, 0, 0, 0, time.UTC)
 }
 
 // daysInMonth returns the number of days in a given month.

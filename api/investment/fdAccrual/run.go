@@ -1394,6 +1394,10 @@ func GetAccrualExceptions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // ─── 12. ProposeOverride ──────────────────────────────────────────────────────
+// Propose captures OLD ledger values into fd_accrual_ledger_audit, then
+// immediately recalculates the ledger row using the override amount and stores
+// the new figures as a PROPOSED state.  The run totals are recalculated so the
+// checker sees the impact before approving.  Approve/Reject only flip the status.
 
 func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1426,35 +1430,137 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// ── Step 1: Load current ledger row so we can capture old values ──────
+		var ledgerID, fdRefNo, bankID, bankName, entityID string
+		var oldPeriodInterest, oldClosingBal, oldTDS, oldNetInterest float64
+		var oldOpeningBal, oldInterestReceived, oldTDSApplicable float64
+		var oldRowStatus, oldFormula string
+		var oldIsOverridden bool
+		var oldOverrideAmt, oldOverrideAdj float64
+		var oldOverrideCode, oldOverrideText, oldOverrideStatus string
+		var principal, interestRate float64
+		var accrualDays int
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT
+				ledger_id,
+				COALESCE(fd_ref_no,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(entity_id,''),
+				COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(accrual_days,0),
+				COALESCE(period_interest_accrued,0),
+				COALESCE(closing_accrued_balance,0),
+				COALESCE(tds_deducted_in_period,0),
+				COALESCE(net_interest_in_period,0),
+				COALESCE(ledger_row_status,''),
+				COALESCE(formula_used,''),
+				COALESCE(is_overridden,false),
+				COALESCE(override_amount,0),
+				COALESCE(override_adjustment,0),
+				COALESCE(override_reason_code,''),
+				COALESCE(override_reason_text,''),
+				COALESCE(override_status,''),
+				COALESCE(opening_accrued_balance,0),
+				COALESCE(interest_received_in_period,0),
+				COALESCE(tds_applicable_amount,0)
+			FROM investment.fd_accrual_ledger
+			WHERE run_id=$1 AND fd_id=$2`,
+			req.RunID, req.FDID,
+		).Scan(
+			&ledgerID,
+			&fdRefNo, &bankID, &bankName, &entityID,
+			&principal, &interestRate, &accrualDays,
+			&oldPeriodInterest, &oldClosingBal, &oldTDS, &oldNetInterest,
+			&oldRowStatus, &oldFormula,
+			&oldIsOverridden, &oldOverrideAmt, &oldOverrideAdj,
+			&oldOverrideCode, &oldOverrideText, &oldOverrideStatus,
+			&oldOpeningBal, &oldInterestReceived, &oldTDSApplicable,
+		); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "Ledger row not found for run/fd: "+err.Error())
+			return
+		}
+
+		// ── Step 2: Write audit row with ALL old values before any mutation ────
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_ledger_audit (
+				ledger_id, run_id, fd_id,
+				fd_ref_no, bank_id, bank_name, entity_id,
+				principal_amount, interest_rate, accrual_days,
+				action_type, processing_status, requested_by, requested_at,
+				old_period_interest_accrued, old_closing_accrued_balance,
+				old_tds_deducted_in_period, old_net_interest_in_period,
+				old_ledger_row_status, old_formula_used,
+				old_is_overridden, old_override_amount, old_override_adjustment,
+				old_override_reason_code, old_override_reason_text, old_override_status,
+				old_opening_accrued_balance, old_interest_received_in_period, old_tds_applicable_amount
+			) VALUES (
+				$1,$2,$3,
+				$4,$5,$6,$7,
+				$8,$9,$10,
+				'OVERRIDE_PROPOSE','PENDING_APPROVAL',$11,now(),
+				$12,$13,$14,$15,$16,$17,
+				$18,$19,$20,$21,$22,$23,
+				$24,$25,$26
+			)`,
+			ledgerID, req.RunID, req.FDID,
+			fdRefNo, bankID, bankName, entityID,
+			principal, interestRate, accrualDays,
+			userEmail,
+			oldPeriodInterest, oldClosingBal, oldTDS, oldNetInterest, oldRowStatus, oldFormula,
+			oldIsOverridden, oldOverrideAmt, oldOverrideAdj, oldOverrideCode, oldOverrideText, oldOverrideStatus,
+			oldOpeningBal, oldInterestReceived, oldTDSApplicable)
+
+		// ── Step 3: Recalculate ledger figures using the override amount ───────
+		newPeriodInterest := math.Round(req.OverrideAmount*100) / 100
+		newClosingBal := math.Round((oldOpeningBal+req.OverrideAmount-oldInterestReceived)*100) / 100
+		newNetInterest := math.Round((req.OverrideAmount-oldTDS)*100) / 100
+		overrideAdj := math.Round((req.OverrideAmount-oldPeriodInterest)*100) / 100
+
+		// ── Step 4: Write proposed figures into ledger row (status = PROPOSED) ─
 		_, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_ledger
-			SET is_overridden = true,
-			    override_amount = $1,
-			    override_reason_code = $2,
-			    override_reason_text = $3,
-			    override_effective_period = $4,
-			    override_status = 'PROPOSED',
-			    override_proposed_by = $5,
-			    override_proposed_at = now(),
-			    updated_at = now()
-			WHERE run_id = $6 AND fd_id = $7`,
+			SET is_overridden              = true,
+			    override_amount            = $1,
+			    override_reason_code       = $2,
+			    override_reason_text       = $3,
+			    override_effective_period  = $4,
+			    override_status            = 'PROPOSED',
+			    override_proposed_by       = $5,
+			    override_proposed_at       = now(),
+			    period_interest_accrued    = $6,
+			    closing_accrued_balance    = $7,
+			    net_interest_in_period     = $8,
+			    override_adjustment        = $9,
+			    ledger_row_status          = 'OVERRIDDEN',
+			    updated_at                 = now()
+			WHERE run_id = $10 AND fd_id = $11`,
 			req.OverrideAmount, nullIfEmpty(req.OverrideReasonCode),
 			nullIfEmpty(req.OverrideReasonText), nullIfEmpty(req.OverrideEffPeriod),
-			userEmail, req.RunID, req.FDID)
+			userEmail,
+			newPeriodInterest, newClosingBal, newNetInterest, overrideAdj,
+			req.RunID, req.FDID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Propose override failed: "+friendlyAccrualError(err, "override proposal"))
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"run_id":          req.RunID,
-			"fd_id":           req.FDID,
-			"override_status": "PROPOSED",
-		})
-		api.LogInfo("[FDAccrual] ProposeOverride: run=%s fd=%s amount=%.2f by=%s",
-			req.RunID, req.FDID, req.OverrideAmount, userEmail)
+		// ── Step 5: Recompute run-level totals across all ledger rows ─────────
+		_, _ = pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_run r
+			SET total_interest_accrued       = sub.total_interest,
+			    total_tds_deducted           = sub.total_tds,
+			    total_accrued_closing_balance = sub.total_net,
+			    run_status                   = 'COMPUTED',
+			    updated_at                   = now()
+			FROM (
+				SELECT
+					ROUND(SUM(period_interest_accrued)::numeric,2)  AS total_interest,
+					ROUND(SUM(tds_deducted_in_period)::numeric,2)   AS total_tds,
+					ROUND(SUM(net_interest_in_period)::numeric,2)   AS total_net
+				FROM investment.fd_accrual_ledger
+				WHERE run_id=$1 AND COALESCE(is_deleted,false)=false
+			) sub
+			WHERE r.run_id=$1`, req.RunID)
 
-		// Also register in exception table for audit visibility (non-fatal)
+		// ── Step 6: Register / refresh exception row for checker visibility ───
 		_, _ = pgxPool.Exec(ctx, `
 			INSERT INTO investment.fd_accrual_exception (
 				run_id, ledger_id, fd_id, fd_ref_no,
@@ -1468,22 +1574,42 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				l.run_id, l.ledger_id, l.fd_id, l.fd_ref_no,
 				'MANUAL_OVERRIDE',
 				COALESCE($1, 'Manual override proposed'),
-				l.period_interest_accrued, $2,
-				$3, $1, $4,
-				'OVERRIDE_PROPOSED', $5, now()
+				$2, $3,
+				$4, $1, $5,
+				'OVERRIDE_PROPOSED', $6, now()
 			FROM investment.fd_accrual_ledger l
-			WHERE l.run_id = $6 AND l.fd_id = $7`,
+			WHERE l.run_id = $7 AND l.fd_id = $8
+			ON CONFLICT DO NOTHING`,
 			nullIfEmpty(req.OverrideReasonText),
+			oldPeriodInterest,
 			req.OverrideAmount,
 			nullIfEmpty(req.OverrideReasonCode),
 			nullIfEmpty(req.OverrideEffPeriod),
 			userEmail,
 			req.RunID, req.FDID,
 		)
+
+		api.RespondWithPayload(w, true, "", map[string]interface{}{
+			"run_id":                  req.RunID,
+			"fd_id":                   req.FDID,
+			"override_status":         "PROPOSED",
+			"period_interest_accrued": newPeriodInterest,
+			"closing_accrued_balance": newClosingBal,
+			"net_interest_in_period":  newNetInterest,
+			"override_adjustment":     overrideAdj,
+			"old_period_interest":     oldPeriodInterest,
+		})
+		api.LogInfo("[FDAccrual] ProposeOverride: run=%s fd=%s amount=%.2f old_interest=%.2f new_interest=%.2f by=%s",
+			req.RunID, req.FDID, req.OverrideAmount, oldPeriodInterest, newPeriodInterest, userEmail)
 	}
 }
 
 // ─── 13. ApproveOverride ──────────────────────────────────────────────────────
+// Figures were already recalculated by ProposeOverride.  Approve only:
+//   1. Enforces maker≠checker
+//   2. Writes an audit row (captures the proposed/current figures as "old")
+//   3. Flips override_status → APPROVED
+//   4. Keeps run_status = COMPUTED (already set by ProposeOverride)
 
 func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1510,7 +1636,7 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Maker ≠ checker
+		// ── Maker ≠ checker ───────────────────────────────────────────────────
 		var proposedBy string
 		_ = pgxPool.QueryRow(ctx,
 			`SELECT COALESCE(override_proposed_by,'') FROM investment.fd_accrual_ledger WHERE run_id=$1 AND fd_id=$2`,
@@ -1521,63 +1647,102 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Load current ledger values to compute adjusted figures
-		var overrideAmt, openingBal, intReceived, tdsDeducted float64
-		var ledgerRowStatus string
+		// ── Load current (proposed) ledger values for audit snapshot ─────────
+		var ledgerID, fdRefNo, bankID, bankName, entityID string
+		var principal, interestRate float64
+		var accrualDays int
+		var curPeriodInterest, curClosingBal, curTDS, curNetInterest float64
+		var curOpeningBal, curInterestReceived, curTDSApplicable float64
+		var curRowStatus, curFormula string
+		var curIsOverridden bool
+		var curOverrideAmt, curOverrideAdj float64
+		var curOverrideCode, curOverrideText, curOverrideStatus string
 		if err := pgxPool.QueryRow(ctx, `
 			SELECT
+				ledger_id,
+				COALESCE(fd_ref_no,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(entity_id,''),
+				COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(accrual_days,0),
+				COALESCE(period_interest_accrued,0),
+				COALESCE(closing_accrued_balance,0),
+				COALESCE(tds_deducted_in_period,0),
+				COALESCE(net_interest_in_period,0),
+				COALESCE(ledger_row_status,''),
+				COALESCE(formula_used,''),
+				COALESCE(is_overridden,false),
 				COALESCE(override_amount,0),
+				COALESCE(override_adjustment,0),
+				COALESCE(override_reason_code,''),
+				COALESCE(override_reason_text,''),
+				COALESCE(override_status,''),
 				COALESCE(opening_accrued_balance,0),
 				COALESCE(interest_received_in_period,0),
-				COALESCE(tds_deducted_in_period,0),
-				COALESCE(ledger_row_status,'')
+				COALESCE(tds_applicable_amount,0)
 			FROM investment.fd_accrual_ledger
 			WHERE run_id=$1 AND fd_id=$2 AND override_status='PROPOSED'`,
 			req.RunID, req.FDID,
-		).Scan(&overrideAmt, &openingBal, &intReceived, &tdsDeducted, &ledgerRowStatus); err != nil {
+		).Scan(
+			&ledgerID,
+			&fdRefNo, &bankID, &bankName, &entityID,
+			&principal, &interestRate, &accrualDays,
+			&curPeriodInterest, &curClosingBal, &curTDS, &curNetInterest,
+			&curRowStatus, &curFormula,
+			&curIsOverridden, &curOverrideAmt, &curOverrideAdj,
+			&curOverrideCode, &curOverrideText, &curOverrideStatus,
+			&curOpeningBal, &curInterestReceived, &curTDSApplicable,
+		); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "No PROPOSED override found for this run/fd")
 			return
 		}
-		if overrideAmt <= 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "override_amount must be > 0 to approve")
-			return
-		}
 
-		// Recompute ledger figures using the approved override amount
-		newPeriodInterest := math.Round(overrideAmt*100) / 100
-		newClosingBal := math.Round((openingBal+overrideAmt-intReceived)*100) / 100
-		newNetInterest := math.Round((overrideAmt-tdsDeducted)*100) / 100
-		overrideAdj := math.Round((overrideAmt-newPeriodInterest)*100) / 100 // delta vs original
+		// ── Write audit row (proposed figures become the "old" snapshot) ──────
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_ledger_audit (
+				ledger_id, run_id, fd_id,
+				fd_ref_no, bank_id, bank_name, entity_id,
+				principal_amount, interest_rate, accrual_days,
+				action_type, processing_status, requested_by, requested_at,
+				checker_by, checker_at, checker_comment,
+				old_period_interest_accrued, old_closing_accrued_balance,
+				old_tds_deducted_in_period, old_net_interest_in_period,
+				old_ledger_row_status, old_formula_used,
+				old_is_overridden, old_override_amount, old_override_adjustment,
+				old_override_reason_code, old_override_reason_text, old_override_status,
+				old_opening_accrued_balance, old_interest_received_in_period, old_tds_applicable_amount
+			) VALUES (
+				$1,$2,$3,
+				$4,$5,$6,$7,
+				$8,$9,$10,
+				'OVERRIDE_APPROVE','APPROVED',$11,now(),
+				$12,now(),$13,
+				$14,$15,$16,$17,$18,$19,
+				$20,$21,$22,$23,$24,$25,
+				$26,$27,$28
+			)`,
+			ledgerID, req.RunID, req.FDID,
+			fdRefNo, bankID, bankName, entityID,
+			principal, interestRate, accrualDays,
+			proposedBy,
+			userEmail, nullIfEmpty(req.Comment),
+			curPeriodInterest, curClosingBal, curTDS, curNetInterest, curRowStatus, curFormula,
+			curIsOverridden, curOverrideAmt, curOverrideAdj, curOverrideCode, curOverrideText, curOverrideStatus,
+			curOpeningBal, curInterestReceived, curTDSApplicable)
 
+		// ── Flip status → APPROVED (figures already in ledger from ProposeOverride) ──
 		_, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_ledger
-			SET override_status             = 'APPROVED',
-			    override_approved_by        = $1,
-			    override_approved_at        = now(),
-			    override_checker_comment    = $2,
-			    period_interest_accrued     = $3,
-			    closing_accrued_balance     = $4,
-			    net_interest_in_period      = $5,
-			    override_adjustment         = $6,
-			    ledger_row_status           = 'OVERRIDDEN',
-			    updated_at                  = now()
-			WHERE run_id = $7 AND fd_id = $8 AND override_status = 'PROPOSED'`,
-			userEmail, nullIfEmpty(req.Comment),
-			newPeriodInterest, newClosingBal, newNetInterest, overrideAdj,
-			req.RunID, req.FDID)
+			SET override_status          = 'APPROVED',
+			    override_approved_by     = $1,
+			    override_approved_at     = now(),
+			    override_checker_comment = $2,
+			    updated_at               = now()
+			WHERE run_id = $3 AND fd_id = $4 AND override_status = 'PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Approve override failed: "+friendlyAccrualError(err, "override approval"))
 			return
 		}
 
-		// Reset run back to COMPUTED so it can be submitted/posted again
-		_, _ = pgxPool.Exec(ctx, `
-			UPDATE investment.fd_accrual_run
-			SET run_status = 'COMPUTED', updated_at = now()
-			WHERE run_id = $1 AND run_status IN ('PENDING_APPROVAL','COMPUTED')`,
-			req.RunID)
-
-		// STEP 5: sync exception table status (non-fatal)
+		// ── Sync exception table status ───────────────────────────────────────
 		_, _ = pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_exception
 			SET exception_status  = 'APPROVED',
@@ -1586,26 +1751,29 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    checker_comment   = $2,
 			    ledger_updated    = true,
 			    ledger_updated_at = now()
-			WHERE run_id = $3
-			  AND fd_id  = $4
-			  AND exception_status = 'OVERRIDE_PROPOSED'`,
+			WHERE run_id = $3 AND fd_id = $4 AND exception_status = 'OVERRIDE_PROPOSED'`,
 			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                  req.RunID,
 			"fd_id":                   req.FDID,
 			"override_status":         "APPROVED",
-			"period_interest_accrued": newPeriodInterest,
-			"closing_accrued_balance": newClosingBal,
-			"net_interest_in_period":  newNetInterest,
-			"override_adjustment":     overrideAdj,
+			"period_interest_accrued": curPeriodInterest,
+			"closing_accrued_balance": curClosingBal,
+			"net_interest_in_period":  curNetInterest,
+			"override_adjustment":     curOverrideAdj,
 		})
-		api.LogInfo("[FDAccrual] ApproveOverride: run=%s fd=%s by=%s override_amt=%.2f new_period_interest=%.2f",
-			req.RunID, req.FDID, userEmail, overrideAmt, newPeriodInterest)
+		api.LogInfo("[FDAccrual] ApproveOverride: run=%s fd=%s by=%s (proposed by %s) override_amt=%.2f",
+			req.RunID, req.FDID, userEmail, proposedBy, curOverrideAmt)
 	}
 }
 
 // ─── 14. RejectOverride ───────────────────────────────────────────────────────
+// Reject:
+//   1. Captures the current (proposed) ledger figures into audit
+//   2. Restores the original pre-propose figures from the OVERRIDE_PROPOSE audit row
+//   3. Flips override_status → REJECTED and clears override fields
+//   4. Recomputes run totals after the rollback
 
 func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1631,27 +1799,168 @@ func RejectOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		// ── Step 1: Load current (proposed) state for audit snapshot ─────────
+		var ledgerID, fdRefNo, bankID, bankName, entityID string
+		var principal, interestRate float64
+		var accrualDays int
+		var curPeriodInterest, curClosingBal, curTDS, curNetInterest float64
+		var curOpeningBal, curInterestReceived, curTDSApplicable float64
+		var curRowStatus, curFormula string
+		var curIsOverridden bool
+		var curOverrideAmt, curOverrideAdj float64
+		var curOverrideCode, curOverrideText, curOverrideStatus string
+		var proposedBy string
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT
+				ledger_id,
+				COALESCE(fd_ref_no,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(entity_id,''),
+				COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(accrual_days,0),
+				COALESCE(period_interest_accrued,0), COALESCE(closing_accrued_balance,0),
+				COALESCE(tds_deducted_in_period,0), COALESCE(net_interest_in_period,0),
+				COALESCE(ledger_row_status,''), COALESCE(formula_used,''),
+				COALESCE(is_overridden,false),
+				COALESCE(override_amount,0), COALESCE(override_adjustment,0),
+				COALESCE(override_reason_code,''), COALESCE(override_reason_text,''), COALESCE(override_status,''),
+				COALESCE(opening_accrued_balance,0), COALESCE(interest_received_in_period,0),
+				COALESCE(tds_applicable_amount,0),
+				COALESCE(override_proposed_by,'')
+			FROM investment.fd_accrual_ledger
+			WHERE run_id=$1 AND fd_id=$2 AND override_status='PROPOSED'`,
+			req.RunID, req.FDID,
+		).Scan(
+			&ledgerID,
+			&fdRefNo, &bankID, &bankName, &entityID,
+			&principal, &interestRate, &accrualDays,
+			&curPeriodInterest, &curClosingBal, &curTDS, &curNetInterest,
+			&curRowStatus, &curFormula,
+			&curIsOverridden, &curOverrideAmt, &curOverrideAdj,
+			&curOverrideCode, &curOverrideText, &curOverrideStatus,
+			&curOpeningBal, &curInterestReceived, &curTDSApplicable,
+			&proposedBy,
+		); err != nil {
+			api.RespondWithError(w, http.StatusNotFound, "No PROPOSED override found for this run/fd")
+			return
+		}
+
+		// ── Step 2: Write audit row for this rejection ────────────────────────
+		_, _ = pgxPool.Exec(ctx, `
+			INSERT INTO investment.fd_accrual_ledger_audit (
+				ledger_id, run_id, fd_id,
+				fd_ref_no, bank_id, bank_name, entity_id,
+				principal_amount, interest_rate, accrual_days,
+				action_type, processing_status, requested_by, requested_at,
+				checker_by, checker_at, checker_comment,
+				old_period_interest_accrued, old_closing_accrued_balance,
+				old_tds_deducted_in_period, old_net_interest_in_period,
+				old_ledger_row_status, old_formula_used,
+				old_is_overridden, old_override_amount, old_override_adjustment,
+				old_override_reason_code, old_override_reason_text, old_override_status,
+				old_opening_accrued_balance, old_interest_received_in_period, old_tds_applicable_amount
+			) VALUES (
+				$1,$2,$3,
+				$4,$5,$6,$7,
+				$8,$9,$10,
+				'OVERRIDE_REJECT','REJECTED',$11,now(),
+				$12,now(),$13,
+				$14,$15,$16,$17,$18,$19,
+				$20,$21,$22,$23,$24,$25,
+				$26,$27,$28
+			)`,
+			ledgerID, req.RunID, req.FDID,
+			fdRefNo, bankID, bankName, entityID,
+			principal, interestRate, accrualDays,
+			proposedBy,
+			userEmail, nullIfEmpty(req.Comment),
+			curPeriodInterest, curClosingBal, curTDS, curNetInterest, curRowStatus, curFormula,
+			curIsOverridden, curOverrideAmt, curOverrideAdj, curOverrideCode, curOverrideText, curOverrideStatus,
+			curOpeningBal, curInterestReceived, curTDSApplicable)
+
+		// ── Step 3: Restore original pre-propose figures from audit ──────────
+		// The OVERRIDE_PROPOSE audit row stores the original values as old_*.
+		var origPeriodInterest, origClosingBal, origTDS, origNetInterest float64
+		var origFormula, origRowStatus string
+		_ = pgxPool.QueryRow(ctx, `
+			SELECT
+				COALESCE(old_period_interest_accrued,0),
+				COALESCE(old_closing_accrued_balance,0),
+				COALESCE(old_tds_deducted_in_period,0),
+				COALESCE(old_net_interest_in_period,0),
+				COALESCE(old_formula_used,''),
+				COALESCE(old_ledger_row_status,'CALCULATED')
+			FROM investment.fd_accrual_ledger_audit
+			WHERE ledger_id=$1 AND action_type='OVERRIDE_PROPOSE'
+			ORDER BY requested_at DESC LIMIT 1`, ledgerID,
+		).Scan(&origPeriodInterest, &origClosingBal, &origTDS, &origNetInterest, &origFormula, &origRowStatus)
+		// If no prior audit exists (shouldn't happen), keep current values as fallback.
+		if origRowStatus == "" {
+			origRowStatus = "CALCULATED"
+		}
+
+		// ── Step 4: Revert ledger row to original figures + mark REJECTED ─────
 		_, err := pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_ledger
-			SET override_status = 'REJECTED',
-			    override_rejected_by = $1,
-			    override_rejected_at = now(),
-			    override_checker_comment = $2,
-			    is_overridden = false,
-			    updated_at = now()
-			WHERE run_id = $3 AND fd_id = $4 AND override_status = 'PROPOSED'`,
-			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
+			SET override_status            = 'REJECTED',
+			    override_rejected_by       = $1,
+			    override_rejected_at       = now(),
+			    override_checker_comment   = $2,
+			    is_overridden              = false,
+			    override_amount            = 0,
+			    override_adjustment        = 0,
+			    period_interest_accrued    = $3,
+			    closing_accrued_balance    = $4,
+			    tds_deducted_in_period     = $5,
+			    net_interest_in_period     = $6,
+			    ledger_row_status          = $7,
+			    formula_used               = $8,
+			    updated_at                 = now()
+			WHERE run_id = $9 AND fd_id = $10 AND override_status = 'PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment),
+			origPeriodInterest, origClosingBal, origTDS, origNetInterest,
+			origRowStatus, nullIfEmpty(origFormula),
+			req.RunID, req.FDID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Reject override failed: "+err.Error())
 			return
 		}
 
+		// ── Step 5: Recompute run totals after rollback ───────────────────────
+		_, _ = pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_run r
+			SET total_interest_accrued        = sub.total_interest,
+			    total_tds_deducted            = sub.total_tds,
+			    total_accrued_closing_balance = sub.total_net,
+			    run_status                    = 'COMPUTED',
+			    updated_at                    = now()
+			FROM (
+				SELECT
+					ROUND(SUM(period_interest_accrued)::numeric,2) AS total_interest,
+					ROUND(SUM(tds_deducted_in_period)::numeric,2)  AS total_tds,
+					ROUND(SUM(net_interest_in_period)::numeric,2)  AS total_net
+				FROM investment.fd_accrual_ledger
+				WHERE run_id=$1 AND COALESCE(is_deleted,false)=false
+			) sub
+			WHERE r.run_id=$1`, req.RunID)
+
+		// ── Step 6: Sync exception table ─────────────────────────────────────
+		_, _ = pgxPool.Exec(ctx, `
+			UPDATE investment.fd_accrual_exception
+			SET exception_status = 'REJECTED',
+			    approved_by      = $1,
+			    approved_at      = now(),
+			    checker_comment  = $2
+			WHERE run_id = $3 AND fd_id = $4 AND exception_status = 'OVERRIDE_PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"run_id":          req.RunID,
-			"fd_id":           req.FDID,
-			"override_status": "REJECTED",
+			"run_id":                  req.RunID,
+			"fd_id":                   req.FDID,
+			"override_status":         "REJECTED",
+			"restored_period_interest": origPeriodInterest,
+			"restored_closing_balance": origClosingBal,
 		})
-		api.LogInfo("[FDAccrual] RejectOverride: run=%s fd=%s by=%s", req.RunID, req.FDID, userEmail)
+		api.LogInfo("[FDAccrual] RejectOverride: run=%s fd=%s by=%s (proposed by %s) restored_interest=%.2f",
+			req.RunID, req.FDID, userEmail, proposedBy, origPeriodInterest)
 	}
 }
 

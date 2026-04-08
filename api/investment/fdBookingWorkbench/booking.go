@@ -2031,12 +2031,36 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					GREATEST(
 						COALESCE(aud.requested_at,'1970-01-01'::timestamp),
 						COALESCE(aud.checker_at,'1970-01-01'::timestamp)
-					), 'YYYY-MM-DD HH24:MI'), '')                                AS approved_at
+					), 'YYYY-MM-DD HH24:MI'), '')                                AS approved_at,
+				-- simulator-ready fields from booking
+				COALESCE(m.bank_config_id,'')                                  AS bank_config_id,
+				COALESCE(m.frequency_id,'')                                    AS frequency_id,
+				COALESCE(m.day_count_code,'')                                  AS day_count_code,
+				-- bank config detail columns (flat, used in simulator_input)
+				COALESCE(bc.holiday_calendar_code,'')                          AS holiday_calendar_code,
+				COALESCE(bc.tds_deduction_timing,'')                           AS tds_deduction_timing,
+				COALESCE(bc.rounding_method,'')                                AS rounding_method,
+				COALESCE(bc.rounding_frequency,'')                             AS rounding_frequency,
+				COALESCE(bc.interest_rounding_decimals,2)                      AS interest_rounding_decimals,
+				COALESCE(bc.broken_period_method,'')                           AS broken_period_method,
+				COALESCE(bc.broken_period_location,'')                         AS broken_period_location,
+				COALESCE(bc.grace_period_days,0)                               AS grace_period_days,
+				COALESCE(bc.grace_period_rate_type,'')                         AS grace_period_rate_type,
+				COALESCE(bc.capitalization_schedule_type,'')                   AS capitalization_schedule_type,
+				COALESCE(bc.capitalization_date_adjustment,'')                 AS capitalization_date_adjustment,
+				COALESCE(bc.weekend_accrual,true)                              AS weekend_accrual,
+				COALESCE(bc.holiday_accrual,true)                              AS holiday_accrual,
+				COALESCE(bc.accrual_start_convention,'')                       AS accrual_start_convention,
+				COALESCE(bc.accrual_end_convention,'')                         AS accrual_end_convention,
+				COALESCE(bc.period_boundary_definition,'')                     AS period_boundary_definition,
+				COALESCE(bc.quarter_definition,'')                             AS quarter_definition
 			FROM investment.fd_booking_request m
 			LEFT JOIN investment.fd_confirmation c
 				ON c.booking_id = m.booking_id AND COALESCE(c.is_deleted,false) = false
 			LEFT JOIN investment.fd_master fm
 				ON fm.booking_id = m.booking_id AND COALESCE(fm.is_deleted,false) = false
+			LEFT JOIN investment.fd_bank_config_master bc
+				ON bc.config_id = m.bank_config_id AND COALESCE(bc.is_deleted,false) = false
 			LEFT JOIN LATERAL (
 				SELECT requested_by, requested_at, checker_by, checker_at
 				FROM investment.fd_audit_booking_request
@@ -2089,6 +2113,81 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					row[string(f.Name)] = vals[i]
 				}
 			}
+
+			// ── Build simulator_input — maps 1:1 to SimulateCashflowRequest ────────
+			// Use confirmed values when available (post-CONFIRMED), fall back to booked.
+			startDate := strVal(row["actual_start_date"])
+			if startDate == "" {
+				startDate = strVal(row["value_date"])
+				if startDate == "" {
+					startDate = strVal(row["expected_start_date"])
+				}
+			}
+			maturityDate := strVal(row["actual_maturity_date"])
+			if maturityDate == "" {
+				maturityDate = strVal(row["expected_maturity_date"])
+			}
+			principal := row["actual_principal"]
+			if isZeroNumeric(principal) {
+				principal = row["principal_amount"]
+			}
+			interestRate := row["confirmed_rate"]
+			if isZeroNumeric(interestRate) {
+				interestRate = row["interest_rate"]
+			}
+			interestType := strVal(row["confirmed_interest_type"])
+			if interestType == "" {
+				interestType = strVal(row["interest_type"])
+			}
+
+			row["simulator_input"] = map[string]interface{}{
+				// ── Core FD params (confirmed values win over booked) ────────
+				"principal_amount": principal,
+				"interest_rate":    interestRate,
+				"start_date":       startDate,
+				"maturity_date":    maturityDate,
+				"tenor_days":       row["tenor_days"],
+				"tenor_months":     row["tenor_months"],
+				"tenor_years":      row["tenor_years"],
+				"interest_type":    interestType,
+				// ── Config refs (POST these directly to /simulator/cashflow) ─
+				"bank_config_id": row["bank_config_id"],
+				"frequency_id":   row["frequency_id"],
+				"day_count_code": row["day_count_code"],
+				"tds_plan_id":    row["tds_plan_id"],
+				// ── Bank-config inline overrides ─────────────────────────────
+				"holiday_calendar_code":          row["holiday_calendar_code"],
+				"tds_deduction_timing":           row["tds_deduction_timing"],
+				"rounding_method":                row["rounding_method"],
+				"rounding_frequency":             row["rounding_frequency"],
+				"interest_rounding_decimals":     row["interest_rounding_decimals"],
+				"broken_period_method":           row["broken_period_method"],
+				"broken_period_location":         row["broken_period_location"],
+				"grace_period_days":              row["grace_period_days"],
+				"grace_period_rate_type":         row["grace_period_rate_type"],
+				"capitalization_schedule_type":   row["capitalization_schedule_type"],
+				"capitalization_date_adjustment": row["capitalization_date_adjustment"],
+				"weekend_accrual":                row["weekend_accrual"],
+				"holiday_accrual":                row["holiday_accrual"],
+				"accrual_start_convention":       row["accrual_start_convention"],
+				"accrual_end_convention":         row["accrual_end_convention"],
+				"period_boundary_definition":     row["period_boundary_definition"],
+				"quarter_definition":             row["quarter_definition"],
+			}
+			// Remove the bank-config detail columns from the flat row —
+			// they are already embedded in simulator_input above.
+			for _, k := range []string{
+				"tds_deduction_timing", "rounding_method", "rounding_frequency",
+				"interest_rounding_decimals", "broken_period_method", "broken_period_location",
+				"grace_period_days", "grace_period_rate_type",
+				"capitalization_schedule_type", "capitalization_date_adjustment",
+				"weekend_accrual", "holiday_accrual",
+				"accrual_start_convention", "accrual_end_convention",
+				"period_boundary_definition", "quarter_definition",
+			} {
+				delete(row, k)
+			}
+
 			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
@@ -2198,4 +2297,36 @@ func nullIfEmpty(s string) interface{} {
 		return nil
 	}
 	return s
+}
+
+// strVal coerces an interface{} map value to string.
+// It handles pgx-scanned text/varchar types and returns "" for nil.
+func strVal(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// isZeroNumeric returns true when v is nil, the integer 0, or the float64 0.
+func isZeroNumeric(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	switch n := v.(type) {
+	case float64:
+		return n == 0
+	case float32:
+		return n == 0
+	case int:
+		return n == 0
+	case int32:
+		return n == 0
+	case int64:
+		return n == 0
+	}
+	return false
 }
