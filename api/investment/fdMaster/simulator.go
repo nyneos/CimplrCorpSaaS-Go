@@ -1072,40 +1072,65 @@ func extractEventDates(rows []SimulatedCashflowRow, eventType string) *json.RawM
 }
 
 // buildSimulateSummary aggregates totals across the simulated schedule.
+//
+// Source-of-truth rules for TotalInterestAccrued:
+//
+//   SIMPLE FD  — only ACCRUAL rows carry InterestAccrued; MATURITY row has 0.
+//                Sum from ACCRUAL rows only.
+//
+//   COMPOUND FD — both ACCRUAL (monthly sub-accruals) and CAPITALIZATION rows
+//                 carry InterestAccrued.  The CAPITALIZATION row's InterestAccrued
+//                 is the *sum* of the ACCRUAL rows inside its window — so counting
+//                 both would double the total.
+//                 Strategy: if any CAPITALIZATION row is present (compound schedule),
+//                 use CAPITALIZATION rows as the sole source; ignore ACCRUAL row
+//                 interest.  If no CAPITALIZATION rows exist (simple schedule), use
+//                 ACCRUAL rows.
+//
+// TDS is always sourced exclusively from TDS_DEDUCTION rows.
 func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 	var s SimulateSummary
+
+	// Detect whether this is a compound schedule (has any CAPITALIZATION row).
+	isCompound := false
+	for _, row := range rows {
+		if row.EventType == "CAPITALIZATION" {
+			isCompound = true
+			break
+		}
+	}
+
 	for _, row := range rows {
 		switch row.EventType {
 		case "ACCRUAL":
-			// SIMPLE FD: interest accumulated from ACCRUAL rows.
-			s.TotalInterestAccrued += row.InterestAccrued
 			s.AccrualPeriodCount++
+			if !isCompound {
+				// SIMPLE FD: ACCRUAL rows are the only source of interest.
+				s.TotalInterestAccrued += row.InterestAccrued
+			}
+			// COMPOUND FD: interest is aggregated via CAPITALIZATION rows below.
 		case "CAPITALIZATION":
-			// COMPOUND FD: interest accumulated from CAPITALIZATION rows.
-			// TDS is tracked via separate TDS_DEDUCTION rows — do not also
-			// add TDSAmount here to avoid double-counting.
 			s.TotalCapitalized += row.CapitalizedAmount
 			s.CapitalizationCount++
-			s.TotalInterestAccrued += row.InterestAccrued
+			if isCompound {
+				// COMPOUND FD: each CAPITALIZATION row's InterestAccrued is the
+				// canonical per-period interest total (sum of its ACCRUAL sub-rows).
+				s.TotalInterestAccrued += row.InterestAccrued
+			}
 		case "INTEREST_RECEIPT":
-			// Counted in ACCRUAL/CAPITALIZATION rows; avoid double-count.
+			s.InterestReceiptCount++
+			// Interest already counted in ACCRUAL / CAPITALIZATION rows.
 		case "TDS_DEDUCTION":
 			s.TotalTDSDeducted += row.TDSAmount
 		case "MATURITY":
 			s.MaturityAmount = row.NetCashFlow
-			// For COMPOUND FDs: InterestAccrued on the MATURITY row equals the
-			// final cap period's interest, which is already summed above in
-			// CAPITALIZATION. Adding it again would double-count.
-			// For SIMPLE FDs: the MATURITY row has no InterestAccrued (it is 0);
-			// all interest came from ACCRUAL rows above.
-			// TDS on the MATURITY row is captured via TDS_DEDUCTION — skip here.
+			// InterestAccrued on MATURITY == final cap-period interest, already
+			// counted above. TDS already in TDS_DEDUCTION. Nothing to add.
 		case "GRACE_PERIOD":
 			s.TotalInterestAccrued += row.InterestAccrued
 		}
-		if row.EventType == "INTEREST_RECEIPT" {
-			s.InterestReceiptCount++
-		}
 	}
+
 	// Effective yield = net interest (post TDS) / principal * 100
 	if fd.PrincipalAmount > 0 && fd.TenorDays > 0 {
 		netInterest := s.TotalInterestAccrued - s.TotalTDSDeducted

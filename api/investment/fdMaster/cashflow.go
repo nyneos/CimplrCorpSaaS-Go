@@ -1808,6 +1808,13 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 	var cumulativeInterest float64
 	// map of capitalization date -> closing principal after that cap
 	capPrincipal := map[string]float64{}
+	// ordered slice of (capEnd, closingPrincipal) to resolve orphan accrual OpeningP
+	type capSnapshot struct {
+		end       time.Time
+		closing   float64
+		opening   float64
+	}
+	var capSnapshots []capSnapshot
 
 	// Initialize FY TDS end
 	fyEndYear := fd.ValueDate.Year()
@@ -1815,6 +1822,14 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		fyEndYear++
 	}
 	lastTDSFYEnd := time.Date(fyEndYear, time.March, 31, 0, 0, 0, 0, time.UTC)
+
+	// lastPayoutEndDate tracks the end of the most-recently emitted INTEREST_RECEIPT window.
+	// ACCRUAL rows whose PeriodStart falls before this date will have their PeriodStart clamped
+	// to avoid reporting an overlap with the closed payout period.
+	lastPayoutEndDate := fd.ValueDate
+	// normTiming is the canonical TDS timing mode for this FD — computed once here so it is
+	// available both inside the cap loop and in the payout section below.
+	normTiming := normTDSTiming(tdsDeductionTiming)
 
 	lastCapDate := fd.ValueDate
 	for _, capEnd := range periodEnds {
@@ -1848,7 +1863,7 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		// FIX 3: compute TDS first, then capitalized = interest - TDS (not just interest)
 		// NOTE: if TDS timing is "RECEIPT" we should NOT deduct TDS at capitalization time
 		tdsThisPeriod := 0.0
-		normTiming := normTDSTiming(tdsDeductionTiming) // used below for TDS_DEDUCTION event date
+		normTiming = normTDSTiming(tdsDeductionTiming) // refresh (no-op — value never changes; kept for clarity)
 		if hasTDS {
 			// TDS timing for COMPOUND FDs (tds_plan_master only — no bank config fallback):
 			//   RECEIPT       — no TDS at capitalisation; TDS fires at INTEREST_RECEIPT payout rows
@@ -1964,6 +1979,7 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 
 		// record closing principal after this capitalization for use by payout computation
 		capPrincipal[capEnd.Format(constants.DateFormat)] = closingPrincipal
+		capSnapshots = append(capSnapshots, capSnapshot{end: capEnd, closing: closingPrincipal, opening: openingPrincipal})
 
 		// advance
 		openingPrincipal = closingPrincipal
@@ -1986,9 +2002,19 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		))
 		compMonths := freqTypeToMonths(compFreqType)
 
-		// Only emit payout events when payoutMonths > 0 AND payout frequency differs from compounding frequency.
-		if payoutMonths > 0 && payoutMonths != compMonths {
-			payoutDates := buildPayoutDates(fd, payoutMonths)
+		// For RECEIPT TDS timing: always emit INTEREST_RECEIPT rows, even when payout freq == compounding freq.
+		// The investor receives interest cash at each cap event; TDS must be withheld.
+		// For other timings: skip when payout == compounding freq (pure accumulation, no cash movement).
+		emitPayouts := payoutMonths > 0 && (normTiming == "RECEIPT" || payoutMonths != compMonths)
+		if emitPayouts {
+			// When payout==comp freq and RECEIPT timing, use cap dates as payout dates.
+			var payoutDates []time.Time
+			if normTiming == "RECEIPT" && payoutMonths == compMonths {
+				// use the capitalization period ends as payout events
+				payoutDates = periodEnds
+			} else {
+				payoutDates = buildPayoutDates(fd, payoutMonths)
+			}
 			lastPayout := fd.ValueDate
 			for _, payoutDate := range payoutDates {
 				// Sum accruals whose period-end falls within (lastPayout, payoutDate]
@@ -2055,25 +2081,41 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 					}
 				}
 				lastPayout = payoutDate
+				lastPayoutEndDate = payoutDate
 			}
 		}
-	}
-
-	// FIX 1: fix up accruals that didn't get principal set (post-last-cap rows), then append ALL
+	}	// FIX 1: fix up accruals that didn't get principal set (post-last-cap rows or gaps), then append ALL.
+	// For each orphan accrual (OpeningP == 0), find the latest cap whose end <= accrual.PeriodStart
+	// and use that cap's closing principal. This prevents the leaked "final openingPrincipal" bug.
 	for _, a := range accrualRows {
 		if a.OpeningP == 0 {
-			a.OpeningP = openingPrincipal
+			// Find the latest cap snapshot with end <= a.PeriodStart
+			principalForRow := fd.PrincipalAmount
+			for _, snap := range capSnapshots {
+				if snap.end.Before(a.PeriodStart) || snap.end.Equal(a.PeriodStart) {
+					principalForRow = snap.closing
+				} else {
+					break // capSnapshots is ordered by cap date ascending
+				}
+			}
+			a.OpeningP = principalForRow
 			raw := a.OpeningP * fd.InterestRate * float64(a.PeriodDays) / float64(a.Divisor) / 100
 			a.Interest = applyRounding(raw, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
 		}
 	}
 	for _, a := range accrualRows {
 		seq++
+		// Clamp PeriodStartDate: if a payout window already closed past a.PeriodStart,
+		// the reported start must not overlap the closed window.
+		reportedStart := a.PeriodStart
+		if lastPayoutEndDate.After(reportedStart) {
+			reportedStart = lastPayoutEndDate
+		}
 		rows = append(rows, CashflowRow{
 			PeriodNumber:      seq,
 			EventType:         "ACCRUAL",
 			EventDate:         a.PeriodEnd,
-			PeriodStartDate:   a.PeriodStart,
+			PeriodStartDate:   reportedStart,
 			PeriodEndDate:     a.PeriodEnd,
 			PeriodDays:        a.PeriodDays,
 			OpeningPrincipal:  a.OpeningP,
