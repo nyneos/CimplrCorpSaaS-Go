@@ -77,9 +77,9 @@ func validateTDSPlanFields(input map[string]interface{}) string {
 
 	// Check deduction_timing
 	if deductionTiming, ok := input["deduction_timing"].(string); ok && deductionTiming != "" {
-		validTimings := map[string]bool{"ACCRUAL": true, "RECEIPT": true, "MATURITY": true}
+		validTimings := map[string]bool{"ACCRUAL": true, "RECEIPT": true, "MATURITY": true, "ACCRUAL_ANNUAL": true}
 		if !validTimings[deductionTiming] {
-			return fmt.Sprintf("Invalid deduction_timing '%s'. Must be ACCRUAL, RECEIPT, or MATURITY.", deductionTiming)
+			return fmt.Sprintf("Invalid deduction_timing '%s'. Must be ACCRUAL_ANNUAL, ACCRUAL, RECEIPT, or MATURITY.", deductionTiming)
 		}
 	}
 
@@ -116,7 +116,7 @@ func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
 	}
 
 	if strings.Contains(errStr, "fd_tds_deduction_timing_chk") {
-		return "Invalid deduction timing. Must be ACCRUAL, RECEIPT, or MATURITY.", http.StatusOK
+		return "Invalid deduction timing. Must be ACCRUAL_ANNUAL,ACCRUAL, RECEIPT, or MATURITY.", http.StatusOK
 	}
 
 	if strings.Contains(errStr, "fd_tds_rate_chk") {

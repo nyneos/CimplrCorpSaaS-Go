@@ -546,6 +546,12 @@ type SimulateCashflowResponse struct {
 
 	// Non-working days that fell within the FD period.
 	Holidays []HolidayEntry `json:"holidays,omitempty"`
+
+	// Interest payout dates (INTEREST_RECEIPT boundaries) as YYYY-MM-DD array.
+	PayoutDates *json.RawMessage `json:"payout_dates,omitempty"`
+
+	// Compounding / capitalisation dates as YYYY-MM-DD array.
+	CompoundingDates *json.RawMessage `json:"compounding_dates,omitempty"`
 }
 
 // SimulatedFDSummary echoes back what the engine used — all resolved masters.
@@ -601,6 +607,7 @@ type SimulatedCashflowRow struct {
 	Divisor           int     `json:"divisor,omitempty"`
 	FormulaUsed       string  `json:"formula_used,omitempty"`
 	AccrualRatePerDay float64 `json:"accrual_rate_per_day,omitempty"`
+	HolidaysInPeriod  int     `json:"holidays_in_period"`
 	// Cumulative / snapshot fields
 	InterestRate            float64 `json:"interest_rate"`
 	TDSRate                 float64 `json:"tds_rate"`
@@ -628,12 +635,14 @@ type SimulateSummary struct {
 
 // simulationResult holds everything produced by runSimulationForRequest.
 type simulationResult struct {
-	ResolvedInput SimulatedFDSummary
-	Schedule      []SimulatedCashflowRow
-	RawRows       []CashflowRow // before conversion — needed for summary
-	Summary       SimulateSummary
-	Holidays      []HolidayEntry
-	FD            *FDRecord // in-memory FDRecord used for the run
+	ResolvedInput    SimulatedFDSummary
+	Schedule         []SimulatedCashflowRow
+	RawRows          []CashflowRow // before conversion — needed for summary
+	Summary          SimulateSummary
+	Holidays         []HolidayEntry
+	FD               *FDRecord        // in-memory FDRecord used for the run
+	PayoutDates      *json.RawMessage // INTEREST_RECEIPT boundary dates
+	CompoundingDates *json.RawMessage // CAPITALIZATION boundary dates
 }
 
 // runSimulationForRequest validates the request, loads all required DB masters,
@@ -786,14 +795,16 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		effectiveTDSName = tds.TDSPlanName
 		effectiveTDSRate = tds.TDSRate
 		effectiveTDSThreshold = tds.ThresholdAmount
-		effectiveTDSTiming = tds.DeductionTiming
-	}
-	if effectiveTDSTiming == "" {
-		effectiveTDSTiming = cfg.TDSDeductionTiming
+		// TDS timing comes ONLY from tds_plan_master — no bank config fallback
+		effectiveTDSTiming = normTDSTiming(tds.DeductionTiming)
 	}
 
 	// ── Build effective frequency fields for echo ─────────────────────────
 	payoutMonths := freqTypeToMonths(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode))
+
+	// ── Extract payout and compounding date arrays from schedule ─────────
+	payoutDatesJSON := extractEventDates(simRows, "INTEREST_RECEIPT")
+	compoundingDatesJSON := extractEventDates(simRows, "CAPITALIZATION")
 
 	return &simulationResult{
 		ResolvedInput: SimulatedFDSummary{
@@ -825,11 +836,13 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 			TDSThreshold:       effectiveTDSThreshold,
 			TDSDeductionTiming: effectiveTDSTiming,
 		},
-		Schedule: simRows,
-		RawRows:  rawRows,
-		Summary:  buildSimulateSummary(rawRows, fd),
-		Holidays: holidays,
-		FD:       fd,
+		Schedule:         simRows,
+		RawRows:          rawRows,
+		Summary:          buildSimulateSummary(rawRows, fd),
+		Holidays:         holidays,
+		FD:               fd,
+		PayoutDates:      payoutDatesJSON,
+		CompoundingDates: compoundingDatesJSON,
 	}, nil
 }
 
@@ -875,10 +888,12 @@ func SimulateCashflowHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		api.RespondWithPayload(w, true, "", SimulateCashflowResponse{
-			ResolvedInput: result.ResolvedInput,
-			Schedule:      result.Schedule,
-			Summary:       result.Summary,
-			Holidays:      result.Holidays,
+			ResolvedInput:    result.ResolvedInput,
+			Schedule:         result.Schedule,
+			Summary:          result.Summary,
+			Holidays:         result.Holidays,
+			PayoutDates:      result.PayoutDates,
+			CompoundingDates: result.CompoundingDates,
 		})
 	}
 }
@@ -1025,6 +1040,7 @@ func cashflowRowToSim(row CashflowRow) SimulatedCashflowRow {
 		Divisor:           row.Divisor,
 		FormulaUsed:       row.FormulaUsed,
 		AccrualRatePerDay: row.AccrualRatePerDay,
+		HolidaysInPeriod:  row.HolidaysInPeriod,
 		// cumulative / snapshot
 		InterestRate:            row.InterestRate,
 		TDSRate:                 row.TDSRate,
@@ -1035,26 +1051,54 @@ func cashflowRowToSim(row CashflowRow) SimulatedCashflowRow {
 	}
 }
 
+// extractEventDates collects event_date strings for all rows matching eventType,
+// marshals them to a json.RawMessage array, and returns nil if none found.
+func extractEventDates(rows []SimulatedCashflowRow, eventType string) *json.RawMessage {
+	var dates []string
+	for _, r := range rows {
+		if r.EventType == eventType && r.EventDate != "" {
+			dates = append(dates, r.EventDate)
+		}
+	}
+	if len(dates) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(dates)
+	if err != nil {
+		return nil
+	}
+	raw := json.RawMessage(b)
+	return &raw
+}
+
 // buildSimulateSummary aggregates totals across the simulated schedule.
 func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 	var s SimulateSummary
 	for _, row := range rows {
 		switch row.EventType {
 		case "ACCRUAL":
+			// SIMPLE FD: interest accumulated from ACCRUAL rows.
 			s.TotalInterestAccrued += row.InterestAccrued
 			s.AccrualPeriodCount++
 		case "CAPITALIZATION":
+			// COMPOUND FD: interest accumulated from CAPITALIZATION rows.
+			// TDS is tracked via separate TDS_DEDUCTION rows — do not also
+			// add TDSAmount here to avoid double-counting.
 			s.TotalCapitalized += row.CapitalizedAmount
 			s.CapitalizationCount++
 			s.TotalInterestAccrued += row.InterestAccrued
 		case "INTEREST_RECEIPT":
-			// Counted in accrual rows; avoid double-count.
+			// Counted in ACCRUAL/CAPITALIZATION rows; avoid double-count.
 		case "TDS_DEDUCTION":
 			s.TotalTDSDeducted += row.TDSAmount
 		case "MATURITY":
 			s.MaturityAmount = row.NetCashFlow
-			s.TotalInterestAccrued += row.InterestAccrued
-			s.TotalTDSDeducted += row.TDSAmount
+			// For COMPOUND FDs: InterestAccrued on the MATURITY row equals the
+			// final cap period's interest, which is already summed above in
+			// CAPITALIZATION. Adding it again would double-count.
+			// For SIMPLE FDs: the MATURITY row has no InterestAccrued (it is 0);
+			// all interest came from ACCRUAL rows above.
+			// TDS on the MATURITY row is captured via TDS_DEDUCTION — skip here.
 		case "GRACE_PERIOD":
 			s.TotalInterestAccrued += row.InterestAccrued
 		}
@@ -1171,6 +1215,13 @@ type SimulateDiffResponse struct {
 
 	// Holidays from the confirmation schedule's calendar.
 	Holidays []HolidayEntry `json:"holidays,omitempty"`
+
+	// Booking payout/compounding date arrays.
+	BookingPayoutDates      *json.RawMessage `json:"booking_payout_dates,omitempty"`
+	BookingCompoundingDates *json.RawMessage `json:"booking_compounding_dates,omitempty"`
+	// Confirmation payout/compounding date arrays.
+	ConfirmationPayoutDates      *json.RawMessage `json:"confirmation_payout_dates,omitempty"`
+	ConfirmationCompoundingDates *json.RawMessage `json:"confirmation_compounding_dates,omitempty"`
 }
 
 // diffKey produces the matching key for a SimulatedCashflowRow.
@@ -1443,17 +1494,21 @@ func SimulateDiffHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		newCnt, changedCnt, removedCnt, unchangedCnt := countDiffTypes(diffRows)
 
 		api.RespondWithPayload(w, true, "", SimulateDiffResponse{
-			BookingInput:        bookingResult.ResolvedInput,
-			ConfirmationInput:   confirmResult.ResolvedInput,
-			DiffSchedule:        diffRows,
-			BookingSummary:      bookingResult.Summary,
-			ConfirmationSummary: confirmResult.Summary,
-			TotalRows:           len(diffRows),
-			NewRows:             newCnt,
-			ChangedRows:         changedCnt,
-			RemovedRows:         removedCnt,
-			UnchangedRows:       unchangedCnt,
-			Holidays:            confirmResult.Holidays, // use confirmation calendar for display
+			BookingInput:                 bookingResult.ResolvedInput,
+			ConfirmationInput:            confirmResult.ResolvedInput,
+			DiffSchedule:                 diffRows,
+			BookingSummary:               bookingResult.Summary,
+			ConfirmationSummary:          confirmResult.Summary,
+			TotalRows:                    len(diffRows),
+			NewRows:                      newCnt,
+			ChangedRows:                  changedCnt,
+			RemovedRows:                  removedCnt,
+			UnchangedRows:                unchangedCnt,
+			Holidays:                     confirmResult.Holidays,
+			BookingPayoutDates:           bookingResult.PayoutDates,
+			BookingCompoundingDates:      bookingResult.CompoundingDates,
+			ConfirmationPayoutDates:      confirmResult.PayoutDates,
+			ConfirmationCompoundingDates: confirmResult.CompoundingDates,
 		})
 	}
 }
