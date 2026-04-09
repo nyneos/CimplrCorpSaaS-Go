@@ -1341,20 +1341,21 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		ctx := r.Context()
-		baseQuery := `
-            SELECT m.penalty_id, m.bank_code,
-                   COALESCE(mb.bank_name,'') AS bank_name,
-                   COALESCE(mb.bank_short_name,'') AS bank_short_name,
-                   m.min_amount_range, m.max_amount_range, m.min_tenor_days,
-                   m.max_tenor_days, m.min_held_days, m.max_held_days, m.penalty_type,
-                   m.penalty_value, m.calculation_method, m.no_interest_if_withdrawn_before,
-                   m.description, m.effective_from, m.effective_to, m.is_active
-            FROM investment.fd_penalty_structure_master m
-            LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
-            WHERE m.is_active = true AND (m.is_deleted IS NULL OR m.is_deleted = false)
-              AND m.effective_from <= now()::date AND (m.effective_to IS NULL OR m.effective_to >= now()::date)
-        `
+		 ctx := r.Context()
+		 // Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
+		 baseQuery := `
+		     SELECT m.penalty_id, m.bank_code,
+			     COALESCE(mb.bank_name,'') AS bank_name,
+			     COALESCE(mb.bank_short_name,'') AS bank_short_name,
+			     m.min_amount_range, m.max_amount_range, m.min_tenor_days,
+			     m.max_tenor_days, m.min_held_days, m.max_held_days, m.penalty_type,
+			     m.penalty_value, m.calculation_method, m.no_interest_if_withdrawn_before,
+			     m.description, TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from, TO_CHAR(m.effective_to,'YYYY-MM-DD') AS effective_to, m.is_active
+		     FROM investment.fd_penalty_structure_master m
+		     LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
+		     WHERE m.is_active = true AND (m.is_deleted IS NULL OR m.is_deleted = false)
+			AND m.effective_from <= now()::date AND (m.effective_to IS NULL OR m.effective_to >= now()::date)
+		 `
 
 		var args []interface{}
 		if bankCode != "" {
@@ -1362,8 +1363,8 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			args = append(args, bankCode)
 		}
 
-		// Add ordering + pagination
-		baseQuery += fmt.Sprintf(" ORDER BY effective_from DESC LIMIT %d OFFSET %d", limit, offset)
+		// Add ordering + pagination (order by actual date column to ensure correct ordering)
+		baseQuery += fmt.Sprintf(" ORDER BY m.effective_from DESC LIMIT %d OFFSET %d", limit, offset)
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
