@@ -150,30 +150,49 @@ func (am *AppManager) RegisterService(s serviceiface.Service) {
 }
 
 func (am *AppManager) StartAll() error {
-	am.mu.Lock()
-	defer am.mu.Unlock()
+	       am.mu.Lock()
+	       defer am.mu.Unlock()
 
-	// First pass: start all except Resourcemanager
-	for _, service := range am.services {
-		if service.Name() == "resourcemanager" {
-			continue
-		}
-		fmt.Println("Starting service:", service.Name())
-		if err := service.Start(); err != nil {
-			return fmt.Errorf("failed to start service %s: %w", service.Name(), err)
-		}
-	}
+	       // Start all services except gateway and resourcemanager in goroutines
+	       var gatewaySvc serviceiface.Service
+	       for _, service := range am.services {
+		       switch service.Name() {
+		       case "gateway":
+			       gatewaySvc = service
+		       case "resourcemanager":
+			       // skip for now
+		       default:
+			       fmt.Println("Starting service (background):", service.Name())
+			       go func(s serviceiface.Service) {
+				       if err := s.Start(); err != nil {
+					       fmt.Printf("failed to start service %s: %v\n", s.Name(), err)
+				       }
+			       }(service)
+		       }
+	       }
 
-	// Now start resourcemanager (after heartbeat is wired)
-	for _, service := range am.services {
-		if service.Name() == "resourcemanager" {
-			fmt.Println("Starting service:", service.Name())
-			if err := service.Start(); err != nil {
-				return fmt.Errorf("failed to start service %s: %w", service.Name(), err)
-			}
-		}
-	}
-	return nil
+	       // Start resourcemanager in background (if present)
+	       for _, service := range am.services {
+		       if service.Name() == "resourcemanager" {
+			       fmt.Println("Starting service (background):", service.Name())
+			       go func(s serviceiface.Service) {
+				       if err := s.Start(); err != nil {
+					       fmt.Printf("failed to start service %s: %v\n", s.Name(), err)
+				       }
+			       }(service)
+		       }
+	       }
+
+	       // Start gateway synchronously (blocking)
+	       if gatewaySvc != nil {
+		       fmt.Println("Starting gateway (blocking):", gatewaySvc.Name())
+		       if err := gatewaySvc.Start(); err != nil {
+			       return fmt.Errorf("failed to start service %s: %w", gatewaySvc.Name(), err)
+		       }
+	       } else {
+		       return fmt.Errorf("gateway service not found")
+	       }
+	       return nil
 }
 
 func (am *AppManager) StopAll() error {
