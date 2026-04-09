@@ -39,7 +39,7 @@ func (s *GatewayService) Start() error {
 			}
 		}
 	}
-	go StartGateway(port, pathPrefix)
+	StartGateway(port, pathPrefix)
 	return nil
 }
 
