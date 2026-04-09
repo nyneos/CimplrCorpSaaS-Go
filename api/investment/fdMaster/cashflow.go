@@ -218,7 +218,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			COALESCE(b.day_count_code, '') AS day_count_convention,
 			%s AS currency,
 			COALESCE(b.tds_plan_id, ''),
-			COALESCE(c.bank_fd_ref_no, c.bank_reference_number, ''),
+			COALESCE(c.bank_fd_ref_no, ''),
 			COALESCE(c.confirmation_received_date, c.actual_start_date),
 			COALESCE(c.confirmation_status, '')
 		FROM investment.fd_confirmation c

@@ -456,6 +456,10 @@ func UpdateReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			args = append(args, newNet)
 			idx++
 		}
+		if len(setClauses) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "no valid updatable fields provided")
+			return
+		}
 		args = append(args, req.ReceiptID)
 		updateSQL := fmt.Sprintf("UPDATE investment.fd_interest_receipt SET %s WHERE receipt_id=$%d",
 			strings.Join(setClauses, ","), idx)
@@ -732,12 +736,16 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Step 2b: Approve TDS audit rows for these receipts
+		// Step 2b: Approve TDS audit rows for these receipts.
+		// fd_tds_receipt_audit is keyed by tds_id (not receipt_id) — join through fd_tds_receipt.
 		_, err = tx.Exec(ctx, `
-			UPDATE investment.fd_tds_receipt_audit
+			UPDATE investment.fd_tds_receipt_audit a
 			SET processing_status='APPROVED', checker_by=$1,
 			    checker_at=now(), checker_comment=$2
-			WHERE receipt_id=ANY($3) AND processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
+			FROM investment.fd_tds_receipt t
+			WHERE a.tds_id = t.tds_id
+			  AND t.receipt_id = ANY($3)
+			  AND a.processing_status LIKE 'PENDING%'`, userEmail, req.Comment, req.ReceiptIDs)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "TDS audit update failed: "+err.Error())
 			return

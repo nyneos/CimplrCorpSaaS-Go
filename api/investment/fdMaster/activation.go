@@ -1494,12 +1494,12 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			cashflowMaps = []map[string]interface{}{}
 		}
 
-		// Fetch ALL audit rows for all cashflow_ids of this FD, grouped per cashflow_id.
-		// Returns full history array (not just latest) so the UI can show complete audit trail.
-		auditByCFID := map[string][]map[string]interface{}{}
+		// Fetch the LATEST audit row per cashflow_id for this FD.
+		// We only need the most-recent entry per cashflow — not the full history.
+		auditByCFID := map[string]map[string]interface{}{}
 		if cfIDCol != "" {
 			auditRows, aErr := pgxPool.Query(ctx, `
-				SELECT *
+				SELECT DISTINCT ON (cashflow_id) *
 				FROM investment.fd_audit_cashflow_schedule
 				WHERE fd_id = $1
 				ORDER BY cashflow_id, requested_at DESC`, fdID)
@@ -1541,49 +1541,41 @@ func GetCashflowSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						}
 					}
 					am["pending_new_fields"] = pendingNewFields
-					// Rename processing_status → audit_status so it doesn't clash
-					// with any posting_status column on the cashflow row itself.
-					am["audit_status"] = am["processing_status"]
-					delete(am, "processing_status")
-					auditByCFID[cfID] = append(auditByCFID[cfID], am)
+					auditByCFID[cfID] = am
 				}
 			}
 		}
 
-		// Merge full audit history array into each cashflow row under "audit_trail".
-		// For the most-recent PENDING audit entry, also flatten old_* values as
-		// pending_old_* directly on the cashflow row for easy UI display.
-		// Redundant latest_audit_* top-level fields are intentionally NOT added.
+		// Merge the latest audit entry into each cashflow row.
+		// Exposed as "latest_audit" object on the row.
+		// pending_old_* fields from the latest PENDING audit are also flattened inline.
 		for i, row := range cashflowMaps {
 			cfID := ""
 			if v, ok := row[cfIDCol]; ok && v != nil {
 				cfID = fmt.Sprintf("%v", v)
 			}
-			history := auditByCFID[cfID]
-			if history == nil {
-				history = []map[string]interface{}{}
-			}
-			cashflowMaps[i]["audit_trail"] = history
+			latestAudit := auditByCFID[cfID]
 
-			// Find the most-recent PENDING entry and surface its old_* values inline
 			hasPending := false
-			pendingStatus := ""
-			for _, entry := range history {
-				status := fmt.Sprintf("%v", entry["audit_status"])
+			processingStatus := ""
+			if latestAudit != nil {
+				status := fmt.Sprintf("%v", latestAudit["processing_status"])
+				processingStatus = status
 				if strings.HasPrefix(status, "PENDING") {
 					hasPending = true
-					pendingStatus = status
 					// Flatten all old_* keys as pending_old_* on the cashflow row
-					for k, v := range entry {
+					for k, v := range latestAudit {
 						if strings.HasPrefix(k, "old_") {
 							cashflowMaps[i]["pending_"+k] = v
 						}
 					}
-					break
 				}
+				cashflowMaps[i]["latest_audit"] = latestAudit
+			} else {
+				cashflowMaps[i]["latest_audit"] = nil
 			}
 			cashflowMaps[i]["has_pending_edit"] = hasPending
-			cashflowMaps[i]["pending_edit_status"] = pendingStatus
+			cashflowMaps[i]["processing_status"] = processingStatus
 		}
 
 		api.RespondWithPayload(w, true, "", cashflowMaps)
@@ -2461,6 +2453,28 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		// ── Classify the requested fields ────────────────────────────────────
+		// FD-level keys drive a full downstream recalculation.
+		// Row-level keys are direct overrides on the target cashflow row only.
+		fdLevelKeys := map[string]bool{"interest_rate": true, "principal_amount": true}
+		rowLevelAllowed := map[string]bool{
+			"tds_amount": true, "interest_accrued": true, "net_cash_flow": true,
+			"event_date": true, "period_days": true, "formula_used": true,
+			"accrual_rate_per_day": true, "opening_principal": true,
+			"closing_principal": true, "capitalized_amount": true,
+			"period_start_date": true, "period_end_date": true, "notes": true,
+		}
+		needsRecalc := false
+		rowLevelFields := map[string]interface{}{}
+		for k, v := range req.Fields {
+			key := strings.ToLower(k)
+			if fdLevelKeys[key] {
+				needsRecalc = true
+			} else if rowLevelAllowed[key] {
+				rowLevelFields[key] = v
+			}
+		}
+
 		// ── Load FD master record ─────────────────────────────────────────────
 		conn, connErr := pgxPool.Acquire(ctx)
 		if connErr != nil {
@@ -2475,7 +2489,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Apply any field overrides that affect the FD record itself (rate, principal).
+		// Apply FD-level overrides so the recalc uses the new rate/principal.
 		if v, ok := req.Fields["interest_rate"]; ok {
 			if fv, ok2 := toFloat64(v); ok2 && fv > 0 {
 				fd.InterestRate = fv
@@ -2486,6 +2500,194 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				fd.PrincipalAmount = fv
 			}
 		}
+
+		reasonBase := req.Reason
+		if reasonBase == "" {
+			reasonBase = "cashflow edit from sequence " + fmt.Sprintf("%d", startSeq)
+		}
+
+		var auditIDs []string
+
+		if !needsRecalc {
+			// ── Single-row mode: only override the target cashflow row ─────────
+			// No recalculation, no downstream rows. Queue exactly one audit row
+			// with the user's explicit field values as pending_fields.
+			if len(rowLevelFields) == 0 {
+				api.RespondWithError(w, http.StatusBadRequest, "no valid fields provided — supported: tds_amount, interest_accrued, net_cash_flow, event_date, period_days, formula_used, accrual_rate_per_day, opening_principal, closing_principal, capitalized_amount, period_start_date, period_end_date, notes; or FD-level: interest_rate, principal_amount")
+				return
+			}
+
+			// Read snapshot of the single target row.
+			type snapRow struct {
+				seqNum       int
+				eventType    string
+				eventDate    *time.Time
+				periodStart  *time.Time
+				periodEnd    *time.Time
+				periodDays   *int
+				openingP     *float64
+				interestAcc  *float64
+				capAmt       *float64
+				closingP     *float64
+				tdsAmt       *float64
+				netCF        *float64
+				dayCountCode *string
+				divisor      *int
+				formulaUsed  *string
+				accrualRate  *float64
+				drAccCode    *string
+				drAccName    *string
+				crAccCode    *string
+				crAccName    *string
+				systemCalc   *bool
+				isEdited     *bool
+				bankConfirm  *bool
+				bankConfDate *time.Time
+				bankRef      *string
+				voucherGen   *bool
+				voucherNum   *string
+				postStatus   *string
+				remarks      *string
+				isActive     *bool
+				isDeleted    *bool
+				receiptID    *string
+				receiptClr   *bool
+			}
+			var snap snapRow
+			snapErr := pgxPool.QueryRow(ctx,
+				fmt.Sprintf(`SELECT
+					sequence_number, event_type, event_date, period_start_date, period_end_date, period_days,
+					opening_principal, interest_accrued, capitalized_amount, closing_principal, tds_amount, net_cash_flow,
+					day_count_code, divisor, formula_used, accrual_rate_per_day,
+					dr_account_code, dr_account_name, cr_account_code, cr_account_name,
+					system_calculated, is_edited,
+					bank_confirmed, bank_confirmed_date, bank_reference,
+					voucher_generated, voucher_number, posting_status,
+					remarks, is_active, is_deleted, receipt_id, receipt_cleared
+				FROM %s WHERE %s=$1 AND %s=$2 AND COALESCE(is_deleted,false)=false`,
+					table, cashflowIDCol, fdCol),
+				req.CashflowID, req.FDID,
+			).Scan(
+				&snap.seqNum, &snap.eventType, &snap.eventDate, &snap.periodStart, &snap.periodEnd, &snap.periodDays,
+				&snap.openingP, &snap.interestAcc, &snap.capAmt, &snap.closingP, &snap.tdsAmt, &snap.netCF,
+				&snap.dayCountCode, &snap.divisor, &snap.formulaUsed, &snap.accrualRate,
+				&snap.drAccCode, &snap.drAccName, &snap.crAccCode, &snap.crAccName,
+				&snap.systemCalc, &snap.isEdited,
+				&snap.bankConfirm, &snap.bankConfDate, &snap.bankRef,
+				&snap.voucherGen, &snap.voucherNum, &snap.postStatus,
+				&snap.remarks, &snap.isActive, &snap.isDeleted,
+				&snap.receiptID, &snap.receiptClr,
+			)
+			if snapErr != nil {
+				api.RespondWithError(w, http.StatusNotFound, "cashflow row not found: "+snapErr.Error())
+				return
+			}
+
+			pfJSON, _ := json.Marshal(rowLevelFields)
+			reasonWithFields := reasonBase + constants.QuerryPendingFields + string(pfJSON)
+
+			seqPtr := &snap.seqNum
+			etPtr := &snap.eventType
+			var auditID string
+			_ = pgxPool.QueryRow(ctx, `
+				INSERT INTO investment.fd_audit_cashflow_schedule (
+					cashflow_id, fd_id,
+					action_type, processing_status,
+					reason,
+					requested_by, requested_at,
+					old_sequence_number, old_event_type, old_event_date,
+					old_period_start_date, old_period_end_date, old_period_days,
+					old_opening_principal, old_interest_accrued, old_capitalized_amount,
+					old_closing_principal, old_tds_amount, old_net_cash_flow,
+					old_day_count_code, old_divisor, old_formula_used, old_accrual_rate_per_day,
+					old_dr_account_code, old_dr_account_name, old_cr_account_code, old_cr_account_name,
+					old_system_calculated, old_is_edited,
+					old_bank_confirmed, old_bank_confirmed_date, old_bank_reference,
+					old_voucher_generated, old_voucher_number, old_posting_status,
+					old_remarks, old_is_active, old_is_deleted,
+					old_receipt_id, old_receipt_cleared
+				) VALUES (
+					$1,$2,'EDIT','PENDING_EDIT_APPROVAL',$3,
+					$4,now(),
+					$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+					$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+					$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+				) RETURNING audit_id`,
+				req.CashflowID, req.FDID,
+				reasonWithFields,
+				userEmail,
+				seqPtr, etPtr, snap.eventDate,
+				snap.periodStart, snap.periodEnd, snap.periodDays,
+				snap.openingP, snap.interestAcc, snap.capAmt,
+				snap.closingP, snap.tdsAmt, snap.netCF,
+				snap.dayCountCode, snap.divisor, snap.formulaUsed, snap.accrualRate,
+				snap.drAccCode, snap.drAccName, snap.crAccCode, snap.crAccName,
+				snap.systemCalc, snap.isEdited,
+				snap.bankConfirm, snap.bankConfDate, snap.bankRef,
+				snap.voucherGen, snap.voucherNum, snap.postStatus,
+				snap.remarks, snap.isActive, snap.isDeleted,
+				snap.receiptID, snap.receiptClr,
+			).Scan(&auditID)
+
+			if auditID == "" {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to create audit row")
+				return
+			}
+			auditIDs = append(auditIDs, auditID)
+
+			// Read entity_id + principal for approval engine
+			var entityID string
+			var principalAmount float64
+			_ = pgxPool.QueryRow(ctx,
+				`SELECT COALESCE(entity_id,''), COALESCE(principal_amount,0)
+				 FROM investment.fd_master WHERE fd_id = $1`, req.FDID,
+			).Scan(&entityID, &principalAmount)
+
+			go func(auditID, fdID, entityID, userID, email string, amount float64) {
+				defer func() { recover() }()
+				bgCtx := context.Background()
+				instID, instErr := approvalengine.CreateInstance(bgCtx, pgxPool, approvalengine.InstanceRequest{
+					ModuleCode:       "FIXED_DEPOSIT",
+					EntityCode:       entityID,
+					TransactionType:  "FD_CASHFLOW_EDIT",
+					RecordID:         auditID,
+					RecordTable:      "investment.fd_audit_cashflow_schedule",
+					AuditTable:       "investment.fd_audit_cashflow_schedule",
+					AuditIDColumn:    "audit_id",
+					ActionType:       "EDIT",
+					Amount:           amount,
+					SubmittedBy:      userID,
+					SubmittedByEmail: email,
+				})
+				if instErr != nil {
+					api.LogError("[CashflowEdit] CreateInstance failed audit=%s: %v", auditID, instErr)
+				}
+				_, _ = pgxPool.Exec(bgCtx,
+					`UPDATE investment.fd_audit_cashflow_schedule
+					 SET processing_status='PENDING_EDIT_APPROVAL' WHERE audit_id=$1`, auditID)
+				if instID != "" {
+					api.LogInfo("[CashflowEdit] Engine instance %s created for audit %s", instID, auditID)
+				} else {
+					api.LogInfo("[CashflowEdit] No matrix for FD_CASHFLOW_EDIT — audit %s left PENDING_EDIT_APPROVAL", auditID)
+				}
+			}(auditID, req.FDID, entityID, req.UserID, userEmail, principalAmount)
+
+			api.LogInfo("[FDMaster] EditCashflowLineItem (single-row): fd=%s cashflow=%s fields=%v by=%s",
+				req.FDID, req.CashflowID, rowLevelFields, userEmail)
+			api.RespondWithPayload(w, true, "", map[string]interface{}{
+				"fd_id":              req.FDID,
+				"cashflow_id":        req.CashflowID,
+				"rows_affected":      1,
+				"audit_rows_created": 1,
+				"audit_ids":          auditIDs,
+				"status":             "PENDING_EDIT_APPROVAL",
+				"message":            "Field override submitted. Pending approval.",
+				"submitted_by":       userEmail,
+			})
+			return
+		}
+
+		// ── Recalc mode: FD-level override → downstream recalculation ─────────
 
 		// ── Load all master configs ───────────────────────────────────────────
 		cfg, _ := loadBankConfig(ctx, conn, fd.BankConfigID)
@@ -2566,7 +2768,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		existingRows, qErr := pgxPool.Query(ctx,
 			fmt.Sprintf(`SELECT
-				%s, %s,
+				%s,
 				sequence_number, event_type, event_date, period_start_date, period_end_date, period_days,
 				opening_principal, interest_accrued, capitalized_amount, closing_principal, tds_amount, net_cash_flow,
 				day_count_code, divisor, formula_used, accrual_rate_per_day,
@@ -2577,7 +2779,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				remarks, is_active, is_deleted,
 				receipt_id, receipt_cleared
 			FROM %s WHERE %s=$1 AND %s>=$2 AND COALESCE(is_deleted,false)=false
-			ORDER BY %s`, cashflowIDCol, fdCol, table, fdCol, seqCol, seqCol),
+			ORDER BY %s`, cashflowIDCol, table, fdCol, seqCol, seqCol),
 			req.FDID, startSeq,
 		)
 		if qErr != nil {
@@ -2588,7 +2790,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for existingRows.Next() {
 			var dr dbRow
 			if sErr := existingRows.Scan(
-				&dr.cashflowID, &dr.snap.seqNumber,
+				&dr.cashflowID,
 				&dr.seqNum, &dr.eventType, &dr.snap.eventDate, &dr.snap.periodStart, &dr.snap.periodEnd, &dr.snap.periodDays,
 				&dr.snap.openingP, &dr.snap.interestAcc, &dr.snap.capAmt, &dr.snap.closingP, &dr.snap.tdsAmt, &dr.snap.netCF,
 				&dr.snap.dayCountCode, &dr.snap.divisor, &dr.snap.formulaUsed, &dr.snap.accrualRate,
@@ -2599,6 +2801,9 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&dr.snap.remarks, &dr.snap.isActive, &dr.snap.isDeleted,
 				&dr.snap.receiptID, &dr.snap.receiptClr,
 			); sErr == nil {
+				// populate snapshot pointer fields from the directly-scanned values
+				dr.snap.seqNumber = &dr.seqNum
+				dr.snap.eventType = &dr.eventType
 				existing = append(existing, dr)
 			}
 		}
@@ -2627,8 +2832,7 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			newBySeq[nr.PeriodNumber] = nr
 		}
 
-		var auditIDs []string
-		reasonBase := req.Reason
+		// Overwrite reasonBase to describe the recalc
 		if reasonBase == "" {
 			reasonBase = "full recalculation from sequence " + fmt.Sprintf("%d", startSeq)
 		}
@@ -2651,6 +2855,12 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"period_end_date":      newRow.PeriodEndDate.Format(constants.DateFormat),
 					"formula_used":         newRow.FormulaUsed,
 					"accrual_rate_per_day": newRow.AccrualRatePerDay,
+				}
+			}
+			// Merge any row-level overrides from req.Fields into the target row only
+			if dr.cashflowID == req.CashflowID {
+				for k, v := range rowLevelFields {
+					newFieldsMap[k] = v
 				}
 			}
 			pfJSON, _ := json.Marshal(newFieldsMap)
@@ -2730,19 +2940,17 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				if err != nil {
 					api.LogError("[CashflowEdit] CreateInstance failed audit=%s: %v", auditID, err)
-					return
 				}
+				// Always keep the audit row as PENDING_EDIT_APPROVAL regardless of
+				// whether an approval matrix exists. Manual approval via
+				// /cashflow/bulk-approve is required in all cases.
+				_, _ = pgxPool.Exec(bgCtx,
+					`UPDATE investment.fd_audit_cashflow_schedule
+					 SET processing_status='PENDING_EDIT_APPROVAL' WHERE audit_id=$1`, auditID)
 				if instID != "" {
-					_, _ = pgxPool.Exec(bgCtx,
-						`UPDATE investment.fd_audit_cashflow_schedule
-						 SET processing_status='PENDING_EDIT_APPROVAL' WHERE audit_id=$1`, auditID)
 					api.LogInfo("[CashflowEdit] Engine instance %s created for audit %s", instID, auditID)
 				} else {
-					// No matrix — auto-approve immediately
-					api.LogInfo("[CashflowEdit] No matrix for FD_CASHFLOW_EDIT — auto-approving audit %s", auditID)
-					if applyErr := applyApprovedCashflowEdit(bgCtx, pgxPool, auditID, "system"); applyErr != nil {
-						api.LogError("[CashflowEdit] Auto-approve apply failed audit=%s: %v", auditID, applyErr)
-					}
+					api.LogInfo("[CashflowEdit] No approval matrix for FD_CASHFLOW_EDIT — audit %s left PENDING_EDIT_APPROVAL for manual approval", auditID)
 				}
 			}(aid, req.FDID, entityID, req.UserID, userEmail, principalAmount)
 		}
@@ -3017,7 +3225,7 @@ func propagateCashflowDownstream(
 		return
 	}
 
-	// Propagate forward
+	// Propagate principal cascade forward from the edited row.
 	for i := editedIdx + 1; i < len(allRows); i++ {
 		prevClose := allRows[i-1].closeP
 		allRows[i].openP = prevClose
@@ -3028,14 +3236,49 @@ func propagateCashflowDownstream(
 			allRows[i].ncf = 0
 		case "MATURITY":
 			allRows[i].closeP = 0
-			allRows[i].ncf = allRows[i].openP + allRows[i].intAmt - allRows[i].tdsAmt
+			// Recompute MATURITY net_cash_flow as:
+			//   opening_principal + SUM(all interest_accrued) - SUM(all tds_amount)
+			// across every non-MATURITY row in the schedule so that any change to
+			// interest_accrued or tds_amount on any upstream row flows through correctly.
+			var totalInt, totalTDS float64
+			for _, ar := range allRows {
+				if strings.ToUpper(ar.eventType) != "MATURITY" {
+					totalInt += ar.intAmt
+					totalTDS += ar.tdsAmt
+				}
+			}
+			allRows[i].ncf = allRows[i].openP + totalInt - totalTDS
 		case "ACCRUAL", "TDS_DEDUCTION", "INTEREST_RECEIPT":
 			allRows[i].closeP = prevClose
+			allRows[i].ncf = 0
 		}
 	}
 
-	// Persist from editedIdx onward
-	for _, r := range allRows[editedIdx:] {
+	// Also recompute the MATURITY row even if editedIdx == the MATURITY row index
+	// (handles direct edits to the MATURITY row itself).
+	for i, r := range allRows {
+		if strings.ToUpper(r.eventType) == "MATURITY" && i > editedIdx {
+			// already handled above in the propagation loop — skip
+			break
+		}
+		if strings.ToUpper(r.eventType) == "MATURITY" && i == editedIdx {
+			var totalInt, totalTDS float64
+			for _, ar := range allRows {
+				if strings.ToUpper(ar.eventType) != "MATURITY" {
+					totalInt += ar.intAmt
+					totalTDS += ar.tdsAmt
+				}
+			}
+			allRows[i].ncf = allRows[i].openP + totalInt - totalTDS
+			break
+		}
+	}
+
+	// Persist ALL rows (from editedIdx onward and always the MATURITY row).
+	for idx, r := range allRows {
+		if idx < editedIdx && strings.ToUpper(r.eventType) != "MATURITY" {
+			continue
+		}
 		if _, execErr := pool.Exec(ctx,
 			fmt.Sprintf(`UPDATE %s SET %s=$1, %s=$2, %s=$3, %s=$4, %s=$5 WHERE %s=$6 AND %s=$7`,
 				table, openCol, closeCol, capCol, intCol, ncfCol, cashflowIDCol, fdCol),
