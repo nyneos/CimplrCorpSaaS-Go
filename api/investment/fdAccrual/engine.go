@@ -43,7 +43,12 @@ type AccrualInput struct {
 	AccrualEndConvention   string // INCLUDE / EXCLUDE / PRECEDING_WD
 	BankRoundingMethod     string // ROUND / FLOOR / CEIL (bank config level)
 	BankRoundingFrequency  string // EACH_PERIOD / FINAL_ONLY
+	BankRoundingDecimals   int    // interest_rounding_decimals from bank config
+	CapDateAdjustment      string // PRECEDING_WD / FOLLOWING_WD / NO_ADJUST
 	BrokenPeriodMethod     string // SIMPLE / COMPOUND / HYBRID / NONE
+	// Compounding frequency (from fd_master.frequency_id → frequency_master)
+	FrequencyID           string // e.g. "FREQ-QUARTERLY"
+	CompoundingFrequency  string // e.g. "QUARTERLY", "MONTHLY", "ANNUALLY", "DAILY", "AT_MATURITY"
 }
 
 // AccrualRunParams controls what the engine calculates.
@@ -63,6 +68,11 @@ type AccrualRunParams struct {
 }
 
 // AccrualPeriodResult holds the engine output for one FD x one period.
+// It carries two parallel calculation views:
+//   - The standard (config-authoritative) fields: bank config day count, holiday-aware days,
+//     bank rounding rule — these are written to the main ledger columns.
+//   - The Req* fields: calculated using run-level request params only (entity baseline,
+//     no holiday exclusions, run rounding rule). Stored in req_* ledger columns.
 type AccrualPeriodResult struct {
 	FDID             string
 	FdRefNo          string
@@ -73,7 +83,7 @@ type AccrualPeriodResult struct {
 	InterestTypeCode string
 	PrincipalAmount  float64
 	InterestRate     float64
-	DayCountCode     string
+	DayCountCode     string // config path day count code
 	FdStartDate      time.Time
 	FdMaturityDate   time.Time
 
@@ -82,12 +92,12 @@ type AccrualPeriodResult struct {
 	AccrualPeriodEnd   time.Time
 	AccrualDays        int
 
-	// Calculation inputs
-	OpeningPrincipal float64
+	// Config-path calculation inputs (bank-authoritative)
+	OpeningPrincipal float64 // compound principal from cashflow schedule (COMPOUND FDs)
 	DailyAccrualRate float64
 	Divisor          int
 
-	// Outputs
+	// Config-path outputs
 	PeriodInterestAccrued    float64
 	OpeningAccruedBalance    float64
 	InterestReceivedInPeriod float64
@@ -96,10 +106,43 @@ type AccrualPeriodResult struct {
 	TDSDeductedInPeriod      float64
 	NetInterestInPeriod      float64
 
+	// Config-path metadata (stored on ledger for audit)
+	ConfigWeekendAccrual    bool
+	ConfigHolidayAccrual    bool
+	ConfigHolidaysExcluded  int    // days skipped due to bank holiday calendar
+	ConfigRoundingRule      string // bank rounding method
+	ConfigPrecisionDecimals int    // bank interest_rounding_decimals
+	ConfigCapDateAdjustment string // PRECEDING_WD / FOLLOWING_WD / NO_ADJUST
+	ConfigHolidayCalendar   string // calendar code used
+
+	// Req-path: calculation using run-level request parameters only.
+	// All calendar days counted (no holiday/weekend exclusion).
+	// Opening principal always = fd.PrincipalAmount (no compounding lookup).
+	ReqDayCountCode      string
+	ReqDivisor           int
+	ReqAccrualDays       int // raw calendar days (effectiveEnd - effectiveStart)
+	ReqOpeningPrincipal  float64
+	ReqDailyAccrualRate  float64
+	ReqPeriodInterest    float64
+	ReqClosingBalance    float64
+	ReqTDSDeducted       float64
+	ReqNetInterest       float64
+	ReqFormulaUsed       string
+	ReqRoundingRule      string
+	ReqPrecisionDecimals int
+	ReqWeekendAccrual    bool // always true
+	ReqHolidayAccrual    bool // always true
+
+	// Compounding metadata (for BRD IA-05 Section C)
+	FrequencyID            string // from fd_master.frequency_id
+	CompoundingFrequency   string // human-readable e.g. "QUARTERLY"
+	CompoundPrincipalUsed  float64 // the opening_principal including past capitalizations
+	NextCapitalizationDate string  // next cashflow CAPITALIZATION event after period_end
+
 	// References
 	CashflowRowIDs   []string // cashflow_ids used in this calc
-	FormulaUsed      string
-	LedgerRowStatus  string // CALCULATED / ERROR / EXCLUDED
+	FormulaUsed      string   // config-path formula string
+	LedgerRowStatus  string   // CALCULATED / ERROR / EXCLUDED
 	CalculationError string
 }
 
@@ -150,7 +193,10 @@ type ScheduleConfigRow struct {
 
 // ─── Day-count helpers ────────────────────────────────────────────────────────
 
-// getDivisorForAccrual returns the annual divisor. Never returns 0.
+// getDivisorForAccrual returns the annual divisor from a day count code.
+// For ACT_ACT it uses the reference date's year. Use getDivisorForPeriod
+// when you have a full period (start, end) for accurate leap-year handling.
+// Never returns 0.
 func getDivisorForAccrual(dayCountCode string, refDate time.Time) int {
 	switch strings.ToUpper(dayCountCode) {
 	case "ACT_365":
@@ -162,6 +208,43 @@ func getDivisorForAccrual(dayCountCode string, refDate time.Time) int {
 	case "ACT_ACT":
 		year := refDate.Year()
 		if year%400 == 0 || (year%4 == 0 && year%100 != 0) {
+			return 366
+		}
+		return 365
+	default:
+		return 365
+	}
+}
+
+// periodHasLeapDay returns true if any day in [start, end) falls in a
+// calendar year that is a leap year AND Feb 29 exists in [start, end).
+func periodHasLeapDay(start, end time.Time) bool {
+	for y := start.Year(); y <= end.Year(); y++ {
+		isLeap := y%400 == 0 || (y%4 == 0 && y%100 != 0)
+		if !isLeap {
+			continue
+		}
+		feb29 := time.Date(y, time.February, 29, 0, 0, 0, 0, time.UTC)
+		if !feb29.Before(start) && feb29.Before(end) {
+			return true
+		}
+	}
+	return false
+}
+
+// getDivisorForPeriod is the period-aware version of getDivisorForAccrual.
+// For ACT_ACT it returns 366 if Feb 29 falls within [start, end), else 365.
+// All other conventions behave identically to getDivisorForAccrual.
+func getDivisorForPeriod(dayCountCode string, start, end time.Time) int {
+	switch strings.ToUpper(dayCountCode) {
+	case "ACT_365":
+		return 365
+	case "ACT_360":
+		return 360
+	case "30_360":
+		return 360
+	case "ACT_ACT":
+		if periodHasLeapDay(start, end) {
 			return 366
 		}
 		return 365
@@ -199,27 +282,32 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 	query := `
 		SELECT
 			f.fd_id,
-			COALESCE(f.bank_fd_ref_no, '')                   AS fd_ref_no,
-			COALESCE(f.bank_id, '')                           AS bank_id,
-			COALESCE(f.bank_name, '')                         AS bank_name,
-			COALESCE(f.entity_id, '')                         AS entity_id,
-			COALESCE(f.entity_name, '')                       AS entity_name,
-			COALESCE(f.interest_type_code, 'SIMPLE')          AS interest_type_code,
-			COALESCE(f.principal_amount, 0)                   AS principal_amount,
-			COALESCE(f.interest_rate, 0)                      AS interest_rate,
-			COALESCE(f.day_count_code, 'ACT_365')             AS day_count_code,
+			COALESCE(f.bank_fd_ref_no, '')                        AS fd_ref_no,
+			COALESCE(f.bank_id, '')                               AS bank_id,
+			COALESCE(f.bank_name, '')                             AS bank_name,
+			COALESCE(f.entity_id, '')                             AS entity_id,
+			COALESCE(f.entity_name, '')                           AS entity_name,
+			COALESCE(f.interest_type_code, 'SIMPLE')              AS interest_type_code,
+			COALESCE(f.principal_amount, 0)                       AS principal_amount,
+			COALESCE(f.interest_rate, 0)                          AS interest_rate,
+			COALESCE(f.day_count_code, 'ACT_365')                 AS day_count_code,
 			f.start_date,
 			f.maturity_date,
-			COALESCE(f.bank_config_id, '')                    AS bank_config_id,
-			COALESCE(bc.holiday_calendar_code, '')            AS holiday_calendar_code,
-			COALESCE(bc.weekend_accrual, true)                AS weekend_accrual,
-			COALESCE(bc.holiday_accrual, true)                AS holiday_accrual,
-			COALESCE(mc.weekend_pattern, 'Sat,Sun')           AS weekend_pattern,
-			COALESCE(bc.accrual_start_convention, 'INCLUDE')  AS accrual_start_convention,
-			COALESCE(bc.accrual_end_convention,   'EXCLUDE')  AS accrual_end_convention,
-			COALESCE(bc.rounding_method,          'ROUND')    AS bank_rounding_method,
-			COALESCE(bc.rounding_frequency,       'EACH_PERIOD') AS bank_rounding_frequency,
-			COALESCE(bc.broken_period_method,     'SIMPLE')   AS broken_period_method
+			COALESCE(f.bank_config_id, '')                        AS bank_config_id,
+			COALESCE(bc.holiday_calendar_code, '')                AS holiday_calendar_code,
+			COALESCE(bc.weekend_accrual, true)                    AS weekend_accrual,
+			COALESCE(bc.holiday_accrual, true)                    AS holiday_accrual,
+			COALESCE(mc.weekend_pattern, 'Sat,Sun')               AS weekend_pattern,
+			COALESCE(bc.accrual_start_convention, 'INCLUDE')      AS accrual_start_convention,
+			COALESCE(bc.accrual_end_convention,   'EXCLUDE')      AS accrual_end_convention,
+			COALESCE(bc.rounding_method,          'ROUND')        AS bank_rounding_method,
+			COALESCE(bc.rounding_frequency,       'EACH_PERIOD')  AS bank_rounding_frequency,
+			COALESCE(bc.interest_rounding_decimals, 2)            AS bank_rounding_decimals,
+			COALESCE(bc.capitalization_date_adjustment, 'NO_ADJUST') AS cap_date_adjustment,
+			COALESCE(bc.broken_period_method,     'SIMPLE')       AS broken_period_method,
+			-- compounding frequency from fd_master
+			COALESCE(f.frequency_id, '')                          AS frequency_id,
+			COALESCE(f.frequency_id, '')                          AS compounding_frequency
 		FROM investment.fd_master f
 			LEFT JOIN investment.fd_bank_config_master bc ON bc.config_id = f.bank_config_id
 				AND COALESCE(bc.is_deleted, false) = false
@@ -265,7 +353,10 @@ func getFDsInScope(ctx context.Context, pool *pgxpool.Pool, params AccrualRunPar
 			&fd.BankConfigID, &fd.HolidayCalendarCode,
 			&fd.WeekendAccrual, &fd.HolidayAccrual, &fd.WeekendPattern,
 			&fd.AccrualStartConvention, &fd.AccrualEndConvention,
-			&fd.BankRoundingMethod, &fd.BankRoundingFrequency, &fd.BrokenPeriodMethod,
+			&fd.BankRoundingMethod, &fd.BankRoundingFrequency,
+			&fd.BankRoundingDecimals, &fd.CapDateAdjustment,
+			&fd.BrokenPeriodMethod,
+			&fd.FrequencyID, &fd.CompoundingFrequency,
 		); err != nil {
 			return nil, fmt.Errorf("getFDsInScope scan: %w", err)
 		}
@@ -681,6 +772,24 @@ func getCompoundPrincipalAtDate(ctx context.Context, pool *pgxpool.Pool,
 	return val
 }
 
+// getNextCapitalizationDate finds the first capitalization date occurring strictly after the period end.
+func getNextCapitalizationDate(ctx context.Context, pool *pgxpool.Pool, fdID string, afterDate time.Time) string {
+	var nextDate time.Time
+	err := pool.QueryRow(ctx, `
+		SELECT MIN(event_date)
+		FROM investment.fd_cashflow_schedule
+		WHERE fd_id = $1
+		  AND event_type = 'CAPITALIZATION'
+		  AND event_date > $2
+		  AND COALESCE(is_deleted, false) = false`,
+		fdID, afterDate,
+	).Scan(&nextDate)
+	if err != nil || nextDate.IsZero() {
+		return ""
+	}
+	return nextDate.Format(constants.DateFormat)
+}
+
 // getCashflowDataForPeriod sums interest receipts and TDS deductions in the period.
 func getCashflowDataForPeriod(ctx context.Context, pool *pgxpool.Pool,
 	fdID string, periodStart, periodEnd time.Time) (interestReceived float64, tdsDeducted float64, cashflowIDs []string) {
@@ -745,6 +854,20 @@ func getPriorRunClosingBalance(ctx context.Context, pool *pgxpool.Pool,
 // ─── Core calculation ─────────────────────────────────────────────────────────
 
 // calculateAccrualForFD computes the accrual for a single FD over the run period.
+//
+// It runs the interest formula TWICE:
+//
+//  1. Config path (bank-authoritative): uses fd.DayCountCode, fd.BankRoundingMethod,
+//     fd.BankRoundingDecimals, holiday-aware working day count, compound principal from
+//     fd_cashflow_schedule for COMPOUND FDs.
+//
+//  2. Req path (run-level baseline): uses params.DayCountConvention, params.RoundingRule,
+//     params.PrecisionDecimals, raw calendar days (no holiday exclusion),
+//     always fd.PrincipalAmount (no compounding lookup).
+//
+// Both results are stored on AccrualPeriodResult; the config path populates the
+// main fields (DayCountCode, DailyAccrualRate, PeriodInterestAccrued, FormulaUsed...)
+// and the req path populates Req* fields.  The DB layer stores both in the ledger.
 func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 	fd AccrualInput, params AccrualRunParams, openingBalance float64) AccrualPeriodResult {
 
@@ -815,85 +938,181 @@ func calculateAccrualForFD(ctx context.Context, pool *pgxpool.Pool,
 		}
 	}
 
-	// Load holiday calendar (empty if no calendar code configured)
+	// ── Load holiday calendar (config path) ───────────────────────────────
 	cal := loadHolidayCalendarForAccrual(ctx, pool, fd.HolidayCalendarCode, fd.FdStartDate, fd.FdMaturityDate)
 
-	dayCountCode := fd.DayCountCode
-	if params.DayCountConvention != "" {
-		dayCountCode = params.DayCountConvention
-	}
-	divisor := getDivisorForAccrual(dayCountCode, effectiveStart)
+	// ─────────────────────────────────────────────────────────────────────
+	// CONFIG PATH — bank-authoritative calculation
+	// ─────────────────────────────────────────────────────────────────────
 
-	// Use holiday-aware working day count (skips non-accrual days per bank config)
-	accrualDays := accrualCountWorkingDays(effectiveStart, effectiveEnd, fd, cal)
-	if accrualDays <= 0 {
-		excluded.CalculationError = "accrual days <= 0"
+	// Day count from bank config (fd_master / fd_bank_config_master)
+	configDayCountCode := fd.DayCountCode
+	if configDayCountCode == "" {
+		configDayCountCode = "ACT_365"
+	}
+	// Period-aware divisor: for ACT_ACT, use 366 if Feb 29 falls in the period
+	configDivisor := getDivisorForPeriod(configDayCountCode, effectiveStart, effectiveEnd)
+
+	// Holiday-aware accrual day count
+	configAccrualDays := accrualCountWorkingDays(effectiveStart, effectiveEnd, fd, cal)
+
+	// Count excluded days for reporting
+	rawCalDays := int(effectiveEnd.Sub(effectiveStart).Hours() / 24)
+	configHolidaysExcluded := rawCalDays - configAccrualDays
+	if configHolidaysExcluded < 0 {
+		configHolidaysExcluded = 0
+	}
+
+	if configAccrualDays <= 0 {
+		excluded.CalculationError = "config path: accrual days <= 0 after holiday/weekend exclusion"
 		return excluded
 	}
 
-	openingPrincipal := fd.PrincipalAmount
+	// Opening principal: for COMPOUND FDs use closing_principal from last CAPITALIZATION event
+	configOpeningPrincipal := fd.PrincipalAmount
 	if strings.EqualFold(fd.InterestTypeCode, "COMPOUND") {
 		if cp := getCompoundPrincipalAtDate(ctx, pool, fd.FDID, effectiveStart); cp > 0 {
-			openingPrincipal = cp
+			configOpeningPrincipal = cp
 		}
 	}
 
-	decimals := params.PrecisionDecimals
-	if decimals <= 0 {
-		decimals = 2
+	// Bank rounding: bank config decimals take precedence, then run-level
+	configDecimals := fd.BankRoundingDecimals
+	if configDecimals <= 0 {
+		configDecimals = params.PrecisionDecimals
+	}
+	if configDecimals <= 0 {
+		configDecimals = 2
+	}
+	configRoundingRule := fd.BankRoundingMethod
+	if configRoundingRule == "" {
+		configRoundingRule = params.RoundingRule
+	}
+	if configRoundingRule == "" {
+		configRoundingRule = "ROUND"
 	}
 
-	dailyRate := (fd.InterestRate / 100.0) / float64(divisor)
-	rawInterest := openingPrincipal * dailyRate * float64(accrualDays)
+	configDailyRate := (fd.InterestRate / 100.0) / float64(configDivisor)
+	configRaw := configOpeningPrincipal * configDailyRate * float64(configAccrualDays)
+	configPeriodInterest := roundAccrual(configRaw, configDecimals, configRoundingRule)
 
-	// STEP 3D: bank config rounding takes precedence over run-level rounding
-	roundingRule := params.RoundingRule
-	if fd.BankRoundingMethod != "" {
-		roundingRule = fd.BankRoundingMethod
-	}
-	periodInterest := roundAccrual(rawInterest, decimals, roundingRule)
-
+	// Cashflow data (same for both paths — receipts come from bank, not formula)
 	interestReceived, tdsDeducted, cashflowIDs := getCashflowDataForPeriod(
 		ctx, pool, fd.FDID, effectiveStart, effectiveEnd)
 
-	tdsApplicable := periodInterest
-	closingBalance := openingBalance + periodInterest - interestReceived
-	netInterest := periodInterest - tdsDeducted
+	configTDSApplicable := configPeriodInterest
+	configClosingBalance := openingBalance + configPeriodInterest - interestReceived
+	configNetInterest := configPeriodInterest - tdsDeducted
 
-	formula := fmt.Sprintf("P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.6f",
-		openingPrincipal, fd.InterestRate, accrualDays, divisor, periodInterest)
+	configFormula := fmt.Sprintf(
+		"[CONFIG] P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.4f | rnd(%s,%d) = %.2f | holiday_excl=%d",
+		configOpeningPrincipal, fd.InterestRate, configAccrualDays, configDivisor,
+		configRaw, configRoundingRule, configDecimals, configPeriodInterest, configHolidaysExcluded)
 
+	// ─────────────────────────────────────────────────────────────────────
+	// REQ PATH — run-level baseline calculation
+	// No holiday exclusions. Always fd.PrincipalAmount (no compounding lookup).
+	// ─────────────────────────────────────────────────────────────────────
+
+	reqDayCountCode := params.DayCountConvention
+	if reqDayCountCode == "" {
+		reqDayCountCode = "ACT_365"
+	}
+	// Req path: period-aware divisor too, but using the run's day count
+	reqDivisor := getDivisorForPeriod(reqDayCountCode, effectiveStart, effectiveEnd)
+
+	// Raw calendar days — NO holiday/weekend exclusion on req path
+	reqAccrualDays := rawCalDays
+
+	reqOpeningPrincipal := fd.PrincipalAmount // always original principal
+
+	reqDecimals := params.PrecisionDecimals
+	if reqDecimals <= 0 {
+		reqDecimals = 2
+	}
+	reqRoundingRule := params.RoundingRule
+	if reqRoundingRule == "" {
+		reqRoundingRule = "ROUND"
+	}
+
+	reqDailyRate := (fd.InterestRate / 100.0) / float64(reqDivisor)
+	reqRaw := reqOpeningPrincipal * reqDailyRate * float64(reqAccrualDays)
+	reqPeriodInterest := roundAccrual(reqRaw, reqDecimals, reqRoundingRule)
+
+	reqClosingBalance := openingBalance + reqPeriodInterest - interestReceived
+	reqNetInterest := reqPeriodInterest - tdsDeducted
+
+	reqFormula := fmt.Sprintf(
+		"[REQ] P(%.2f) × r(%.4f%%) × d(%d) / D(%d) = %.4f | rnd(%s,%d) = %.2f",
+		reqOpeningPrincipal, fd.InterestRate, reqAccrualDays, reqDivisor,
+		reqRaw, reqRoundingRule, reqDecimals, reqPeriodInterest)
+
+	// ─────────────────────────────────────────────────────────────────────
 	// marshal cashflowIDs JSON for DB storage (used in run.go)
 	cashflowIDsJSON, _ := json.Marshal(cashflowIDs)
 	_ = cashflowIDsJSON
 
 	return AccrualPeriodResult{
+		// Identity
 		FDID: fd.FDID, FdRefNo: fd.FdRefNo, BankID: fd.BankID, BankName: fd.BankName,
 		EntityID: fd.EntityID, EntityName: fd.EntityName,
 		InterestTypeCode: fd.InterestTypeCode,
 		PrincipalAmount:  fd.PrincipalAmount, InterestRate: fd.InterestRate,
-		DayCountCode:   dayCountCode,
-		FdStartDate:    fd.FdStartDate,
-		FdMaturityDate: fd.FdMaturityDate,
+		FdStartDate:      fd.FdStartDate,
+		FdMaturityDate:   fd.FdMaturityDate,
 
+		// Period window
 		AccrualPeriodStart: effectiveStart,
 		AccrualPeriodEnd:   effectiveEnd,
-		AccrualDays:        accrualDays,
 
-		OpeningPrincipal: openingPrincipal,
-		DailyAccrualRate: dailyRate,
-		Divisor:          divisor,
-
-		PeriodInterestAccrued:    periodInterest,
+		// Config path (main ledger fields)
+		DayCountCode:             configDayCountCode,
+		AccrualDays:              configAccrualDays,
+		OpeningPrincipal:         configOpeningPrincipal,
+		DailyAccrualRate:         configDailyRate,
+		Divisor:                  configDivisor,
+		PeriodInterestAccrued:    configPeriodInterest,
 		OpeningAccruedBalance:    openingBalance,
 		InterestReceivedInPeriod: interestReceived,
-		ClosingAccruedBalance:    closingBalance,
-		TDSApplicableAmount:      tdsApplicable,
+		ClosingAccruedBalance:    configClosingBalance,
+		TDSApplicableAmount:      configTDSApplicable,
 		TDSDeductedInPeriod:      tdsDeducted,
-		NetInterestInPeriod:      netInterest,
+		NetInterestInPeriod:      configNetInterest,
+		FormulaUsed:              configFormula,
 
+		// Config metadata (stored on ledger for audit)
+		ConfigWeekendAccrual:    fd.WeekendAccrual,
+		ConfigHolidayAccrual:    fd.HolidayAccrual,
+		ConfigHolidaysExcluded:  configHolidaysExcluded,
+		ConfigRoundingRule:      configRoundingRule,
+		ConfigPrecisionDecimals: configDecimals,
+		ConfigCapDateAdjustment: fd.CapDateAdjustment,
+		ConfigHolidayCalendar:   fd.HolidayCalendarCode,
+
+		// Req path
+		ReqDayCountCode:      reqDayCountCode,
+		ReqDivisor:           reqDivisor,
+		ReqAccrualDays:       reqAccrualDays,
+		ReqOpeningPrincipal:  reqOpeningPrincipal,
+		ReqDailyAccrualRate:  reqDailyRate,
+		ReqPeriodInterest:    reqPeriodInterest,
+		ReqClosingBalance:    reqClosingBalance,
+		ReqTDSDeducted:       tdsDeducted,
+		ReqNetInterest:       reqNetInterest,
+		ReqFormulaUsed:       reqFormula,
+		ReqRoundingRule:      reqRoundingRule,
+		ReqPrecisionDecimals: reqDecimals,
+		ReqWeekendAccrual:    true,
+		ReqHolidayAccrual:    true,
+
+		// Compounding metadata (BRD IA-05 Section C)
+		FrequencyID:           fd.FrequencyID,
+		CompoundingFrequency:  fd.CompoundingFrequency,
+		CompoundPrincipalUsed: configOpeningPrincipal,
+		NextCapitalizationDate: getNextCapitalizationDate(ctx, pool, fd.FDID, effectiveEnd),
+
+		// References
 		CashflowRowIDs:  cashflowIDs,
-		FormulaUsed:     formula,
 		LedgerRowStatus: "CALCULATED",
 	}
 }

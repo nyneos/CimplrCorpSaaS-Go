@@ -405,8 +405,11 @@ func RunAccrual(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			RunID  string `json:"run_id"`
+			UserID   string `json:"user_id"`
+			RunID    string `json:"run_id"`
+			EntityID string `json:"entity_id"` // optional extra filter
+			BankID   string `json:"bank_id"`   // optional
+			FDID     string `json:"fd_id"`     // optional
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -418,122 +421,506 @@ func GetAccrualLedger(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
+
+		extraFilter := ""
+		var args []interface{}
+		args = append(args, req.RunID)
+		if req.BankID != "" {
+			args = append(args, req.BankID)
+			extraFilter += fmt.Sprintf(" AND l.bank_id = $%d", len(args))
+		}
+		if req.FDID != "" {
+			args = append(args, req.FDID)
+			extraFilter += fmt.Sprintf(" AND l.fd_id = $%d", len(args))
+		}
+
 		rows, err := pgxPool.Query(ctx, `
 			SELECT
 				l.ledger_id, l.run_id, l.fd_id,
-				COALESCE(l.fd_ref_no,'')        AS fd_ref_no,
-				COALESCE(l.bank_id,'')          AS bank_id,
-				COALESCE(l.bank_name,'')        AS bank_name,
-				COALESCE(l.entity_id,'')        AS entity_id,
-				COALESCE(l.entity_name,'')      AS entity_name,
-				l.accrual_period_start, l.accrual_period_end, l.accrual_days,
+				COALESCE(l.fd_ref_no,'')           AS fd_ref_no,
+				COALESCE(l.bank_id,'')             AS bank_id,
+				COALESCE(l.bank_name,'')           AS bank_name,
+				COALESCE(l.entity_id,'')           AS entity_id,
+				COALESCE(l.entity_name,'')         AS entity_name,
+				COALESCE(l.interest_type_code,'')  AS interest_type_code,
+				COALESCE(l.principal_amount,0)     AS principal_amount,
+				COALESCE(l.interest_rate,0)        AS interest_rate,
+				l.accrual_period_start,
+				l.accrual_period_end,
+				COALESCE(l.accrual_days,0)         AS accrual_days,
 				COALESCE(l.day_count_code,'ACT_365') AS day_count_code,
-				COALESCE(l.opening_principal,0),
-				COALESCE(l.period_interest_accrued,0),
-				COALESCE(l.closing_accrued_balance,0),
-				COALESCE(l.tds_deducted_in_period,0),
-				COALESCE(l.net_interest_in_period,0),
-				COALESCE(l.is_overridden,false),
-				COALESCE(l.ledger_row_status,''),
-				COALESCE(l.formula_used,''),
-				COALESCE(l.journal_entry_id,'')
+				COALESCE(l.divisor,365)            AS divisor,
+				COALESCE(l.opening_principal,0)    AS opening_principal,
+				COALESCE(l.daily_accrual_rate,0)   AS daily_accrual_rate,
+				COALESCE(l.period_interest_accrued,0)  AS period_interest_accrued,
+				COALESCE(l.opening_accrued_balance,0)  AS opening_accrued_balance,
+				COALESCE(l.closing_accrued_balance,0)  AS closing_accrued_balance,
+				COALESCE(l.interest_received_in_period,0) AS interest_received_in_period,
+				COALESCE(l.tds_applicable_amount,0)    AS tds_applicable_amount,
+				COALESCE(l.tds_deducted_in_period,0)   AS tds_deducted_in_period,
+				COALESCE(l.net_interest_in_period,0)   AS net_interest_in_period,
+				-- req baseline
+				COALESCE(l.req_period_interest,0)      AS req_period_interest,
+				COALESCE(l.req_accrual_days,0)         AS req_accrual_days,
+				-- running totals per FD (within this run)
+				SUM(l.period_interest_accrued) OVER (
+					PARTITION BY l.fd_id ORDER BY l.accrual_period_start
+				)                                      AS running_interest_accrued,
+				SUM(l.tds_deducted_in_period) OVER (
+					PARTITION BY l.fd_id ORDER BY l.accrual_period_start
+				)                                      AS running_tds_deducted,
+				SUM(l.net_interest_in_period) OVER (
+					PARTITION BY l.fd_id ORDER BY l.accrual_period_start
+				)                                      AS running_net_interest,
+				-- variance indicator
+				ROUND((COALESCE(l.period_interest_accrued,0) -
+				       COALESCE(l.req_period_interest,0))::numeric, 4)
+				                                       AS config_vs_req_variance,
+				-- override flags
+				COALESCE(l.is_overridden,false)        AS is_overridden,
+				COALESCE(l.override_status,'')         AS override_status,
+				COALESCE(l.override_amount,0)          AS override_amount,
+				COALESCE(l.ledger_row_status,'')       AS ledger_row_status,
+				COALESCE(l.config_holidays_excluded,0) AS holidays_excluded,
+				COALESCE(l.config_rounding_rule,'ROUND') AS config_rounding_rule,
+				COALESCE(l.req_rounding_rule,'ROUND')    AS req_rounding_rule,
+				COALESCE(l.journal_entry_id,'')        AS journal_entry_id
 			FROM investment.fd_accrual_ledger l
 			WHERE l.run_id = $1
-			  AND COALESCE(l.is_deleted,false) = false
-			ORDER BY l.entity_id, l.bank_name, l.fd_id`,
-			req.RunID)
+			  AND COALESCE(l.is_deleted,false) = false`+
+			extraFilter+`
+			ORDER BY l.entity_id, l.bank_name, l.fd_id, l.accrual_period_start`,
+			args...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
 		defer rows.Close()
 
-		ledger := make([]map[string]interface{}, 0)
+		// Scan properly
+		var ledger []map[string]interface{}
+		var totalInterest, totalTDS, totalNet, totalReqInterest float64
+		bankTotals := map[string]float64{} // bank_id → net interest
 		fields := rows.FieldDescriptions()
 		for rows.Next() {
 			vals, _ := rows.Values()
 			row := make(map[string]interface{}, len(fields))
 			for i, f := range fields {
 				if vals[i] == nil {
-					row[string(f.Name)] = ""
+					row[string(f.Name)] = nil
 				} else {
 					row[string(f.Name)] = vals[i]
 				}
 			}
 			ledger = append(ledger, row)
+			if v, ok := row["period_interest_accrued"]; ok && v != nil {
+				if f, ok := v.(float64); ok {
+					totalInterest += f
+				}
+			}
+			if v, ok := row["tds_deducted_in_period"]; ok && v != nil {
+				if f, ok := v.(float64); ok {
+					totalTDS += f
+				}
+			}
+			if v, ok := row["net_interest_in_period"]; ok && v != nil {
+				if f, ok := v.(float64); ok {
+					totalNet += f
+				}
+			}
+			if v, ok := row["req_period_interest"]; ok && v != nil {
+				if f, ok := v.(float64); ok {
+					totalReqInterest += f
+				}
+			}
+			bankID := ""
+			if v, ok := row["bank_id"]; ok && v != nil {
+				bankID, _ = v.(string)
+			}
+			if bankID != "" {
+				if v, ok := row["net_interest_in_period"]; ok && v != nil {
+					if f, ok := v.(float64); ok {
+						bankTotals[bankID] += f
+					}
+				}
+			}
 		}
 		if err := rows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
 
+		// Build bank summary list
+		bankSummaryList := make([]map[string]interface{}, 0, len(bankTotals))
+		for bid, net := range bankTotals {
+			bankSummaryList = append(bankSummaryList, map[string]interface{}{
+				"bank_id":                bid,
+				"total_net_interest":     math.Round(net*100) / 100,
+			})
+		}
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id": req.RunID,
 			"count":  len(ledger),
+			"summary": map[string]interface{}{
+				"total_interest_accrued":    math.Round(totalInterest*100) / 100,
+				"total_tds_deducted":        math.Round(totalTDS*100) / 100,
+				"total_net_interest":        math.Round(totalNet*100) / 100,
+				"total_req_interest":        math.Round(totalReqInterest*100) / 100,
+				"config_vs_req_variance":    math.Round((totalInterest-totalReqInterest)*100) / 100,
+				"fd_count":                  len(ledger),
+				"by_bank":                   bankSummaryList,
+			},
 			"ledger": ledger,
 		})
 	}
 }
 
 // ─── 5. GetAccrualCalculationDetail ───────────────────────────────────────────
+// Accepts ledger_id (preferred) or run_id+fd_id (backward-compatibility).
+// Returns two full calculation views (req vs config) with variance_drivers
+// and old_values for instant before/after comparison without joining audit.
 
 func GetAccrualCalculationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			RunID  string `json:"run_id"`
-			FDID   string `json:"fd_id"`
+			UserID   string `json:"user_id"`
+			LedgerID string `json:"ledger_id"` // preferred
+			RunID    string `json:"run_id"`    // legacy fallback
+			FDID     string `json:"fd_id"`     // legacy fallback
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
+		if req.LedgerID == "" && (req.RunID == "" || req.FDID == "") {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"ledger_id (or both run_id + fd_id) is required")
 			return
 		}
 
 		ctx := r.Context()
-		row, err := pgxPool.Query(ctx, `
-			SELECT l.*,
-			       COALESCE(fm.interest_type_code,'') AS fd_interest_type,
-			       COALESCE(fm.day_count_code,'')     AS fd_day_count_code,
-			       fm.start_date                      AS fd_start_date,
-			       fm.maturity_date                   AS fd_maturity_date
+
+		// Build the WHERE clause — ledger_id takes priority
+		var whereClause string
+		var whereArgs []interface{}
+		if req.LedgerID != "" {
+			whereClause = "l.ledger_id = $1"
+			whereArgs = []interface{}{req.LedgerID}
+		} else {
+			whereClause = "l.run_id = $1 AND l.fd_id = $2"
+			whereArgs = []interface{}{req.RunID, req.FDID}
+		}
+
+		query := `
+			SELECT
+				l.ledger_id, l.run_id, l.fd_id,
+				COALESCE(l.fd_ref_no,'')          AS fd_ref_no,
+				COALESCE(l.bank_name,'')          AS bank_name,
+				COALESCE(l.entity_id,'')          AS entity_id,
+				COALESCE(l.interest_type_code,'') AS interest_type_code,
+				COALESCE(l.principal_amount,0)    AS principal_amount,
+				COALESCE(l.interest_rate,0)       AS interest_rate,
+				l.fd_start_date, l.fd_maturity_date,
+				-- Compounding specifics joined from master
+				COALESCE(f.frequency_id, '')      AS frequency_id,
+				COALESCE(f.frequency_id, '')      AS compounding_frequency,
+				-- Period
+				l.accrual_period_start, l.accrual_period_end,
+				COALESCE(l.accrual_days,0)        AS accrual_days,
+				-- Config-path (authoritative)
+				COALESCE(l.day_count_code,'')     AS day_count_code,
+				COALESCE(l.divisor,365)           AS divisor,
+				COALESCE(l.opening_principal,0)   AS opening_principal,
+				COALESCE(l.daily_accrual_rate,0)  AS daily_accrual_rate,
+				COALESCE(l.period_interest_accrued,0)    AS period_interest_accrued,
+				COALESCE(l.closing_accrued_balance,0)    AS closing_accrued_balance,
+				COALESCE(l.tds_deducted_in_period,0)     AS tds_deducted_in_period,
+				COALESCE(l.net_interest_in_period,0)     AS net_interest_in_period,
+				COALESCE(l.formula_used,'')              AS formula_used,
+				COALESCE(l.config_weekend_accrual,true)  AS config_weekend_accrual,
+				COALESCE(l.config_holiday_accrual,true)  AS config_holiday_accrual,
+				COALESCE(l.config_holidays_excluded,0)   AS config_holidays_excluded,
+				COALESCE(l.config_rounding_rule,'ROUND') AS config_rounding_rule,
+				COALESCE(l.config_precision_decimals,2)  AS config_precision_decimals,
+				COALESCE(l.config_cap_date_adjustment,'') AS config_cap_date_adjustment,
+				COALESCE(l.config_holiday_calendar_code,'') AS config_holiday_calendar_code,
+				-- Req-path (run-level baseline)
+				COALESCE(l.req_day_count_code,'')       AS req_day_count_code,
+				COALESCE(l.req_divisor,365)             AS req_divisor,
+				COALESCE(l.req_accrual_days,0)          AS req_accrual_days,
+				COALESCE(l.req_opening_principal,0)     AS req_opening_principal,
+				COALESCE(l.req_daily_accrual_rate,0)    AS req_daily_accrual_rate,
+				COALESCE(l.req_period_interest,0)       AS req_period_interest,
+				COALESCE(l.req_closing_balance,0)       AS req_closing_balance,
+				COALESCE(l.req_tds_deducted,0)          AS req_tds_deducted,
+				COALESCE(l.req_net_interest,0)          AS req_net_interest,
+				COALESCE(l.req_formula_used,'')         AS req_formula_used,
+				COALESCE(l.req_rounding_rule,'ROUND')   AS req_rounding_rule,
+				COALESCE(l.req_precision_decimals,2)    AS req_precision_decimals,
+				COALESCE(l.req_weekend_accrual,true)    AS req_weekend_accrual,
+				COALESCE(l.req_holiday_accrual,true)    AS req_holiday_accrual,
+				-- Old values (pre-change snapshot on ledger row)
+				COALESCE(l.old_period_interest_accrued,0)  AS old_period_interest_accrued,
+				COALESCE(l.old_closing_accrued_balance,0)  AS old_closing_accrued_balance,
+				COALESCE(l.old_tds_deducted_in_period,0)   AS old_tds_deducted_in_period,
+				COALESCE(l.old_net_interest_in_period,0)   AS old_net_interest_in_period,
+				COALESCE(l.old_formula_used,'')            AS old_formula_used,
+				COALESCE(l.old_ledger_row_status,'')       AS old_ledger_row_status,
+				COALESCE(l.old_day_count_code,'')          AS old_day_count_code,
+				COALESCE(l.old_opening_principal,0)        AS old_opening_principal,
+				-- Override info
+				COALESCE(l.is_overridden,false)            AS is_overridden,
+				COALESCE(l.override_amount,0)              AS override_amount,
+				COALESCE(l.override_adjustment,0)          AS override_adjustment,
+				COALESCE(l.override_reason_code,'')        AS override_reason_code,
+				COALESCE(l.override_reason_text,'')        AS override_reason_text,
+				COALESCE(l.override_status,'')             AS override_status,
+				COALESCE(l.override_proposed_by,'')        AS override_proposed_by,
+				COALESCE(l.override_approved_by,'')        AS override_approved_by,
+				COALESCE(l.ledger_row_status,'')           AS ledger_row_status,
+				COALESCE(l.opening_accrued_balance,0)      AS opening_accrued_balance
 			FROM investment.fd_accrual_ledger l
-			LEFT JOIN investment.fd_master fm ON fm.fd_id = l.fd_id
-			WHERE l.run_id = $1 AND l.fd_id = $2
-			  AND COALESCE(l.is_deleted,false) = false`,
-			req.RunID, req.FDID)
+			LEFT JOIN investment.fd_master f ON f.fd_id = l.fd_id
+			WHERE ` + whereClause + `
+			  AND COALESCE(l.is_deleted,false) = false
+			ORDER BY l.accrual_period_start ASC`
+
+		rows, err := pgxPool.Query(ctx, query, whereArgs...)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer row.Close()
+		defer rows.Close()
 
-		fields := row.FieldDescriptions()
-		var ledger map[string]interface{}
-		if row.Next() {
-			vals, _ := row.Values()
-			ledger = make(map[string]interface{}, len(fields))
-			for i, f := range fields {
-				if vals[i] == nil {
-					ledger[string(f.Name)] = ""
-				} else {
-					ledger[string(f.Name)] = vals[i]
-				}
-			}
+		// One response per ledger row (may be multiple for sub-period granularity)
+		type detailRow struct {
+			LedgerID, RunID, FDID                          string
+			FdRefNo, BankName, EntityID                    string
+			InterestTypeCode                               string
+			PrincipalAmount, InterestRate                  float64
+			FdStartDate, FdMaturityDate                    time.Time
+			FrequencyID, CompoundingFrequency              string
+			PeriodStart, PeriodEnd                         time.Time
+			// config
+			AccrualDays                                    int
+			DayCountCode                                   string
+			Divisor                                        int
+			OpeningPrincipal, DailyRate                    float64
+			PeriodInterest, ClosingBal, TDS, NetInterest   float64
+			FormulaUsed                                    string
+			ConfigWeekendAccrual, ConfigHolidayAccrual      bool
+			ConfigHolidaysExcluded                         int
+			ConfigRoundingRule                             string
+			ConfigPrecisionDecimals                        int
+			ConfigCapDateAdj, ConfigCalendar               string
+			// req
+			ReqDayCountCode                                string
+			ReqDivisor, ReqAccrualDays                     int
+			ReqOpeningPrincipal, ReqDailyRate              float64
+			ReqPeriodInterest, ReqClosingBal               float64
+			ReqTDS, ReqNetInterest                         float64
+			ReqFormulaUsed, ReqRoundingRule                string
+			ReqPrecisionDecimals                           int
+			ReqWeekendAccrual, ReqHolidayAccrual           bool
+			// old
+			OldPeriodInterest, OldClosingBal               float64
+			OldTDS, OldNetInterest                         float64
+			OldFormulaUsed, OldRowStatus                   string
+			OldDayCountCode                                string
+			OldOpeningPrincipal                            float64
+			// override
+			IsOverridden                                   bool
+			OverrideAmount, OverrideAdj                    float64
+			OverrideReasonCode, OverrideReasonText          string
+			OverrideStatus, OverrideProposedBy             string
+			OverrideApprovedBy                             string
+			LedgerRowStatus                                string
+			OpeningAccruedBal                              float64
 		}
-		if err := row.Err(); err != nil {
+
+		var ledgerRows []map[string]interface{}
+		for rows.Next() {
+			var d detailRow
+			if sErr := rows.Scan(
+				&d.LedgerID, &d.RunID, &d.FDID,
+				&d.FdRefNo, &d.BankName, &d.EntityID,
+				&d.InterestTypeCode,
+				&d.PrincipalAmount, &d.InterestRate,
+				&d.FdStartDate, &d.FdMaturityDate,
+				&d.FrequencyID, &d.CompoundingFrequency,
+				&d.PeriodStart, &d.PeriodEnd, &d.AccrualDays,
+				// config
+				&d.DayCountCode, &d.Divisor,
+				&d.OpeningPrincipal, &d.DailyRate,
+				&d.PeriodInterest, &d.ClosingBal, &d.TDS, &d.NetInterest,
+				&d.FormulaUsed,
+				&d.ConfigWeekendAccrual, &d.ConfigHolidayAccrual,
+				&d.ConfigHolidaysExcluded,
+				&d.ConfigRoundingRule, &d.ConfigPrecisionDecimals,
+				&d.ConfigCapDateAdj, &d.ConfigCalendar,
+				// req
+				&d.ReqDayCountCode, &d.ReqDivisor, &d.ReqAccrualDays,
+				&d.ReqOpeningPrincipal, &d.ReqDailyRate,
+				&d.ReqPeriodInterest, &d.ReqClosingBal,
+				&d.ReqTDS, &d.ReqNetInterest,
+				&d.ReqFormulaUsed, &d.ReqRoundingRule, &d.ReqPrecisionDecimals,
+				&d.ReqWeekendAccrual, &d.ReqHolidayAccrual,
+				// old
+				&d.OldPeriodInterest, &d.OldClosingBal,
+				&d.OldTDS, &d.OldNetInterest,
+				&d.OldFormulaUsed, &d.OldRowStatus,
+				&d.OldDayCountCode, &d.OldOpeningPrincipal,
+				// override
+				&d.IsOverridden, &d.OverrideAmount, &d.OverrideAdj,
+				&d.OverrideReasonCode, &d.OverrideReasonText,
+				&d.OverrideStatus, &d.OverrideProposedBy, &d.OverrideApprovedBy,
+				&d.LedgerRowStatus, &d.OpeningAccruedBal,
+			); sErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "scan error: "+sErr.Error())
+				return
+			}
+
+			// ── Build variance_drivers ─────────────────────────────────────────
+			var drivers []string
+			dayDiff := d.ReqAccrualDays - d.AccrualDays
+			if dayDiff != 0 {
+				drivers = append(drivers, fmt.Sprintf("accrual_day_diff: req=%d config=%d delta=%d (holiday_excl=%d)",
+					d.ReqAccrualDays, d.AccrualDays, dayDiff, d.ConfigHolidaysExcluded))
+			}
+			if d.ReqDivisor != d.Divisor {
+				drivers = append(drivers, fmt.Sprintf("divisor_diff: req=%d config=%d (day_count_code: req=%s config=%s)",
+					d.ReqDivisor, d.Divisor, d.ReqDayCountCode, d.DayCountCode))
+			}
+			if d.ReqRoundingRule != d.ConfigRoundingRule || d.ReqPrecisionDecimals != d.ConfigPrecisionDecimals {
+				drivers = append(drivers, fmt.Sprintf("rounding_diff: req=%s(%d) config=%s(%d)",
+					d.ReqRoundingRule, d.ReqPrecisionDecimals,
+					d.ConfigRoundingRule, d.ConfigPrecisionDecimals))
+			}
+			if d.ReqOpeningPrincipal != d.OpeningPrincipal {
+				drivers = append(drivers, fmt.Sprintf("principal_diff: req=%.2f config=%.2f (COMPOUND FD compounding)",
+					d.ReqOpeningPrincipal, d.OpeningPrincipal))
+			}
+			if !d.ConfigHolidayAccrual {
+				drivers = append(drivers, fmt.Sprintf("holiday_exclusion: %d days excluded by bank calendar",
+					d.ConfigHolidaysExcluded))
+			}
+			if len(drivers) == 0 {
+				drivers = []string{"no_variance: req and config calculations match"}
+			}
+
+			periodInterestVariance := math.Round((d.ReqPeriodInterest-d.PeriodInterest)*100) / 100
+			var variancePct float64
+			if d.ReqPeriodInterest != 0 {
+				variancePct = math.Round((periodInterestVariance/d.ReqPeriodInterest)*10000) / 100
+			}
+
+			row := map[string]interface{}{
+				"ledger_id": d.LedgerID,
+				"run_id":    d.RunID,
+				"fd_snapshot": map[string]interface{}{
+					"fd_id":             d.FDID,
+					"fd_ref_no":         d.FdRefNo,
+					"bank_name":         d.BankName,
+					"entity_id":         d.EntityID,
+					"interest_type":     d.InterestTypeCode,
+					"principal_amount":  d.PrincipalAmount,
+					"interest_rate":     d.InterestRate,
+					"frequency_id":      d.FrequencyID,
+					"compounding_freq":  d.CompoundingFrequency,
+					"fd_start_date":     d.FdStartDate.Format(constants.DateFormat),
+					"fd_maturity_date":  d.FdMaturityDate.Format(constants.DateFormat),
+				},
+				"period_inputs": map[string]interface{}{
+					"accrual_period_start": d.PeriodStart.Format(constants.DateFormat),
+					"accrual_period_end":   d.PeriodEnd.Format(constants.DateFormat),
+					"opening_accrued_bal":  d.OpeningAccruedBal,
+				},
+				"req_calculation": map[string]interface{}{
+					"description":        "Run-level request params (entity baseline — no holiday exclusion)",
+					"day_count_code":     d.ReqDayCountCode,
+					"divisor":            d.ReqDivisor,
+					"accrual_days":       d.ReqAccrualDays,
+					"weekend_accrual":    d.ReqWeekendAccrual,
+					"holiday_accrual":    d.ReqHolidayAccrual,
+					"opening_principal":  d.ReqOpeningPrincipal,
+					"rate_per_day":       d.ReqDailyRate,
+					"period_interest":    d.ReqPeriodInterest,
+					"closing_balance":    d.ReqClosingBal,
+					"tds_deducted":       d.ReqTDS,
+					"net_interest":       d.ReqNetInterest,
+					"rounding_rule":      d.ReqRoundingRule,
+					"precision_decimals": d.ReqPrecisionDecimals,
+					"formula":            d.ReqFormulaUsed,
+				},
+				"config_calculation": map[string]interface{}{
+					"description":        "Per-FD bank config (authoritative — holiday/rounding/convention-aware)",
+					"day_count_code":     d.DayCountCode,
+					"divisor":            d.Divisor,
+					"accrual_days":       d.AccrualDays,
+					"weekend_accrual":    d.ConfigWeekendAccrual,
+					"holiday_accrual":    d.ConfigHolidayAccrual,
+					"holidays_excluded":  d.ConfigHolidaysExcluded,
+					"cap_date_adjustment": d.ConfigCapDateAdj,
+					"holiday_calendar":   d.ConfigCalendar,
+					"opening_principal":  d.OpeningPrincipal, // for compounded FD, this is the compound principal
+					"rate_per_day":       d.DailyRate,
+					"period_interest":    d.PeriodInterest,
+					"closing_balance":    d.ClosingBal,
+					"tds_deducted":       d.TDS,
+					"net_interest":       d.NetInterest,
+					"rounding_rule":      d.ConfigRoundingRule,
+					"precision_decimals": d.ConfigPrecisionDecimals,
+					"formula":            d.FormulaUsed,
+				},
+				"variance": map[string]interface{}{
+					"day_count_variance":          dayDiff,
+					"period_interest_variance":    periodInterestVariance,
+					"variance_pct":               variancePct,
+					"variance_drivers":           drivers,
+				},
+				"override_info": map[string]interface{}{
+					"is_overridden":       d.IsOverridden,
+					"override_amount":     d.OverrideAmount,
+					"override_adjustment":  d.OverrideAdj,
+					"override_reason_code": d.OverrideReasonCode,
+					"override_reason_text": d.OverrideReasonText,
+					"override_status":      d.OverrideStatus,
+					"override_proposed_by": d.OverrideProposedBy,
+					"override_approved_by": d.OverrideApprovedBy,
+				},
+				"old_values": map[string]interface{}{
+					"old_period_interest":   d.OldPeriodInterest,
+					"old_closing_balance":   d.OldClosingBal,
+					"old_tds_deducted":      d.OldTDS,
+					"old_net_interest":      d.OldNetInterest,
+					"old_formula_used":      d.OldFormulaUsed,
+					"old_row_status":        d.OldRowStatus,
+					"old_day_count_code":    d.OldDayCountCode,
+					"old_opening_principal": d.OldOpeningPrincipal,
+				},
+				"ledger_row_status": d.LedgerRowStatus,
+				"engine_version":    "v2.1",
+			}
+			ledgerRows = append(ledgerRows, row)
+		}
+		if err := rows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
 		}
-		if ledger == nil {
-			api.RespondWithPayload(w, false, "No ledger entry found for this run/fd", nil)
+		if len(ledgerRows) == 0 {
+			api.RespondWithPayload(w, false, "No ledger entry found", nil)
 			return
 		}
 
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"ledger": ledger})
+		result := map[string]interface{}{"count": len(ledgerRows)}
+		if len(ledgerRows) == 1 {
+			// Single row — flatten for convenience
+			result["detail"] = ledgerRows[0]
+		} else {
+			result["rows"] = ledgerRows
+		}
+		api.RespondWithPayload(w, true, "", result)
 	}
 }
 
@@ -574,9 +961,10 @@ func SubmitForApproval(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "Run not found: "+err.Error())
 			return
 		}
+		// SIMULATION runs may be submitted for workflow visibility; they will NOT post to GL on approval.
+		// FINAL runs follow the normal approve → post-journals path.
 		if runMode == "SIMULATION" {
-			api.RespondWithError(w, http.StatusBadRequest, "SIMULATION runs cannot be submitted for approval")
-			return
+			api.LogInfo("[FDAccrual] SubmitForApproval: run=%s is SIMULATION — will skip GL posting on approval", req.RunID)
 		}
 		if runStatus != "COMPUTED" {
 			api.RespondWithError(w, http.StatusBadRequest, "Only COMPUTED runs can be submitted (current: "+runStatus+")")
@@ -724,28 +1112,39 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					results = append(results, res)
 					continue
 				}
-				if jErr := postAccrualJournals(ctx, pgxPool, runID, userEmail); jErr != nil {
-					api.LogError("[FDAccrual] Journal posting failed for run %s: %v", runID, jErr)
-					res["journal_error"] = jErr.Error()
+				// GL guard: SIMULATION runs are approved in workflow but NOT posted to GL
+				var approveRunMode string
+				_ = pgxPool.QueryRow(ctx,
+					`SELECT COALESCE(run_mode,'FINAL') FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+				).Scan(&approveRunMode)
+				if strings.EqualFold(approveRunMode, "SIMULATION") {
+					api.LogInfo("[FDAccrual] BulkApprove: run=%s is SIMULATION — skipping GL posting", runID)
+					res["journals_posted"] = false
+					res["simulation_note"] = "SIMULATION run: no GL journal entries created"
 				} else {
-					res["journals_posted"] = true
-					// Mark POSTED and lock period
-					_, _ = pgxPool.Exec(ctx,
-						`UPDATE investment.fd_accrual_run SET run_status='POSTED', posting_status='POSTED', posting_completed_at=now() WHERE run_id=$1`,
-						runID)
-					var periodStart time.Time
-					_ = pgxPool.QueryRow(ctx,
-						`SELECT accrual_period_start FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
-					).Scan(&periodStart)
-					if !periodStart.IsZero() {
-						_, _ = pgxPool.Exec(ctx, `
-							INSERT INTO investment.fd_accrual_period_lock (entity_id, financial_period, run_id, locked_at, locked_by, is_locked)
-							SELECT entity_id, $1, $2, now(), $3, true
-							FROM investment.fd_accrual_run WHERE run_id = $2
-							ON CONFLICT (entity_id, financial_period) DO UPDATE
-							  SET run_id=EXCLUDED.run_id, locked_at=now(), locked_by=EXCLUDED.locked_by, is_locked=true`,
-							buildAccrualPeriod(periodStart), runID, userEmail)
-						res["period_locked"] = buildAccrualPeriod(periodStart)
+					if jErr := postAccrualJournals(ctx, pgxPool, runID, userEmail); jErr != nil {
+						api.LogError("[FDAccrual] Journal posting failed for run %s: %v", runID, jErr)
+						res["journal_error"] = jErr.Error()
+					} else {
+						res["journals_posted"] = true
+						// Mark POSTED and lock period
+						_, _ = pgxPool.Exec(ctx,
+							`UPDATE investment.fd_accrual_run SET run_status='POSTED', posting_status='POSTED', posting_completed_at=now() WHERE run_id=$1`,
+							runID)
+						var periodStart time.Time
+						_ = pgxPool.QueryRow(ctx,
+							`SELECT accrual_period_start FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+						).Scan(&periodStart)
+						if !periodStart.IsZero() {
+							_, _ = pgxPool.Exec(ctx, `
+								INSERT INTO investment.fd_accrual_period_lock (entity_id, financial_period, run_id, locked_at, locked_by, is_locked)
+								SELECT entity_id, $1, $2, now(), $3, true
+								FROM investment.fd_accrual_run WHERE run_id = $2
+								ON CONFLICT (entity_id, financial_period) DO UPDATE
+								  SET run_id=EXCLUDED.run_id, locked_at=now(), locked_by=EXCLUDED.locked_by, is_locked=true`,
+								buildAccrualPeriod(periodStart), runID, userEmail)
+							res["period_locked"] = buildAccrualPeriod(periodStart)
+						}
 					}
 				}
 				res[constants.ValueSuccess] = true
@@ -779,16 +1178,27 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			).Scan(&instStatus)
 
 			if instStatus == approvalengine.InstStatusApproved {
-				if jErr := postAccrualJournals(ctx, pgxPool, runID, userEmail); jErr != nil {
-					api.LogError("[FDAccrual] Journal posting failed for run %s: %v", runID, jErr)
-					res["journal_error"] = jErr.Error()
+				// GL guard: SIMULATION runs skip GL posting
+				var approveRunMode2 string
+				_ = pgxPool.QueryRow(ctx,
+					`SELECT COALESCE(run_mode,'FINAL') FROM investment.fd_accrual_run WHERE run_id=$1`, runID,
+				).Scan(&approveRunMode2)
+				if strings.EqualFold(approveRunMode2, "SIMULATION") {
+					api.LogInfo("[FDAccrual] BulkApprove (engine): run=%s is SIMULATION — skipping GL posting", runID)
+					res["journals_posted"] = false
+					res["simulation_note"] = "SIMULATION run: no GL journal entries created"
 				} else {
-					res["journals_posted"] = true
+					if jErr := postAccrualJournals(ctx, pgxPool, runID, userEmail); jErr != nil {
+						api.LogError("[FDAccrual] Journal posting failed for run %s: %v", runID, jErr)
+						res["journal_error"] = jErr.Error()
+					} else {
+						res["journals_posted"] = true
+					}
+					// Mark POSTED
+					_, _ = pgxPool.Exec(ctx,
+						`UPDATE investment.fd_accrual_run SET run_status='POSTED', posting_status='POSTED', posting_completed_at=now() WHERE run_id=$1`,
+						runID)
 				}
-				// Mark POSTED
-				_, _ = pgxPool.Exec(ctx,
-					`UPDATE investment.fd_accrual_run SET run_status='POSTED', posting_status='POSTED', posting_completed_at=now() WHERE run_id=$1`,
-					runID)
 				// Lock the period
 				var periodStart time.Time
 				_ = pgxPool.QueryRow(ctx,
@@ -1031,6 +1441,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer rows.Close()
 
 		runs := make([]map[string]interface{}, 0)
+		var runIDs []string
 		fields := rows.FieldDescriptions()
 		for rows.Next() {
 			vals, _ := rows.Values()
@@ -1043,10 +1454,85 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			runs = append(runs, row)
+			
+			if v, ok := row["run_id"]; ok && v != "" {
+				if castID, ok := v.(string); ok {
+					runIDs = append(runIDs, castID)
+				}
+			}
 		}
 		if err := rows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowError+err.Error())
 			return
+		}
+
+		// Pull audit trail events for runs
+		runAuditTrails := map[string][]map[string]interface{}{}
+		runLatestProcessingStatus := map[string]string{}
+		
+		if len(runIDs) > 0 {
+			auditRows, err := pgxPool.Query(ctx, `
+				SELECT
+					run_id, action_type, processing_status,
+					COALESCE(reason,'') as reason, COALESCE(requested_by,'') as requested_by,
+					requested_at,
+					COALESCE(checker_by,'') as checker_by, checker_at,
+					COALESCE(checker_comment,'') as checker_comment
+				FROM investment.fd_accrual_run_audit
+				WHERE run_id = ANY($1)
+				ORDER BY requested_at DESC`, runIDs)
+			
+			if err == nil {
+				defer auditRows.Close()
+				for auditRows.Next() {
+					var rID, actionType, status, reason, reqBy, checkBy, checkComment string
+					var reqAt time.Time
+					var checkAt *time.Time
+					
+					_ = auditRows.Scan(&rID, &actionType, &status, &reason, &reqBy, &reqAt, &checkBy, &checkAt, &checkComment)
+					event := map[string]interface{}{
+						"action_type":       actionType,
+						"processing_status": status,
+						"reason":           reason,
+						"requested_by":     reqBy,
+						"requested_at":     reqAt,
+						"checker_by":       checkBy,
+						"checker_at":       checkAt,
+						"checker_comment":  checkComment,
+					}
+					
+					runAuditTrails[rID] = append(runAuditTrails[rID], event)
+					// Since ordered by DESC, the first one encountered is the latest requested_at
+					if _, ok := runLatestProcessingStatus[rID]; !ok {
+						runLatestProcessingStatus[rID] = status
+					}
+				}
+			}
+		}
+
+		// Inject processing status and audit trail back into the main run entries
+		for _, row := range runs {
+			id, _ := row["run_id"].(string)
+			
+			// If missing audit trail, default processing_status to standard logic
+			if latestStat, ok := runLatestProcessingStatus[id]; ok && latestStat != "" {
+				row["processing_status"] = latestStat
+			} else {
+				// Default fallback logic
+				if runStatus, _ := row["run_status"].(string); runStatus == "PENDING_APPROVAL" {
+					row["processing_status"] = "PENDING_APPROVAL"
+				} else if runStatus == "POSTED" || runStatus == "APPROVED" {
+					row["processing_status"] = "APPROVED"
+				} else {
+					row["processing_status"] = "SYSTEM"
+				}
+			}
+			
+			if events, ok := runAuditTrails[id]; ok {
+				row["audit_trail"] = events
+			} else {
+				row["audit_trail"] = []interface{}{}
+			}
 		}
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1403,19 +1889,19 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID             string  `json:"user_id"`
-			RunID              string  `json:"run_id"`
-			FDID               string  `json:"fd_id"`
+			LedgerID           string  `json:"ledger_id"` // preferred target
+			RunID              string  `json:"run_id"`    // legacy fallback
+			FDID               string  `json:"fd_id"`     // legacy fallback
 			OverrideAmount     float64 `json:"override_amount"`
 			OverrideReasonCode string  `json:"override_reason_code"`
 			OverrideReasonText string  `json:"override_reason_text"`
-			OverrideEffPeriod  string  `json:"override_effective_period"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
+		if req.LedgerID == "" && (req.RunID == "" || req.FDID == "") {
+			api.RespondWithError(w, http.StatusBadRequest, "ledger_id (or both run_id + fd_id) is required")
 			return
 		}
 		if req.OverrideAmount <= 0 {
@@ -1431,8 +1917,18 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
+		var whereClause string
+		var whereArgs []interface{}
+		if req.LedgerID != "" {
+			whereClause = "ledger_id = $1"
+			whereArgs = []interface{}{req.LedgerID}
+		} else {
+			whereClause = "run_id = $1 AND fd_id = $2"
+			whereArgs = []interface{}{req.RunID, req.FDID}
+		}
+
 		// ── Step 1: Load current ledger row so we can capture old values ──────
-		var ledgerID, fdRefNo, bankID, bankName, entityID string
+		var ledgerID, outRunID, outFDID, fdRefNo, bankID, bankName, entityID string
 		var oldPeriodInterest, oldClosingBal, oldTDS, oldNetInterest float64
 		var oldOpeningBal, oldInterestReceived, oldTDSApplicable float64
 		var oldRowStatus, oldFormula string
@@ -1443,7 +1939,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var accrualDays int
 		if err := pgxPool.QueryRow(ctx, `
 			SELECT
-				ledger_id,
+				ledger_id, run_id, fd_id,
 				COALESCE(fd_ref_no,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(entity_id,''),
 				COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(accrual_days,0),
 				COALESCE(period_interest_accrued,0),
@@ -1462,10 +1958,10 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(interest_received_in_period,0),
 				COALESCE(tds_applicable_amount,0)
 			FROM investment.fd_accrual_ledger
-			WHERE run_id=$1 AND fd_id=$2`,
-			req.RunID, req.FDID,
+			WHERE `+whereClause,
+			whereArgs...,
 		).Scan(
-			&ledgerID,
+			&ledgerID, &outRunID, &outFDID,
 			&fdRefNo, &bankID, &bankName, &entityID,
 			&principal, &interestRate, &accrualDays,
 			&oldPeriodInterest, &oldClosingBal, &oldTDS, &oldNetInterest,
@@ -1474,9 +1970,13 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&oldOverrideCode, &oldOverrideText, &oldOverrideStatus,
 			&oldOpeningBal, &oldInterestReceived, &oldTDSApplicable,
 		); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "Ledger row not found for run/fd: "+err.Error())
+			api.RespondWithError(w, http.StatusNotFound, "Ledger row not found: "+err.Error())
 			return
 		}
+		
+		// Fill req with standard keys for downstream run total calcs
+		req.RunID = outRunID
+		req.FDID = outFDID
 
 		// ── Step 2: Write audit row with ALL old values before any mutation ────
 		_, _ = pgxPool.Exec(ctx, `
@@ -1515,28 +2015,28 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		overrideAdj := math.Round((req.OverrideAmount-oldPeriodInterest)*100) / 100
 
 		// ── Step 4: Write proposed figures into ledger row (status = PROPOSED) ─
-		_, err := pgxPool.Exec(ctx, `
+		var err error
+		_, err = pgxPool.Exec(ctx, `
 			UPDATE investment.fd_accrual_ledger
 			SET is_overridden              = true,
 			    override_amount            = $1,
 			    override_reason_code       = $2,
 			    override_reason_text       = $3,
-			    override_effective_period  = $4,
 			    override_status            = 'PROPOSED',
-			    override_proposed_by       = $5,
+			    override_proposed_by       = $4,
 			    override_proposed_at       = now(),
-			    period_interest_accrued    = $6,
-			    closing_accrued_balance    = $7,
-			    net_interest_in_period     = $8,
-			    override_adjustment        = $9,
+			    period_interest_accrued    = $5,
+			    closing_accrued_balance    = $6,
+			    net_interest_in_period     = $7,
+			    override_adjustment        = $8,
 			    ledger_row_status          = 'OVERRIDDEN',
 			    updated_at                 = now()
-			WHERE run_id = $10 AND fd_id = $11`,
+			WHERE ledger_id = $9`,
 			req.OverrideAmount, nullIfEmpty(req.OverrideReasonCode),
-			nullIfEmpty(req.OverrideReasonText), nullIfEmpty(req.OverrideEffPeriod),
+			nullIfEmpty(req.OverrideReasonText),
 			userEmail,
 			newPeriodInterest, newClosingBal, newNetInterest, overrideAdj,
-			req.RunID, req.FDID)
+			ledgerID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Propose override failed: "+friendlyAccrualError(err, "override proposal"))
 			return
@@ -1578,15 +2078,14 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				$4, $1, $5,
 				'OVERRIDE_PROPOSED', $6, now()
 			FROM investment.fd_accrual_ledger l
-			WHERE l.run_id = $7 AND l.fd_id = $8
+			WHERE l.ledger_id = $7
 			ON CONFLICT DO NOTHING`,
 			nullIfEmpty(req.OverrideReasonText),
 			oldPeriodInterest,
 			req.OverrideAmount,
 			nullIfEmpty(req.OverrideReasonCode),
-			nullIfEmpty(req.OverrideEffPeriod),
 			userEmail,
-			req.RunID, req.FDID,
+			ledgerID,
 		)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
@@ -1614,17 +2113,18 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID  string `json:"user_id"`
-			RunID   string `json:"run_id"`
-			FDID    string `json:"fd_id"`
-			Comment string `json:"comment"`
+			UserID   string `json:"user_id"`
+			LedgerID string `json:"ledger_id"` // preferred
+			RunID    string `json:"run_id"`    // legacy fallback
+			FDID     string `json:"fd_id"`     // legacy fallback
+			Comment  string `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
-		if req.RunID == "" || req.FDID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrRunIDAndFDIDRequired)
+		if req.LedgerID == "" && (req.RunID == "" || req.FDID == "") {
+			api.RespondWithError(w, http.StatusBadRequest, "ledger_id (or both run_id + fd_id) is required")
 			return
 		}
 
@@ -1636,52 +2136,45 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// ── Maker ≠ checker ───────────────────────────────────────────────────
-		var proposedBy string
-		_ = pgxPool.QueryRow(ctx,
-			`SELECT COALESCE(override_proposed_by,'') FROM investment.fd_accrual_ledger WHERE run_id=$1 AND fd_id=$2`,
-			req.RunID, req.FDID,
-		).Scan(&proposedBy)
-		if proposedBy == userEmail {
-			api.RespondWithError(w, http.StatusForbidden, "Maker cannot approve their own override")
-			return
+		var whereClause string
+		var whereArgs []interface{}
+		if req.LedgerID != "" {
+			whereClause = "l.ledger_id = $1"
+			whereArgs = []interface{}{req.LedgerID}
+		} else {
+			whereClause = "l.run_id = $1 AND l.fd_id = $2"
+			whereArgs = []interface{}{req.RunID, req.FDID}
 		}
 
-		// ── Load current (proposed) ledger values for audit snapshot ─────────
-		var ledgerID, fdRefNo, bankID, bankName, entityID string
-		var principal, interestRate float64
-		var accrualDays int
+		// ── Maker ≠ checker ───────────────────────────────────────────────────
+		var ledgerID, proposedBy string
 		var curPeriodInterest, curClosingBal, curTDS, curNetInterest float64
 		var curOpeningBal, curInterestReceived, curTDSApplicable float64
-		var curRowStatus, curFormula string
+		var curRowStatus, curFormula, fdRefNo, bankID, bankName, entityID string
 		var curIsOverridden bool
 		var curOverrideAmt, curOverrideAdj float64
 		var curOverrideCode, curOverrideText, curOverrideStatus string
+		var principal, interestRate float64
+		var accrualDays int
+
 		if err := pgxPool.QueryRow(ctx, `
 			SELECT
-				ledger_id,
-				COALESCE(fd_ref_no,''), COALESCE(bank_id,''), COALESCE(bank_name,''), COALESCE(entity_id,''),
-				COALESCE(principal_amount,0), COALESCE(interest_rate,0), COALESCE(accrual_days,0),
-				COALESCE(period_interest_accrued,0),
-				COALESCE(closing_accrued_balance,0),
-				COALESCE(tds_deducted_in_period,0),
-				COALESCE(net_interest_in_period,0),
-				COALESCE(ledger_row_status,''),
-				COALESCE(formula_used,''),
-				COALESCE(is_overridden,false),
-				COALESCE(override_amount,0),
-				COALESCE(override_adjustment,0),
-				COALESCE(override_reason_code,''),
-				COALESCE(override_reason_text,''),
-				COALESCE(override_status,''),
-				COALESCE(opening_accrued_balance,0),
-				COALESCE(interest_received_in_period,0),
-				COALESCE(tds_applicable_amount,0)
-			FROM investment.fd_accrual_ledger
-			WHERE run_id=$1 AND fd_id=$2 AND override_status='PROPOSED'`,
-			req.RunID, req.FDID,
+				l.ledger_id,
+				COALESCE(l.override_proposed_by,''),
+				COALESCE(l.fd_ref_no,''), COALESCE(l.bank_id,''), COALESCE(l.bank_name,''), COALESCE(l.entity_id,''),
+				COALESCE(l.principal_amount,0), COALESCE(l.interest_rate,0), COALESCE(l.accrual_days,0),
+				COALESCE(l.period_interest_accrued,0), COALESCE(l.closing_accrued_balance,0),
+				COALESCE(l.tds_deducted_in_period,0), COALESCE(l.net_interest_in_period,0),
+				COALESCE(l.ledger_row_status,''), COALESCE(l.formula_used,''),
+				COALESCE(l.is_overridden,false), COALESCE(l.override_amount,0), COALESCE(l.override_adjustment,0),
+				COALESCE(l.override_reason_code,''), COALESCE(l.override_reason_text,''), COALESCE(l.override_status,''),
+				COALESCE(l.opening_accrued_balance,0), COALESCE(l.interest_received_in_period,0), COALESCE(l.tds_applicable_amount,0)
+			FROM investment.fd_accrual_ledger l
+			WHERE `+whereClause+` AND COALESCE(l.override_status,'') = 'PROPOSED'
+			  AND COALESCE(l.is_deleted,false) = false`,
+			whereArgs...,
 		).Scan(
-			&ledgerID,
+			&ledgerID, &proposedBy,
 			&fdRefNo, &bankID, &bankName, &entityID,
 			&principal, &interestRate, &accrualDays,
 			&curPeriodInterest, &curClosingBal, &curTDS, &curNetInterest,
@@ -1690,7 +2183,13 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&curOverrideCode, &curOverrideText, &curOverrideStatus,
 			&curOpeningBal, &curInterestReceived, &curTDSApplicable,
 		); err != nil {
-			api.RespondWithError(w, http.StatusNotFound, "No PROPOSED override found for this run/fd")
+			api.RespondWithError(w, http.StatusNotFound,
+				fmt.Sprintf("No PROPOSED override found: %v", err))
+			return
+		}
+
+		if proposedBy == userEmail {
+			api.RespondWithError(w, http.StatusForbidden, "Maker cannot approve their own override")
 			return
 		}
 
@@ -1735,8 +2234,8 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    override_approved_at     = now(),
 			    override_checker_comment = $2,
 			    updated_at               = now()
-			WHERE run_id = $3 AND fd_id = $4 AND override_status = 'PROPOSED'`,
-			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
+			WHERE ledger_id = $3 AND override_status = 'PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment), ledgerID)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "Approve override failed: "+friendlyAccrualError(err, "override approval"))
 			return
@@ -1751,8 +2250,8 @@ func ApproveOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			    checker_comment   = $2,
 			    ledger_updated    = true,
 			    ledger_updated_at = now()
-			WHERE run_id = $3 AND fd_id = $4 AND exception_status = 'OVERRIDE_PROPOSED'`,
-			userEmail, nullIfEmpty(req.Comment), req.RunID, req.FDID)
+			WHERE ledger_id = $3 AND exception_status = 'OVERRIDE_PROPOSED'`,
+			userEmail, nullIfEmpty(req.Comment), ledgerID)
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"run_id":                  req.RunID,
@@ -2398,6 +2897,18 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 					tds_applicable_amount, tds_deducted_in_period, net_interest_in_period,
 					cashflow_row_ids,
 					formula_used, ledger_row_status,
+					-- req_* (run-level baseline)
+					req_day_count_code, req_divisor, req_accrual_days,
+					req_opening_principal, req_daily_accrual_rate,
+					req_period_interest, req_closing_balance,
+					req_tds_deducted, req_net_interest, req_formula_used,
+					req_weekend_accrual, req_holiday_accrual,
+					req_rounding_rule, req_precision_decimals,
+					-- config_* (bank config params used)
+					config_weekend_accrual, config_holiday_accrual,
+					config_rounding_rule, config_precision_decimals,
+					config_cap_date_adjustment, config_holiday_calendar_code,
+					config_holidays_excluded,
 					is_overridden, override_status, journal_entry_id,
 					is_active, is_deleted, created_at
 				) VALUES (
@@ -2412,6 +2923,18 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 					$24,$25,$26,
 					$27,
 					$28,$29,
+					-- req_*
+					$30,$31,$32,
+					$33,$34,
+					$35,$36,
+					$37,$38,$39,
+					$40,$41,
+					$42,$43,
+					-- config_*
+					$44,$45,
+					$46,$47,
+					$48,$49,
+					$50,
 					false,null,null,
 					true,false,now()
 				)
@@ -2430,6 +2953,25 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 					daily_accrual_rate         = EXCLUDED.daily_accrual_rate,
 					divisor                    = EXCLUDED.divisor,
 					opening_principal          = EXCLUDED.opening_principal,
+					-- req_* on conflict
+					req_day_count_code         = EXCLUDED.req_day_count_code,
+					req_divisor                = EXCLUDED.req_divisor,
+					req_accrual_days           = EXCLUDED.req_accrual_days,
+					req_opening_principal      = EXCLUDED.req_opening_principal,
+					req_daily_accrual_rate     = EXCLUDED.req_daily_accrual_rate,
+					req_period_interest        = EXCLUDED.req_period_interest,
+					req_closing_balance        = EXCLUDED.req_closing_balance,
+					req_tds_deducted           = EXCLUDED.req_tds_deducted,
+					req_net_interest           = EXCLUDED.req_net_interest,
+					req_formula_used           = EXCLUDED.req_formula_used,
+					-- config_* on conflict
+					config_weekend_accrual      = EXCLUDED.config_weekend_accrual,
+					config_holiday_accrual      = EXCLUDED.config_holiday_accrual,
+					config_rounding_rule        = EXCLUDED.config_rounding_rule,
+					config_precision_decimals   = EXCLUDED.config_precision_decimals,
+					config_cap_date_adjustment  = EXCLUDED.config_cap_date_adjustment,
+					config_holiday_calendar_code = EXCLUDED.config_holiday_calendar_code,
+					config_holidays_excluded    = EXCLUDED.config_holidays_excluded,
 					updated_at                 = now()`,
 				runID, fd.FDID,
 				nullIfEmpty(result.FdRefNo), nullIfEmpty(result.BankID), nullIfEmpty(result.BankName),
@@ -2443,6 +2985,18 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 				result.TDSApplicableAmount, result.TDSDeductedInPeriod, result.NetInterestInPeriod,
 				string(cashflowIDsJSON),
 				result.FormulaUsed, result.LedgerRowStatus,
+				// req_*
+				nullIfEmpty(result.ReqDayCountCode), result.ReqDivisor, result.ReqAccrualDays,
+				result.ReqOpeningPrincipal, result.ReqDailyAccrualRate,
+				result.ReqPeriodInterest, result.ReqClosingBalance,
+				result.ReqTDSDeducted, result.ReqNetInterest, nullIfEmpty(result.ReqFormulaUsed),
+				result.ReqWeekendAccrual, result.ReqHolidayAccrual,
+				nullIfEmpty(result.ReqRoundingRule), result.ReqPrecisionDecimals,
+				// config_*
+				result.ConfigWeekendAccrual, result.ConfigHolidayAccrual,
+				nullIfEmpty(result.ConfigRoundingRule), result.ConfigPrecisionDecimals,
+				nullIfEmpty(result.ConfigCapDateAdjustment), nullIfEmpty(result.ConfigHolidayCalendar),
+				result.ConfigHolidaysExcluded,
 			)
 			if upsertErr != nil {
 				fdFailed = true
@@ -2460,17 +3014,32 @@ func executeAccrualRun(ctx context.Context, pool *pgxpool.Pool, runID string, ex
 
 			fdCalculated = true
 
-			logAccrualEvent(ctx, pool, LogAccrualParams{
-				RunID:     runID,
-				FDID:      fd.FDID,
-				Level:     "INFO",
-				EventType: "CALCULATED",
-				Message: fmt.Sprintf("sub=[%s,%s] interest=%.4f tds=%.4f net=%.4f days=%d",
-					sp[0].Format(constants.DateFormat), sp[1].Format(constants.DateFormat),
-					result.PeriodInterestAccrued, result.TDSDeductedInPeriod,
-					result.NetInterestInPeriod, result.AccrualDays),
-				Detail: nil,
-			})
+				interestVariance := result.ReqPeriodInterest - result.PeriodInterestAccrued
+				logAccrualEvent(ctx, pool, LogAccrualParams{
+					RunID:     runID,
+					FDID:      fd.FDID,
+					Level:     "INFO",
+					EventType: "CALCULATED",
+					Message: fmt.Sprintf(
+						"sub=[%s,%s] config_days=%d req_days=%d config_interest=%.4f req_interest=%.4f variance=%.4f tds=%.4f holiday_excl=%d",
+						sp[0].Format(constants.DateFormat), sp[1].Format(constants.DateFormat),
+						result.AccrualDays, result.ReqAccrualDays,
+						result.PeriodInterestAccrued, result.ReqPeriodInterest,
+						interestVariance, result.TDSDeductedInPeriod,
+						result.ConfigHolidaysExcluded),
+					Detail: map[string]interface{}{
+						"config_rate_per_day":     result.DailyAccrualRate,
+						"req_rate_per_day":        result.ReqDailyAccrualRate,
+						"config_accrual_days":     result.AccrualDays,
+						"req_accrual_days":        result.ReqAccrualDays,
+						"config_holiday_accrual":  result.ConfigHolidayAccrual,
+						"config_weekend_accrual":  result.ConfigWeekendAccrual,
+						"holidays_excluded":       result.ConfigHolidaysExcluded,
+						"interest_variance":       interestVariance,
+						"config_formula":          result.FormulaUsed,
+						"req_formula":             result.ReqFormulaUsed,
+					},
+				})
 		} // end sub-period loop
 
 		if fdFailed && !fdCalculated {
