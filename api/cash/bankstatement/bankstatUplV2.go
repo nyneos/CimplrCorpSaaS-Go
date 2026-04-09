@@ -778,7 +778,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			_, writeErr := tmpXlsFile.Write(tmpFile)
 			if writeErr == nil {
 				tmpXlsFile.Close() // Close before reading
-				xlsBook, xlsErr := xls.OpenFile(tmpXlsFile.Name())
+				var xlsBook xls.Workbook
+				xlsBook, xlsErr = xls.OpenFile(tmpXlsFile.Name())
 				if xlsErr == nil {
 					sheet, sheetErr := xlsBook.GetSheet(0)
 					if sheetErr == nil && sheet != nil {
