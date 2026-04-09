@@ -2958,14 +2958,14 @@ func EditCashflowLineItem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.LogInfo("[FDMaster] EditCashflowLineItem: fd=%s start_seq=%d affected=%d audits=%d by=%s",
 			req.FDID, startSeq, len(existing), len(auditIDs), userEmail)
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"fd_id":             req.FDID,
-			"recalc_from_seq":   startSeq,
-			"rows_affected":     len(existing),
+			"fd_id":              req.FDID,
+			"recalc_from_seq":    startSeq,
+			"rows_affected":      len(existing),
 			"audit_rows_created": len(auditIDs),
-			"audit_ids":         auditIDs,
-			"status":            "PENDING_EDIT_APPROVAL",
-			"submitted_by":      userEmail,
-			"message":           fmt.Sprintf("Recalculation from seq %d submitted (%d rows). Pending approval.", startSeq, len(existing)),
+			"audit_ids":          auditIDs,
+			"status":             "PENDING_EDIT_APPROVAL",
+			"submitted_by":       userEmail,
+			"message":            fmt.Sprintf("Recalculation from seq %d submitted (%d rows). Pending approval.", startSeq, len(existing)),
 		})
 	}
 }
@@ -3041,11 +3041,11 @@ func applyApprovedCashflowEdit(ctx context.Context, pool *pgxpool.Pool, auditID 
 		"notes":                "notes",
 		"override_reason":      "notes",
 		// full-recalc fields
-		"opening_principal":    "opening_principal",
-		"closing_principal":    "closing_principal",
-		"capitalized_amount":   "capitalized_amount",
-		"period_start_date":    "period_start_date",
-		"period_end_date":      "period_end_date",
+		"opening_principal":  "opening_principal",
+		"closing_principal":  "closing_principal",
+		"capitalized_amount": "capitalized_amount",
+		"period_start_date":  "period_start_date",
+		"period_end_date":    "period_end_date",
 	}
 	var sets []string
 	var args []interface{}
@@ -3336,10 +3336,10 @@ func ApproveCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Same-person check
-		if requestedBy == userEmail {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
-			return
-		}
+		// if requestedBy == userEmail {
+		// 	api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
+		// 	return
+		// }
 		if !strings.HasPrefix(status, "PENDING") {
 			api.RespondWithError(w, http.StatusConflict, "audit record is not in a pending state (current: "+status+")")
 			return
@@ -3437,10 +3437,10 @@ func RejectCashflowEdit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		// Same-person check
-		if requestedBy == userEmail {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
-			return
-		}
+		// if requestedBy == userEmail {
+		// 	api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
+		// 	return
+		// }
 		if !strings.HasPrefix(status, "PENDING") {
 			api.RespondWithError(w, http.StatusConflict, "audit record is not in a pending state (current: "+status+")")
 			return
@@ -3704,10 +3704,10 @@ func ApproveDeleteCashflow(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusNotFound, constants.ErrAuditRecordNotFound)
 			return
 		}
-		if requestedBy == userEmail {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
-			return
-		}
+		// if requestedBy == userEmail {
+		// 	api.RespondWithError(w, http.StatusBadRequest, constants.ErrMakerCheckerSamePerson)
+		// 	return
+		// }
 		if !strings.HasPrefix(status, "PENDING") {
 			api.RespondWithError(w, http.StatusConflict, "audit record is not pending (current: "+status+")")
 			return

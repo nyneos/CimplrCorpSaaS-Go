@@ -3113,6 +3113,7 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID     string   `json:"user_id"`
 			ReceiptIDs []string `json:"receipt_ids"`
+			ReceiptID  string   `json:"receipt_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -3122,6 +3123,12 @@ func PostReceiptJournals(pool *pgxpool.Pool) http.HandlerFunc {
 		if userEmail == "" {
 			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
 			return
+		}
+
+		// Accept single `receipt_id` for convenience (legacy clients). Convert
+		// it into the ReceiptIDs slice used by the handler.
+		if len(req.ReceiptIDs) == 0 && strings.TrimSpace(req.ReceiptID) != "" {
+			req.ReceiptIDs = append(req.ReceiptIDs, strings.TrimSpace(req.ReceiptID))
 		}
 
 		ctx := r.Context()
