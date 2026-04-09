@@ -2114,48 +2114,48 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
-			// ── Build simulator_input — maps 1:1 to SimulateCashflowRequest ────────
-			// Use confirmed values when available (post-CONFIRMED), fall back to booked.
-			startDate := strVal(row["actual_start_date"])
-			if startDate == "" {
-				startDate = strVal(row["value_date"])
-				if startDate == "" {
-					startDate = strVal(row["expected_start_date"])
-				}
+			// ── Build simulate_diff_input — maps to SimulateDiffRequest ────────────
+			// booking  = always the original booked values (immutable baseline).
+			// confirmation = starts as a copy of booking values; the frontend
+			//                overwrites it with whatever the bank actually confirmed
+			//                before calling /simulator/diff.
+			// When a confirmation row already exists (post-CONFIRMED status),
+			// confirmation fields are pre-populated with the confirmed actuals so
+			// the diff is ready to render immediately.
+			bookingStart := strVal(row["value_date"])
+			if bookingStart == "" {
+				bookingStart = strVal(row["expected_start_date"])
 			}
-			maturityDate := strVal(row["actual_maturity_date"])
-			if maturityDate == "" {
-				maturityDate = strVal(row["expected_maturity_date"])
+			bookingMaturity := strVal(row["expected_maturity_date"])
+
+			// confirmed actuals — empty when not yet confirmed
+			confirmedStart := strVal(row["actual_start_date"])
+			if confirmedStart == "" {
+				confirmedStart = bookingStart // fall back to booked
 			}
-			principal := row["actual_principal"]
-			if isZeroNumeric(principal) {
-				principal = row["principal_amount"]
+			confirmedMaturity := strVal(row["actual_maturity_date"])
+			if confirmedMaturity == "" {
+				confirmedMaturity = bookingMaturity
 			}
-			interestRate := row["confirmed_rate"]
-			if isZeroNumeric(interestRate) {
-				interestRate = row["interest_rate"]
+			confirmedPrincipal := row["actual_principal"]
+			if isZeroNumeric(confirmedPrincipal) {
+				confirmedPrincipal = row["principal_amount"]
 			}
-			interestType := strVal(row["confirmed_interest_type"])
-			if interestType == "" {
-				interestType = strVal(row["interest_type"])
+			confirmedRate := row["confirmed_rate"]
+			if isZeroNumeric(confirmedRate) {
+				confirmedRate = row["interest_rate"]
+			}
+			confirmedInterestType := strVal(row["confirmed_interest_type"])
+			if confirmedInterestType == "" {
+				confirmedInterestType = strVal(row["interest_type"])
 			}
 
-			row["simulator_input"] = map[string]interface{}{
-				// ── Core FD params (confirmed values win over booked) ────────
-				"principal_amount": principal,
-				"interest_rate":    interestRate,
-				"start_date":       startDate,
-				"maturity_date":    maturityDate,
-				"tenor_days":       row["tenor_days"],
-				"tenor_months":     row["tenor_months"],
-				"tenor_years":      row["tenor_years"],
-				"interest_type":    interestType,
-				// ── Config refs (POST these directly to /simulator/cashflow) ─
-				"bank_config_id": row["bank_config_id"],
-				"frequency_id":   row["frequency_id"],
-				"day_count_code": row["day_count_code"],
-				"tds_plan_id":    row["tds_plan_id"],
-				// ── Bank-config inline overrides ─────────────────────────────
+			// shared config block — same for both sides (bank config doesn't change on confirmation)
+			configBlock := map[string]interface{}{
+				"bank_config_id":                 row["bank_config_id"],
+				"frequency_id":                   row["frequency_id"],
+				"day_count_code":                 row["day_count_code"],
+				"tds_plan_id":                    row["tds_plan_id"],
 				"holiday_calendar_code":          row["holiday_calendar_code"],
 				"tds_deduction_timing":           row["tds_deduction_timing"],
 				"rounding_method":                row["rounding_method"],
@@ -2174,8 +2174,44 @@ func GetApprovedActiveBookings(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"period_boundary_definition":     row["period_boundary_definition"],
 				"quarter_definition":             row["quarter_definition"],
 			}
+
+			// booking leg — original booked values, never changes
+			bookingLeg := map[string]interface{}{
+				"principal_amount": row["principal_amount"],
+				"interest_rate":    row["interest_rate"],
+				"start_date":       bookingStart,
+				"maturity_date":    bookingMaturity,
+				"tenor_days":       row["tenor_days"],
+				"tenor_months":     row["tenor_months"],
+				"tenor_years":      row["tenor_years"],
+				"interest_type":    strVal(row["interest_type"]),
+			}
+			for k, v := range configBlock {
+				bookingLeg[k] = v
+			}
+
+			// confirmation leg — pre-filled with confirmed actuals (or booked if not yet confirmed)
+			confirmationLeg := map[string]interface{}{
+				"principal_amount": confirmedPrincipal,
+				"interest_rate":    confirmedRate,
+				"start_date":       confirmedStart,
+				"maturity_date":    confirmedMaturity,
+				"tenor_days":       row["tenor_days"],
+				"tenor_months":     row["tenor_months"],
+				"tenor_years":      row["tenor_years"],
+				"interest_type":    confirmedInterestType,
+			}
+			for k, v := range configBlock {
+				confirmationLeg[k] = v
+			}
+
+			row["simulate_diff_input"] = map[string]interface{}{
+				"booking":      bookingLeg,
+				"confirmation": confirmationLeg,
+			}
+
 			// Remove the bank-config detail columns from the flat row —
-			// they are already embedded in simulator_input above.
+			// they are already embedded in simulate_diff_input above.
 			for _, k := range []string{
 				"tds_deduction_timing", "rounding_method", "rounding_frequency",
 				"interest_rounding_decimals", "broken_period_method", "broken_period_location",
