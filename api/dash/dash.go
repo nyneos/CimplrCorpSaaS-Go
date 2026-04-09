@@ -24,28 +24,15 @@ import (
 	statementstatus "CimplrCorpSaas/api/dash/statementstatus"
 	ticker "CimplrCorpSaas/api/dash/ticker"
 	middlewares "CimplrCorpSaas/api/middlewares"
-	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartDashService(db *sql.DB, port string) {
+func StartDashService(pgxPool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	dbPort := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
-	}
 	// Statement Status Dashboard
 	mux.Handle("/dash/statement-status", middlewares.PreValidationMiddleware(pgxPool)(statementstatus.GetStatementStatusHandler(pgxPool)))
 	mux.Handle("/dash/transaction-pool", middlewares.PreValidationMiddleware(pgxPool)(commonpool.GetTransactionPoolHandler(db)))
@@ -223,8 +210,7 @@ func StartDashService(db *sql.DB, port string) {
 	mux.Handle("/dash/notification/overview", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
 	log.Printf("Dashboard Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
-	if err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}
 }

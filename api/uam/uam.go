@@ -8,34 +8,16 @@ import (
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
-	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartUAMService(db *sql.DB, port string) {
+func StartUAMService(pgxPool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
 
-	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
-	pgxPool := func() *pgxpool.Pool {
-		user := os.Getenv("DB_USER")
-		pass := os.Getenv("DB_PASSWORD")
-		host := os.Getenv("DB_HOST")
-		port := os.Getenv("DB_PORT")
-		name := os.Getenv("DB_NAME")
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
-		pool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
-		}
-		return pool
-	}()
-	defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
@@ -89,8 +71,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
 	log.Printf("UAM Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
-	if err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
 }

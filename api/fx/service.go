@@ -4,15 +4,18 @@ import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type FXService struct {
 	config map[string]interface{}
 	db     *sql.DB
+	pool   *pgxpool.Pool
 }
 
-func NewFXService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &FXService{config: cfg, db: db}
+func NewFXService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
+	return &FXService{config: cfg, db: db, pool: pool}
 }
 
 func (s *FXService) Name() string {
@@ -33,7 +36,7 @@ func (s *FXService) Start() error {
 			}
 		}
 	}
-	go StartFXService(s.db, port)
+	go StartFXService(s.pool, s.db, port)
 	return nil
 }
 

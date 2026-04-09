@@ -4,15 +4,18 @@ import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type CashService struct {
 	config map[string]interface{}
 	db     *sql.DB
+	pool   *pgxpool.Pool
 }
 
-func NewCashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &CashService{config: cfg, db: db}
+func NewCashService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
+	return &CashService{config: cfg, db: db, pool: pool}
 }
 
 func (s *CashService) Name() string {
@@ -33,7 +36,7 @@ func (s *CashService) Start() error {
 			}
 		}
 	}
-	go StartCashService(s.db, port)
+	go StartCashService(s.pool, s.db, port)
 	return nil
 }
 

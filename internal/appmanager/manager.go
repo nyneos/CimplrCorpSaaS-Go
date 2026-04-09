@@ -58,19 +58,19 @@ var serviceConstructors = map[string]func(map[string]interface{}) serviceiface.S
 		return resource.NewResourceManagerService(cfg)
 	},
 	"fx": func(cfg map[string]interface{}) serviceiface.Service {
-		return fx.NewFXService(cfg, db) // Pass db here
+		return fx.NewFXService(cfg, pgxPool, db)
 	},
 	"dash": func(cfg map[string]interface{}) serviceiface.Service {
-		return dash.NewDashService(cfg, db) // Pass db here
+		return dash.NewDashService(cfg, pgxPool, db)
 	},
 	"cash": func(cfg map[string]interface{}) serviceiface.Service {
-		return cash.NewCashService(cfg, db) // Pass db here
+		return cash.NewCashService(cfg, pgxPool, db)
 	},
 	"uam": func(cfg map[string]interface{}) serviceiface.Service {
-		return uam.NewUAMService(cfg, db)
+		return uam.NewUAMService(cfg, pgxPool, db)
 	},
 	"master": func(cfg map[string]interface{}) serviceiface.Service {
-		return master.NewMasterService(cfg, db)
+		return master.NewMasterService(cfg, pgxPool, db)
 	},
 	"investment": func(cfg map[string]interface{}) serviceiface.Service {
 		// return investment.NewInvestmentService(cfg, pgxPool)

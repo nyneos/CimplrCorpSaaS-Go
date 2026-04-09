@@ -4,15 +4,18 @@ import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type MasterService struct {
 	config map[string]interface{}
 	db     *sql.DB
+	pool   *pgxpool.Pool
 }
 
-func NewMasterService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &MasterService{config: cfg, db: db}
+func NewMasterService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
+	return &MasterService{config: cfg, db: db, pool: pool}
 }
 
 func (s *MasterService) Name() string {
@@ -33,7 +36,7 @@ func (s *MasterService) Start() error {
 			}
 		}
 	}
-	go StartMasterService(s.db, port)
+	go StartMasterService(s.pool, s.db, port)
 	return nil
 }
 

@@ -12,28 +12,15 @@ import (
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/travel"
-	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartCashService(db *sql.DB, port string) {
+func StartCashService(pgxPool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
-	user := os.Getenv("DB_USER")
-	pass := os.Getenv("DB_PASSWORD")
-	host := os.Getenv("DB_HOST")
-	dbPort := os.Getenv("DB_PORT")
-	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
-	pgxPool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		log.Fatalf("failed to connect to pgxpool DB: %v", err)
-	}
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db, pgxPool)))
 	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db, pgxPool)))
 
@@ -201,8 +188,7 @@ func StartCashService(db *sql.DB, port string) {
 		w.Write([]byte("Cash Service is active"))
 	})
 	log.Printf("Cash Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
-	if err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Cash Service failed: %v", err)
 	}
 }

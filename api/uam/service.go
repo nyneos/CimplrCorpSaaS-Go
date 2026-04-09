@@ -4,15 +4,18 @@ import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type UAMService struct {
 	config map[string]interface{}
 	db     *sql.DB
+	pool   *pgxpool.Pool
 }
 
-func NewUAMService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &UAMService{config: cfg, db: db}
+func NewUAMService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
+	return &UAMService{config: cfg, db: db, pool: pool}
 }
 
 func (s *UAMService) Name() string {
@@ -33,7 +36,7 @@ func (s *UAMService) Start() error {
 			}
 		}
 	}
-	go StartUAMService(s.db, port)
+	go StartUAMService(s.pool, s.db, port)
 	return nil
 }
 

@@ -4,16 +4,18 @@ import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
 	"fmt"
-)
 
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
 type DashService struct {
 	config map[string]interface{}
 	db     *sql.DB
+	pool   *pgxpool.Pool
 }
 
-func NewDashService(cfg map[string]interface{}, db *sql.DB) serviceiface.Service {
-	return &DashService{config: cfg, db: db}
+func NewDashService(cfg map[string]interface{}, pool *pgxpool.Pool, db *sql.DB) serviceiface.Service {
+	return &DashService{config: cfg, db: db, pool: pool}
 }
 
 func (s *DashService) Name() string {
@@ -34,7 +36,7 @@ func (s *DashService) Start() error {
 			}
 		}
 	}
-	go StartDashService(s.db, port)
+	go StartDashService(s.pool, s.db, port)
 	return nil
 }
 

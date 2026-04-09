@@ -30,7 +30,13 @@ func InitDB() (*sql.DB, error) {
 		"user=%s password=%s host=%s port=%s dbname=%s sslmode=disable",
 		user, pass, host, port, name,
 	)
-	return sql.Open("postgres", connStr)
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	return db, nil
 }
 
 func main() {
@@ -69,7 +75,7 @@ func main() {
 		sslMode = "disable"
 	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=30&pool_min_conns=2&statement_timeout=30000",
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=20&pool_min_conns=2&statement_timeout=30000",
 		user, pass, host, port, name, sslMode,
 	)
 
