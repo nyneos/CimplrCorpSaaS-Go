@@ -1345,33 +1345,160 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM investment.fd_closure_request cr WHERE %s", where), args...).Scan(&totalCount)
 
 		listArgs := append(args, req.PageSize, offset)
+
+		// Full-detail SELECT — mirrors GetClosureDetail but in list form.
+		// Includes every field from closure_request + all JOINed stage data so
+		// the caller has everything needed to pre-fill UpdateClosure without a
+		// separate detail call.
 		dataSQL := fmt.Sprintf(`
-			SELECT cr.closure_request_id, cr.fd_id, cr.booking_id, cr.confirmation_id,
-			  cr.entity_id, cr.entity_name, cr.closure_type, cr.closure_status,
-			  cr.initiation_date, cr.effective_closure_date, cr.maturity_date,
-			  cr.principal_amount, cr.accrued_interest, cr.tds_deducted,
-			  cr.penalty_amount, cr.net_payout_amount,
-			  COALESCE(cr.settlement_account_id,'') AS settlement_account_id,
-			  COALESCE(cr.maturity_instructions,'') AS maturity_instructions,
-			  COALESCE(cr.closure_reason,'') AS closure_reason,
-			  cr.submitted_by_email, cr.approved_by_email,
-			  cr.approved_at, cr.rejected_at,
-			  COALESCE(cr.rejection_reason,'') AS rejection_reason,
-			  cr.accounting_posted, cr.created_at, cr.updated_at,
-			  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
-			  COALESCE(m.bank_name,'') AS bank_name,
-			  m.interest_rate, m.tenure_days, m.fd_status,
-			  COALESCE(ai.status,'') AS approval_status,
+			SELECT
+			  -- ── closure_request (columns that actually exist) ────────────
+			  cr.closure_request_id,
+			  cr.fd_id,
+			  COALESCE(cr.booking_id,'')            AS booking_id,
+			  COALESCE(cr.confirmation_id,'')       AS confirmation_id,
+			  COALESCE(cr.entity_id,'')             AS entity_id,
+			  COALESCE(cr.entity_name,'')           AS entity_name,
+			  cr.closure_type,
+			  cr.closure_status,
+			  COALESCE(cr.initiation_date::text,'')          AS initiation_date,
+			  COALESCE(cr.effective_closure_date::text,'')   AS effective_closure_date,
+			  COALESCE(cr.maturity_date::text,'')            AS maturity_date,
+			  COALESCE(cr.principal_amount,0)                AS principal_amount,
+			  COALESCE(cr.accrued_interest,0)                AS accrued_interest,
+			  COALESCE(cr.tds_deducted,0)                    AS tds_deducted,
+			  COALESCE(cr.penalty_amount,0)                  AS penalty_amount,
+			  COALESCE(cr.net_payout_amount,0)               AS net_payout_amount,
+			  COALESCE(cr.rollover_amount,0)                 AS rollover_amount,
+			  COALESCE(cr.rollover_tenor_days,0)             AS rollover_tenor_days,
+			  COALESCE(cr.settlement_account_id,'')          AS settlement_account_id,
+			  COALESCE(cr.maturity_instructions,'')          AS maturity_instructions,
+			  COALESCE(cr.closure_reason,'')                 AS closure_reason,
+			  COALESCE(cr.closure_notes,'')                  AS closure_notes,
+			  COALESCE(cr.variance_remark,'')                AS variance_remark,
+			  COALESCE(cr.approval_instance_id,'')           AS approval_instance_id,
+			  COALESCE(cr.submitted_by,'')                   AS submitted_by,
+			  COALESCE(cr.submitted_by_email,'')             AS submitted_by_email,
+			  COALESCE(cr.accounting_posted,false)           AS accounting_posted,
+			  COALESCE(cr.created_at::text,'')               AS created_at,
+			  COALESCE(cr.updated_at::text,'')               AS updated_at,
+			  -- ── fd_master (original FD at time of booking/activation) ────
+			  COALESCE(m.bank_fd_ref_no,'')          AS fd_reference_number,
+			  COALESCE(m.bank_id,'')                 AS bank_id,
+			  COALESCE(m.bank_name,'')               AS bank_name,
+			  COALESCE(m.interest_rate,0)            AS fd_interest_rate,
+			  COALESCE(m.interest_type_code,'')      AS interest_type_code,
+			  COALESCE(m.tenure_days,0)              AS tenure_days,
+			  COALESCE(m.start_date::text,'')        AS fd_start_date,
+			  COALESCE(m.maturity_date::text,'')     AS fd_maturity_date,
+			  COALESCE(m.principal_amount,0)         AS original_principal,
+			  COALESCE(m.fd_status,'')               AS fd_status,
+			  COALESCE(m.maturity_instructions,'')   AS fd_maturity_instructions,
+			  COALESCE(m.day_count_code,'')          AS day_count_code,
+			  COALESCE(m.frequency_id,'')            AS frequency_id,
+			  COALESCE(m.auto_renewal,false)         AS auto_renewal,
+			  -- ── fd_booking_request (at time of initiation) ───────────────
+			  COALESCE(b.entity_id,'')               AS booking_entity_id,
+			  COALESCE(b.entity_name,'')             AS booking_entity_name,
+			  COALESCE(b.source_account_id,'')       AS source_account_id,
+			  COALESCE(b.tds_plan_id,'')             AS tds_plan_id,
+			  COALESCE(b.frequency_id,'')            AS booking_frequency_id,
+			  COALESCE(b.bank_config_id,'')          AS bank_config_id,
+			  -- ── fd_confirmation (as confirmed by bank) ───────────────────
+			  COALESCE(c.bank_fd_ref_no,'')          AS bank_fd_reference,
+			  COALESCE(c.confirmation_status,'')     AS confirmation_status,
+			  COALESCE(c.confirmation_received_date::text,'') AS confirmation_date,
+			  -- ── accrual ledger totals (live) ─────────────────────────────
+			  COALESCE(al.total_interest_accrued,0)  AS total_interest_accrued,
+			  COALESCE(al.total_tds_accrued,0)       AS total_tds_accrued,
+			  -- ── penalty structure (for the bank) ─────────────────────────
+			  COALESCE(ps.penalty_value,0)           AS penalty_structure_value,
+			  COALESCE(ps.penalty_type,'NONE')       AS penalty_structure_type,
+			  COALESCE(ps.no_interest_if_withdrawn_before,0) AS no_interest_min_days,
+			  -- ── maturity payout sub-table (LATERAL, latest row) ──────────
+			  COALESCE(mp.payout_date::text,'')      AS mp_payout_date,
+			  COALESCE(mp.principal_returned,0)      AS mp_principal_returned,
+			  COALESCE(mp.gross_interest,0)          AS mp_gross_interest,
+			  COALESCE(mp.tds_deducted,0)            AS mp_tds_deducted,
+			  COALESCE(mp.net_payout,0)              AS mp_net_payout,
+			  COALESCE(mp.settlement_account_id,'')  AS mp_settlement_account_id,
+			  COALESCE(mp.payment_status,'')         AS mp_payment_status,
+			  -- ── premature closure sub-table (LATERAL, latest row) ────────
+			  COALESCE(prem.premature_closure_date::text,'') AS prem_closure_date,
+			  COALESCE(prem.days_held,0)             AS prem_days_held,
+			  COALESCE(prem.contracted_rate,0)       AS prem_contracted_rate,
+			  COALESCE(prem.applicable_rate,0)       AS prem_applicable_rate,
+			  COALESCE(prem.gross_interest_earned,0) AS prem_gross_interest_earned,
+			  COALESCE(prem.penalty_rate,0)          AS prem_penalty_rate,
+			  COALESCE(prem.penalty_amount,0)        AS prem_penalty_amount,
+			  COALESCE(prem.no_interest_flag,false)  AS prem_no_interest_flag,
+			  COALESCE(prem.tds_on_interest,0)       AS prem_tds_on_interest,
+			  COALESCE(prem.net_payout,0)            AS prem_net_payout,
+			  -- ── rollover sub-table (LATERAL, latest row) ─────────────────
+			  COALESCE(rol.rollover_date::text,'')   AS rol_rollover_date,
+			  COALESCE(rol.rollover_amount,0)        AS rol_rollover_amount,
+			  COALESCE(rol.rollover_principal,0)     AS rol_rollover_principal,
+			  COALESCE(rol.interest_credited,0)      AS rol_interest_credited,
+			  COALESCE(rol.tds_deducted,0)           AS rol_tds_deducted,
+			  COALESCE(rol.new_tenor_days,0)         AS rol_new_tenor_days,
+			  COALESCE(rol.rollover_type,'')         AS rol_rollover_type,
+			  -- ── approval engine status ───────────────────────────────────
+			  COALESCE(ai.status,'')                 AS approval_status,
+			  COALESCE(ai.submitted_at::text,'')     AS approval_submitted_at,
+			  -- ── latest audit processing status ───────────────────────────
 			  COALESCE((
 			    SELECT aud.processing_status
 			    FROM investment.fd_audit_closure_request aud
 			    WHERE aud.closure_request_id = cr.closure_request_id
 			    ORDER BY aud.created_at DESC LIMIT 1
-			  ),'') AS latest_processing_status
+			  ),'') AS latest_processing_status,
+			  -- ── computed maturity amount ─────────────────────────────────
+			  ROUND((
+			    COALESCE(cr.principal_amount,0)
+			    + COALESCE(al.total_interest_accrued,0)
+			    - COALESCE(al.total_tds_accrued,0)
+			  )::numeric, 4) AS expected_maturity_amount
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
+			LEFT JOIN investment.fd_booking_request b ON b.booking_id = cr.booking_id
+			LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = cr.confirmation_id
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
-			WHERE %s ORDER BY cr.created_at DESC
+			LEFT JOIN LATERAL (
+			  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued,
+			         SUM(COALESCE(tds_deducted_in_period,0))  AS total_tds_accrued
+			  FROM investment.fd_accrual_ledger
+			  WHERE fd_id = cr.fd_id AND COALESCE(is_deleted,false) = false
+			) al ON true
+			LEFT JOIN LATERAL (
+			  SELECT penalty_value, penalty_type, no_interest_if_withdrawn_before
+			  FROM investment.fd_penalty_structure_master ps
+			  WHERE ps.bank_code = m.bank_id AND COALESCE(ps.is_deleted,false) = false
+			  ORDER BY ps.penalty_value DESC LIMIT 1
+			) ps ON true
+			LEFT JOIN LATERAL (
+			  SELECT payout_date, principal_returned, gross_interest, tds_deducted, net_payout,
+			         settlement_account_id, payment_status
+			  FROM investment.fd_closure_maturity_payout
+			  WHERE closure_request_id = cr.closure_request_id
+			  ORDER BY created_at DESC LIMIT 1
+			) mp ON true
+			LEFT JOIN LATERAL (
+			  SELECT premature_closure_date, days_held, contracted_rate, applicable_rate,
+			         gross_interest_earned, penalty_rate, penalty_amount, no_interest_flag,
+			         tds_on_interest, net_payout
+			  FROM investment.fd_closure_premature
+			  WHERE closure_request_id = cr.closure_request_id
+			  ORDER BY created_at DESC LIMIT 1
+			) prem ON true
+			LEFT JOIN LATERAL (
+			  SELECT rollover_date, rollover_amount, rollover_principal, interest_credited,
+			         tds_deducted, new_tenor_days, rollover_type
+			  FROM investment.fd_closure_rollover
+			  WHERE closure_request_id = cr.closure_request_id
+			  ORDER BY created_at DESC LIMIT 1
+			) rol ON true
+			WHERE %s
+			ORDER BY cr.created_at DESC
 			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
 
 		rows, err := pool.Query(ctx, dataSQL, listArgs...)
@@ -1392,9 +1519,13 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			records = append(records, row)
 		}
+		if records == nil {
+			records = []map[string]interface{}{}
+		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"records": records, "total": totalCount, "page": req.Page, "page_size": req.PageSize,
 		})
+		api.LogInfo("[FDClosure] GetAllClosureRequests: %d/%d by=%s", len(records), totalCount, userEmail)
 	}
 }
 
