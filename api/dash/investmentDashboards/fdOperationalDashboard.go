@@ -245,7 +245,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(ir.fd_id,'') AS suspected_fd_ref
 				FROM investment.fd_interest_receipt ir
 				WHERE ir.is_deleted=false
-				  AND (ir.fd_id IS NULL OR ir.reconciliation_status IN ('UNMATCHED','PENDING',''))
+				  AND (ir.fd_id IS NULL OR ir.reconcile_status IN ('UNMATCHED','PENDING',''))
 				  AND ($1::text='' OR ir.entity_id=$1)
 				ORDER BY ir.receipt_date DESC
 				LIMIT 100`, entityFilter)
@@ -500,7 +500,220 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			return out, nil
 		})
 
-		// ── 9. full FD list with all info ─────────────────────────────────────
+		// ── 9. interest receipts (with audit/approval status) ──────────────────
+		run("receipts", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  ir.receipt_id,
+				  COALESCE(ir.fd_id,'')                       AS fd_id,
+				  COALESCE(ir.entity_id,'')                   AS entity_id,
+				  COALESCE(ir.entity_name,'')                 AS entity_name,
+				  COALESCE(ir.bank_id,'')                     AS bank_id,
+				  COALESCE(ir.bank_name,'')                   AS bank_name,
+				  COALESCE(ir.fd_ref_no,'')                   AS fd_ref_no,
+				  COALESCE(TO_CHAR(ir.receipt_date,'YYYY-MM-DD'),'') AS receipt_date,
+				  COALESCE(TO_CHAR(ir.period_start,'YYYY-MM-DD'),'') AS period_start,
+				  COALESCE(TO_CHAR(ir.period_end,'YYYY-MM-DD'),'')   AS period_end,
+				  COALESCE(ir.gross_interest_received,0)      AS gross_interest,
+				  COALESCE(ir.tds_amount_deducted,0)          AS tds_deducted,
+				  COALESCE(ir.net_amount_received,0)          AS net_amount,
+				  COALESCE(ir.receipt_status,'')              AS receipt_status,
+				  COALESCE(ir.ingestion_mode,'')              AS ingestion_source,
+				  COALESCE(la.processing_status,'')           AS processing_status,
+				  COALESCE(la.action_type,'')                 AS action_type,
+				  COALESCE(la.requested_by,'')                AS requested_by,
+				  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				  COALESCE(la.checker_by,'')                  AS checker_by,
+				  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+				  COALESCE(TO_CHAR(ir.created_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS created_at
+				FROM investment.fd_interest_receipt ir
+				LEFT JOIN LATERAL (
+				  SELECT processing_status, action_type, requested_by, requested_at, checker_by, checker_at
+				  FROM investment.fd_interest_receipt_audit
+				  WHERE receipt_id = ir.receipt_id
+				  ORDER BY created_at DESC LIMIT 1
+				) la ON true
+				WHERE ir.is_deleted = false
+				  AND ($1::text='' OR ir.entity_id=$1)
+				ORDER BY ir.created_at DESC
+				LIMIT 200`, entityFilter)
+			if err != nil {
+				api.LogError("[OperationalDash] receipts query error: %v", err)
+				return map[string]interface{}{"rows": []interface{}{}, "count": 0,
+					"pending_count": 0, "approved_count": 0, "captured_count": 0}, nil
+			}
+			defer rows.Close()
+
+			type receiptRow struct {
+				ReceiptID        string  `json:"receipt_id"`
+				FDID             string  `json:"fd_id"`
+				EntityID         string  `json:"entity_id"`
+				EntityName       string  `json:"entity_name"`
+				BankID           string  `json:"bank_id"`
+				BankName         string  `json:"bank_name"`
+				FdRefNo          string  `json:"fd_ref_no"`
+				ReceiptDate      string  `json:"receipt_date"`
+				PeriodStart      string  `json:"period_start"`
+				PeriodEnd        string  `json:"period_end"`
+				GrossInterest    float64 `json:"gross_interest"`
+				TDSDeducted      float64 `json:"tds_deducted"`
+				NetAmount        float64 `json:"net_amount"`
+				ReceiptStatus    string  `json:"receipt_status"`
+				IngestionSource  string  `json:"ingestion_source"`
+				ProcessingStatus string  `json:"processing_status"`
+				ActionType       string  `json:"action_type"`
+				RequestedBy      string  `json:"requested_by"`
+				RequestedAt      string  `json:"requested_at"`
+				CheckerBy        string  `json:"checker_by"`
+				CheckerAt        string  `json:"checker_at"`
+				CreatedAt        string  `json:"created_at"`
+			}
+			out := []receiptRow{}
+			pendingCount, approvedCount, capturedCount := 0, 0, 0
+			for rows.Next() {
+				var rr receiptRow
+				if err2 := rows.Scan(
+					&rr.ReceiptID, &rr.FDID, &rr.EntityID, &rr.EntityName,
+					&rr.BankID, &rr.BankName, &rr.FdRefNo,
+					&rr.ReceiptDate, &rr.PeriodStart, &rr.PeriodEnd,
+					&rr.GrossInterest, &rr.TDSDeducted, &rr.NetAmount,
+					&rr.ReceiptStatus, &rr.IngestionSource,
+					&rr.ProcessingStatus, &rr.ActionType,
+					&rr.RequestedBy, &rr.RequestedAt, &rr.CheckerBy, &rr.CheckerAt,
+					&rr.CreatedAt,
+				); err2 != nil {
+					api.LogError("[OperationalDash] receipts scan error: %v", err2)
+					continue
+				}
+				rr.GrossInterest = fdRound(rr.GrossInterest, 2)
+				rr.TDSDeducted = fdRound(rr.TDSDeducted, 2)
+				rr.NetAmount = fdRound(rr.NetAmount, 2)
+				switch rr.ProcessingStatus {
+				case "PENDING_APPROVAL":
+					pendingCount++
+				case "APPROVED":
+					approvedCount++
+				default:
+					if rr.ReceiptStatus == "CAPTURED" {
+						capturedCount++
+					}
+				}
+				out = append(out, rr)
+			}
+			return map[string]interface{}{
+				"rows":           out,
+				"count":          len(out),
+				"pending_count":  pendingCount,
+				"approved_count": approvedCount,
+				"captured_count": capturedCount,
+			}, nil
+		})
+
+		// ── 10. TDS receipts (with audit/approval status) ─────────────────────
+		run("tds_receipts", func(ctx context.Context) (interface{}, error) {
+			rows, err := pool.Query(ctx, `
+				SELECT
+				  t.tds_id,
+				  COALESCE(t.receipt_id,'')                   AS receipt_id,
+				  COALESCE(t.fd_id,'')                        AS fd_id,
+				  COALESCE(t.entity_id,'')                    AS entity_id,
+				  COALESCE(m.entity_name, t.entity_id, '')    AS entity_name,
+				  COALESCE(t.bank_id,'')                      AS bank_id,
+				  COALESCE(m.bank_name, t.bank_id, '')        AS bank_name,
+				  COALESCE(t.fd_ref_no,'')                    AS fd_ref_no,
+				  COALESCE(TO_CHAR(t.deduction_date,'YYYY-MM-DD'),'') AS deduction_date,
+				  COALESCE(TO_CHAR(t.period_start,'YYYY-MM-DD'),'')   AS period_start,
+				  COALESCE(TO_CHAR(t.period_end,'YYYY-MM-DD'),'')     AS period_end,
+				  COALESCE(t.tds_deducted_actual,0)           AS tds_actual,
+				  COALESCE(t.tds_expected,0)                  AS tds_expected,
+				  COALESCE(t.tds_status,'')                   AS tds_status,
+				  COALESCE(t.ingestion_source,'')             AS ingestion_source,
+				  COALESCE(la.processing_status,'')           AS processing_status,
+				  COALESCE(la.action_type,'')                 AS action_type,
+				  COALESCE(la.requested_by,'')                AS requested_by,
+				  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				  COALESCE(la.checker_by,'')                  AS checker_by,
+				  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+				  COALESCE(TO_CHAR(t.created_at,'YYYY-MM-DD HH24:MI:SS'),'')    AS created_at
+				FROM investment.fd_tds_receipt t
+				LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
+				LEFT JOIN LATERAL (
+				  SELECT processing_status, action_type, requested_by, requested_at, checker_by, checker_at
+				  FROM investment.fd_tds_receipt_audit
+				  WHERE tds_id = t.tds_id
+				  ORDER BY created_at DESC LIMIT 1
+				) la ON true
+				WHERE t.is_deleted = false
+				  AND ($1::text='' OR t.entity_id=$1)
+				ORDER BY t.created_at DESC
+				LIMIT 200`, entityFilter)
+			if err != nil {
+				api.LogError("[OperationalDash] tds_receipts query error: %v", err)
+				return map[string]interface{}{"rows": []interface{}{}, "count": 0,
+					"pending_count": 0, "approved_count": 0}, nil
+			}
+			defer rows.Close()
+
+			type tdsRow struct {
+				TDSID            string  `json:"tds_id"`
+				ReceiptID        string  `json:"receipt_id"`
+				FDID             string  `json:"fd_id"`
+				EntityID         string  `json:"entity_id"`
+				EntityName       string  `json:"entity_name"`
+				BankID           string  `json:"bank_id"`
+				BankName         string  `json:"bank_name"`
+				FdRefNo          string  `json:"fd_ref_no"`
+				DeductionDate    string  `json:"deduction_date"`
+				PeriodStart      string  `json:"period_start"`
+				PeriodEnd        string  `json:"period_end"`
+				TDSActual        float64 `json:"tds_actual"`
+				TDSExpected      float64 `json:"tds_expected"`
+				TDSStatus        string  `json:"tds_status"`
+				IngestionSource  string  `json:"ingestion_source"`
+				ProcessingStatus string  `json:"processing_status"`
+				ActionType       string  `json:"action_type"`
+				RequestedBy      string  `json:"requested_by"`
+				RequestedAt      string  `json:"requested_at"`
+				CheckerBy        string  `json:"checker_by"`
+				CheckerAt        string  `json:"checker_at"`
+				CreatedAt        string  `json:"created_at"`
+			}
+			out := []tdsRow{}
+			pendingCount, approvedCount := 0, 0
+			for rows.Next() {
+				var tr tdsRow
+				if err2 := rows.Scan(
+					&tr.TDSID, &tr.ReceiptID, &tr.FDID, &tr.EntityID, &tr.EntityName,
+					&tr.BankID, &tr.BankName, &tr.FdRefNo,
+					&tr.DeductionDate, &tr.PeriodStart, &tr.PeriodEnd,
+					&tr.TDSActual, &tr.TDSExpected,
+					&tr.TDSStatus, &tr.IngestionSource,
+					&tr.ProcessingStatus, &tr.ActionType,
+					&tr.RequestedBy, &tr.RequestedAt, &tr.CheckerBy, &tr.CheckerAt,
+					&tr.CreatedAt,
+				); err2 != nil {
+					api.LogError("[OperationalDash] tds_receipts scan error: %v", err2)
+					continue
+				}
+				tr.TDSActual = fdRound(tr.TDSActual, 2)
+				tr.TDSExpected = fdRound(tr.TDSExpected, 2)
+				switch tr.ProcessingStatus {
+				case "PENDING_APPROVAL":
+					pendingCount++
+				case "APPROVED":
+					approvedCount++
+				}
+				out = append(out, tr)
+			}
+			return map[string]interface{}{
+				"rows":           out,
+				"count":          len(out),
+				"pending_count":  pendingCount,
+				"approved_count": approvedCount,
+			}, nil
+		})
+
+		// ── 11. full FD list with all info ────────────────────────────────────
 		run("fd_list", func(ctx context.Context) (interface{}, error) {
 			rows, err := pool.Query(ctx, `
 				SELECT
@@ -586,6 +799,8 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 		tdsCount := 0
 		excCount := 0
 		failedPostings := 0
+		receiptsPendingCount := 0
+		tdsPendingApprovalCount := 0
 
 		if v := get("booking_requests"); v != nil {
 			if m, ok := v.(map[string]interface{}); ok {
@@ -625,6 +840,20 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 		}
+		if v := get("receipts"); v != nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				if c, ok2 := m["pending_count"].(int); ok2 {
+					receiptsPendingCount = c
+				}
+			}
+		}
+		if v := get("tds_receipts"); v != nil {
+			if m, ok := v.(map[string]interface{}); ok {
+				if c, ok2 := m["pending_count"].(int); ok2 {
+					tdsPendingApprovalCount = c
+				}
+			}
+		}
 		if v := get("posting_queue"); v != nil {
 			b, _ := json.Marshal(v)
 			var prRows []struct {
@@ -655,15 +884,19 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				"unmatched_receipts":       unmatchedCount,
 				"tds_pending_count":        tdsCount,
 				"tds_pending_amount":       getNestedFloat(get("tds_pending"), "total_amount"),
-				"exceptions_open":          excCount,
-				"exceptions_impact":        getNestedFloat(get("exceptions"), "impact"),
-				"failed_posting_batches":   failedPostings,
-				"total_work_items":         bookingCount + confirmCount + unmatchedCount + tdsCount + excCount,
+				"exceptions_open":              excCount,
+				"exceptions_impact":            getNestedFloat(get("exceptions"), "impact"),
+				"failed_posting_batches":       failedPostings,
+				"receipts_pending_approval":    receiptsPendingCount,
+				"tds_pending_approval":         tdsPendingApprovalCount,
+				"total_work_items":             bookingCount + confirmCount + unmatchedCount + tdsCount + excCount + receiptsPendingCount + tdsPendingApprovalCount,
 			},
 			"tables": map[string]interface{}{
 				"booking_requests":      get("booking_requests"),
 				"pending_confirmations": get("pending_confirmations"),
 				"unmatched_receipts":    get("unmatched_receipts"),
+				"receipts":              get("receipts"),
+				"tds_receipts":          get("tds_receipts"),
 				"exceptions":            get("exceptions"),
 				"posting_queue":         get("posting_queue"),
 				"fd_list":               get("fd_list"),

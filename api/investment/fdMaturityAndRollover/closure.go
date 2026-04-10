@@ -418,9 +418,6 @@ type initiateClosureRequest struct {
 	GrossInterestEarned  float64 `json:"gross_interest_earned"`
 	TDSOnInterest        float64 `json:"tds_on_interest"`
 	PenaltyStructureID   string  `json:"penalty_structure_id"`
-	PenaltyType          string  `json:"penalty_type"`          // snapshot: PERCENTAGE | FLAT_AMOUNT | RATE_REDUCTION
-	PenaltyValue         float64 `json:"penalty_value"`         // snapshot of penalty master value
-	PenaltyCalcMethod    string  `json:"penalty_calc_method"`   // snapshot of calculation_method
 	PrematureClosureDate string  `json:"premature_closure_date"`
 
 	// ── Net payout / settlement ────────────────────────────────────────────
@@ -436,7 +433,6 @@ type initiateClosureRequest struct {
 	PrincipalReturned float64 `json:"principal_returned"`
 	GrossInterest     float64 `json:"gross_interest"`
 	PayoutDate        string  `json:"payout_date"`
-	BankReference     string  `json:"bank_reference"` // bank's UTR / transaction ref for payout
 
 	// ── Rollover specific ──────────────────────────────────────────────────
 	RolloverType         string  `json:"rollover_type"` // FULL | PARTIAL | PRINCIPAL_ONLY
@@ -448,10 +444,6 @@ type initiateClosureRequest struct {
 	NewMaturityDate      string  `json:"new_maturity_date"`
 	PartialWithdrawal    float64 `json:"partial_withdrawal"`
 	NewFDID              string  `json:"new_fd_id"`
-	// New bank for rollover (may differ from the source FD's bank)
-	NewBankID    string `json:"new_bank_id"`
-	NewBankName  string `json:"new_bank_name"`
-	NewAccountID string `json:"new_account_id"` // settlement/source account at new bank
 
 	// ── Closure metadata ──────────────────────────────────────────────────
 	ClosureReason string `json:"closure_reason"`
@@ -759,55 +751,19 @@ func InitiateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 
 		switch req.ClosureType {
 		case "MATURITY":
-			_, _ = tx.Exec(ctx, `
-				INSERT INTO investment.fd_closure_maturity_payout
-				  (closure_request_id,fd_id,payout_date,principal_returned,gross_interest,
-				   tds_deducted,net_payout,settlement_account_id,bank_reference,payment_status,created_by)
-				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,'PENDING',$10)`,
-				closureRequestID, req.FDID, effectiveDateStr, principalAmount,
-				roundToFour(accruedInterest), roundToFour(tdsDeducted), netPayout,
-				nullStrOrNil(req.SettlementAccountID), nullStrOrNil(req.BankReference), userEmail)
+			_, _ = tx.Exec(ctx, `INSERT INTO investment.fd_closure_maturity_payout (closure_request_id,fd_id,payout_date,principal_returned,gross_interest,tds_deducted,net_payout,settlement_account_id,payment_status,created_by) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'PENDING',$9)`,
+				closureRequestID, req.FDID, effectiveDateStr, principalAmount, roundToFour(accruedInterest), roundToFour(tdsDeducted), netPayout, nullStrOrNil(req.SettlementAccountID), userEmail)
 		case "PREMATURE":
 			var daysHeld int
 			_ = tx.QueryRow(ctx, `SELECT COALESCE((CURRENT_DATE - start_date)::int,0) FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&daysHeld)
 			var contractedRate float64
 			_ = tx.QueryRow(ctx, `SELECT COALESCE(interest_rate,0) FROM investment.fd_master WHERE fd_id=$1`, req.FDID).Scan(&contractedRate)
-			// Use penalty details from request (populated via /validate system_values) or fall back to computed values
-			penaltyType := req.PenaltyType
-			penaltyValue := req.PenaltyValue
-			penaltyCalcMethod := req.PenaltyCalcMethod
-			penaltyStructureID := req.PenaltyStructureID
-			_, _ = tx.Exec(ctx, `
-				INSERT INTO investment.fd_closure_premature
-				  (closure_request_id,fd_id,premature_closure_date,days_held,contracted_rate,
-				   applicable_rate,gross_interest_earned,penalty_rate,penalty_amount,no_interest_flag,
-				   tds_on_interest,net_payout,penalty_id,penalty_type,penalty_value,calculation_method,
-				   bank_reference,created_by)
-				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-				closureRequestID, req.FDID, effectiveDateStr, daysHeld, contractedRate,
-				roundToFour(contractedRate-penaltyRate),
-				roundToFour(accruedInterest), penaltyRate, roundToFour(penaltyAmount), noInterestFlag,
-				roundToFour(tdsDeducted), netPayout,
-				nullStrOrNil(penaltyStructureID), nullStrOrNil(penaltyType),
-				penaltyValue, nullStrOrNil(penaltyCalcMethod),
-				nullStrOrNil(req.BankReference), userEmail)
+			_, _ = tx.Exec(ctx, `INSERT INTO investment.fd_closure_premature (closure_request_id,fd_id,premature_closure_date,days_held,contracted_rate,applicable_rate,gross_interest_earned,penalty_rate,penalty_amount,no_interest_flag,tds_on_interest,net_payout,created_by) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+				closureRequestID, req.FDID, effectiveDateStr, daysHeld, contractedRate, roundToFour(contractedRate-penaltyRate),
+				roundToFour(accruedInterest), penaltyRate, roundToFour(penaltyAmount), noInterestFlag, roundToFour(tdsDeducted), netPayout, userEmail)
 		case "ROLLOVER":
-			rollType := req.RolloverType
-			if rollType == "" {
-				rollType = "FULL"
-			}
-			_, _ = tx.Exec(ctx, `
-				INSERT INTO investment.fd_closure_rollover
-				  (closure_request_id,source_fd_id,rollover_date,
-				   rollover_amount,rollover_principal,interest_credited,tds_deducted,
-				   new_tenor_days,new_interest_rate,rollover_type,
-				   bank_code,new_bank_id,new_bank_name,new_account_id,created_by)
-				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-				closureRequestID, req.FDID, effectiveDateStr,
-				netPayout, principalAmount, roundToFour(accruedInterest), roundToFour(tdsDeducted),
-				req.RolloverTenorDays, req.RolloverInterestRate, rollType,
-				nullStrOrNil(req.NewBankID), nullStrOrNil(req.NewBankID),
-				nullStrOrNil(req.NewBankName), nullStrOrNil(req.NewAccountID), userEmail)
+			_, _ = tx.Exec(ctx, `INSERT INTO investment.fd_closure_rollover (closure_request_id,source_fd_id,rollover_date,rollover_amount,rollover_principal,interest_credited,tds_deducted,new_tenor_days,rollover_type,created_by) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'FULL',$9)`,
+				closureRequestID, req.FDID, effectiveDateStr, netPayout, principalAmount, roundToFour(accruedInterest), roundToFour(tdsDeducted), req.RolloverTenorDays, userEmail)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -874,9 +830,6 @@ type updateClosureRequest struct {
 	GrossInterestEarned  float64 `json:"gross_interest_earned"`
 	TDSOnInterest        float64 `json:"tds_on_interest"`
 	PenaltyStructureID   string  `json:"penalty_structure_id"`
-	PenaltyType          string  `json:"penalty_type"`
-	PenaltyValue         float64 `json:"penalty_value"`
-	PenaltyCalcMethod    string  `json:"penalty_calc_method"`
 	PrematureClosureDate string  `json:"premature_closure_date"`
 
 	// ── Net payout / settlement ──────────────────────────────────────────────
@@ -892,7 +845,6 @@ type updateClosureRequest struct {
 	PrincipalReturned float64 `json:"principal_returned"`
 	GrossInterest     float64 `json:"gross_interest"`
 	PayoutDate        string  `json:"payout_date"`
-	BankReference     string  `json:"bank_reference"`
 
 	// ── Rollover specific ───────────────────────────────────────────────────
 	RolloverType         string  `json:"rollover_type"`
@@ -904,10 +856,6 @@ type updateClosureRequest struct {
 	NewMaturityDate      string  `json:"new_maturity_date"`
 	PartialWithdrawal    float64 `json:"partial_withdrawal"`
 	NewFDID              string  `json:"new_fd_id"`
-	// New bank for rollover (may differ from source FD’s bank)
-	NewBankID    string `json:"new_bank_id"`
-	NewBankName  string `json:"new_bank_name"`
-	NewAccountID string `json:"new_account_id"`
 
 	// ── Closure metadata ────────────────────────────────────────────────────
 	ClosureReason  string `json:"closure_reason"`
@@ -1227,14 +1175,13 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			settleAcct := firstNonEmpty(req.SettlementAccountID, oldSettlAcct)
 			_, _ = tx.Exec(ctx, `
 				INSERT INTO investment.fd_closure_maturity_payout
-				  (closure_request_id,fd_id,payout_date,principal_returned,gross_interest,tds_deducted,net_payout,settlement_account_id,bank_reference,payment_status,created_by)
-				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,'PENDING',$10)
+				  (closure_request_id,fd_id,payout_date,principal_returned,gross_interest,tds_deducted,net_payout,settlement_account_id,payment_status,created_by)
+				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'PENDING',$9)
 				ON CONFLICT (closure_request_id) DO UPDATE SET
 				  payout_date=EXCLUDED.payout_date, principal_returned=EXCLUDED.principal_returned,
 				  gross_interest=EXCLUDED.gross_interest, tds_deducted=EXCLUDED.tds_deducted,
-				  net_payout=EXCLUDED.net_payout, settlement_account_id=EXCLUDED.settlement_account_id,
-				  bank_reference=EXCLUDED.bank_reference`,
-				req.ClosureRequestID, oldFDID, effDate, princ, roundToFour(grInt), roundToFour(tds), roundToFour(netP), nullStrOrNil(settleAcct), nullStrOrNil(req.BankReference), userEmail)
+				  net_payout=EXCLUDED.net_payout, settlement_account_id=EXCLUDED.settlement_account_id`,
+				req.ClosureRequestID, oldFDID, effDate, princ, roundToFour(grInt), roundToFour(tds), roundToFour(netP), nullStrOrNil(settleAcct), userEmail)
 
 		case "PREMATURE":
 			effDate := firstNonEmpty(req.PrematureClosureDate, req.EffectiveClosureDate, oldEffDate)
@@ -1270,30 +1217,20 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			if netP <= 0 {
 				netP = oldNetPayout
 			}
-			penType := req.PenaltyType
-			penVal := req.PenaltyValue
-			penCalc := req.PenaltyCalcMethod
-			penID := req.PenaltyStructureID
 			_, _ = tx.Exec(ctx, `
 				INSERT INTO investment.fd_closure_premature
 				  (closure_request_id,fd_id,premature_closure_date,days_held,contracted_rate,applicable_rate,
-				   gross_interest_earned,penalty_rate,penalty_amount,no_interest_flag,tds_on_interest,net_payout,
-				   penalty_id,penalty_type,penalty_value,calculation_method,bank_reference,created_by)
-				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+				   gross_interest_earned,penalty_rate,penalty_amount,no_interest_flag,tds_on_interest,net_payout,created_by)
+				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 				ON CONFLICT (closure_request_id) DO UPDATE SET
 				  premature_closure_date=EXCLUDED.premature_closure_date,
 				  days_held=EXCLUDED.days_held, contracted_rate=EXCLUDED.contracted_rate,
 				  applicable_rate=EXCLUDED.applicable_rate, gross_interest_earned=EXCLUDED.gross_interest_earned,
 				  penalty_rate=EXCLUDED.penalty_rate, penalty_amount=EXCLUDED.penalty_amount,
 				  no_interest_flag=EXCLUDED.no_interest_flag, tds_on_interest=EXCLUDED.tds_on_interest,
-				  net_payout=EXCLUDED.net_payout,
-				  penalty_id=EXCLUDED.penalty_id, penalty_type=EXCLUDED.penalty_type,
-				  penalty_value=EXCLUDED.penalty_value, calculation_method=EXCLUDED.calculation_method,
-				  bank_reference=EXCLUDED.bank_reference`,
+				  net_payout=EXCLUDED.net_payout`,
 				req.ClosureRequestID, oldFDID, effDate, dH, contrRate, appRate,
-				roundToFour(grInt), pRate, roundToFour(pAmt), req.NoInterestFlag, roundToFour(tdsOI), roundToFour(netP),
-				nullStrOrNil(penID), nullStrOrNil(penType), penVal, nullStrOrNil(penCalc),
-				nullStrOrNil(req.BankReference), userEmail)
+				roundToFour(grInt), pRate, roundToFour(pAmt), req.NoInterestFlag, roundToFour(tdsOI), roundToFour(netP), userEmail)
 
 		case "ROLLOVER":
 			effDate := firstNonEmpty(req.EffectiveClosureDate, oldEffDate)
@@ -1321,33 +1258,24 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 			if rollType == "" {
 				rollType = "FULL"
 			}
-			newBankCode := req.NewBankID
-			rollRate := req.RolloverInterestRate
 			_, _ = tx.Exec(ctx, `
 				INSERT INTO investment.fd_closure_rollover
 				  (closure_request_id,source_fd_id,rollover_date,rollover_amount,rollover_principal,
-				   interest_credited,tds_deducted,new_tenor_days,new_interest_rate,rollover_type,
-				   bank_code,new_bank_id,new_bank_name,new_account_id,created_by)
-				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+				   interest_credited,tds_deducted,new_tenor_days,rollover_type,created_by)
+				VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10)
 				ON CONFLICT (closure_request_id) DO UPDATE SET
 				  rollover_date=EXCLUDED.rollover_date, rollover_amount=EXCLUDED.rollover_amount,
 				  rollover_principal=EXCLUDED.rollover_principal, interest_credited=EXCLUDED.interest_credited,
 				  tds_deducted=EXCLUDED.tds_deducted, new_tenor_days=EXCLUDED.new_tenor_days,
-				  new_interest_rate=EXCLUDED.new_interest_rate, rollover_type=EXCLUDED.rollover_type,
-				  bank_code=EXCLUDED.bank_code,
-				  new_bank_id=EXCLUDED.new_bank_id, new_bank_name=EXCLUDED.new_bank_name,
-				  new_account_id=EXCLUDED.new_account_id`,
+				  rollover_type=EXCLUDED.rollover_type`,
 				req.ClosureRequestID, oldFDID, effDate, roundToFour(rollAmt), roundToFour(rollPrinc),
-				roundToFour(intCred), roundToFour(tds), rollDays, rollRate, rollType,
-				nullStrOrNil(newBankCode),
-				nullStrOrNil(req.NewBankID), nullStrOrNil(req.NewBankName), nullStrOrNil(req.NewAccountID),
-				userEmail)
+				roundToFour(intCred), roundToFour(tds), rollDays, rollType, userEmail)
 		}
 
 		snapshotJSON, _ := json.Marshal(oldRow)
 		// Pass all old values to audit as individual columns.
 		// Use PENDING_EDIT_APPROVAL so the audit trail shows this was an edit on a pending record.
-		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
+		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "UPDATE", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -1357,12 +1285,6 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Closure request updated", map[string]interface{}{
 			"closure_request_id": req.ClosureRequestID, "updated_by": userEmail,
 		})
-		go func(id, uEmail string) {
-			defer func() { recover() }() //nolint:errcheck
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/closure/update", id, map[string]interface{}{
-				"record_id": id, "event": "FD_CLOSURE_UPDATED", "actor_email": uEmail,
-			})
-		}(req.ClosureRequestID, userEmail)
 	}
 }
 
@@ -1423,194 +1345,59 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		_ = pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM investment.fd_closure_request cr WHERE %s", where), args...).Scan(&totalCount)
 
 		listArgs := append(args, req.PageSize, offset)
-
-		// Full-detail SELECT — mirrors GetClosureDetail but in list form.
-		// Includes every field from closure_request + all JOINed stage data so
-		// the caller has everything needed to pre-fill UpdateClosure without a
-		// separate detail call.
 		dataSQL := fmt.Sprintf(`
-			WITH latest_audit AS (
-			  SELECT DISTINCT ON (a.closure_request_id)
-			    a.closure_request_id, a.action_type, a.processing_status,
-			    a.requested_by, a.requested_at,
-			    a.checker_by, a.checker_at, a.checker_comment
-			  FROM investment.fd_audit_closure_request a
-			  ORDER BY a.closure_request_id,
-			    GREATEST(
-			      COALESCE(a.requested_at,'1970-01-01'::timestamptz),
-			      COALESCE(a.checker_at,'1970-01-01'::timestamptz)
-			    ) DESC
-			),
-			history AS (
-			  SELECT
-			    closure_request_id,
-			    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
-			    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-			    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-			  FROM investment.fd_audit_closure_request
-			  GROUP BY closure_request_id
-			)
-			SELECT
-			  -- ── closure_request (columns that actually exist) ────────────
-			  cr.closure_request_id,
-			  cr.fd_id,
-			  COALESCE(cr.booking_id,'')            AS booking_id,
-			  COALESCE(cr.confirmation_id,'')       AS confirmation_id,
-			  COALESCE(cr.entity_id,'')             AS entity_id,
-			  COALESCE(cr.entity_name,'')           AS entity_name,
-			  cr.closure_type,
-			  cr.closure_status,
-			  COALESCE(cr.initiation_date::text,'')          AS initiation_date,
-			  COALESCE(cr.effective_closure_date::text,'')   AS effective_closure_date,
-			  COALESCE(cr.maturity_date::text,'')            AS maturity_date,
-			  COALESCE(cr.principal_amount,0)                AS principal_amount,
-			  COALESCE(cr.accrued_interest,0)                AS accrued_interest,
-			  COALESCE(cr.tds_deducted,0)                    AS tds_deducted,
-			  COALESCE(cr.penalty_amount,0)                  AS penalty_amount,
-			  COALESCE(cr.net_payout_amount,0)               AS net_payout_amount,
-			  COALESCE(cr.rollover_amount,0)                 AS rollover_amount,
-			  COALESCE(cr.rollover_tenor_days,0)             AS rollover_tenor_days,
-			  COALESCE(cr.settlement_account_id,'')          AS settlement_account_id,
-			  COALESCE(cr.maturity_instructions,'')          AS maturity_instructions,
-			  COALESCE(cr.closure_reason,'')                 AS closure_reason,
-			  COALESCE(cr.closure_notes,'')                  AS closure_notes,
-			  COALESCE(cr.variance_remark,'')                AS variance_remark,
-			  COALESCE(cr.approval_instance_id,'')           AS approval_instance_id,
-			  COALESCE(cr.submitted_by,'')                   AS submitted_by,
-			  COALESCE(cr.submitted_by_email,'')             AS submitted_by_email,
-			  COALESCE(cr.accounting_posted,false)           AS accounting_posted,
-			  COALESCE(cr.created_at::text,'')               AS created_at,
-			  COALESCE(cr.updated_at::text,'')               AS updated_at,
-			  -- ── fd_master (original FD at time of booking/activation) ────
-			  COALESCE(m.bank_fd_ref_no,'')          AS fd_reference_number,
-			  COALESCE(m.bank_id,'')                 AS bank_id,
-			  COALESCE(m.bank_name,'')               AS bank_name,
-			  COALESCE(m.interest_rate,0)            AS fd_interest_rate,
-			  COALESCE(m.interest_type_code,'')      AS interest_type_code,
-			  COALESCE(m.tenure_days,0)              AS tenure_days,
-			  COALESCE(m.start_date::text,'')        AS fd_start_date,
-			  COALESCE(m.maturity_date::text,'')     AS fd_maturity_date,
-			  COALESCE(m.principal_amount,0)         AS original_principal,
-			  COALESCE(m.fd_status,'')               AS fd_status,
-			  COALESCE(m.maturity_instructions,'')   AS fd_maturity_instructions,
-			  COALESCE(m.day_count_code,'')          AS day_count_code,
-			  COALESCE(m.frequency_id,'')            AS frequency_id,
-			  COALESCE(m.auto_renewal,false)         AS auto_renewal,
-			  -- ── fd_booking_request (at time of initiation) ───────────────
-			  COALESCE(b.entity_id,'')               AS booking_entity_id,
-			  COALESCE(b.entity_name,'')             AS booking_entity_name,
-			  COALESCE(b.source_account_id,'')       AS source_account_id,
-			  COALESCE(b.tds_plan_id,'')             AS tds_plan_id,
-			  COALESCE(b.frequency_id,'')            AS booking_frequency_id,
-			  COALESCE(b.bank_config_id,'')          AS bank_config_id,
-			  -- ── fd_confirmation (as confirmed by bank) ───────────────────
-			  COALESCE(c.bank_fd_ref_no,'')          AS bank_fd_reference,
-			  COALESCE(c.confirmation_status,'')     AS confirmation_status,
-			  COALESCE(c.confirmation_received_date::text,'') AS confirmation_date,
-			  -- ── accrual ledger totals (live) ─────────────────────────────
-			  COALESCE(al.total_interest_accrued,0)  AS total_interest_accrued,
-			  COALESCE(al.total_tds_accrued,0)       AS total_tds_accrued,
-			  -- ── penalty structure (for the bank) ─────────────────────────
-			  COALESCE(ps.penalty_value,0)           AS penalty_structure_value,
-			  COALESCE(ps.penalty_type,'NONE')       AS penalty_structure_type,
-			  COALESCE(ps.no_interest_if_withdrawn_before,0) AS no_interest_min_days,
-			  -- ── maturity payout sub-table (LATERAL, latest row) ──────────
-			  COALESCE(mp.payout_date::text,'')      AS mp_payout_date,
-			  COALESCE(mp.principal_returned,0)      AS mp_principal_returned,
-			  COALESCE(mp.gross_interest,0)          AS mp_gross_interest,
-			  COALESCE(mp.tds_deducted,0)            AS mp_tds_deducted,
-			  COALESCE(mp.net_payout,0)              AS mp_net_payout,
-			  COALESCE(mp.settlement_account_id,'')  AS mp_settlement_account_id,
-			  COALESCE(mp.payment_status,'')         AS mp_payment_status,
-			  -- ── premature closure sub-table (LATERAL, latest row) ────────
-			  COALESCE(prem.premature_closure_date::text,'') AS prem_closure_date,
-			  COALESCE(prem.days_held,0)             AS prem_days_held,
-			  COALESCE(prem.contracted_rate,0)       AS prem_contracted_rate,
-			  COALESCE(prem.applicable_rate,0)       AS prem_applicable_rate,
-			  COALESCE(prem.gross_interest_earned,0) AS prem_gross_interest_earned,
-			  COALESCE(prem.penalty_rate,0)          AS prem_penalty_rate,
-			  COALESCE(prem.penalty_amount,0)        AS prem_penalty_amount,
-			  COALESCE(prem.no_interest_flag,false)  AS prem_no_interest_flag,
-			  COALESCE(prem.tds_on_interest,0)       AS prem_tds_on_interest,
-			  COALESCE(prem.net_payout,0)            AS prem_net_payout,
-			  -- ── rollover sub-table (LATERAL, latest row) ─────────────────
-			  COALESCE(rol.rollover_date::text,'')   AS rol_rollover_date,
-			  COALESCE(rol.rollover_amount,0)        AS rol_rollover_amount,
-			  COALESCE(rol.rollover_principal,0)     AS rol_rollover_principal,
-			  COALESCE(rol.interest_credited,0)      AS rol_interest_credited,
-			  COALESCE(rol.tds_deducted,0)           AS rol_tds_deducted,
-			  COALESCE(rol.new_tenor_days,0)         AS rol_new_tenor_days,
-			  COALESCE(rol.rollover_type,'')         AS rol_rollover_type,
-			  -- ── approval engine status ───────────────────────────────────
-			  COALESCE(ai.status,'')                 AS approval_status,
-			  COALESCE(ai.submitted_at::text,'')     AS approval_submitted_at,
-			  -- ── latest audit fields ──────────────────────────────────────
-			  COALESCE(la.processing_status,'')      AS latest_processing_status,
-			  COALESCE(la.action_type,'')            AS latest_action_type,
-			  COALESCE(la.requested_by,'')           AS latest_requested_by,
-			  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS latest_requested_at,
-			  COALESCE(la.checker_by,'')             AS latest_checker_by,
-			  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS latest_checker_at,
-			  COALESCE(la.checker_comment,'')        AS latest_checker_comment,
-			  -- ── history pivot ────────────────────────────────────────────
-			  COALESCE(h.created_by_audit,'')        AS created_by_audit,
-			  COALESCE(h.created_at_audit,'')        AS created_at_audit,
-			  COALESCE(h.edited_by,'')               AS edited_by,
-			  COALESCE(h.edited_at,'')               AS edited_at,
-			  COALESCE(h.deleted_by,'')              AS deleted_by,
-			  COALESCE(h.deleted_at,'')              AS deleted_at,
-			  -- ── computed maturity amount ─────────────────────────────────
-			  ROUND((
-			    COALESCE(cr.principal_amount,0)
-			    + COALESCE(al.total_interest_accrued,0)
-			    - COALESCE(al.total_tds_accrued,0)
-			  )::numeric, 4) AS expected_maturity_amount
+			SELECT cr.closure_request_id, cr.fd_id,
+			  COALESCE(cr.booking_id,'') AS booking_id,
+			  COALESCE(cr.confirmation_id,'') AS confirmation_id,
+			  COALESCE(cr.entity_id,'') AS entity_id,
+			  COALESCE(cr.entity_name,'') AS entity_name,
+			  cr.closure_type, cr.closure_status,
+			  COALESCE(cr.initiation_date::text,'') AS initiation_date,
+			  COALESCE(cr.effective_closure_date::text,'') AS effective_closure_date,
+			  COALESCE(cr.maturity_date::text,'') AS maturity_date,
+			  COALESCE(cr.principal_amount,0) AS principal_amount,
+			  COALESCE(cr.accrued_interest,0) AS accrued_interest,
+			  COALESCE(cr.tds_deducted,0) AS tds_deducted,
+			  COALESCE(cr.penalty_amount,0) AS penalty_amount,
+			  COALESCE(cr.net_payout_amount,0) AS net_payout_amount,
+			  COALESCE(cr.settlement_account_id,'') AS settlement_account_id,
+			  COALESCE(cr.maturity_instructions,'') AS maturity_instructions,
+			  COALESCE(cr.closure_reason,'') AS closure_reason,
+			  COALESCE(cr.submitted_by,'') AS submitted_by,
+			  COALESCE(cr.submitted_by_email,'') AS submitted_by_email,
+			  COALESCE(cr.accounting_posted, false) AS accounting_posted,
+			  COALESCE(cr.created_at::text,'') AS created_at,
+			  COALESCE(cr.updated_at::text,'') AS updated_at,
+			  COALESCE(m.bank_fd_ref_no,'') AS fd_reference_number,
+			  COALESCE(m.bank_name,'') AS bank_name,
+			  COALESCE(m.interest_rate,0) AS interest_rate,
+			  COALESCE(m.tenure_days,0) AS tenure_days,
+			  COALESCE(m.fd_status,'') AS fd_status,
+			  COALESCE(ai.status,'') AS approval_status,
+			  COALESCE((
+			    SELECT aud.processing_status
+			    FROM investment.fd_audit_closure_request aud
+			    WHERE aud.closure_request_id = cr.closure_request_id
+			    ORDER BY aud.created_at DESC LIMIT 1
+			  ),'') AS latest_processing_status,
+			  COALESCE((
+			    SELECT aud.performed_by_email
+			    FROM investment.fd_audit_closure_request aud
+			    WHERE aud.closure_request_id = cr.closure_request_id
+			      AND aud.action_type IN ('APPROVE','REJECT')
+			    ORDER BY aud.created_at DESC LIMIT 1
+			  ),'') AS checker_email,
+			  COALESCE((
+			    SELECT aud.created_at::text
+			    FROM investment.fd_audit_closure_request aud
+			    WHERE aud.closure_request_id = cr.closure_request_id
+			      AND aud.action_type IN ('APPROVE','REJECT')
+			    ORDER BY aud.created_at DESC LIMIT 1
+			  ),'') AS checked_at
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
-			LEFT JOIN investment.fd_booking_request b ON b.booking_id = cr.booking_id
-			LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = cr.confirmation_id
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
-			LEFT JOIN latest_audit la ON la.closure_request_id = cr.closure_request_id
-			LEFT JOIN history h ON h.closure_request_id = cr.closure_request_id
-			LEFT JOIN LATERAL (
-			  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued,
-			         SUM(COALESCE(tds_deducted_in_period,0))  AS total_tds_accrued
-			  FROM investment.fd_accrual_ledger
-			  WHERE fd_id = cr.fd_id AND COALESCE(is_deleted,false) = false
-			) al ON true
-			LEFT JOIN LATERAL (
-			  SELECT penalty_value, penalty_type, no_interest_if_withdrawn_before
-			  FROM investment.fd_penalty_structure_master ps
-			  WHERE ps.bank_code = m.bank_id AND COALESCE(ps.is_deleted,false) = false
-			  ORDER BY ps.penalty_value DESC LIMIT 1
-			) ps ON true
-			LEFT JOIN LATERAL (
-			  SELECT payout_date, principal_returned, gross_interest, tds_deducted, net_payout,
-			         settlement_account_id, payment_status
-			  FROM investment.fd_closure_maturity_payout
-			  WHERE closure_request_id = cr.closure_request_id
-			  ORDER BY created_at DESC LIMIT 1
-			) mp ON true
-			LEFT JOIN LATERAL (
-			  SELECT premature_closure_date, days_held, contracted_rate, applicable_rate,
-			         gross_interest_earned, penalty_rate, penalty_amount, no_interest_flag,
-			         tds_on_interest, net_payout
-			  FROM investment.fd_closure_premature
-			  WHERE closure_request_id = cr.closure_request_id
-			  ORDER BY created_at DESC LIMIT 1
-			) prem ON true
-			LEFT JOIN LATERAL (
-			  SELECT rollover_date, rollover_amount, rollover_principal, interest_credited,
-			         tds_deducted, new_tenor_days, rollover_type
-			  FROM investment.fd_closure_rollover
-			  WHERE closure_request_id = cr.closure_request_id
-			  ORDER BY created_at DESC LIMIT 1
-			) rol ON true
-			WHERE %s
-			ORDER BY GREATEST(COALESCE(la.requested_at,'1970-01-01'::timestamptz),COALESCE(la.checker_at,'1970-01-01'::timestamptz)) DESC
+			WHERE %s ORDER BY cr.created_at DESC
 			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
 
 		rows, err := pool.Query(ctx, dataSQL, listArgs...)
@@ -1631,13 +1418,9 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			records = append(records, row)
 		}
-		if records == nil {
-			records = []map[string]interface{}{}
-		}
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"records": records, "total": totalCount, "page": req.Page, "page_size": req.PageSize,
 		})
-		api.LogInfo("[FDClosure] GetAllClosureRequests: %d/%d by=%s", len(records), totalCount, userEmail)
 	}
 }
 
@@ -2120,7 +1903,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=NULL,updated_at=NOW() WHERE closure_request_id=$1`, crID)
 
 				snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": "PENDING_APPROVAL", "rejected_by": userEmail, "rejection_reason": req.Comment})
-				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
+				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "REJECT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
 
 				if cerr := tx.Commit(ctx); cerr != nil {
 					_ = tx.Rollback(ctx)
@@ -2217,12 +2000,6 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Closure request deleted", map[string]interface{}{
 			"closure_request_id": req.ClosureRequestID, "deleted_by": userEmail,
 		})
-		go func(id, uEmail string) {
-			defer func() { recover() }() //nolint:errcheck
-			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/closure/delete", id, map[string]interface{}{
-				"record_id": id, "event": "FD_CLOSURE_DELETED", "actor_email": uEmail,
-			})
-		}(req.ClosureRequestID, userEmail)
 	}
 }
 
@@ -2685,12 +2462,10 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		// 2. Read the confirmed rollover amounts persisted on fd_closure_rollover.
 		var rolloverAmt, rolloverInterestRate float64
 		var newTenorDays int
-		var rvNewBankID, rvNewBankName, rvNewAccountID string
 		_ = tx.QueryRow(ctx, `
-			SELECT COALESCE(rollover_amount,0), COALESCE(new_tenor_days,0), COALESCE(rollover_interest_rate,0),
-			       COALESCE(new_bank_id,''), COALESCE(new_bank_name,''), COALESCE(new_account_id,'')
+			SELECT COALESCE(rollover_amount,0), COALESCE(new_tenor_days,0), COALESCE(rollover_interest_rate,0)
 			FROM investment.fd_closure_rollover WHERE closure_request_id=$1 LIMIT 1`, closureRequestID,
-		).Scan(&rolloverAmt, &newTenorDays, &rolloverInterestRate, &rvNewBankID, &rvNewBankName, &rvNewAccountID)
+		).Scan(&rolloverAmt, &newTenorDays, &rolloverInterestRate)
 		if rolloverAmt <= 0 {
 			rolloverAmt = roundToFour(principalAmt + accruedInterest - tdsAmt)
 		}
@@ -2699,16 +2474,6 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		}
 		if rolloverInterestRate <= 0 {
 			rolloverInterestRate = srcInterestRate
-		}
-		// Prefer new bank details if specified; fall back to source FD's bank
-		if rvNewBankID != "" {
-			srcBankID = rvNewBankID
-		}
-		if rvNewBankName != "" {
-			srcBankName = rvNewBankName
-		}
-		if rvNewAccountID != "" {
-			srcSourceAccountID = rvNewAccountID
 		}
 
 		// 3. INSERT fd_booking_request with status SENT_TO_BANK.
@@ -2722,14 +2487,14 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 			  bank_config_id, source_account_id,
 			  principal_amount, interest_rate, tenure_days,
 			  interest_type_code, frequency_id, day_count_code, tds_plan_id,
-			  booking_status, booking_remarks, source_closure_request_id, created_by
+			  booking_status, booking_remarks, created_by
 			) VALUES (
 			  $1,$2,$3,$4,
 			  NULLIF($5,''), NULLIF($6,''),
 			  $7,$8,$9,
 			  NULLIF($10,''), NULLIF($11,''), NULLIF($12,''), NULLIF($13,''),
 			  'SENT_TO_BANK',
-			  $14, $15, $16
+			  $14, $15
 			) RETURNING booking_id`,
 			srcEntityID, srcEntityName,
 			srcBankID, srcBankName,
@@ -2737,7 +2502,7 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 			rolloverAmt, rolloverInterestRate, newTenorDays,
 			srcInterestTypeCode, srcFrequencyID, srcDayCountCode, srcTDSPlanID,
 			fmt.Sprintf("Rollover booking — source closure %s source FD %s", closureRequestID, fdID),
-			closureRequestID, approvedByEmail,
+			approvedByEmail,
 		).Scan(&newBookingID)
 		if bookingErr != nil {
 			// Non-fatal: journals are posted; log and let the reconcile worker retry.
@@ -2748,7 +2513,7 @@ func postClosureJournals(ctx context.Context, p PostClosureJournalsParams) error
 		//    reconcile worker and the UI can find it.
 		if newBookingID != "" {
 			if _, linkErr := tx.Exec(ctx,
-				`UPDATE investment.fd_closure_rollover SET new_fd_booking_id=$1 WHERE closure_request_id=$2`,
+				`UPDATE investment.fd_closure_rollover SET new_booking_id=$1 WHERE closure_request_id=$2`,
 				newBookingID, closureRequestID); linkErr != nil {
 				api.LogError("[FDClosure] ROLLOVER: failed to link booking_id=%s on fd_closure_rollover for closure=%s: %v",
 					newBookingID, closureRequestID, linkErr)
@@ -2929,7 +2694,7 @@ func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		var dbPenaltyRate, dbPenaltyAmount float64
 		var dbNoInterestFlag bool
 		var dbDaysHeld, dbMinDays int
-		var dbPenaltyStructureID, dbPenaltyType, dbPenaltyCalcMethod string
+		var dbPenaltyStructureID string
 		if req.ClosureType == "PREMATURE" {
 			_ = pool.QueryRow(ctx,
 				`SELECT COALESCE((CURRENT_DATE - start_date)::int,0) FROM investment.fd_master WHERE fd_id=$1`,
@@ -2938,9 +2703,7 @@ func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COALESCE(ps.penalty_structure_id,''),
 				       COALESCE(ps.penalty_value,0),
 				       COALESCE(ps.no_interest_if_withdrawn_before,0) > 0,
-				       COALESCE(ps.no_interest_if_withdrawn_before,0),
-				       COALESCE(ps.penalty_type,''),
-				       COALESCE(ps.calculation_method,'')
+				       COALESCE(ps.no_interest_if_withdrawn_before,0)
 				FROM investment.fd_penalty_structure_master ps
 				WHERE ps.bank_code = $1
 				  AND COALESCE(ps.is_deleted, false) = false
@@ -2953,7 +2716,7 @@ func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				  (CASE WHEN ps.min_holding_days IS NOT NULL THEN 0 ELSE 1 END),
 				  ps.penalty_value DESC
 				LIMIT 1`, dbBankID, dbDaysHeld,
-			).Scan(&dbPenaltyStructureID, &dbPenaltyRate, &dbNoInterestFlag, &dbMinDays, &dbPenaltyType, &dbPenaltyCalcMethod)
+			).Scan(&dbPenaltyStructureID, &dbPenaltyRate, &dbNoInterestFlag, &dbMinDays)
 			intForPenalty := dbAccruedInterest
 			if dbNoInterestFlag && dbDaysHeld < dbMinDays {
 				intForPenalty = 0
@@ -3119,9 +2882,6 @@ func ValidateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 				"no_interest_flag":      dbNoInterestFlag,
 				"min_days_for_interest": dbMinDays,
 				"penalty_structure_id":  dbPenaltyStructureID,
-				"penalty_type":          dbPenaltyType,
-				"penalty_value":         dbPenaltyRate,
-				"calculation_method":    dbPenaltyCalcMethod,
 				// Rollover-specific system values
 				"rollover_principal": dbPrincipal,
 				"rollover_amount":    dbNetPayout,
@@ -3264,30 +3024,6 @@ func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
 		// Paginated list with approval engine enrichment
 		listArgs := append(args, req.PageSize, offset)
 		dataSQL := fmt.Sprintf(`
-			WITH latest_audit AS (
-			  SELECT DISTINCT ON (a.closure_request_id)
-			    a.closure_request_id, a.action_type, a.processing_status,
-			    a.requested_by, a.requested_at,
-			    a.checker_by, a.checker_at, a.checker_comment
-			  FROM investment.fd_audit_closure_request a
-			  ORDER BY a.closure_request_id,
-			    GREATEST(
-			      COALESCE(a.requested_at,'1970-01-01'::timestamptz),
-			      COALESCE(a.checker_at,'1970-01-01'::timestamptz)
-			    ) DESC
-			),
-			history AS (
-			  SELECT
-			    closure_request_id,
-			    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
-			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
-			    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
-			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-			    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
-			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-			  FROM investment.fd_audit_closure_request
-			  GROUP BY closure_request_id
-			)
 			SELECT
 			  cr.closure_request_id,
 			  cr.fd_id,
@@ -3347,29 +3083,12 @@ func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(
 			    (SELECT COUNT(*) FROM public.variance_log vl
 			     WHERE vl.record_id = cr.fd_id AND vl.status = 'OPEN')
-			  , 0) AS open_variance_count,
-			  -- ── latest audit fields ──────────────────────────────────────
-			  COALESCE(la.processing_status,'')      AS latest_processing_status,
-			  COALESCE(la.action_type,'')            AS latest_action_type,
-			  COALESCE(la.requested_by,'')           AS latest_requested_by,
-			  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS latest_requested_at,
-			  COALESCE(la.checker_by,'')             AS latest_checker_by,
-			  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS latest_checker_at,
-			  COALESCE(la.checker_comment,'')        AS latest_checker_comment,
-			  -- ── history pivot ────────────────────────────────────────────
-			  COALESCE(h.created_by_audit,'')        AS created_by_audit,
-			  COALESCE(h.created_at_audit,'')        AS created_at_audit,
-			  COALESCE(h.edited_by,'')               AS edited_by,
-			  COALESCE(h.edited_at,'')               AS edited_at,
-			  COALESCE(h.deleted_by,'')              AS deleted_by,
-			  COALESCE(h.deleted_at,'')              AS deleted_at
+			  , 0) AS open_variance_count
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
-			LEFT JOIN latest_audit la ON la.closure_request_id = cr.closure_request_id
-			LEFT JOIN history h ON h.closure_request_id = cr.closure_request_id
 			WHERE %s
-			ORDER BY GREATEST(COALESCE(la.requested_at,'1970-01-01'::timestamptz),COALESCE(la.checker_at,'1970-01-01'::timestamptz)) DESC
+			ORDER BY cr.created_at DESC
 			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
 
 		rows, err := pool.Query(ctx, dataSQL, listArgs...)

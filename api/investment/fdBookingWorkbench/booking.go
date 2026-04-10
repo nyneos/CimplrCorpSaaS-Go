@@ -664,29 +664,72 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Build dynamic SET clause
-		allowedFields := map[string]bool{
-			"principal_amount": true, "interest_rate": true, "tenure_days": true,
-			"value_date": true, "expected_maturity_date": true, "maturity_amount": true,
-			"interest_type": true, "interest_type_id": true, "interest_payout_frequency": true,
-			"compounding_frequency": true, "day_count_convention": true,
-			"currency": true, "tds_plan_id": true, "penalty_structure_id": true,
-			"renewal_instructions": true, "notes": true, "bank_config_id": true,
+		// allowedFields maps accepted client-side field names to their actual DB column names.
+		// Aliases (e.g. interest_payout_frequency, compounding_frequency) resolve to the same
+		// underlying column so we must de-duplicate them when building the SET clause.
+		allowedFields := map[string]string{
+			"principal_amount":       "principal_amount",
+			"interest_rate":          "interest_rate",
+			"tenure_days":            "tenure_days",
+			"value_date":             "value_date",
+			"expected_maturity_date": "expected_maturity_date",
+			"maturity_amount":        "maturity_amount",
+			// interest_type / interest_type_id are two client aliases for the same columns
+			"interest_type":    "interest_type_code", // alias → DB column
+			"interest_type_id": "interest_type_id",
+			// frequency aliases – both map to frequency_id; de-dup handled below
+			"interest_payout_frequency": "frequency_id",
+			"compounding_frequency":     "frequency_id",
+			"frequency_id":              "frequency_id",
+			// day_count alias
+			"day_count_convention": "day_count_code",
+			"day_count_code":       "day_count_code",
+			// other fields
+			"currency":             "currency",
+			"tds_plan_id":          "tds_plan_id",
+			"penalty_structure_id": "penalty_structure_id",
+			// renewal_instructions is a string alias for the boolean auto_renewal column;
+			// handled specially below — NOT included here to avoid direct column SET.
+			"notes":           "booking_remarks", // alias → DB column
+			"booking_remarks": "booking_remarks",
+			"bank_config_id":  "bank_config_id",
 		}
 
 		setClauses := make([]string, 0)
 		setArgs := make([]interface{}, 0)
 		argIdx := 1
+		usedColumns := make(map[string]bool) // prevent duplicate SET for aliased columns
 		for k, v := range req.Fields {
-			if !allowedFields[k] {
+			colName, ok := allowedFields[k]
+			if !ok {
 				continue
 			}
+			if usedColumns[colName] {
+				continue // already added this DB column via another alias
+			}
+			usedColumns[colName] = true
 			if k == "value_date" || k == "expected_maturity_date" {
 				v = coerceDateValue(v)
 			}
-			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", k, argIdx))
+			setClauses = append(setClauses, fmt.Sprintf("%s = $%d", colName, argIdx))
 			setArgs = append(setArgs, v)
 			argIdx++
 		}
+		// Special: renewal_instructions (string) → auto_renewal (bool)
+		if ri, ok := req.Fields["renewal_instructions"]; ok && !usedColumns["auto_renewal"] {
+			autoRenewalVal := false
+			switch v := ri.(type) {
+			case bool:
+				autoRenewalVal = v
+			case string:
+				autoRenewalVal = strings.ToUpper(strings.TrimSpace(v)) == "AUTO" || strings.ToUpper(strings.TrimSpace(v)) == "TRUE"
+			}
+			setClauses = append(setClauses, fmt.Sprintf("auto_renewal = $%d", argIdx))
+			setArgs = append(setArgs, autoRenewalVal)
+			usedColumns["auto_renewal"] = true
+			argIdx++
+		}
+
 		if len(setClauses) == 0 {
 			api.RespondWithError(w, http.StatusBadRequest, "No valid fields to update")
 			return
@@ -700,6 +743,7 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		updateQ := fmt.Sprintf(`UPDATE investment.fd_booking_request SET %s WHERE booking_id = $%d`,
 			strings.Join(setClauses, ", "), argIdx)
 		if _, err = tx.Exec(ctx, updateQ, setArgs...); err != nil {
+			logDBError(err, fmt.Sprintf("UpdateBooking exec query=%s args=%v", updateQ, setArgs))
 			msg, status := getUserFriendlyFDError(err, "Update failed")
 			api.RespondWithError(w, status, msg)
 			return
@@ -709,13 +753,14 @@ func UpdateBooking(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO investment.fd_audit_booking_request (
 				booking_id, action_type, processing_status, requested_by, requested_at, reason,
 				old_principal_amount, old_interest_rate, old_interest_type_id, old_tenure_days, old_tenor_type, old_tenure_years,
-				old_value_date, old_expected_maturity_date, old_bank_id, old_source_account_id
-			) VALUES ($1,'EDIT','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+				old_value_date, old_expected_maturity_date, old_source_account_id
+			) VALUES ($1,'EDIT','PENDING_EDIT_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 			req.BookingID, userEmail, req.Reason,
 			oldPrincipal, oldRate, nullIfEmpty(oldInterestTypeID), oldTenorDays, nullIfEmpty(oldTenorType), oldTenureYears,
 			coerceDateValue(oldValueDate), coerceDateValue(oldMaturityDate),
-			oldBankID, oldBankAccountID,
+			oldBankAccountID,
 		); err != nil {
+			logDBError(err, fmt.Sprintf("UpdateBooking audit insert booking_id=%s", req.BookingID))
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
 			api.RespondWithError(w, status, msg)
 			return
