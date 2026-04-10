@@ -1347,7 +1347,7 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		snapshotJSON, _ := json.Marshal(oldRow)
 		// Pass all old values to audit as individual columns.
 		// Use PENDING_EDIT_APPROVAL so the audit trail shows this was an edit on a pending record.
-		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "UPDATE", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
+		_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: req.ClosureRequestID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "PENDING_EDIT_APPROVAL", Reason: req.UpdateReason, Snapshot: snapshotJSON, OldValues: oldRow})
 
 		if err := tx.Commit(ctx); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxCommitFailed)
@@ -1357,6 +1357,12 @@ func UpdateClosure(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Closure request updated", map[string]interface{}{
 			"closure_request_id": req.ClosureRequestID, "updated_by": userEmail,
 		})
+		go func(id, uEmail string) {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/closure/update", id, map[string]interface{}{
+				"record_id": id, "event": "FD_CLOSURE_UPDATED", "actor_email": uEmail,
+			})
+		}(req.ClosureRequestID, userEmail)
 	}
 }
 
@@ -1423,6 +1429,30 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 		// the caller has everything needed to pre-fill UpdateClosure without a
 		// separate detail call.
 		dataSQL := fmt.Sprintf(`
+			WITH latest_audit AS (
+			  SELECT DISTINCT ON (a.closure_request_id)
+			    a.closure_request_id, a.action_type, a.processing_status,
+			    a.requested_by, a.requested_at,
+			    a.checker_by, a.checker_at, a.checker_comment
+			  FROM investment.fd_audit_closure_request a
+			  ORDER BY a.closure_request_id,
+			    GREATEST(
+			      COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+			      COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+			    ) DESC
+			),
+			history AS (
+			  SELECT
+			    closure_request_id,
+			    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+			    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+			    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			  FROM investment.fd_audit_closure_request
+			  GROUP BY closure_request_id
+			)
 			SELECT
 			  -- ── closure_request (columns that actually exist) ────────────
 			  cr.closure_request_id,
@@ -1517,13 +1547,21 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  -- ── approval engine status ───────────────────────────────────
 			  COALESCE(ai.status,'')                 AS approval_status,
 			  COALESCE(ai.submitted_at::text,'')     AS approval_submitted_at,
-			  -- ── latest audit processing status ───────────────────────────
-			  COALESCE((
-			    SELECT aud.processing_status
-			    FROM investment.fd_audit_closure_request aud
-			    WHERE aud.closure_request_id = cr.closure_request_id
-			    ORDER BY aud.created_at DESC LIMIT 1
-			  ),'') AS latest_processing_status,
+			  -- ── latest audit fields ──────────────────────────────────────
+			  COALESCE(la.processing_status,'')      AS latest_processing_status,
+			  COALESCE(la.action_type,'')            AS latest_action_type,
+			  COALESCE(la.requested_by,'')           AS latest_requested_by,
+			  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS latest_requested_at,
+			  COALESCE(la.checker_by,'')             AS latest_checker_by,
+			  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS latest_checker_at,
+			  COALESCE(la.checker_comment,'')        AS latest_checker_comment,
+			  -- ── history pivot ────────────────────────────────────────────
+			  COALESCE(h.created_by_audit,'')        AS created_by_audit,
+			  COALESCE(h.created_at_audit,'')        AS created_at_audit,
+			  COALESCE(h.edited_by,'')               AS edited_by,
+			  COALESCE(h.edited_at,'')               AS edited_at,
+			  COALESCE(h.deleted_by,'')              AS deleted_by,
+			  COALESCE(h.deleted_at,'')              AS deleted_at,
 			  -- ── computed maturity amount ─────────────────────────────────
 			  ROUND((
 			    COALESCE(cr.principal_amount,0)
@@ -1535,6 +1573,8 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = cr.booking_id
 			LEFT JOIN investment.fd_confirmation c ON c.confirmation_id = cr.confirmation_id
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
+			LEFT JOIN latest_audit la ON la.closure_request_id = cr.closure_request_id
+			LEFT JOIN history h ON h.closure_request_id = cr.closure_request_id
 			LEFT JOIN LATERAL (
 			  SELECT SUM(COALESCE(period_interest_accrued,0)) AS total_interest_accrued,
 			         SUM(COALESCE(tds_deducted_in_period,0))  AS total_tds_accrued
@@ -1570,7 +1610,7 @@ func GetAllClosureRequests(pool *pgxpool.Pool) http.HandlerFunc {
 			  ORDER BY created_at DESC LIMIT 1
 			) rol ON true
 			WHERE %s
-			ORDER BY cr.created_at DESC
+			ORDER BY GREATEST(COALESCE(la.requested_at,'1970-01-01'::timestamptz),COALESCE(la.checker_at,'1970-01-01'::timestamptz)) DESC
 			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
 
 		rows, err := pool.Query(ctx, dataSQL, listArgs...)
@@ -2080,7 +2120,7 @@ func BulkRejectClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 				_, _ = tx.Exec(ctx, `UPDATE investment.fd_master SET closure_request_id=NULL,updated_at=NOW() WHERE closure_request_id=$1`, crID)
 
 				snapshotJSON, _ := json.Marshal(map[string]interface{}{"closure_status": "PENDING_APPROVAL", "rejected_by": userEmail, "rejection_reason": req.Comment})
-				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "REJECT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
+				_ = insertClosureAudit(ctx, ClosureAuditParams{Exec: tx, ClosureRequestID: crID, PerformedBy: req.UserID, PerformedByEmail: userEmail, ActionType: "EDIT", ProcessingStatus: "REJECTED", Reason: req.Comment, Snapshot: snapshotJSON, OldValues: map[string]interface{}{"closure_status": "PENDING_APPROVAL"}})
 
 				if cerr := tx.Commit(ctx); cerr != nil {
 					_ = tx.Rollback(ctx)
@@ -2177,6 +2217,12 @@ func DeleteClosureRequest(pool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "Closure request deleted", map[string]interface{}{
 			"closure_request_id": req.ClosureRequestID, "deleted_by": userEmail,
 		})
+		go func(id, uEmail string) {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/closure/delete", id, map[string]interface{}{
+				"record_id": id, "event": "FD_CLOSURE_DELETED", "actor_email": uEmail,
+			})
+		}(req.ClosureRequestID, userEmail)
 	}
 }
 
@@ -3218,6 +3264,30 @@ func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
 		// Paginated list with approval engine enrichment
 		listArgs := append(args, req.PageSize, offset)
 		dataSQL := fmt.Sprintf(`
+			WITH latest_audit AS (
+			  SELECT DISTINCT ON (a.closure_request_id)
+			    a.closure_request_id, a.action_type, a.processing_status,
+			    a.requested_by, a.requested_at,
+			    a.checker_by, a.checker_at, a.checker_comment
+			  FROM investment.fd_audit_closure_request a
+			  ORDER BY a.closure_request_id,
+			    GREATEST(
+			      COALESCE(a.requested_at,'1970-01-01'::timestamptz),
+			      COALESCE(a.checker_at,'1970-01-01'::timestamptz)
+			    ) DESC
+			),
+			history AS (
+			  SELECT
+			    closure_request_id,
+			    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+			    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+			    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			  FROM investment.fd_audit_closure_request
+			  GROUP BY closure_request_id
+			)
 			SELECT
 			  cr.closure_request_id,
 			  cr.fd_id,
@@ -3277,12 +3347,29 @@ func GetClosureApprovalList(pool *pgxpool.Pool) http.HandlerFunc {
 			  COALESCE(
 			    (SELECT COUNT(*) FROM public.variance_log vl
 			     WHERE vl.record_id = cr.fd_id AND vl.status = 'OPEN')
-			  , 0) AS open_variance_count
+			  , 0) AS open_variance_count,
+			  -- ── latest audit fields ──────────────────────────────────────
+			  COALESCE(la.processing_status,'')      AS latest_processing_status,
+			  COALESCE(la.action_type,'')            AS latest_action_type,
+			  COALESCE(la.requested_by,'')           AS latest_requested_by,
+			  COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS latest_requested_at,
+			  COALESCE(la.checker_by,'')             AS latest_checker_by,
+			  COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS latest_checker_at,
+			  COALESCE(la.checker_comment,'')        AS latest_checker_comment,
+			  -- ── history pivot ────────────────────────────────────────────
+			  COALESCE(h.created_by_audit,'')        AS created_by_audit,
+			  COALESCE(h.created_at_audit,'')        AS created_at_audit,
+			  COALESCE(h.edited_by,'')               AS edited_by,
+			  COALESCE(h.edited_at,'')               AS edited_at,
+			  COALESCE(h.deleted_by,'')              AS deleted_by,
+			  COALESCE(h.deleted_at,'')              AS deleted_at
 			FROM investment.fd_closure_request cr
 			LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
 			LEFT JOIN uam.approval_instance ai ON ai.instance_id = cr.approval_instance_id
+			LEFT JOIN latest_audit la ON la.closure_request_id = cr.closure_request_id
+			LEFT JOIN history h ON h.closure_request_id = cr.closure_request_id
 			WHERE %s
-			ORDER BY cr.created_at DESC
+			ORDER BY GREATEST(COALESCE(la.requested_at,'1970-01-01'::timestamptz),COALESCE(la.checker_at,'1970-01-01'::timestamptz)) DESC
 			LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
 
 		rows, err := pool.Query(ctx, dataSQL, listArgs...)

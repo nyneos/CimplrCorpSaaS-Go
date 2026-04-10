@@ -801,7 +801,7 @@ func BulkApproveReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					if rErr := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
 						InstanceEyeID: eyeID,
 						ActorEmail:    userEmail,
-						ActionType:    "APPROVED",
+						ActionType:    approvalengine.ActionApproved,
 						Comment:       req.Comment,
 					}); rErr != nil {
 						api.LogError("[FDReceipt] RecordAction APPROVED failed eye=%s: %v", eyeID, rErr)
@@ -898,7 +898,7 @@ func BulkRejectReceipt(pool *pgxpool.Pool) http.HandlerFunc {
 					if rErr := approvalengine.RecordAction(ctx, pool, approvalengine.ActionRequest{
 						InstanceEyeID: eyeID,
 						ActorEmail:    userEmail,
-						ActionType:    "REJECTED",
+						ActionType:    approvalengine.ActionRejected,
 						Comment:       req.Comment,
 					}); rErr != nil {
 						api.LogError("[FDReceipt] RecordAction REJECTED failed eye=%s: %v", eyeID, rErr)
@@ -964,6 +964,18 @@ WITH latest_audit AS (
       COALESCE(a.requested_at,'1970-01-01'::timestamptz),
       COALESCE(a.checker_at,'1970-01-01'::timestamptz)
     ) DESC
+),
+history AS (
+  SELECT
+    receipt_id,
+    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+  FROM investment.fd_interest_receipt_audit
+  GROUP BY receipt_id
 )
 SELECT
   r.receipt_id,
@@ -1003,6 +1015,12 @@ SELECT
   COALESCE(l.old_gross_interest_received,0) AS old_gross_interest_received,
   COALESCE(l.old_tds_amount_deducted,0)     AS old_tds_amount_deducted,
   COALESCE(l.old_net_amount_received,0)     AS old_net_amount_received,
+  COALESCE(h.created_by_audit,'')      AS created_by_audit,
+  COALESCE(h.created_at_audit,'')      AS created_at_audit,
+  COALESCE(h.edited_by,'')             AS edited_by,
+  COALESCE(h.edited_at,'')             AS edited_at,
+  COALESCE(h.deleted_by,'')            AS deleted_by,
+  COALESCE(h.deleted_at,'')            AS deleted_at,
   COALESCE(ai.instance_id,'')          AS approval_instance_id,
   COALESCE(ai.status,'')               AS approval_engine_status,
   COALESCE(aie.instance_eye_id,'')     AS current_eye_id,
@@ -1013,6 +1031,7 @@ SELECT
   COALESCE(aie.is_escalated,false)     AS is_escalated
 FROM investment.fd_interest_receipt r
 LEFT JOIN latest_audit l ON l.receipt_id = r.receipt_id
+LEFT JOIN history h ON h.receipt_id = r.receipt_id
 LEFT JOIN uam.approval_instance ai
   ON ai.record_id = r.receipt_id
   AND ai.module_code = 'FIXED_DEPOSIT'
@@ -1114,11 +1133,23 @@ func GetApprovedActiveReceipts(pool *pgxpool.Pool) http.HandlerFunc {
 		baseSQL := `
 WITH latest_audit AS (
   SELECT DISTINCT ON (a.receipt_id)
-	a.receipt_id, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.processing_status
+	a.receipt_id, a.action_type, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.processing_status
   FROM investment.fd_interest_receipt_audit a
   WHERE a.processing_status = 'APPROVED'
   ORDER BY a.receipt_id,
 	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+),
+history AS (
+  SELECT
+    receipt_id,
+    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+  FROM investment.fd_interest_receipt_audit
+  GROUP BY receipt_id
 )
 SELECT
   r.receipt_id,
@@ -1137,9 +1168,16 @@ SELECT
   COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
   COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
-  COALESCE(l.processing_status,'')     AS processing_status
+  COALESCE(l.processing_status,'')     AS processing_status,
+  COALESCE(h.created_by_audit,'')      AS created_by_audit,
+  COALESCE(h.created_at_audit,'')      AS created_at_audit,
+  COALESCE(h.edited_by,'')             AS edited_by,
+  COALESCE(h.edited_at,'')             AS edited_at,
+  COALESCE(h.deleted_by,'')            AS deleted_by,
+  COALESCE(h.deleted_at,'')            AS deleted_at
 FROM investment.fd_interest_receipt r
 LEFT JOIN latest_audit l ON l.receipt_id = r.receipt_id
+LEFT JOIN history h ON h.receipt_id = r.receipt_id
 WHERE r.is_deleted = false AND l.processing_status = 'APPROVED'`
 
 		args := []interface{}{}
@@ -1215,11 +1253,23 @@ func GetApprovedActiveTDS(pool *pgxpool.Pool) http.HandlerFunc {
 		baseSQL := `
 WITH latest_audit AS (
   SELECT DISTINCT ON (a.tds_id)
-	a.tds_id, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.processing_status
+	a.tds_id, a.action_type, a.requested_by, a.requested_at, a.checker_by, a.checker_at, a.processing_status
   FROM investment.fd_tds_receipt_audit a
   WHERE a.processing_status = 'APPROVED'
   ORDER BY a.tds_id,
 	GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz), COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+),
+history AS (
+  SELECT
+    tds_id,
+    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+  FROM investment.fd_tds_receipt_audit
+  GROUP BY tds_id
 )
 SELECT
   t.tds_id,
@@ -1236,10 +1286,17 @@ SELECT
   COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
   COALESCE(l.checker_by,'')            AS checker_by,
   COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
-  COALESCE(l.processing_status,'')     AS processing_status
+  COALESCE(l.processing_status,'')     AS processing_status,
+  COALESCE(h.created_by_audit,'')      AS created_by_audit,
+  COALESCE(h.created_at_audit,'')      AS created_at_audit,
+  COALESCE(h.edited_by,'')             AS edited_by,
+  COALESCE(h.edited_at,'')             AS edited_at,
+  COALESCE(h.deleted_by,'')            AS deleted_by,
+  COALESCE(h.deleted_at,'')            AS deleted_at
 FROM investment.fd_tds_receipt t
 LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND COALESCE(m.is_deleted,false) = false
 LEFT JOIN latest_audit l ON l.tds_id = t.tds_id
+LEFT JOIN history h ON h.tds_id = t.tds_id
 WHERE t.is_deleted = false AND l.processing_status = 'APPROVED'`
 
 		args := []interface{}{}
@@ -1316,6 +1373,27 @@ func GetTDSReceiptsAll(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		baseSQL := `
+WITH latest_audit AS (
+  SELECT DISTINCT ON (a.tds_id)
+    a.tds_id, a.action_type, a.processing_status,
+    a.requested_by, a.requested_at,
+    a.checker_by, a.checker_at, a.checker_comment, a.reason
+  FROM investment.fd_tds_receipt_audit a
+  ORDER BY a.tds_id,
+    GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+),
+history AS (
+  SELECT
+    tds_id,
+    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+  FROM investment.fd_tds_receipt_audit
+  GROUP BY tds_id
+)
 SELECT
 	t.tds_id,
 	COALESCE(t.receipt_id,'')              AS receipt_id,
@@ -1355,17 +1433,18 @@ SELECT
 	COALESCE(la.checker_by,'')             AS checker_by,
 	COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
 	COALESCE(la.checker_comment,'')        AS checker_comment,
-	COALESCE(la.reason,'')                 AS reason
+	COALESCE(la.reason,'')                 AS reason,
+	-- history pivot
+	COALESCE(h.created_by_audit,'')        AS created_by_audit,
+	COALESCE(h.created_at_audit,'')        AS created_at_audit,
+	COALESCE(h.edited_by,'')               AS edited_by,
+	COALESCE(h.edited_at,'')               AS edited_at,
+	COALESCE(h.deleted_by,'')              AS deleted_by,
+	COALESCE(h.deleted_at,'')              AS deleted_at
 FROM investment.fd_tds_receipt t
 LEFT JOIN investment.fd_master m ON m.fd_id = t.fd_id AND m.is_deleted = false
-LEFT JOIN LATERAL (
-	SELECT processing_status, action_type, requested_by, requested_at,
-				 checker_by, checker_at, checker_comment, reason
-	FROM investment.fd_tds_receipt_audit a
-	WHERE a.tds_id = t.tds_id
-	ORDER BY GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamp), COALESCE(a.checker_at,'1970-01-01'::timestamp)) DESC
-	LIMIT 1
-) la ON true
+LEFT JOIN latest_audit la ON la.tds_id = t.tds_id
+LEFT JOIN history h ON h.tds_id = t.tds_id
 WHERE t.is_deleted = false`
 
 		args := []interface{}{}

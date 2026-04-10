@@ -1095,7 +1095,7 @@ func BulkApproveAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						old_rounding_rule, old_precision_decimals,
 						old_accrual_period_start, old_accrual_period_end,
 						old_financial_period, old_fd_status_filter, old_fd_inclusion_method
-					) VALUES ($1,'APPROVE','APPROVED',$2,$3,now(),$3,now(),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+					) VALUES ($1,'EDIT','APPROVED',$2,$3,now(),$3,now(),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 					runID, req.Comment, userEmail, req.Comment,
 					oldStatus, oldMode, oldDcc, oldRound, oldPrec,
 					oldPeriodStart, oldPeriodEnd, oldFinPeriod, oldFdFilter, oldInclusion)
@@ -1305,7 +1305,7 @@ func BulkRejectAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						old_rounding_rule, old_precision_decimals,
 						old_accrual_period_start, old_accrual_period_end,
 						old_financial_period, old_fd_status_filter, old_fd_inclusion_method
-					) VALUES ($1,'REJECT','REJECTED',$2,$3,now(),$3,now(),$2,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+					) VALUES ($1,'EDIT','REJECTED',$2,$3,now(),$3,now(),$2,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 					runID, req.Comment, userEmail,
 					oldStatus, oldMode, oldDcc, oldRound, oldPrec,
 					oldPeriodStart, oldPeriodEnd, oldFinPeriod, oldFdFilter, oldInclusion)
@@ -1469,6 +1469,7 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Pull audit trail events for runs
 		runAuditTrails := map[string][]map[string]interface{}{}
 		runLatestProcessingStatus := map[string]string{}
+		runHistory := map[string]map[string]string{}
 		
 		if len(runIDs) > 0 {
 			auditRows, err := pgxPool.Query(ctx, `
@@ -1506,6 +1507,23 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					if _, ok := runLatestProcessingStatus[rID]; !ok {
 						runLatestProcessingStatus[rID] = status
 					}
+					// Build history pivot
+					if _, ok := runHistory[rID]; !ok {
+						runHistory[rID] = map[string]string{}
+					}
+					h := runHistory[rID]
+					reqAtStr := reqAt.Format("2006-01-02 15:04:05")
+					switch actionType {
+					case "CREATE":
+						if h["created_by"] == "" { h["created_by"] = reqBy }
+						if h["created_at"] == "" { h["created_at"] = reqAtStr }
+					case "EDIT":
+						if h["edited_by"] == "" { h["edited_by"] = reqBy }
+						if h["edited_at"] == "" { h["edited_at"] = reqAtStr }
+					case "DELETE":
+						if h["deleted_by"] == "" { h["deleted_by"] = reqBy }
+						if h["deleted_at"] == "" { h["deleted_at"] = reqAtStr }
+					}
 				}
 			}
 		}
@@ -1532,6 +1550,23 @@ func GetAccrualRuns(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row["audit_trail"] = events
 			} else {
 				row["audit_trail"] = []interface{}{}
+			}
+
+			// Inject history pivot (created/edited/deleted by/at)
+			if h, ok := runHistory[id]; ok {
+				row["created_by_audit"] = h["created_by"]
+				row["created_at_audit"] = h["created_at"]
+				row["edited_by"]        = h["edited_by"]
+				row["edited_at"]        = h["edited_at"]
+				row["deleted_by"]       = h["deleted_by"]
+				row["deleted_at"]       = h["deleted_at"]
+			} else {
+				row["created_by_audit"] = ""
+				row["created_at_audit"] = ""
+				row["edited_by"]        = ""
+				row["edited_at"]        = ""
+				row["deleted_by"]       = ""
+				row["deleted_at"]       = ""
 			}
 		}
 
@@ -1995,7 +2030,7 @@ func ProposeOverride(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				$1,$2,$3,
 				$4,$5,$6,$7,
 				$8,$9,$10,
-				'OVERRIDE_PROPOSE','PENDING_APPROVAL',$11,now(),
+				'EDIT','PENDING_APPROVAL',$11,now(),
 				$12,$13,$14,$15,$16,$17,
 				$18,$19,$20,$21,$22,$23,
 				$24,$25,$26
@@ -3465,7 +3500,7 @@ func postAccrualJournals(ctx context.Context, pool *pgxpool.Pool, runID, userEma
 				$1,$2,$3,
 				$4,$5,$6,$7,
 				$8,$9,$10,
-				'APPROVE','POSTED',$11,now(),
+				'EDIT','POSTED',$11,now(),
 				$11,now(),'Journal posted',
 				$12,$13,$14,$15,'CALCULATED',$16,
 				$17,$18,$19,$20,$21,$22,

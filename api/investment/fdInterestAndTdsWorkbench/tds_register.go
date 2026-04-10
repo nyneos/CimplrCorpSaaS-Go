@@ -9,6 +9,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -177,6 +178,13 @@ func CreateTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"exception_raised":    exceptionRaised,
 			},
 		})
+		go func(id, uEmail, fID, eID string) {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/tds-register/create", id, map[string]interface{}{
+				"record_id": id, "event": "FD_TDS_REGISTER_CREATED", "actor_email": uEmail,
+				"fd_id": fID, "entity_id": eID,
+			})
+		}(tdsID, userEmail, req.FDID, req.EntityID)
 	}
 }
 
@@ -207,8 +215,29 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := context.Background()
 
-		// Simple query with basic joins
+		// Simple query with basic joins + audit history
 		sql := `
+			WITH latest_audit AS (
+			  SELECT DISTINCT ON (a.tds_id)
+			    a.tds_id, a.action_type, a.processing_status,
+			    a.requested_by, a.requested_at,
+			    a.checker_by, a.checker_at, a.checker_comment
+			  FROM investment.fd_tds_receipt_audit a
+			  ORDER BY a.tds_id,
+			    GREATEST(COALESCE(a.requested_at,'1970-01-01'::timestamptz),COALESCE(a.checker_at,'1970-01-01'::timestamptz)) DESC
+			),
+			history AS (
+			  SELECT
+			    tds_id,
+			    MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+			    MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+			    MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+			    MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+			    MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+			    MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			  FROM investment.fd_tds_receipt_audit
+			  GROUP BY tds_id
+			)
 			SELECT 
 				tds.tds_id,
 				tds.receipt_id,
@@ -226,9 +255,24 @@ func GetTDSRegisterView(pool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(tds.exception_raised, false) AS exception_raised,
 				TO_CHAR(tds.deduction_date, 'YYYY-MM-DD') AS deduction_date_fmt,
 				COALESCE(fd.entity_name, '') AS entity_name,
-				COALESCE(fd.bank_name, '') AS bank_name
+				COALESCE(fd.bank_name, '') AS bank_name,
+				COALESCE(la.processing_status,'')      AS processing_status,
+				COALESCE(la.action_type,'')            AS action_type,
+				COALESCE(la.requested_by,'')           AS requested_by,
+				COALESCE(TO_CHAR(la.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(la.checker_by,'')             AS checker_by,
+				COALESCE(TO_CHAR(la.checker_at,'YYYY-MM-DD HH24:MI:SS'),'')   AS checker_at,
+				COALESCE(la.checker_comment,'')        AS checker_comment,
+				COALESCE(h.created_by_audit,'')        AS created_by_audit,
+				COALESCE(h.created_at_audit,'')        AS created_at_audit,
+				COALESCE(h.edited_by,'')               AS edited_by,
+				COALESCE(h.edited_at,'')               AS edited_at,
+				COALESCE(h.deleted_by,'')              AS deleted_by,
+				COALESCE(h.deleted_at,'')              AS deleted_at
 			FROM investment.fd_tds_receipt tds
 			LEFT JOIN investment.fd_master fd ON fd.fd_id = tds.fd_id
+			LEFT JOIN latest_audit la ON la.tds_id = tds.tds_id
+			LEFT JOIN history h ON h.tds_id = tds.tds_id
 			WHERE tds.is_deleted = false
 		  AND tds.ingestion_source = 'TDS_WORKBENCH'`
 
@@ -405,6 +449,13 @@ func ReconcileTDSRegister(pool *pgxpool.Pool) http.HandlerFunc {
 				"action":        req.ReconcileAction,
 			},
 		})
+		go func(uEmail, eID, action string) {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pool, "/investment/fd/tds-register/reconcile", eID, map[string]interface{}{
+				"record_id": eID, "event": "FD_TDS_REGISTER_RECONCILED", "actor_email": uEmail,
+				"entity_id": eID, "reconcile_action": action,
+			})
+		}(userEmail, req.EntityID, req.ReconcileAction)
 	}
 }
 

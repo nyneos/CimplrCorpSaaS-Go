@@ -11,6 +11,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/approvalengine"
 	"CimplrCorpSaas/api/constants"
+	notifcatalog "CimplrCorpSaas/api/notification/catalog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -101,6 +102,12 @@ func CreateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"next_run_at":        nextRun,
 			"is_active":          true,
 		})
+		go func() {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/schedule/create", configID, map[string]interface{}{
+				"record_id": configID, "event": "FD_ACCRUAL_SCHEDULE_CREATED", "actor_email": userEmail, "entity_id": req.EntityID,
+			})
+		}()
 		api.LogInfo("[FDAccrual] CreateScheduleConfig: config_id=%s entity=%s freq=%s", configID, req.EntityID, req.ScheduleFrequency)
 	}
 }
@@ -215,6 +222,12 @@ func UpdateScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id": req.ConfigID,
 			"updated":   true,
 		})
+		go func() {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/schedule/update", req.ConfigID, map[string]interface{}{
+				"record_id": req.ConfigID, "event": "FD_ACCRUAL_SCHEDULE_UPDATED", "actor_email": userEmail,
+			})
+		}()
 		api.LogInfo("[FDAccrual] UpdateScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
@@ -326,6 +339,12 @@ func DisableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id": req.ConfigID,
 			"is_active": false,
 		})
+		go func() {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/schedule/disable", req.ConfigID, map[string]interface{}{
+				"record_id": req.ConfigID, "event": "FD_ACCRUAL_SCHEDULE_DISABLED", "actor_email": userEmail,
+			})
+		}()
 		api.LogInfo("[FDAccrual] DisableSchedule: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
@@ -371,6 +390,12 @@ func EnableSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id": req.ConfigID,
 			"is_active": true,
 		})
+		go func() {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/schedule/enable", req.ConfigID, map[string]interface{}{
+				"record_id": req.ConfigID, "event": "FD_ACCRUAL_SCHEDULE_ENABLED", "actor_email": userEmail,
+			})
+		}()
 		api.LogInfo("[FDAccrual] EnableSchedule: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
@@ -453,6 +478,12 @@ func ApproveAccrualSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"run_id": req.RunID,
 			"status": instStatus,
 		})
+		go func(rID, uEmail, st string) {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/run/schedule-approve", rID, map[string]interface{}{
+				"record_id": rID, "event": "FD_ACCRUAL_RUN_APPROVED", "actor_email": uEmail, "status": st,
+			})
+		}(req.RunID, userEmail, instStatus)
 		api.LogInfo("[FDAccrual] ApproveAccrualSchedule: run_id=%s by=%s result=%s", req.RunID, userEmail, instStatus)
 	}
 }
@@ -515,6 +546,12 @@ func RejectAccrualSchedule(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"run_id": req.RunID,
 			"status": "REJECTED",
 		})
+		go func(rID, uEmail string) {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/run/schedule-reject", rID, map[string]interface{}{
+				"record_id": rID, "event": "FD_ACCRUAL_RUN_REJECTED", "actor_email": uEmail,
+			})
+		}(req.RunID, userEmail)
 		api.LogInfo("[FDAccrual] RejectAccrualSchedule: run_id=%s by=%s", req.RunID, userEmail)
 	}
 }
@@ -593,6 +630,12 @@ func DeleteScheduleConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"config_id": req.ConfigID,
 			"deleted":   true,
 		})
+		go func() {
+			defer func() { recover() }() //nolint:errcheck
+			notifcatalog.TriggerNotification(context.Background(), pgxPool, "/investment/fd/accrual/schedule/delete", req.ConfigID, map[string]interface{}{
+				"record_id": req.ConfigID, "event": "FD_ACCRUAL_SCHEDULE_DELETED", "actor_email": userEmail,
+			})
+		}()
 		api.LogInfo("[FDAccrual] DeleteScheduleConfig: config_id=%s by=%s", req.ConfigID, userEmail)
 	}
 }
@@ -973,6 +1016,18 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(a.requested_at,'1970-01-01'::timestamptz),
 					COALESCE(a.checker_at,'1970-01-01'::timestamptz)
 				) DESC
+		),
+		history AS (
+			SELECT
+				config_id,
+				MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+				MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+				MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+				MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+				MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.fd_accrual_schedule_config_audit
+			GROUP BY config_id
 		)
 		SELECT
 			c.config_id,
@@ -1002,6 +1057,13 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			COALESCE(l.checker_by,'')                   AS audit_checker_by,
 			l.checker_at                                AS audit_checker_at,
 			COALESCE(l.checker_comment,'')              AS audit_checker_comment,
+			-- History fields
+			COALESCE(h.created_by_audit,'')             AS created_by_audit,
+			COALESCE(h.created_at_audit,'')             AS created_at_audit,
+			COALESCE(h.edited_by,'')                    AS edited_by,
+			COALESCE(h.edited_at,'')                    AS edited_at,
+			COALESCE(h.deleted_by,'')                   AS deleted_by,
+			COALESCE(h.deleted_at,'')                   AS deleted_at,
 			-- Stats: count of runs created by this schedule
 			(SELECT COUNT(*) FROM investment.fd_accrual_run r
 			 WHERE r.entity_id = c.entity_id
@@ -1009,6 +1071,7 @@ func GetScheduleConfigsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			   AND r.run_type LIKE 'SCHEDULED_%') AS total_runs_created
 		FROM investment.fd_accrual_schedule_config c
 		LEFT JOIN latest_audit l ON l.config_id = c.config_id
+		LEFT JOIN history h ON h.config_id = c.config_id
 		WHERE 1=1`
 		
 		args := []interface{}{}
@@ -1088,6 +1151,19 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						COALESCE(a.requested_at,'1970-01-01'::timestamptz),
 						COALESCE(a.checker_at,'1970-01-01'::timestamptz)
 					) DESC
+			),
+			history AS (
+				SELECT
+					config_id,
+					MAX(CASE WHEN action_type='CREATE' THEN requested_by END)                                   AS created_by_audit,
+					MAX(CASE WHEN action_type='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at_audit,
+					MAX(CASE WHEN action_type='EDIT'   THEN requested_by END)                                   AS edited_by,
+					MAX(CASE WHEN action_type='EDIT'   THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+					MAX(CASE WHEN action_type='DELETE' THEN requested_by END)                                   AS deleted_by,
+					MAX(CASE WHEN action_type='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+				FROM investment.fd_accrual_schedule_config_audit
+				WHERE config_id = $1
+				GROUP BY config_id
 			)
 			SELECT
 				c.config_id,
@@ -1115,14 +1191,22 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				l.requested_at,
 				COALESCE(l.checker_by,''),
 				l.checker_at,
-				COALESCE(l.checker_comment,'')
+				COALESCE(l.checker_comment,''),
+				COALESCE(h.created_by_audit,''),
+				COALESCE(h.created_at_audit,''),
+				COALESCE(h.edited_by,''),
+				COALESCE(h.edited_at,''),
+				COALESCE(h.deleted_by,''),
+				COALESCE(h.deleted_at,'')
 			FROM investment.fd_accrual_schedule_config c
 			LEFT JOIN latest_audit l ON l.config_id = c.config_id
+			LEFT JOIN history h ON h.config_id = c.config_id
 			WHERE c.config_id = $1`, req.ConfigID)
 		
 		var configID, entityID, entityName, scheduleFreq, bankFilter, fdFilter, runMode, granularity string
 		var lastRunID, lastRunStatus, createdBy, updatedBy string
 		var auditAction, auditStatus, auditReqBy, auditChkBy, auditComment string
+		var histCreatedBy, histCreatedAt, histEditedBy, histEditedAt, histDeletedBy, histDeletedAt string
 		var runDay int
 		var autoSubmit, isActive bool
 		var lastRunAt, nextRunAt, createdAt, updatedAt, auditReqAt, auditChkAt interface{}
@@ -1134,6 +1218,7 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			&isActive, &createdAt, &createdBy, &updatedAt, &updatedBy,
 			&auditAction, &auditStatus, &auditReqBy, &auditReqAt,
 			&auditChkBy, &auditChkAt, &auditComment,
+			&histCreatedBy, &histCreatedAt, &histEditedBy, &histEditedAt, &histDeletedBy, &histDeletedAt,
 		); err != nil {
 			api.RespondWithError(w, http.StatusNotFound, "Schedule config not found: "+err.Error())
 			return
@@ -1166,6 +1251,12 @@ func GetScheduleConfigDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"audit_checker_by":          auditChkBy,
 			"audit_checker_at":          auditChkAt,
 			"audit_checker_comment":     auditComment,
+			"created_by_audit":          histCreatedBy,
+			"created_at_audit":          histCreatedAt,
+			"edited_by":                 histEditedBy,
+			"edited_at":                 histEditedAt,
+			"deleted_by":                histDeletedBy,
+			"deleted_at":                histDeletedAt,
 		}
 
 		// ── 2. All runs created by this schedule ────────────────────────────

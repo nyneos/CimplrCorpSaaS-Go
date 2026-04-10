@@ -169,6 +169,7 @@ func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
 	rolloverAmount := p.RolloverAmount
 	maturityDate := p.MaturityDate
 	tenorDays := p.TenorDays
+	rolloverType := "FULL"
 	// net_payout_amount = full rollover amount (principal + net interest)
 	netPayout := rolloverAmount
 
@@ -213,9 +214,71 @@ func processAutoRenewalFD(ctx context.Context, p AutoRenewalFDParams) error {
 		  closure_request_id, source_fd_id, rollover_date,
 		  rollover_amount, rollover_principal, interest_credited, tds_deducted,
 		  new_tenor_days, rollover_type, created_by
-		) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,'FULL','SYSTEM')`,
+		) VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,'SYSTEM')`,
 		closureRequestID, fdID, maturityDate.Format(constants.DateFormat),
-		rolloverAmount, principalAmount, accruedInterest, tdsDeducted, tenorDays)
+		rolloverAmount, principalAmount, accruedInterest, tdsDeducted,
+		tenorDays, rolloverType)
+
+	// Read source FD config to mirror onto the new booking request.
+	var srcBankID, srcBankName, srcBankConfigID, srcSourceAccountID string
+	var srcInterestTypeCode, srcFrequencyID, srcDayCountCode, srcTDSPlanID string
+	var srcInterestRate float64
+	_ = db.QueryRow(ctx, `
+		SELECT
+		  COALESCE(m.bank_id,''), COALESCE(m.bank_name,''),
+		  COALESCE(b.bank_config_id,''), COALESCE(b.source_account_id,''),
+		  COALESCE(m.interest_type_code,'SIMPLE'), COALESCE(b.frequency_id,''),
+		  COALESCE(m.day_count_code,''), COALESCE(b.tds_plan_id,''),
+		  COALESCE(m.interest_rate,0)
+		FROM investment.fd_master m
+		LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
+		WHERE m.fd_id = $1 LIMIT 1`, fdID,
+	).Scan(
+		&srcBankID, &srcBankName,
+		&srcBankConfigID, &srcSourceAccountID,
+		&srcInterestTypeCode, &srcFrequencyID,
+		&srcDayCountCode, &srcTDSPlanID,
+		&srcInterestRate,
+	)
+
+	// Create fd_booking_request (BOOKING_PENDING) so ops can place the new FD
+	// with the bank. The entry mirrors the source FD's configuration.
+	var newBookingID string
+	bookErr := db.QueryRow(ctx, `
+		INSERT INTO investment.fd_booking_request (
+		  entity_id, entity_name,
+		  bank_id, bank_name,
+		  bank_config_id, source_account_id,
+		  principal_amount, interest_rate, tenure_days,
+		  interest_type_code, frequency_id, day_count_code, tds_plan_id,
+		  booking_status, booking_remarks, source_closure_request_id,
+		  created_by, created_at, updated_by, updated_at
+		) VALUES (
+		  NULLIF($1,''), NULLIF($2,''),
+		  NULLIF($3,''), NULLIF($4,''),
+		  NULLIF($5,''), NULLIF($6,''),
+		  $7, $8, $9,
+		  NULLIF($10,''), NULLIF($11,''), NULLIF($12,''), NULLIF($13,''),
+		  'BOOKING_PENDING',
+		  $14, $15,
+		  'SYSTEM', NOW(), 'SYSTEM', NOW()
+		) RETURNING booking_id`,
+		entityID, entityName,
+		srcBankID, srcBankName,
+		srcBankConfigID, srcSourceAccountID,
+		rolloverAmount, srcInterestRate, tenorDays,
+		srcInterestTypeCode, srcFrequencyID, srcDayCountCode, srcTDSPlanID,
+		fmt.Sprintf("Auto-renewal booking — source closure %s source FD %s", closureRequestID, fdID),
+		closureRequestID,
+	).Scan(&newBookingID)
+	if bookErr != nil {
+		log.Printf("[AutoRenewal] fd_booking_request insert failed for FD %s closure %s: %v", fdID, closureRequestID, bookErr)
+	} else if newBookingID != "" {
+		_, _ = db.Exec(ctx,
+			`UPDATE investment.fd_closure_rollover SET new_fd_booking_id=$1 WHERE closure_request_id=$2`,
+			newBookingID, closureRequestID)
+		log.Printf("[AutoRenewal] Created booking_request %s (BOOKING_PENDING) for closure %s FD %s", newBookingID, closureRequestID, fdID)
+	}
 
 	// Link closure request on fd_master
 	_, err = db.Exec(ctx,
