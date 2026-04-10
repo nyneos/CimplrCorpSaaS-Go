@@ -70,6 +70,10 @@ func RegisterFDBookingRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		mid(http.HandlerFunc(CaptureConfirmation(pool))),
 	)
 	mux.Handle(
+		"/investment/fd/confirmation/edit",
+		mid(http.HandlerFunc(EditConfirmation(pool))),
+	)
+	mux.Handle(
 		"/investment/fd/confirmation/resolve-variance",
 		mid(http.HandlerFunc(ResolveVariance(pool))),
 	)

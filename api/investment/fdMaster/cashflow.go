@@ -30,6 +30,7 @@ type FDRecord struct {
 	TenorMonths             int       // optional: tenor in months (may be 0)
 	TenureType              string    // DAYS | MONTHS | YEARS
 	TenureYears             int       // optional: tenor in years (may be 0)
+	PenaltyID               string
 	ValueDate               time.Time // maps to start_date
 	MaturityDate            time.Time
 	MaturityAmount          float64
@@ -196,6 +197,11 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		currencyExpr = "COALESCE(b.currency_code, '')"
 	}
 
+	penaltyExpr := "''::text"
+	if confCols["penalty_id"] {
+		penaltyExpr = "COALESCE(c.penalty_id, '')"
+	}
+
 	rec := &FDRecord{}
 	q := fmt.Sprintf(`
 		SELECT
@@ -220,13 +226,14 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 			COALESCE(b.tds_plan_id, ''),
 			COALESCE(c.bank_fd_ref_no, ''),
 			COALESCE(c.confirmation_received_date, c.actual_start_date),
-			COALESCE(c.confirmation_status, '')
+			COALESCE(c.confirmation_status, ''),
+			%s AS penalty_id
 		FROM investment.fd_confirmation c
 		JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 		WHERE c.confirmation_id = $1
 		  AND COALESCE(c.is_deleted, false) = false
 		  AND COALESCE(b.is_deleted, false) = false
-	`, bankAccExpr, currencyExpr)
+	`, bankAccExpr, currencyExpr, penaltyExpr)
 	err = exec.QueryRow(ctx, q, confirmationID).Scan(
 		&rec.ConfirmationID,
 		&rec.BookingID,
@@ -250,6 +257,7 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 		&rec.BankFDReference,
 		&rec.ReceiptDate,
 		&rec.ConfirmationStatus,
+		&rec.PenaltyID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrLoadFDRecord, err)

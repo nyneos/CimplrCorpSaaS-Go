@@ -36,4 +36,5 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 	// Maturity Summary — pivot-table view of all FDs
 	mux.Handle("/investment/fd/maturity/summary",
 		mid(http.HandlerFunc(GetFDMaturitySummary(pool))))
+
 }

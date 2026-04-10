@@ -403,6 +403,8 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		// status
 		"status":    statusValue,
 		"fd_status": statusValue,
+		// optional
+		"penalty_id": rec.PenaltyID,
 		// audit
 		"created_by": createdBy,
 		"notes":      notes,
@@ -420,7 +422,7 @@ func insertFDMaster(ctx context.Context, exec queryExecutor, rec *FDRecord, fdNu
 		"tenure_months", "tenor_months",
 		"tenure_type", "tenor_type",
 		"tenure_years", "tenor_years",
-		"frequency_id", "bank_config_id", "tds_plan_id", "day_count_code",
+		"frequency_id", "bank_config_id", "tds_plan_id", "day_count_code", "penalty_id",
 		"bank_fd_ref_no", "fd_number", "fd_no", "certificate_number", "bank_fd_reference",
 		"status", "fd_status",
 		"created_by", "notes", "is_deleted",
