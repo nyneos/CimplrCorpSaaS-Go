@@ -320,7 +320,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				ORDER BY ae.created_at DESC
 				LIMIT 200`, entityFilter)
 			if err != nil {
@@ -459,7 +459,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY 1`
 
 			type bandMap = map[string]int64
@@ -522,7 +522,7 @@ func GetFDOperationalDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false
-				  AND m.fd_status NOT IN ('CANCELLED')
+				  AND m.fd_status IN ('ACTIVE','MATURED','PENDING_ACTIVATION')
 				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
 				ORDER BY m.maturity_date ASC NULLS LAST
 				LIMIT 500`, entityFilter)

@@ -110,7 +110,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COALESCE(SUM(m.principal_amount),0)
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED','PENDING_ACTIVATION')
+				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&deployed)
 			if err != nil {
@@ -130,7 +130,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT COUNT(*)
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
-				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED','PENDING_ACTIVATION')
+				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&cnt)
 			if err != nil {
@@ -246,9 +246,9 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false
-				  AND m.fd_status IN ('ACTIVE','MATURED','PENDING_ACTIVATION')
+				  AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND m.maturity_date <= CURRENT_DATE + INTERVAL '90 days'
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				ORDER BY m.maturity_date ASC`, entityFilter)
 			if err != nil {
 				return []interface{}{}, nil
@@ -538,7 +538,7 @@ func GetFDTreasuryDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false
-				  AND m.fd_status NOT IN ('CANCELLED')
+				  AND m.fd_status IN ('ACTIVE','MATURED')
 				  AND ($1::text='' OR COALESCE(m.entity_id, b.entity_id)=$1)
 				ORDER BY m.maturity_date ASC NULLS LAST
 				LIMIT 500`, entityFilter)

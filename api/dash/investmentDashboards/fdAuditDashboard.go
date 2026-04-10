@@ -239,6 +239,35 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
 					FROM investment.fd_audit_compounding_frequency
 					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"TDS_RECEIPT", `
+					SELECT 'TDS_RECEIPT',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_tds_receipt_audit
+					WHERE requested_at >= $1::date AND requested_at < $2::date
+					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id=$3))`},
+				{"ACCRUAL_SCHEDULE", `
+					SELECT 'ACCRUAL_SCHEDULE',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_accrual_schedule_config_audit
+					WHERE requested_at >= $1::date AND requested_at < $2::date AND $3::text = $3::text`},
+				{"ACCRUAL_RUN", `
+					SELECT 'ACCRUAL_RUN',
+					  COUNT(*),
+					  COALESCE(SUM(CASE WHEN processing_status IN ('PENDING_APPROVAL','PENDING_EDIT_APPROVAL','PENDING_DELETE_APPROVAL') THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'APPROVED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN processing_status = 'REJECTED' THEN 1 ELSE 0 END),0),
+					  COALESCE(SUM(CASE WHEN checker_by IS NOT NULL THEN 1 ELSE 0 END),0)
+					FROM investment.fd_accrual_run_audit
+					WHERE requested_at >= $1::date AND requested_at < $2::date
+					  AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'')=$3))`},
 			}
 
 			out := []summaryRow{}
@@ -300,6 +329,12 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  SELECT checker_by, requested_at FROM investment.fd_audit_day_count_convention
 				  UNION ALL
 				  SELECT checker_by, requested_at FROM investment.fd_audit_compounding_frequency
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_tds_receipt_audit
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_accrual_schedule_config_audit
+				  UNION ALL
+				  SELECT checker_by, requested_at FROM investment.fd_accrual_run_audit
 				) t
 				WHERE requested_at >= $1::date AND requested_at < $2::date`, startDate, endDate).Scan(&checked, &total)
 			if err != nil {
@@ -578,6 +613,71 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_audit_compounding_frequency
 				  WHERE requested_at >= $1::date AND requested_at < $2::date
 				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'TDS_RECEIPT',
+				    audit_id::text,
+				    tds_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_tds_receipt_audit
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id=$3))
+
+				  UNION ALL
+
+				  SELECT
+				    'ACCRUAL_SCHEDULE',
+				    config_id AS audit_id_text,
+				    config_id,
+				    action_type,
+				    processing_status,
+				    '',
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    '',
+				    '',
+				    requested_at
+				  FROM investment.fd_accrual_schedule_config_audit
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+
+				  UNION ALL
+
+				  SELECT
+				    'ACCRUAL_RUN',
+				    run_id AS audit_id_text,
+				    run_id,
+				    action_type,
+				    processing_status,
+				    COALESCE(reason,''),
+				    COALESCE(requested_by,''),
+				    COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_by,''),
+				    COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD"T"HH24:MI:SS'),''),
+				    COALESCE(checker_comment,''),
+				    COALESCE(old_run_status,''),
+				    '',
+				    requested_at
+				  FROM investment.fd_accrual_run_audit
+				  WHERE requested_at >= $1::date AND requested_at < $2::date
+				    AND ($4::text='' OR action_type=$4)
+				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'')=$3))
 				) combined
 				ORDER BY sort_ts DESC
 				LIMIT 500`, startDate, endDate, entityFilter, actionFilter, fdFilter)
@@ -980,6 +1080,59 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_audit_cashflow_schedule
 				  WHERE checker_by IS NOT NULL
 				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    audit_id::text,
+				    tds_id,
+				    'TDS_RECEIPT',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_tds_receipt_audit
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_tds_receipt r JOIN investment.fd_master m ON m.fd_id=r.fd_id WHERE r.tds_id=fd_tds_receipt_audit.tds_id AND m.entity_id=$3))
+
+				  UNION ALL
+
+				  SELECT
+				    config_id AS audit_id_text,
+				    config_id,
+				    'ACCRUAL_SCHEDULE',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_accrual_schedule_config_audit
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+
+				  UNION ALL
+
+				  SELECT
+				    run_id AS audit_id_text,
+				    run_id,
+				    'ACCRUAL_RUN',
+				    action_type,
+				    COALESCE(requested_by,''),
+				    COALESCE(checker_by,''),
+				    processing_status,
+				    requested_at,
+				    checker_at,
+				    COALESCE(checker_comment,'')
+				  FROM investment.fd_accrual_run_audit
+				  WHERE checker_by IS NOT NULL
+				    AND requested_at >= $1::date AND requested_at < $2::date
+				    AND ($3::text='' OR EXISTS(SELECT 1 FROM investment.fd_accrual_run ar WHERE ar.run_id=fd_accrual_run_audit.run_id AND COALESCE(ar.entity_id,'')=$3))
 				) combined
 				ORDER BY requested_at DESC
 				LIMIT 200`, startDate, endDate, entityFilter)

@@ -155,7 +155,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted = false
 				  AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text = '' OR b.entity_id = $1)`
+				  AND ($1::text = '' OR COALESCE(m.entity_id,b.entity_id) = $1)`
 			var value float64
 			var count int64
 			err := pool.QueryRow(ctx, sqlStr, entityFilter).Scan(&value, &count)
@@ -178,7 +178,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				 FROM investment.fd_master m
 				 LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				 WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				   AND ($1::text='' OR b.entity_id=$1)`,
+				   AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`,
 				entityFilter).Scan(&totalAmt)
 
 			sqlStr := `
@@ -196,7 +196,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  ORDER BY bc.created_at DESC LIMIT 1
 				) lim ON true
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY COALESCE(m.bank_name, m.bank_id), lim.credit_limit
 				ORDER BY exposure DESC`
 
@@ -252,7 +252,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)`
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
 			var a7, a15, a30 float64
 			var c7, c15, c30 int64
 			err := pool.QueryRow(ctx, sqlStr, entityFilter).Scan(&a7, &c7, &a15, &c15, &a30, &c30)
@@ -286,7 +286,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = al.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(al.is_deleted,false)=false
-				  AND ($1::text='' OR b.entity_id=$1)`
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
 
 			fyStart := periodStartDate("YTD", now)
 			qtdStart := periodStartDate("QTD", now)
@@ -326,7 +326,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(ae.is_deleted,false)=false
 				  AND ae.exception_status NOT IN ('RESOLVED','CLOSED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY ae.exception_type
 				ORDER BY cnt DESC`
 			rows, err := pool.Query(ctx, sql, entityFilter)
@@ -380,7 +380,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status='ACTIVE'
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				  AND m.maturity_date >= CURRENT_DATE
 				GROUP BY 1
 				ORDER BY MIN(m.maturity_date)`
@@ -422,7 +422,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE COALESCE(al.is_deleted,false)=false
 				  AND al.accrual_period_end >= CURRENT_DATE - INTERVAL '6 months'
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY 1, 2
 				ORDER BY 2`
 			accrRows, err := pool.Query(ctx, accrualSQL, entityFilter)
@@ -494,7 +494,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE m.is_deleted=false AND m.fd_status='ACTIVE'
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				GROUP BY 1
 				ORDER BY MIN(m.interest_rate)`
 			rows, err := pool.Query(ctx, sql, entityFilter)
@@ -533,7 +533,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				FROM investment.fd_booking_request b
 				WHERE b.is_deleted=false
 				  AND b.booking_status IN ('PENDING_APPROVAL','SUBMITTED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				UNION ALL
 				SELECT 'Maturity Decisions' AS type,
 				       COUNT(*) AS count,
@@ -544,7 +544,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				WHERE m.is_deleted=false AND m.fd_status='ACTIVE'
 				  AND m.maturity_instructions IS NULL
 				  AND m.maturity_date <= CURRENT_DATE + 30
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				UNION ALL
 				SELECT 'Closure Approvals' AS type,
 				       COUNT(*) AS count,
@@ -555,7 +555,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE cr.is_deleted=false
 				  AND cr.closure_status IN ('PENDING_APPROVAL','SUBMITTED')
-				  AND ($1::text='' OR b.entity_id=$1)`
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
 			rows, err := pool.Query(ctx, sql, entityFilter)
 			if err != nil {
 				return nil, err
@@ -595,7 +595,7 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				LEFT JOIN investment.fd_master m ON m.fd_id = cr.fd_id
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				WHERE cr.is_deleted=false
-				  AND ($1::text='' OR b.entity_id=$1)`
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)`
 			var completed, total, pending, blockers int64
 			err := pool.QueryRow(ctx, sql, entityFilter).Scan(&completed, &total, &pending, &blockers)
 			if err != nil {
@@ -618,13 +618,22 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			sql := `
 				SELECT
 				  m.fd_id,
-				  COALESCE(b.entity_name,'') AS entity,
+				  COALESCE(b.entity_name, m.entity_name,'') AS entity,
+				  COALESCE(m.entity_id, b.entity_id,'') AS entity_id,
 				  COALESCE(m.bank_name, m.bank_id,'') AS bank,
+				  COALESCE(m.bank_fd_ref_no, m.fd_id,'') AS bank_fd_ref_no,
 				  m.principal_amount AS principal,
 				  m.interest_rate AS rate,
+				  COALESCE(m.interest_type_code,'') AS interest_type_code,
+				  COALESCE(TO_CHAR(m.start_date,'YYYY-MM-DD'),'') AS start_date,
+				  COALESCE(m.tenure_days, 0) AS tenure_days,
 				  TO_CHAR(m.maturity_date,'YYYY-MM-DD') AS maturity_date,
 				  COALESCE(al.total_interest_accrued, 0) AS interest_accrued,
-				  m.fd_status AS status
+				  m.fd_status AS status,
+				  COALESCE(b.booking_id,'') AS booking_id,
+				  COALESCE(b.booking_status,'') AS booking_status,
+				  COALESCE(cr.closure_type,'') AS closure_type,
+				  COALESCE(cr.closure_status,'') AS closure_status
 				FROM investment.fd_master m
 				LEFT JOIN investment.fd_booking_request b ON b.booking_id = m.booking_id
 				LEFT JOIN LATERAL (
@@ -632,10 +641,16 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  FROM investment.fd_accrual_ledger
 				  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
 				) al ON true
+				LEFT JOIN LATERAL (
+				  SELECT closure_type, COALESCE(closure_status,'') AS closure_status
+				  FROM investment.fd_closure_request
+				  WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false
+				  ORDER BY created_at DESC LIMIT 1
+				) cr ON true
 				WHERE m.is_deleted=false AND m.fd_status IN ('ACTIVE','MATURED')
-				  AND ($1::text='' OR b.entity_id=$1)
+				  AND ($1::text='' OR COALESCE(m.entity_id,b.entity_id)=$1)
 				ORDER BY m.maturity_date ASC
-				LIMIT 100`
+				LIMIT 200`
 			rows, err := pool.Query(ctx, sql, entityFilter)
 			if err != nil {
 				return nil, err
@@ -644,18 +659,33 @@ func GetFDCfoDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 			type fdRow struct {
 				FDID            string  `json:"fd_id"`
 				Entity          string  `json:"entity"`
+				EntityID        string  `json:"entity_id"`
 				Bank            string  `json:"bank"`
+				BankFDRefNo     string  `json:"bank_fd_ref_no"`
 				Principal       float64 `json:"principal"`
 				Rate            float64 `json:"rate"`
+				InterestTypeCode string `json:"interest_type_code"`
+				StartDate       string  `json:"start_date"`
+				TenureDays      int     `json:"tenure_days"`
 				MaturityDate    string  `json:"maturity_date"`
 				InterestAccrued float64 `json:"interest_accrued"`
 				Status          string  `json:"status"`
+				BookingID       string  `json:"booking_id"`
+				BookingStatus   string  `json:"booking_status"`
+				ClosureType     string  `json:"closure_type"`
+				ClosureStatus   string  `json:"closure_status"`
 			}
 			var out []fdRow
 			for rows.Next() {
 				var fr fdRow
-				if err := rows.Scan(&fr.FDID, &fr.Entity, &fr.Bank, &fr.Principal, &fr.Rate,
-					&fr.MaturityDate, &fr.InterestAccrued, &fr.Status); err != nil {
+				if err := rows.Scan(
+					&fr.FDID, &fr.Entity, &fr.EntityID, &fr.Bank, &fr.BankFDRefNo,
+					&fr.Principal, &fr.Rate, &fr.InterestTypeCode,
+					&fr.StartDate, &fr.TenureDays, &fr.MaturityDate,
+					&fr.InterestAccrued, &fr.Status,
+					&fr.BookingID, &fr.BookingStatus,
+					&fr.ClosureType, &fr.ClosureStatus,
+				); err != nil {
 					continue
 				}
 				fr.Principal = fdRound(fr.Principal, 2)

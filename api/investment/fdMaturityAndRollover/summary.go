@@ -37,22 +37,29 @@ type maturitySummaryRequest struct {
 type fdSummaryRow struct {
 	FDID                 string  `json:"fd_id"`
 	FDRefNo              string  `json:"fd_ref_no"`
+	BankFDRefNo          string  `json:"bank_fd_ref_no"`
 	EntityID             string  `json:"entity_id"`
 	EntityName           string  `json:"entity_name"`
 	BankID               string  `json:"bank_id"`
 	BankName             string  `json:"bank_name"`
 	PrincipalAmount      float64 `json:"principal_amount"`
 	InterestRate         float64 `json:"interest_rate"`
+	InterestTypeCode     string  `json:"interest_type_code"`
 	TenureDays           int     `json:"tenure_days"`
 	StartDate            *string `json:"start_date"`
 	MaturityDate         *string `json:"maturity_date"`
 	FDStatus             string  `json:"fd_status"`
+	BookingID            string  `json:"booking_id"`
+	BookingStatus        string  `json:"booking_status"`
 	ClosureType          *string `json:"closure_type"`
+	ClosureStatus        string  `json:"closure_status"`
 	EffectiveClosureDate *string `json:"effective_closure_date"`
 	AccruedInterest      float64 `json:"accrued_interest"`
 	TDSDeducted          float64 `json:"tds_deducted"`
 	NetPayout            float64 `json:"net_payout"`
 	DaysHeld             int     `json:"days_held"`
+	ReceiptCount         int     `json:"receipt_count"`
+	LatestReceiptDate    string  `json:"latest_receipt_date"`
 	ClosureRequestID     *string `json:"closure_request_id"`
 	ApprovedAt           *string `json:"approved_at"`
 }
@@ -146,20 +153,32 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 		// ── Resolve cashflow table (whichever exists in the DB) ──────────────
 		cashflowTable := resolveCashflowTable(ctx, pool)
 
-		// ── Build acc LATERAL ────────────────────────────────────────────────
+		// ── Build accrual LATERAL — prefer fd_accrual_ledger, fallback to cashflow ──
 		var accLateral string
 		if cashflowTable != "" {
 			accLateral = fmt.Sprintf(`
 			LEFT JOIN LATERAL (
 				SELECT
-					COALESCE(SUM(interest_accrued), 0)  AS total_interest_accrued,
-					COALESCE(SUM(tds_amount), 0)        AS total_tds
-				FROM %s
-				WHERE fd_id = m.fd_id
-				  AND (is_deleted IS NULL OR is_deleted = false)
-			) acc ON true`, cashflowTable)
+					COALESCE(
+						(SELECT SUM(period_interest_accrued) FROM investment.fd_accrual_ledger
+						 WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false),
+						(SELECT SUM(interest_accrued) FROM %s WHERE fd_id = m.fd_id AND (is_deleted IS NULL OR is_deleted=false)),
+						0
+					)::numeric AS total_interest_accrued,
+					COALESCE(
+						(SELECT SUM(tds_amount) FROM %s WHERE fd_id = m.fd_id AND (is_deleted IS NULL OR is_deleted=false)),
+						0
+					)::numeric AS total_tds
+				FROM (SELECT 1) _dummy
+			) acc ON true`, cashflowTable, cashflowTable)
 		} else {
-			accLateral = `LEFT JOIN LATERAL (SELECT 0::numeric AS total_interest_accrued, 0::numeric AS total_tds) acc ON true`
+			accLateral = `LEFT JOIN LATERAL (
+				SELECT
+					COALESCE((SELECT SUM(period_interest_accrued) FROM investment.fd_accrual_ledger
+					          WHERE fd_id = m.fd_id AND COALESCE(is_deleted,false)=false), 0)::numeric AS total_interest_accrued,
+					0::numeric AS total_tds
+				FROM (SELECT 1) _dummy
+			) acc ON true`
 		}
 
 		// Both column names confirmed present in DB schema
@@ -172,12 +191,14 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 				SELECT
 					m.fd_id,
 					COALESCE(m.bank_fd_ref_no, m.fd_id)                     AS fd_ref_no,
+					COALESCE(m.bank_fd_ref_no, '')                          AS bank_fd_ref_no,
 					COALESCE(m.entity_id, '')                                AS entity_id,
 					COALESCE(m.entity_name, '')                              AS entity_name,
 					COALESCE(m.bank_id, '')                                  AS bank_id,
 					COALESCE(m.bank_name, '')                                AS bank_name,
 					COALESCE(m.principal_amount, 0)                          AS principal_amount,
 					COALESCE(m.interest_rate, 0)                             AS interest_rate,
+					COALESCE(m.interest_type_code, '')                       AS interest_type_code,
 					COALESCE(m.tenure_days,
 						(m.maturity_date - m.start_date),
 						0
@@ -185,7 +206,10 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 					m.start_date::text                                       AS start_date,
 					m.maturity_date::text                                    AS maturity_date,
 					COALESCE(m.fd_status, 'UNKNOWN')                        AS fd_status,
+					COALESCE(bk.booking_id, '')                              AS booking_id,
+					COALESCE(bk.booking_status, '')                          AS booking_status,
 					cr.closure_type,
+					COALESCE(cr.closure_status, '')                          AS closure_status,
 					cr.effective_closure_date::text                          AS effective_closure_date,
 					COALESCE(acc.total_interest_accrued, 0)                 AS accrued_interest,
 					COALESCE(acc.total_tds, 0)                              AS tds_deducted,
@@ -194,13 +218,23 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 						(COALESCE(cr.effective_closure_date, NOW()::date) - m.start_date),
 						0
 					)                                                        AS days_held,
+					COALESCE(rct.receipt_count, 0)                           AS receipt_count,
+					COALESCE(rct.latest_receipt_date, '')                    AS latest_receipt_date,
 					cr.closure_request_id,
 					cr.approved_at::text                                     AS approved_at
 				FROM investment.fd_master m
 				LEFT JOIN LATERAL (
+					SELECT booking_id, booking_status
+					FROM investment.fd_booking_request
+					WHERE booking_id = m.booking_id
+					  AND (is_deleted IS NULL OR is_deleted = false)
+					LIMIT 1
+				) bk ON true
+				LEFT JOIN LATERAL (
 					SELECT
 						closure_request_id,
 						closure_type,
+						closure_status,
 						effective_closure_date,
 						net_payout_amount,
 						approved_at
@@ -210,6 +244,14 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 					ORDER BY created_at DESC
 					LIMIT 1
 				) cr ON true
+				LEFT JOIN LATERAL (
+					SELECT
+						COUNT(*) AS receipt_count,
+						COALESCE(MAX(TO_CHAR(receipt_date,'YYYY-MM-DD')),'') AS latest_receipt_date
+					FROM investment.fd_interest_receipt
+					WHERE fd_id = m.fd_id
+					  AND is_deleted = false
+				) rct ON true
 				%s
 				%s
 			) sub
@@ -239,22 +281,29 @@ func GetFDMaturitySummary(pool *pgxpool.Pool) http.HandlerFunc {
 			scanErr := rows.Scan(
 				&row.FDID,
 				&row.FDRefNo,
+				&row.BankFDRefNo,
 				&row.EntityID,
 				&row.EntityName,
 				&row.BankID,
 				&row.BankName,
 				&row.PrincipalAmount,
 				&row.InterestRate,
+				&row.InterestTypeCode,
 				&row.TenureDays,
 				&startDateStr,
 				&maturityDateStr,
 				&row.FDStatus,
+				&row.BookingID,
+				&row.BookingStatus,
 				&closureType,
+				&row.ClosureStatus,
 				&closureEffDate,
 				&row.AccruedInterest,
 				&row.TDSDeducted,
 				&row.NetPayout,
 				&row.DaysHeld,
+				&row.ReceiptCount,
+				&row.LatestReceiptDate,
 				&closureReqID,
 				&approvedAt,
 			)
