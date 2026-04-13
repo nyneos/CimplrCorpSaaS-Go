@@ -128,6 +128,16 @@ func StartFXService(db *sql.DB) {
 			h.ServeHTTP(w, r)
 		})
 
+		v91Download := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := v91.GetExposureDownloadURL(pgxPool)
+			h.ServeHTTP(w, r)
+		})
+
+		v91BulkDownload := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := v91.GetExposureBulkDownloadURL(pgxPool)
+			h.ServeHTTP(w, r)
+		})
+
 		// per-request wrapper for EditAllocationHandler (v91)
 		v91EditAllocation := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			pool, err := pgxpool.New(context.Background(), dsn)
@@ -151,7 +161,12 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/exposures/bulk-delete/v91", middlewares.PreValidationMiddleware(pgxPool)(v91BulkDelete))
 		mux.Handle("/fx/exposures/edit-allocation/v91", middlewares.PreValidationMiddleware(pgxPool)(v91EditAllocation))
 		mux.Handle("/fx/exposures/get-file/v91", middlewares.PreValidationMiddleware(pgxPool)(v91BatchesMinimal))
+		mux.Handle("/fx/exposures/download/v91", middlewares.PreValidationMiddleware(pgxPool)(v91Download))
+		mux.Handle("/fx/exposures/download-bulk/v91", middlewares.PreValidationMiddleware(pgxPool)(v91BulkDownload))
 		mux.Handle("/fx/exposures/batch-upload-staging", middlewares.PreValidationMiddleware(pgxPool)(exposures.BatchUploadStagingData(db)))
+		// For batch-staging uploads (exposure_headers)
+		mux.Handle("/fx/exposures/download", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureDownloadURL(db)))
+		mux.Handle("/fx/exposures/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureBulkDownloadURL(db)))
 		mux.Handle("/fx/exposures/edit", middlewares.PreValidationMiddleware(pgxPool)(exposures.EditExposureHeadersLineItemsJoined(db)))
 		mux.Handle("/fx/exposures/headers-line-items", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetExposureHeadersLineItems(db)))
 		mux.Handle("/fx/exposures/pending-headers-line-items", middlewares.PreValidationMiddleware(pgxPool)(exposures.GetPendingApprovalHeadersLineItems(db)))
@@ -180,6 +195,8 @@ func StartFXService(db *sql.DB) {
 		/*mtm upload */
 		mux.Handle("/fx/forwards/upload-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadMTMFiles(db)))
 		mux.Handle("/fx/forwards/get-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMData(db)))
+		mux.Handle("/fx/forwards/download-mtm", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMDownloadURL(db)))
+		mux.Handle("/fx/forwards/download-mtm-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetMTMBulkDownloadURL(db)))
 
 		// Forward cancel/roll endpoints
 		mux.Handle("/fx/forwards/forward-booking-list", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardBookingList(db)))
@@ -203,6 +220,10 @@ func StartFXService(db *sql.DB) {
 		mux.Handle("/fx/forwards/upload-multi", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadForwardBookingsMulti(db)))
 		mux.Handle("/fx/forwards/upload-confirmations-multi", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadForwardConfirmationsMulti(db)))
 		mux.Handle("/fx/forwards/upload-bank-multi", middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
+		mux.Handle("/fx/forwards/download", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardDownloadURL(db)))
+		mux.Handle("/fx/forwards/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardBulkDownloadURL(db)))
+		mux.Handle("/fx/forwards/download-confirmations-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardConfirmationBulkDownloadURL(db)))
+		mux.Handle("/fx/forwards/download-bank-bulk", middlewares.PreValidationMiddleware(pgxPool)(forwards.GetForwardBankBulkDownloadURL(db)))
 
 	} else {
 		log.Println("v91 uploader route not registered: DB env vars not set")

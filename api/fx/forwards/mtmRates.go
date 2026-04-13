@@ -2,7 +2,7 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
-	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -97,6 +97,7 @@ func UploadMTMFiles(db *sql.DB) http.HandlerFunc {
 func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
+	skipDuplicates := strings.EqualFold(strings.TrimSpace(r.FormValue("skipDuplicates")), "true")
 	for _, fileHeader := range files {
 		file, err := fileHeader.Open()
 		if err != nil {
@@ -119,7 +120,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 
 		fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 		ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-		s3Key := "fx/mtm-rates/" + fileHash + ext
+		s3Key := "fx/mtm/" + fileHash + ext
 
 		var rowsData []map[string]interface{}
 		if ext == ".csv" {
@@ -194,6 +195,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 
 		var fileError error
 		validRows := [][]interface{}{}
+		skippedDuplicates := 0
 		refIds := []string{}
 		for _, row := range rowsData {
 			if v, ok := row["internal_reference_id"].(string); ok && v != "" {
@@ -225,6 +227,19 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				rows.Close()
 			}
 		}
+		existingMTMRefs := map[string]struct{}{}
+		if len(refIds) > 0 {
+			rows, err := db.Query(`SELECT internal_reference_id FROM forward_mtm WHERE internal_reference_id = ANY($1)`, pq.Array(refIds))
+			if err == nil {
+				for rows.Next() {
+					var internalReferenceID string
+					if scanErr := rows.Scan(&internalReferenceID); scanErr == nil {
+						existingMTMRefs[internalReferenceID] = struct{}{}
+					}
+				}
+				rows.Close()
+			}
+		}
 		ledgerMap := map[string]map[string]interface{}{}
 		if len(bookingIdList) > 0 {
 			query := `SELECT booking_id, running_open_amount, ledger_sequence FROM forward_booking_ledger WHERE booking_id = ANY($1)`
@@ -245,6 +260,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				rows.Close()
 			}
 		}
+		fileSeenRefs := map[string]struct{}{}
 		for i, row := range rowsData {
 			entity, _ := row["entity"].(string)
 			if !containsString(buNames, entity) {
@@ -252,6 +268,23 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				break
 			}
 			internalRef, _ := row["internal_reference_id"].(string)
+			if _, seenInFile := fileSeenRefs[internalRef]; seenInFile {
+				if skipDuplicates {
+					skippedDuplicates++
+					continue
+				}
+				fileError = fmt.Errorf("duplicate internal_reference_id in upload file: %s (row %d)", internalRef, i+1)
+				break
+			}
+			fileSeenRefs[internalRef] = struct{}{}
+			if _, exists := existingMTMRefs[internalRef]; exists {
+				if skipDuplicates {
+					skippedDuplicates++
+					continue
+				}
+				fileError = fmt.Errorf("mtm already exists for internal_reference_id: %s (row %d)", internalRef, i+1)
+				break
+			}
 			bookingId := bookingMap[internalRef]
 			if bookingId == "" {
 				fileError = fmt.Errorf("booking not found for internal_reference_id: %s (row %d)", internalRef, i+1)
@@ -318,6 +351,14 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			})
 			continue
 		}
+		if len(validRows) == 0 {
+			results = append(results, map[string]interface{}{
+				"filename": fileHeader.Filename,
+				"inserted": 0,
+				"skipped":  skippedDuplicates,
+			})
+			continue
+		}
 
 		tx, err := db.Begin()
 		if err != nil {
@@ -328,12 +369,10 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			continue
 		}
 
-		s3URL := ""
 		s3Uploaded := false
-		if bankstatement.IsS3UploadEnabled() {
-			contentType := bankstatement.DetectContentType(fileBytes)
-			s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-			if err != nil {
+		if s3storage.IsS3UploadEnabled() {
+			contentType := s3storage.DetectContentType(fileBytes)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 				_ = tx.Rollback()
 				results = append(results, map[string]interface{}{
 					"filename":           fileHeader.Filename,
@@ -351,14 +390,14 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 				offset := i*15 + 1
 				valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", offset, offset+1, offset+2, offset+3, offset+4, offset+5, offset+6, offset+7, offset+8, offset+9, offset+10, offset+11, offset+12, offset+13, offset+14))
 				valueArgs = append(valueArgs, row...)
-				valueArgs = append(valueArgs, s3URL)
+				valueArgs = append(valueArgs, s3Key)
 			}
-			insertQuery := "INSERT INTO forward_mtm (mtm_id, booking_id, deal_date, maturity_date, currency_pair, buy_sell, notional_amount, contract_rate, mtm_rate, mtm_value, days_to_maturity, status, internal_reference_id, entity, upload_link) VALUES " + strings.Join(valueStrings, ",")
+			insertQuery := "INSERT INTO forward_mtm (mtm_id, booking_id, deal_date, maturity_date, currency_pair, buy_sell, notional_amount, contract_rate, mtm_rate, mtm_value, days_to_maturity, status, internal_reference_id, entity, upload_s3_key) VALUES " + strings.Join(valueStrings, ",")
 			_, err := tx.Exec(insertQuery, valueArgs...)
 			if err != nil {
 				_ = tx.Rollback()
 				if s3Uploaded {
-					if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						log.Printf("[mtm-upload] failed to cleanup S3 object after insert failure for %s: %v", fileHeader.Filename, cleanupErr)
 					}
 				}
@@ -372,7 +411,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		err = tx.Commit()
 		if err != nil {
 			if s3Uploaded {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					log.Printf("[mtm-upload] failed to cleanup S3 object after commit failure for %s: %v", fileHeader.Filename, cleanupErr)
 				}
 			}
@@ -385,10 +424,124 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		results = append(results, map[string]interface{}{
 			"filename": fileHeader.Filename,
 			"inserted": len(validRows),
+			"skipped":  skippedDuplicates,
 		})
 	}
 
 	return results, nil
+}
+
+func GetMTMDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			MTMID    string `json:"mtm_id"`
+			RecordID string `json:"record_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		mtmID := strings.TrimSpace(req.MTMID)
+		if mtmID == "" {
+			mtmID = strings.TrimSpace(req.RecordID)
+		}
+		if mtmID == "" {
+			respondWithError(w, http.StatusBadRequest, "mtm_id is required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		err := db.QueryRowContext(r.Context(), `
+			SELECT upload_s3_key
+			FROM forward_mtm
+			WHERE mtm_id = $1
+			LIMIT 1
+		`, mtmID).Scan(&uploadS3Key)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				respondWithError(w, http.StatusNotFound, "mtm record not found")
+				return
+			}
+			respondWithError(w, http.StatusInternalServerError, "failed to fetch mtm record")
+			return
+		}
+
+		s3Key := strings.TrimSpace(uploadS3Key.String)
+		if !uploadS3Key.Valid || s3Key == "" {
+			respondWithError(w, http.StatusNotFound, "no file available for download")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), s3Key, 15*time.Minute)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetMTMBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			MTMIDs []string `json:"mtm_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.MTMIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "mtm_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, mtmID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT upload_s3_key
+				FROM forward_mtm
+				WHERE mtm_id = $1
+				LIMIT 1
+			`, mtmID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, mtmID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || s3Key == "" {
+				failedIDs = append(failedIDs, mtmID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, mtmID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"mtm_id":       mtmID,
+				"download_url": downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
 }
 
 // Helper functions
@@ -481,6 +634,7 @@ func GetMTMData(db *sql.DB) http.HandlerFunc {
 			for i, col := range cols {
 				rowMap[col] = vals[i]
 			}
+			delete(rowMap, "upload_link")
 			data = append(data, rowMap)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

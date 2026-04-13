@@ -617,7 +617,6 @@ type ExposureBatchMinimal struct {
 	BatchID    string    `json:"batch_id"`
 	FileHash   string    `json:"file_hash"`
 	FileName   string    `json:"file_name"`
-	UploadLink string    `json:"upload_link"`
 	UploadedAt time.Time `json:"uploaded_at"`
 }
 
@@ -633,8 +632,7 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 				batch_id,
 				file_hash,
 				file_name,
-				ingestion_timestamp,
-				upload_link
+				ingestion_timestamp
 			FROM public.staging_batches_exposures
 			WHERE batch_id IS NOT NULL
 		`
@@ -665,11 +663,11 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var rec ExposureBatchMinimal
 			var (
-				nbatch, nfileHash, nfileName, nuploadLink *string
-				ningestion                                *time.Time
+				nbatch, nfileHash, nfileName *string
+				ningestion                   *time.Time
 			)
 
-			err := rows.Scan(&nbatch, &nfileHash, &nfileName, &ningestion, &nuploadLink)
+			err := rows.Scan(&nbatch, &nfileHash, &nfileName, &ningestion)
 			if err != nil {
 				log.Println("[SCAN ERROR]", err)
 				continue
@@ -686,9 +684,6 @@ func GetExposureUploadBatchesMinimal(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if ningestion != nil {
 				rec.UploadedAt = *ningestion
-			}
-			if nuploadLink != nil {
-				rec.UploadLink = *nuploadLink
 			}
 
 			list = append(list, rec)

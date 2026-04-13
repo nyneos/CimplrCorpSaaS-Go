@@ -5,15 +5,17 @@ import (
 	"CimplrCorpSaas/api/auth"
 
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func ifaceToBool(v interface{}) bool {
@@ -91,6 +93,124 @@ func Capitalize(s string) string {
 	first := string(b[0])
 	rest := string(b[1:])
 	return strings.ToUpper(first) + strings.ToLower(rest)
+}
+
+func GetProjectionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string `json:"user_id"`
+			ProposalID string `json:"proposal_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.ProposalID) == "" {
+			api.RespondWithResult(w, false, "proposal_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key interface{}
+		if err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = $1`, req.ProposalID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			return
+		}
+
+		key := strings.TrimSpace(ifaceToString(uploadS3Key))
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetProjectionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string   `json:"user_id"`
+			ProposalIDs []string `json:"proposal_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+
+		if len(req.ProposalIDs) == 0 {
+			api.RespondWithResult(w, false, "proposal_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.ProposalIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.ProposalIDs {
+			proposalID := strings.TrimSpace(rawID)
+			if proposalID == "" {
+				continue
+			}
+
+			var uploadS3Key interface{}
+			if err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM cimplrcorpsaas.cashflow_proposal WHERE proposal_id = $1`, proposalID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+
+			key := strings.TrimSpace(ifaceToString(uploadS3Key))
+			if key == "" {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"proposal_id":  proposalID,
+				"download_url": downloadURL,
+			})
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
 }
 
 func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -1253,7 +1373,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.proposal_name,
 				p.effective_date,
 				p.currency_code,
-				p.upload_link,
+				p.upload_s3_key,
 				a.processing_status
 			FROM cashflow_proposal p
 			LEFT JOIN LATERAL (
@@ -1276,8 +1396,8 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var (
-				proposalID, recurrenceType, proposalName, currencyCode, uploadLink, processingStatus interface{}
-				effectiveDate                                                                        interface{}
+				proposalID, recurrenceType, proposalName, currencyCode, uploadS3Key, processingStatus interface{}
+				effectiveDate                                                                         interface{}
 			)
 
 			if err := rows.Scan(
@@ -1286,7 +1406,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&proposalName,
 				&effectiveDate,
 				&currencyCode,
-				&uploadLink,
+				&uploadS3Key,
 				&processingStatus,
 			); err != nil {
 				continue
@@ -1298,7 +1418,7 @@ func GetProjectionsSummary(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"proposal_name":     ifaceToString(proposalName),
 				"effective_date":    ifaceToTimeString(effectiveDate),
 				"currency":          ifaceToString(currencyCode),
-				"upload_link":       ifaceToString(uploadLink),
+				"upload_s3_key":     ifaceToString(uploadS3Key),
 				"processing_status": ifaceToString(processingStatus),
 			}
 

@@ -65,6 +65,8 @@ func StartCashService(db *sql.DB) {
 	// V2 Bank Statement APIs
 	mux.Handle("/cash/bank-statements/v2/get", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetAllBankStatementsHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionsHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/download", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementDownloadURLHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementBulkDownloadURLHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/recompute-kpis", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecomputeBankStatementSummaryHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveBankStatementHandler(db, pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectBankStatementHandler(db, pgxPool)))
@@ -86,6 +88,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/transactions/create", api.BusinessUnitMiddleware(db)(payablerecievable.BulkCreateTransactions(pgxPool)))
 	mux.Handle("/cash/transactions/update", api.BusinessUnitMiddleware(db)(payablerecievable.UpdateTransaction(pgxPool)))
 	mux.Handle("/cash/transactions/upload-payrec-batch", api.BusinessUnitMiddleware(db)(payablerecievable.BatchUploadTransactionsV2(pgxPool))) //twotwo
+	mux.Handle("/cash/transactions/download", api.BusinessUnitMiddleware(db)(payablerecievable.GetTransactionDownloadURL(pgxPool)))
+	mux.Handle("/cash/transactions/download-bulk", api.BusinessUnitMiddleware(db)(payablerecievable.GetTransactionBulkDownloadURL(pgxPool)))
 	mux.Handle("/cash/transactions/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
 
 	//fundplanning
@@ -163,6 +167,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/cashflow-projection/make", api.BusinessUnitMiddleware(db)(projection.AbsorbFlattenedProjections(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/get-projection", api.BusinessUnitMiddleware(db)(projection.GetProposalVersion(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/get-header", api.BusinessUnitMiddleware(db)(projection.GetProjectionsSummary(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/download", api.BusinessUnitMiddleware(db)(projection.GetProjectionDownloadURL(pgxPool)))
+	mux.Handle("/cash/cashflow-projection/download-bulk", api.BusinessUnitMiddleware(db)(projection.GetProjectionBulkDownloadURL(pgxPool)))
 	mux.Handle("/cash/cashflow-projection/update", api.BusinessUnitMiddleware(db)(projection.UpdateCashFlowProposal(pgxPool)))
 
 	mux.Handle("/cash/cashflow-projection/upload", api.BusinessUnitMiddleware(db)(projection.UploadCashflowProposalSimple(pgxPool)))
@@ -176,6 +182,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/projection/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(projection.BulkApproveCashFlowProposalActionsV2(pgxPool)))
 	mux.Handle("/cash/projection/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(projection.BulkRejectCashFlowProposalActionsV2(pgxPool)))
 	mux.Handle("/cash/projection/v2/upload", middlewares.PreValidationMiddleware(pgxPool)(projection.UploadCashflowProposalV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/download", middlewares.PreValidationMiddleware(pgxPool)(projection.GetProjectionDownloadURLV2(pgxPool)))
+	mux.Handle("/cash/projection/v2/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(projection.GetProjectionBulkDownloadURLV2(pgxPool)))
 
 	//bank balance
 	mux.Handle("/cash/bank-balances/create", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.CreateBankBalance(pgxPool)))
@@ -185,6 +193,8 @@ func StartCashService(db *sql.DB) {
 	mux.Handle("/cash/bank-balances/all", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalances(pgxPool)))
 	// mux.Handle("/cash/bank-balances/upload",(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/upload", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UploadBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/download", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalanceDownloadURL(pgxPool)))
+	mux.Handle("/cash/bank-balances/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalanceBulkDownloadURL(pgxPool)))
 	mux.Handle("/cash/bank-balances/update", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UpdateBankBalance(pgxPool)))
 
 	// Fund Availability - Combined Actuals & Projections

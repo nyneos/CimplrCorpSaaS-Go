@@ -220,10 +220,10 @@ func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, in
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO cimplrcorpsaas.bank_statements (
 			entity_id, account_number, statement_period_start, statement_period_end,
-			file_hash, opening_balance, closing_balance, upload_link
+			file_hash, opening_balance, closing_balance, upload_s3_key
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT ON CONSTRAINT uniq_stmt
-		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance, upload_link = EXCLUDED.upload_link
+		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance, upload_s3_key = EXCLUDED.upload_s3_key, upload_link = NULL
 		RETURNING bank_statement_id
 	`, entityID, input.AccountNumber, periodStart, periodEnd, fileHash,
 		input.OpeningBalance, input.ClosingBalance, nil).Scan(&bankStatementID)

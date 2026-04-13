@@ -1034,7 +1034,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				s.withdrawalamount,
 				s.depositamount,
 				s.modeoftransaction,
-				bs.upload_link,
+				bs.upload_s3_key,
 				e.entity_name,
 				mb.bank_name,
 				a.processing_status,
@@ -1084,7 +1084,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			WithdrawalAmount *float64   `json:"withdrawalamount"`
 			DepositAmount    *float64   `json:"depositamount"`
 			ModeOfTxn        string     `json:"modeoftransaction"`
-			UploadLink       string     `json:"upload_link"`
+			UploadS3Key      string     `json:"upload_s3_key"`
 			EntityName       string     `json:"entity_name"`
 			BankName         string     `json:"bank_name"`
 			ProcessingStatus string     `json:"processing_status"`
@@ -1128,7 +1128,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var rrow Row
 			// scan nullable strings into pointers
-			var desc, branch, ifsc, stmtPeriod, chequeRef, modeOfTxn, uploadLink, entName, bankName, procStatus, reqBy, chkBy *string
+			var desc, branch, ifsc, stmtPeriod, chequeRef, modeOfTxn, uploadS3Key, entName, bankName, procStatus, reqBy, chkBy *string
 			var isDeleted *bool
 			var reasonRaw *string
 			// DB-backed old_* scan targets
@@ -1180,7 +1180,7 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&rrow.WithdrawalAmount,
 				&rrow.DepositAmount,
 				&modeOfTxn,
-				&uploadLink,
+				&uploadS3Key,
 				&entName,
 				&bankName,
 				&procStatus,
@@ -1224,10 +1224,10 @@ func GetAllBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				rrow.ModeOfTxn = ""
 			}
-			if uploadLink != nil {
-				rrow.UploadLink = *uploadLink
+			if uploadS3Key != nil {
+				rrow.UploadS3Key = *uploadS3Key
 			} else {
-				rrow.UploadLink = ""
+				rrow.UploadS3Key = ""
 			}
 			if entName != nil {
 				rrow.EntityName = *entName

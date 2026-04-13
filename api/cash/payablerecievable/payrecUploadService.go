@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -92,7 +92,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 				fmt.Printf("[TRANSACTION-UPLOAD] rollback error: %v\n", rollbackErr)
 			}
 			if s3Uploaded && s3Key != "" {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[TRANSACTION-UPLOAD] cleanup after failed transaction failed for key=%s: %v\n", s3Key, cleanupErr)
 				}
 			}
@@ -100,22 +100,24 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	}()
 
 	var duplicateBatchID uuid.UUID
-	var existingUploadLink *string
+	var existingUploadS3Key *string
 	err = tx.QueryRow(ctx, `
-		SELECT batch_id, upload_link
+		SELECT batch_id, upload_s3_key
 		FROM public.staging_batches_transactions
 		WHERE file_hash = $1 AND status IN ('completed', 'processing')
 		ORDER BY ingestion_timestamp DESC
 		LIMIT 1
-	`, fileHashHex).Scan(&duplicateBatchID, &existingUploadLink)
+	`, fileHashHex).Scan(&duplicateBatchID, &existingUploadS3Key)
 	if err == nil {
 		if commitErr := tx.Commit(ctx); commitErr != nil {
 			return nil, fmt.Errorf("failed to finalize duplicate lookup: %w", commitErr)
 		}
 		committed = true
 		dupURL := ""
-		if existingUploadLink != nil {
-			dupURL = strings.TrimSpace(*existingUploadLink)
+		if existingUploadS3Key != nil && strings.TrimSpace(*existingUploadS3Key) != "" {
+			if dupURL, err = s3storage.GetDownloadPresignedURL(ctx, *existingUploadS3Key, 0); err != nil {
+				dupURL = ""
+			}
 		}
 		return &TransactionUploadResult{
 			BatchID:        duplicateBatchID,
@@ -143,21 +145,23 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	}
 
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
-	contentType := bankstatement.DetectContentType(fileBytes)
-	folder := bankstatement.GetStoragePrefix(fileField)
-	s3Key = bankstatement.BuildS3Key(folder, fileField, fileHashHex, ext)
+	contentType := s3storage.DetectContentType(fileBytes)
+	folder := s3storage.GetStoragePrefix(fileField)
+	s3Key = s3storage.BuildS3Key(folder, fileField, fileHashHex, ext)
 	s3URL := ""
-	if bankstatement.IsS3UploadEnabled() {
-		s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-		if err != nil {
+	if s3storage.IsS3UploadEnabled() {
+		if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 			return nil, fmt.Errorf("failed to upload file to s3: %w", err)
 		}
 		s3Uploaded = true
+		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
+			s3URL = ""
+		}
 	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO public.staging_batches_transactions
-		(batch_id, ingestion_source, status, total_records, file_hash, file_name, upload_link)
+		(batch_id, ingestion_source, status, total_records, file_hash, file_name, upload_s3_key)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`,
 		batch.BatchID,
@@ -166,19 +170,10 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		batch.TotalRecords,
 		batch.FileHash,
 		batch.FileName,
-		nullableString(s3URL),
+		nullableString(s3Key),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create batch: %w", err)
-	}
-
-	var uploadLink string
-	if err := tx.QueryRow(ctx, `
-		SELECT COALESCE(upload_link, '')
-		FROM public.staging_batches_transactions
-		WHERE batch_id = $1
-	`, batchID).Scan(&uploadLink); err != nil {
-		return nil, fmt.Errorf("failed to load batch upload_link: %w", err)
 	}
 
 	allStagingTransactions := buildTransactionStagingRecords(batchID, transactionType, rawPayloads)
@@ -190,7 +185,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		return nil, fmt.Errorf("failed to insert staging data: %w", err)
 	}
 
-	if err := ProcessStagingTransactionsToCanonicalV2WithTx(ctx, tx, batchID, userName, uploadLink); err != nil {
+	if err := ProcessStagingTransactionsToCanonicalV2WithTx(ctx, tx, batchID, userName, s3Key); err != nil {
 		return nil, fmt.Errorf("failed to process staging data to canonical tables: %w", err)
 	}
 
@@ -201,9 +196,10 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		SET total_records = $1,
 		    processed_records = $2,
 		    status = 'completed',
-		    upload_link = $3
+		    upload_s3_key = $3,
+		    upload_link = NULL
 		WHERE batch_id = $4
-	`, totalRecords, processedRecords, nullableString(s3URL), batchID)
+	`, totalRecords, processedRecords, nullableString(s3Key), batchID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update batch totals: %w", err)
 	}

@@ -3,8 +3,8 @@ package exposures
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
-	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"database/sql"
 
@@ -80,7 +80,6 @@ type UploadResult struct {
 
 type UploadRouteResult struct {
 	UploadResult
-	UploadLink string `json:"upload_link"`
 }
 
 type CanonicalPreviewRow struct {
@@ -420,16 +419,17 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		// start DB tx
 		batchID := uuid.New()
-		s3Key := fxExposureS3Key(fileHash, fh.Filename)
-		s3URL := ""
+		s3Key, err := fxExposureS3Key(fileHash, fh.Filename, src)
+		if err != nil {
+			return nil, 0, http.StatusBadRequest, err
+		}
 		uploadedNewObject := false
-		if bankstatement.IsS3UploadEnabled() {
+		if s3storage.IsS3UploadEnabled() {
 			fileBytes, err := os.ReadFile(tmpPath)
 			if err != nil {
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("read temp file for s3 upload: %w", err)
 			}
-			s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, bankstatement.DetectContentType(fileBytes))
-			if err != nil {
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, s3storage.DetectContentType(fileBytes)); err != nil {
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to store original file to s3: %w", err)
 			}
 			uploadedNewObject = true
@@ -437,7 +437,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
 			if uploadedNewObject {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					log.Printf("[FBUP-S3] cleanup after acquire failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
@@ -447,7 +447,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		if err != nil {
 			conn.Release()
 			if uploadedNewObject {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					log.Printf("[FBUP-S3] cleanup after tx begin failure failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
@@ -461,7 +461,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			}
 			conn.Release()
 			if cleanupUploadedObject && s3Key != "" {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					log.Printf("[FBUP-S3] cleanup failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
@@ -477,9 +477,9 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		if _, err := tx.Exec(ctx, `
 				INSERT INTO public.staging_batches_exposures
-				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json, upload_link)
+				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json, upload_s3_key)
 				VALUES ($1,$2,'processing',$3,$4,$5,$6,$7,$8)
-			`, batchID, src, 0, fileHash, fh.Filename, userName, string(mappingRaw), s3URL); err != nil {
+			`, batchID, src, 0, fileHash, fh.Filename, userName, string(mappingRaw), s3Key); err != nil {
 			return nil, 0, http.StatusInternalServerError, fmt.Errorf("insert batch: %w", err)
 		}
 
@@ -1219,10 +1219,10 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			persisted, persistErr := exposureBatchUploadLinkPersisted(ctx, pool, batchID, s3URL)
+			persisted, persistErr := exposureBatchUploadS3KeyPersisted(ctx, pool, batchID, s3Key)
 			if persistErr != nil {
 				cleanupUploadedObject = false
-				return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_link: %v)", constants.ErrCommitFailed, err.Error(), persistErr)
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("%s%s (unable to verify persisted upload_s3_key: %v)", constants.ErrCommitFailed, err.Error(), persistErr)
 			}
 			if persisted {
 				cleanupUploadedObject = false
@@ -1260,7 +1260,6 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 		}
 		results = append(results, UploadRouteResult{
 			UploadResult: previewRes,
-			UploadLink:   s3URL,
 		})
 	} // end per-file loop
 
@@ -1444,21 +1443,35 @@ func fxExposureS3PresignExpiry() time.Duration {
 	return expiryDuration
 }
 
-func fxExposureS3Key(fileHash, filename string) string {
+func fxExposureS3Key(fileHash, filename, source string) (string, error) {
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filename)))
-	return bankstatement.BuildS3Key("fx/exposures", "v91", fileHash, ext)
+	folder, err := v91UploadSourceFolder(source)
+	if err != nil {
+		return "", err
+	}
+	return s3storage.BuildS3Key("fx/v91", folder, fileHash, ext), nil
 }
 
-func exposureBatchUploadLinkPersisted(ctx context.Context, pool *pgxpool.Pool, batchID uuid.UUID, uploadLink string) (bool, error) {
+func v91UploadSourceFolder(source string) (string, error) {
+	src := strings.ToUpper(strings.TrimSpace(source))
+	switch src {
+	case "FBL1N", "FBL3N", "FBL5N":
+		return src, nil
+	default:
+		return "", fmt.Errorf("invalid v91 source '%s': expected one of FBL1N, FBL3N, FBL5N", source)
+	}
+}
+
+func exposureBatchUploadS3KeyPersisted(ctx context.Context, pool *pgxpool.Pool, batchID uuid.UUID, uploadS3Key string) (bool, error) {
 	var exists bool
 	err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
 			FROM public.staging_batches_exposures
 			WHERE batch_id = $1
-			  AND COALESCE(upload_link, '') = $2
+			  AND COALESCE(upload_s3_key, '') = $2
 		)
-	`, batchID, uploadLink).Scan(&exists)
+	`, batchID, uploadS3Key).Scan(&exists)
 	if err != nil {
 		return false, err
 	}
@@ -1787,6 +1800,167 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 func httpError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	writeJSON(w, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: msg})
+}
+
+func GetExposureDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BatchID string `json:"batch_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		batchID := strings.TrimSpace(req.BatchID)
+		if batchID == "" {
+			httpError(w, http.StatusBadRequest, "batch_id is required")
+			return
+		}
+
+		batchUUID, err := uuid.Parse(batchID)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, "invalid batch_id")
+			return
+		}
+
+		var uploadS3Key string
+		err = pool.QueryRow(r.Context(), `
+			SELECT COALESCE(upload_s3_key, '')
+			FROM public.staging_batches_exposures
+			WHERE batch_id = $1
+			ORDER BY ingestion_timestamp DESC
+			LIMIT 1
+		`, batchUUID).Scan(&uploadS3Key)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				httpError(w, http.StatusNotFound, "batch not found")
+				return
+			}
+			httpError(w, http.StatusInternalServerError, "failed to fetch batch")
+			return
+		}
+
+		uploadS3Key = strings.TrimSpace(uploadS3Key)
+		if uploadS3Key == "" {
+			httpError(w, http.StatusNotFound, "no file available for download")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), uploadS3Key, 15*time.Minute)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, "failed to generate download url")
+			return
+		}
+
+		writeJSON(w, map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func normalizeBulkIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
+	if len(files) == 0 {
+		writeJSON(w, map[string]interface{}{
+			constants.ValueSuccess: false,
+			"message":              "no downloadable files found",
+			"data": map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
+			},
+		})
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		constants.ValueSuccess: true,
+		"data": map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		},
+	})
+}
+
+func GetExposureBulkDownloadURL(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BatchIDs []string `json:"batch_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.BatchIDs)
+		if len(ids) == 0 {
+			httpError(w, http.StatusBadRequest, "batch_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, batchID := range ids {
+			batchUUID, err := uuid.Parse(batchID)
+			if err != nil {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+
+			var uploadS3Key string
+			err = pool.QueryRow(ctx, `
+				SELECT COALESCE(upload_s3_key, '')
+				FROM public.staging_batches_exposures
+				WHERE batch_id = $1
+				ORDER BY ingestion_timestamp DESC
+				LIMIT 1
+			`, batchUUID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+
+			uploadS3Key = strings.TrimSpace(uploadS3Key)
+			if uploadS3Key == "" {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, uploadS3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, batchID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"batch_id":     batchID,
+				"download_url": downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
 }
 
 func detectExposureCategory(src string) string {

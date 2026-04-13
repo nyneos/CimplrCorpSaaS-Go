@@ -4,6 +4,7 @@ import (
 	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -57,7 +58,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
 														COALESCE(mb.bank_name, '') AS bank_name,
 														mba.account_nickname AS account_nickname,
-														s.upload_link
+														s.upload_s3_key
 										FROM cimplrcorpsaas.bank_statements s
 										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
 										LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
@@ -79,10 +80,10 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 			var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
 			var bankName sql.NullString
 			var accountNickname sql.NullString
-			var uploadLink sql.NullString
+			var uploadS3Key sql.NullString
 			var requestedAt, checkerAt sql.NullTime
 			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname, &uploadLink); err != nil {
+				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname, &uploadS3Key); err != nil {
 				continue
 			}
 			isDeletePending := false
@@ -109,7 +110,7 @@ func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
 				"reason":                     reason.String,
 				"bank_name":                  bankName.String,
 				"account_nickname":           accountNickname.String,
-				"upload_link":                uploadLink.String,
+				"upload_s3_key":              uploadS3Key.String,
 				"is_delete_pending_approval": isDeletePending,
 			})
 		}
@@ -234,6 +235,137 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    resp,
+		})
+	})
+}
+
+func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			BankStatementID string `json:"bank_statement_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_id is required"})
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key sql.NullString
+		err := db.QueryRowContext(ctx, `
+			SELECT upload_s3_key
+			FROM cimplrcorpsaas.bank_statements
+			WHERE bank_statement_id = $1
+		`, body.BankStatementID).Scan(&uploadS3Key)
+		if err != nil {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			if errors.Is(err, sql.ErrNoRows) {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_id not found"})
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": pqUserFriendlyMessage(err)})
+			return
+		}
+
+		if !uploadS3Key.Valid || strings.TrimSpace(uploadS3Key.String) == "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "no file available"})
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, uploadS3Key.String, 15*time.Minute)
+		if err != nil {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Failed to generate download URL"})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	})
+}
+
+func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			BankStatementIDs []string `json:"bank_statement_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.BankStatementIDs) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bank_statement_ids is required"})
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(body.BankStatementIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range body.BankStatementIDs {
+			bankStatementID := strings.TrimSpace(rawID)
+			if bankStatementID == "" {
+				continue
+			}
+
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT upload_s3_key
+				FROM cimplrcorpsaas.bank_statements
+				WHERE bank_statement_id = $1
+			`, bankStatementID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, bankStatementID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.String)
+			if !uploadS3Key.Valid || key == "" {
+				failedIDs = append(failedIDs, bankStatementID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, bankStatementID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"bank_statement_id": bankStatementID,
+				"download_url":      downloadURL,
+			})
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
 		})
 	})
 }

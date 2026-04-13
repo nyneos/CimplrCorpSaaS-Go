@@ -11,12 +11,19 @@ import (
 	"strconv"
 	"strings"
 
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
 )
+
+func nullableString(s string) *string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return &s
+}
 
 func UploadBankBalancesProcess(
 	ctx context.Context,
@@ -42,7 +49,7 @@ func UploadBankBalancesProcess(
 	}
 	hash := sha256.Sum256(fileBytes)
 	fileHash := fmt.Sprintf("%x", hash[:])
-	contentType := bankstatement.DetectContentType(fileBytes)
+	contentType := s3storage.DetectContentType(fileBytes)
 
 	// 3. Parse file
 	ext := ubGetFileExt(fileHeader.Filename)
@@ -51,7 +58,7 @@ func UploadBankBalancesProcess(
 		return "", fmt.Errorf("failed to parse file: %w", err)
 	}
 
-	// 4. Normalize headers 
+	// 4. Normalize headers
 	headerRow := records[0]
 	colCount := len(headerRow)
 	headersNorm := make([]string, colCount)
@@ -64,7 +71,7 @@ func UploadBankBalancesProcess(
 		headersNorm[i] = hn
 	}
 
-	// 5. Prepare rows 
+	// 5. Prepare rows
 	dataRows := records[1:]
 	batchID := uuid.New().String()
 	copyRows := make([][]interface{}, len(dataRows))
@@ -121,7 +128,7 @@ func UploadBankBalancesProcess(
 		copyRows[i] = vals
 	}
 
-	fmt.Println("S3 ENABLED:", bankstatement.IsS3UploadEnabled())
+	fmt.Println("S3 ENABLED:", s3storage.IsS3UploadEnabled())
 
 	// 6. Begin transaction for staging + validation + final insert.
 	tx, err := pgxPool.Begin(ctx)
@@ -135,7 +142,7 @@ func UploadBankBalancesProcess(
 		if !committed {
 			_ = tx.Rollback(ctx)
 			if s3Uploaded && s3Key != "" {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[BANK-BALANCE-UPLOAD] cleanup failed for key=%s: %v\n", s3Key, cleanupErr)
 				}
 			}
@@ -144,15 +151,17 @@ func UploadBankBalancesProcess(
 
 	// 7. S3 upload must succeed before any DB write is persisted for this batch.
 	var s3URL string
-	folder := bankstatement.GetStoragePrefix("bankbalance")
-	s3Key = bankstatement.BuildS3Key(folder, "bank-balance", fileHash, ext)
-	if bankstatement.IsS3UploadEnabled() {
-		s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-		if err != nil {
+	folder := s3storage.GetStoragePrefix("bankbalance")
+	s3Key = s3storage.BuildS3Key(folder, "bank-balance", fileHash, ext)
+	if s3storage.IsS3UploadEnabled() {
+		if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 			fmt.Printf("[BANK-BALANCE-UPLOAD] S3 upload failed: %v", err)
 			return "", fmt.Errorf("failed to upload file to s3: %w", err)
 		}
 		s3Uploaded = true
+		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
+			s3URL = ""
+		}
 		fmt.Printf("[BANK-BALANCE-UPLOAD] S3 upload success key=%s url=%s", s3Key, s3URL)
 	} else {
 		fmt.Printf("[BANK-BALANCE-UPLOAD] S3 upload disabled, skipping for batch=%s", batchID)
@@ -342,11 +351,11 @@ func UploadBankBalancesProcess(
 		vrows.Close()
 	}
 
-	// 12. Final insert with upload_link (identical to original + upload_link)
+	// 12. Final insert with key-based storage for new rows.
 	tgtColsStr := strings.Join(tgtCols, ", ")
 	srcColsStr := strings.Join(selectExprs, ", ")
 	insertSQL := fmt.Sprintf(`
-		INSERT INTO bank_balances_manual (%s, upload_link)
+		INSERT INTO bank_balances_manual (%s, upload_s3_key)
 		SELECT %s, $2
 		FROM input_bank_balance_table s
 		WHERE s.upload_batch_id = $1
@@ -356,7 +365,7 @@ func UploadBankBalancesProcess(
 	// fmt.Println("SOURCE COLS:", srcColsStr)
 	// fmt.Println("FINAL SQL:", insertSQL)
 
-	rows, err := tx.Query(ctx, insertSQL, batchID, s3URL)
+	rows, err := tx.Query(ctx, insertSQL, batchID, nullableString(s3Key))
 	if err != nil {
 		return "", err
 	}

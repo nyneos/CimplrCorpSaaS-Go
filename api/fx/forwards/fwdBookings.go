@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"fmt"
 	"strconv"
 	"time"
@@ -352,7 +352,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		file.Close()
 		fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 		fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
-		s3Key := "fx/forwards/" + fileHash + fileExt
+		s3Key := "fx/forwards/bookings/" + fileHash + fileExt
 		ext := fileExt
 		var rows []map[string]interface{}
 		if ext == ".csv" {
@@ -468,11 +468,11 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		}
 		if len(invalidRows) > 0 {
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"inserted":    0,
-				"errors":      []map[string]interface{}{},
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        []map[string]interface{}{},
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
@@ -480,31 +480,31 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"inserted":    0,
-				"errors":      []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
 
-		s3URL := ""
+		uploadS3Key := ""
 		s3Uploaded := false
-		if bankstatement.IsS3UploadEnabled() {
-			contentType := bankstatement.DetectContentType(fileBytes)
-			s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-			if err != nil {
+		if s3storage.IsS3UploadEnabled() {
+			contentType := s3storage.DetectContentType(fileBytes)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 				_ = tx.Rollback()
 				results = append(results, map[string]interface{}{
-					"filename":    fileHeader.Filename,
-					"upload_link": "",
-					"inserted":    0,
-					"errors":      []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
-					"invalidRows": invalidRows,
+					"filename":      fileHeader.Filename,
+					"upload_s3_key": "",
+					"inserted":      0,
+					"errors":        []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+					"invalidRows":   invalidRows,
 				})
 				continue
 			}
+			uploadS3Key = s3Key
 			s3Uploaded = true
 		}
 
@@ -512,12 +512,12 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		errorRows := []map[string]interface{}{}
 		for i, row := range rows {
 			query := `INSERT INTO forward_bookings (
-				internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status, upload_link
+				internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status, upload_s3_key
 			) VALUES (
 				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
 			)`
 			values := []interface{}{
-				row["internal_reference_id"], row["entity_level_0"], row["entity_level_1"], row["entity_level_2"], row["entity_level_3"], row["local_currency"], row["order_type"], row["transaction_type"], row["counterparty"], row["mode_of_delivery"], row["delivery_period"], row["add_date"], row["settlement_date"], row["maturity_date"], row["delivery_date"], row["currency_pair"], row["base_currency"], row["quote_currency"], row["booking_amount"], row["value_type"], row["actual_value_base_currency"], row["spot_rate"], row["forward_points"], row["bank_margin"], row["total_rate"], row["value_quote_currency"], row["intervening_rate_quote_to_local"], row["value_local_currency"], row["internal_dealer"], row["counterparty_dealer"], row["remarks"], row["narration"], row["transaction_timestamp"], "pending", s3URL,
+				row["internal_reference_id"], row["entity_level_0"], row["entity_level_1"], row["entity_level_2"], row["entity_level_3"], row["local_currency"], row["order_type"], row["transaction_type"], row["counterparty"], row["mode_of_delivery"], row["delivery_period"], row["add_date"], row["settlement_date"], row["maturity_date"], row["delivery_date"], row["currency_pair"], row["base_currency"], row["quote_currency"], row["booking_amount"], row["value_type"], row["actual_value_base_currency"], row["spot_rate"], row["forward_points"], row["bank_margin"], row["total_rate"], row["value_quote_currency"], row["intervening_rate_quote_to_local"], row["value_local_currency"], row["internal_dealer"], row["counterparty_dealer"], row["remarks"], row["narration"], row["transaction_timestamp"], "pending", uploadS3Key,
 			}
 			_, err := tx.ExecContext(ctx, query, values...)
 			if err != nil {
@@ -530,40 +530,40 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		if len(errorRows) > 0 {
 			_ = tx.Rollback()
 			if s3Uploaded {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-upload] failed to cleanup S3 object for %s after insert failure: %v\n", fileHeader.Filename, cleanupErr)
 				}
 			}
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"inserted":    0,
-				"errors":      errorRows,
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        errorRows,
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
 		if err := tx.Commit(); err != nil {
 			if s3Uploaded {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
 				}
 			}
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"inserted":    0,
-				"errors":      []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
 		results = append(results, map[string]interface{}{
-			"filename":    fileHeader.Filename,
-			"upload_link": s3URL,
-			"inserted":    successCount,
-			"errors":      errorRows,
-			"invalidRows": invalidRows,
+			"filename":      fileHeader.Filename,
+			"upload_s3_key": uploadS3Key,
+			"inserted":      successCount,
+			"errors":        errorRows,
+			"invalidRows":   invalidRows,
 		})
 	}
 	return results, nil
@@ -722,11 +722,11 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 		}
 		if len(invalidRows) > 0 {
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"updated":     0,
-				"errors":      []map[string]interface{}{},
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        []map[string]interface{}{},
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
@@ -734,31 +734,31 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"updated":     0,
-				"errors":      []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
 
-		s3URL := ""
+		uploadS3Key := ""
 		s3Uploaded := false
-		if bankstatement.IsS3UploadEnabled() {
-			contentType := bankstatement.DetectContentType(fileBytes)
-			s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-			if err != nil {
+		if s3storage.IsS3UploadEnabled() {
+			contentType := s3storage.DetectContentType(fileBytes)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 				_ = tx.Rollback()
 				results = append(results, map[string]interface{}{
-					"filename":    fileHeader.Filename,
-					"upload_link": "",
-					"updated":     0,
-					"errors":      []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
-					"invalidRows": invalidRows,
+					"filename":      fileHeader.Filename,
+					"upload_s3_key": "",
+					"updated":       0,
+					"errors":        []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+					"invalidRows":   invalidRows,
 				})
 				continue
 			}
+			uploadS3Key = s3Key
 			s3Uploaded = true
 		}
 
@@ -771,7 +771,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 				swift_unique_id = $2,
 				bank_confirmation_date = $3,
 				processing_status = 'pending',
-				confirmation_upload_link = $6
+				confirmation_upload_s3_key = $6
 			WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5`
 			updateValues := []interface{}{
 				row["bank_transaction_id"],
@@ -779,7 +779,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 				row["bank_confirmation_date"],
 				row["internal_reference_id"],
 				row["entity_level_0"],
-				s3URL,
+				uploadS3Key,
 			}
 			res, err := tx.ExecContext(ctx, updateQuery, updateValues...)
 			if err != nil {
@@ -796,40 +796,40 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 		if len(errorRows) > 0 {
 			_ = tx.Rollback()
 			if s3Uploaded {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-confirmation-upload] failed to cleanup S3 object for %s after update failure: %v\n", fileHeader.Filename, cleanupErr)
 				}
 			}
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"updated":     0,
-				"errors":      errorRows,
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        errorRows,
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
 		if err := tx.Commit(); err != nil {
 			if s3Uploaded {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					fmt.Printf("[forward-confirmation-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
 				}
 			}
 			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"upload_link": "",
-				"updated":     0,
-				"errors":      []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
-				"invalidRows": invalidRows,
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				"invalidRows":   invalidRows,
 			})
 			continue
 		}
 		results = append(results, map[string]interface{}{
-			"filename":    fileHeader.Filename,
-			"upload_link": s3URL,
-			"updated":     successCount,
-			"errors":      errorRows,
-			"invalidRows": invalidRows,
+			"filename":      fileHeader.Filename,
+			"upload_s3_key": uploadS3Key,
+			"updated":       successCount,
+			"errors":        errorRows,
+			"invalidRows":   invalidRows,
 		})
 	}
 	return results, nil
@@ -860,6 +860,293 @@ func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_id": batchID, "results": results})
+	}
+}
+
+func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RecordID            string `json:"record_id"`
+			InternalReferenceID string `json:"internal_reference_id"`
+			UploadBatchID       string `json:"upload_batch_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		recordID := strings.TrimSpace(req.InternalReferenceID)
+		if recordID == "" {
+			recordID = strings.TrimSpace(req.RecordID)
+		}
+		uploadBatchID := strings.TrimSpace(req.UploadBatchID)
+
+		if recordID == "" && uploadBatchID == "" {
+			respondWithError(w, http.StatusBadRequest, "internal_reference_id or upload_batch_id is required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+
+		if recordID != "" {
+			err := db.QueryRowContext(r.Context(), `
+				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')
+				FROM forward_bookings
+				WHERE internal_reference_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, recordID).Scan(&uploadS3Key)
+			if err != nil && err != sql.ErrNoRows {
+				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
+				return
+			}
+		}
+
+		if strings.TrimSpace(uploadS3Key.String) == "" && uploadBatchID != "" {
+			err := db.QueryRowContext(r.Context(), `
+				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
+				FROM staging_bank_forward
+				WHERE upload_batch_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, uploadBatchID).Scan(&uploadS3Key)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					respondWithError(w, http.StatusNotFound, "record not found")
+					return
+				}
+				respondWithError(w, http.StatusInternalServerError, "failed to fetch upload batch")
+				return
+			}
+		}
+
+		s3Key := strings.TrimSpace(uploadS3Key.String)
+		if s3Key == "" {
+			respondWithError(w, http.StatusNotFound, "no file available for download")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), s3Key, 15*time.Minute)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func normalizeBulkIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	if len(files) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: false,
+			"message":              "no downloadable files found",
+			"data": map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
+			},
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		constants.ValueSuccess: true,
+		"data": map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		},
+	})
+}
+
+func GetForwardBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			InternalReferenceIDs []string `json:"internal_reference_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.InternalReferenceIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "internal_reference_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, referenceID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
+				FROM forward_bookings
+				WHERE internal_reference_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, referenceID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if s3Key == "" {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"internal_reference_id": referenceID,
+				"download_url":          downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
+}
+
+func GetForwardConfirmationBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			InternalReferenceIDs []string `json:"internal_reference_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.InternalReferenceIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "internal_reference_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, referenceID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), '')
+				FROM forward_bookings
+				WHERE internal_reference_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, referenceID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if s3Key == "" {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"internal_reference_id": referenceID,
+				"download_url":          downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
+}
+
+func GetForwardBankBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UploadBatchIDs []string `json:"upload_batch_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.UploadBatchIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "upload_batch_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, uploadBatchID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
+				FROM staging_bank_forward
+				WHERE upload_batch_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, uploadBatchID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, uploadBatchID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if s3Key == "" {
+				failedIDs = append(failedIDs, uploadBatchID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, uploadBatchID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"upload_batch_id": uploadBatchID,
+				"download_url":    downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
 	}
 }
 
@@ -973,7 +1260,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
-					"upload_link":       "",
+					"upload_s3_key":     "",
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{},
 					"bookings_inserted": 0,
@@ -1002,7 +1289,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
-					"upload_link":       "",
+					"upload_s3_key":     "",
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
 					"bookings_inserted": 0,
@@ -1011,16 +1298,15 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 				continue
 			}
 
-			s3URL := ""
+			uploadS3Key := ""
 			s3Uploaded := false
-			if bankstatement.IsS3UploadEnabled() {
-				contentType := bankstatement.DetectContentType(fileBytes)
-				s3URL, err = bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-				if err != nil {
+			if s3storage.IsS3UploadEnabled() {
+				contentType := s3storage.DetectContentType(fileBytes)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 					_ = tx.Rollback()
 					results = append(results, map[string]interface{}{
 						"filename":          fileHeader.Filename,
-						"upload_link":       "",
+						"upload_s3_key":     "",
 						"staging_inserted":  0,
 						"staging_errors":    []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
 						"bookings_inserted": 0,
@@ -1028,6 +1314,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 					})
 					continue
 				}
+				uploadS3Key = s3Key
 				s3Uploaded = true
 			}
 
@@ -1043,7 +1330,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 					"source_reference_id": row["source_reference_id"],
 					"raw_data":            marshalJSON(row),
 					"processing_status":   "Pending",
-					"upload_link":         s3URL,
+					"upload_s3_key":       uploadS3Key,
 				}
 				// Add other columns from stagingCols
 				for _, col := range stagingCols {
@@ -1088,13 +1375,13 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			if len(stagingErrors) > 0 {
 				_ = tx.Rollback()
 				if s3Uploaded {
-					if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after staging failure: %v\n", fileHeader.Filename, cleanupErr)
 					}
 				}
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
-					"upload_link":       "",
+					"upload_s3_key":     "",
 					"staging_inserted":  0,
 					"staging_errors":    stagingErrors,
 					"bookings_inserted": 0,
@@ -1131,6 +1418,13 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 				booking["booking_amount"] = getStringOrDefault(booking["booking_amount"], r["booking_amount"])
 				booking["total_rate"] = getStringOrDefault(booking["total_rate"], r["total_rate"])
 				booking["processing_status"] = "pending"
+				booking["upload_s3_key"] = uploadS3Key
+				for bk := range booking {
+					legacyCol := strings.ToLower(strings.TrimSpace(bk))
+					if strings.Contains(legacyCol, "upload") && strings.Contains(legacyCol, "link") {
+						delete(booking, bk)
+					}
+				}
 				// Normalize date fields in booking before insert
 				for k, v := range booking {
 					if isDateColumn(k) {
@@ -1167,13 +1461,13 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			if len(bookingErrors) > 0 {
 				_ = tx.Rollback()
 				if s3Uploaded {
-					if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after booking failure: %v\n", fileHeader.Filename, cleanupErr)
 					}
 				}
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
-					"upload_link":       "",
+					"upload_s3_key":     "",
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{},
 					"bookings_inserted": 0,
@@ -1183,13 +1477,13 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			}
 			if err := tx.Commit(); err != nil {
 				if s3Uploaded {
-					if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
 					}
 				}
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
-					"upload_link":       "",
+					"upload_s3_key":     "",
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{},
 					"bookings_inserted": 0,
@@ -1199,7 +1493,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			}
 			results = append(results, map[string]interface{}{
 				"filename":          fileHeader.Filename,
-				"upload_link":       s3URL,
+				"upload_s3_key":     uploadS3Key,
 				"staging_inserted":  stagingSuccess,
 				"staging_errors":    stagingErrors,
 				"bookings_inserted": bookingSuccess,

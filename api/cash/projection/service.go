@@ -2,8 +2,8 @@ package projection
 
 import (
 	"CimplrCorpSaas/api"
-	bankstatement "CimplrCorpSaas/api/cash/bankstatement"
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -77,7 +77,7 @@ func uploadCashflowProposalService(
 		if !committed {
 			_ = tx.Rollback(ctx)
 			if s3Uploaded && s3Key != "" {
-				if cleanupErr := bankstatement.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
 					log.Printf("[CASHFLOW-PROJECTION-UPLOAD] cleanup failed for key=%s: %v", s3Key, cleanupErr)
 				}
 			}
@@ -95,23 +95,23 @@ func uploadCashflowProposalService(
 	}
 	log.Printf("Created proposal %s", proposalID)
 
-	if bankstatement.IsS3UploadEnabled() {
+	if s3storage.IsS3UploadEnabled() {
 		hash := sha256.Sum256(fileBytes)
 		fileHash := fmt.Sprintf("%x", hash[:])
-		folder := bankstatement.GetStoragePrefix("projection")
-		s3Key = bankstatement.BuildS3Key(folder, "cashflow-projection", fileHash, fileExt)
-		contentType := bankstatement.DetectContentType(fileBytes)
-		uploadLink, uploadErr := bankstatement.UploadToS3(ctx, s3Key, fileBytes, contentType)
-		if uploadErr != nil {
+		folder := s3storage.GetStoragePrefix("projection")
+		s3Key = s3storage.BuildS3Key(folder, "cashflow-projection", fileHash, fileExt)
+		contentType := s3storage.DetectContentType(fileBytes)
+		if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
 			return "", 0, http.StatusInternalServerError, fmt.Errorf("Failed to upload file to S3: %s", uploadErr.Error())
 		}
 		s3Uploaded = true
 		if _, err := tx.Exec(ctx, `
 			UPDATE cashflow_proposal
-			SET upload_link = $1
+			SET upload_s3_key = $1,
+			    upload_link = NULL
 			WHERE proposal_id = $2
-		`, uploadLink, proposalID); err != nil {
-			return "", 0, http.StatusInternalServerError, fmt.Errorf("Failed to update proposal upload link: %s", err.Error())
+		`, s3Key, proposalID); err != nil {
+			return "", 0, http.StatusInternalServerError, fmt.Errorf("Failed to update proposal upload key: %s", err.Error())
 		}
 	}
 

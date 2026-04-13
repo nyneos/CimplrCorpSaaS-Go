@@ -4,6 +4,7 @@ import (
 	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -47,7 +48,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	contentType := DetectContentType(tmpFile)
+	contentType := s3storage.DetectContentType(tmpFile)
 
 	var rows [][]string
 	var isCSV bool
@@ -451,12 +452,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	s3Key := BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	s3Key := s3storage.BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	var uploadS3Key interface{}
 	var s3URL string
-	if IsS3UploadEnabled() {
-		s3URL, err = UploadToS3(ctx, s3Key, tmpFile, contentType)
-		if err != nil {
+	if s3storage.IsS3UploadEnabled() {
+		if err = s3storage.PutObjectToS3(ctx, s3Key, tmpFile, contentType); err != nil {
 			return nil, fmt.Errorf("failed to store original file to s3: %w", err)
+		}
+		uploadS3Key = s3Key
+		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
+			log.Printf("[BANK-UPLOAD-DEBUG] failed to presign upload response url for key=%q: %v", s3Key, err)
+			s3URL = ""
 		}
 	} else {
 		log.Printf("[BANK-UPLOAD-DEBUG] S3 upload disabled by BANK_STMT_S3_ENABLED=false; skipping storage for account=%q key=%q", accountNumber, s3Key)
@@ -2009,15 +2015,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
 		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_link
+			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_s3_key
 		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		      ON CONFLICT ON CONSTRAINT uniq_stmt
 		      DO UPDATE SET
 			      file_hash = EXCLUDED.file_hash,
 			      closing_balance = EXCLUDED.closing_balance,
-			      upload_link = EXCLUDED.upload_link
+			      upload_s3_key = COALESCE(EXCLUDED.upload_s3_key, cimplrcorpsaas.bank_statements.upload_s3_key),
+			      upload_link = NULL
 		      RETURNING bank_statement_id
-		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, s3URL).Scan(&bankStatementID)
+		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
@@ -2557,7 +2564,7 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
-	contentType := DetectContentType(tmpFile)
+	contentType := s3storage.DetectContentType(tmpFile)
 	fileExt := ".xlsx"
 	xl, err := excelize.OpenReader(bytes.NewReader(tmpFile))
 	if err != nil {
@@ -2611,8 +2618,8 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 		}
 	}
 
-	s3Key := BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
-	s3URL, err := UploadToS3(ctx, s3Key, tmpFile, contentType)
+	s3Key := s3storage.BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	_, err = s3storage.UploadToS3(ctx, s3Key, tmpFile, contentType)
 	if err != nil {
 		return fmt.Errorf("failed to store original file to s3: %w", err)
 	}
@@ -2858,15 +2865,16 @@ func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File,
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
 		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_link
+			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_s3_key
 		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		      ON CONFLICT ON CONSTRAINT uniq_stmt
 		      DO UPDATE SET
 			      file_hash = EXCLUDED.file_hash,
 			      closing_balance = EXCLUDED.closing_balance,
-			      upload_link = EXCLUDED.upload_link
+			      upload_s3_key = EXCLUDED.upload_s3_key,
+			      upload_link = NULL
 		      RETURNING bank_statement_id
-	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, s3URL).Scan(&bankStatementID)
+	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, s3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)

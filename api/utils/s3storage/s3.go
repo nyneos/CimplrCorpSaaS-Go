@@ -1,4 +1,4 @@
-package bankstatement
+package s3storage
 
 import (
 	"bytes"
@@ -186,8 +186,7 @@ func BuildS3Key(folder, subject, fileHash, fileExt string) string {
 	return fmt.Sprintf("%s%s/%s%s", folder, subjectSafe, fileHash, ext)
 }
 
-// buildModuleS3Key builds an S3 object key under the module's folder.
-// Kept for backward compatibility with existing callers.
+// BuildModuleS3Key builds an S3 object key under the module's folder.
 func BuildModuleS3Key(module, subject, fileHash, fileExt string) string {
 	prefix := GetStoragePrefix(module)
 	ext := strings.TrimSpace(fileExt)
@@ -201,7 +200,7 @@ func BuildModuleS3Key(module, subject, fileHash, fileExt string) string {
 	return fmt.Sprintf("%s%s/%s%s", prefix, subjectSafe, fileHash, ext)
 }
 
-// isS3UploadEnabled reads env var BANK_STMT_S3_ENABLED to determine whether to
+// IsS3UploadEnabled reads env var BANK_STMT_S3_ENABLED to determine whether to
 // upload files to S3. Defaults to true when unset.
 func IsS3UploadEnabled() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("BANK_STMT_S3_ENABLED")))
@@ -249,18 +248,41 @@ func contentDispositionForKey(key string) string {
 	if name == "" || name == "." || name == "/" {
 		name = "download.bin"
 	}
-	// Use attachment so browsers save with the correct extension instead of guessing.
 	return fmt.Sprintf("attachment; filename=%q", name)
 }
 
-func UploadToS3(ctx context.Context, key string, body []byte, contentType string) (string, error) {
+func newS3Client(ctx context.Context) (*s3.Client, string, error) {
 	bucket := storageBucket()
 	region := storageRegion()
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
-		return "", fmt.Errorf("load AWS config: %w", err)
+		return nil, "", fmt.Errorf("load AWS config: %w", err)
 	}
-	client := s3.NewFromConfig(cfg)
+	return s3.NewFromConfig(cfg), bucket, nil
+}
+
+func presignExpiry(expiry time.Duration) time.Duration {
+	expiryDuration := expiry
+	if expiryDuration <= 0 {
+		expiryDuration = 7 * 24 * time.Hour
+		if envExpiry := strings.TrimSpace(os.Getenv("BANK_STMT_URL_EXPIRY_HOURS")); envExpiry != "" {
+			if hours, parseErr := strconv.Atoi(envExpiry); parseErr == nil && hours > 0 {
+				expiryDuration = time.Duration(hours) * time.Hour
+			}
+		}
+	}
+	max := 7 * 24 * time.Hour
+	if expiryDuration > max {
+		expiryDuration = max
+	}
+	return expiryDuration
+}
+
+func PutObjectToS3(ctx context.Context, key string, body []byte, contentType string) error {
+	client, bucket, err := newS3Client(ctx)
+	if err != nil {
+		return err
+	}
 	contentType = contentTypeFromExtension(key, contentType)
 	contentDisposition := contentDispositionForKey(key)
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
@@ -271,28 +293,25 @@ func UploadToS3(ctx context.Context, key string, body []byte, contentType string
 		ContentDisposition: aws.String(contentDisposition),
 	})
 	if err != nil {
-		return "", fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
+		return fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
 	}
+	return nil
+}
 
-	// Generate pre-signed URL. AWS SigV4 presigned URLs max at 7 days; we clamp to that.
+func GetDownloadPresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	client, bucket, err := newS3Client(ctx)
+	if err != nil {
+		return "", err
+	}
+	contentType := contentTypeFromExtension(key, "")
+	contentDisposition := contentDispositionForKey(key)
 	presignClient := s3.NewPresignClient(client)
-	expiryDuration := 7 * 24 * time.Hour // 7 days (AWS limit for presign)
-	if envExpiry := strings.TrimSpace(os.Getenv("BANK_STMT_URL_EXPIRY_HOURS")); envExpiry != "" {
-		if hours, parseErr := strconv.Atoi(envExpiry); parseErr == nil && hours > 0 {
-			expiryDuration = time.Duration(hours) * time.Hour
-			max := 7 * 24 * time.Hour
-			if expiryDuration > max {
-				expiryDuration = max
-			}
-		}
-	}
-
 	presignedReq, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket:                     aws.String(bucket),
 		Key:                        aws.String(key),
 		ResponseContentType:        aws.String(contentType),
 		ResponseContentDisposition: aws.String(contentDisposition),
-	}, s3.WithPresignExpires(expiryDuration))
+	}, s3.WithPresignExpires(presignExpiry(expiry)))
 	if err != nil {
 		return "", fmt.Errorf("failed to generate pre-signed URL: %w", err)
 	}
@@ -300,14 +319,19 @@ func UploadToS3(ctx context.Context, key string, body []byte, contentType string
 	return presignedReq.URL, nil
 }
 
-func DeleteFromS3(ctx context.Context, key string) error {
-	bucket := storageBucket()
-	region := storageRegion()
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		return fmt.Errorf("load AWS config: %w", err)
+// UploadToS3 is kept as a temporary compatibility wrapper during migration.
+func UploadToS3(ctx context.Context, key string, body []byte, contentType string) (string, error) {
+	if err := PutObjectToS3(ctx, key, body, contentType); err != nil {
+		return "", err
 	}
-	client := s3.NewFromConfig(cfg)
+	return GetDownloadPresignedURL(ctx, key, 0)
+}
+
+func DeleteFromS3(ctx context.Context, key string) error {
+	client, bucket, err := newS3Client(ctx)
+	if err != nil {
+		return err
+	}
 	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
