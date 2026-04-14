@@ -1230,7 +1230,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		fileReader := bytes.NewReader(fileBytes)
 		mf := &bytesFile{Reader: fileReader}
 
-		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings)
+		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings, "")
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1391,7 +1391,7 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			bytesReader := bytes.NewReader(fileData)
 			file := &bytesFile{Reader: bytesReader}
 
-			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, fileHash, useMapping, mappings)
+			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, fileHash, useMapping, mappings, "")
 			if err != nil {
 				results = append(results, FileResult{
 					FileName: zipFileEntry.Name,

@@ -32,7 +32,7 @@ const bankStatementModule = "bankstatement"
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string) (map[string]interface{}, error) {
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
@@ -148,8 +148,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// 3. Extract account number, entity id, and name from header
 	var accountNumber, entityID, accountName string
 
+	// If caller supplied an explicit account number override, skip all file-based extraction.
+	if strings.TrimSpace(accountNumberOverride) != "" {
+		accountNumber = strings.TrimSpace(accountNumberOverride)
+		log.Printf("[BANK-UPLOAD-DEBUG] Using caller-supplied account_number override=%q", accountNumber)
+	}
+
 	// If custom mapping is provided, attempt to extract account number and name using the mapped header names.
-	if mappings != nil {
+	if accountNumber == "" && mappings != nil {
 		// Search for custom mapped headers in first 20 rows
 		for i := 0; i < len(rows) && i < 20; i++ {
 			for j, cell := range rows[i] {
@@ -178,7 +184,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	// If account number wasn't found via mapping (or no mapping provided), proceed with the regular extraction logic.
+	// If account number wasn't found via mapping or override, proceed with the regular extraction logic.
 	if accountNumber == "" {
 		// Use default extraction logic when not using custom mapping or when mapping failed
 		if isCSV {
@@ -194,15 +200,33 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 		} else {
-			// For Excel/XLS files
+			// For Excel/XLS files — match same label variants as CSV branch
 			for i := 0; i < 20 && i < len(rows); i++ {
 				for j, cell := range rows[i] {
-					if cell == acNoHeader && j+1 < len(rows[i]) {
-						accountNumber = rows[i][j+1]
+					nc := normalizeCell(cell)
+					isAcctLabel := nc == acNoHeader ||
+						strings.EqualFold(nc, "Account Number") ||
+						strings.EqualFold(nc, "Account No.") ||
+						strings.EqualFold(nc, "Account No") ||
+						strings.EqualFold(nc, "Acc No") ||
+						strings.EqualFold(nc, "Acc No.") ||
+						strings.EqualFold(nc, "A/C Number") ||
+						strings.EqualFold(nc, "A/C No") ||
+						strings.EqualFold(nc, "Account:")
+					if isAcctLabel && j+1 < len(rows[i]) {
+						if v := extractAccountFromCell(rows[i][j+1]); v != "" {
+							accountNumber = v
+						}
 					}
-					if cell == "Name:" && j+1 < len(rows[i]) {
-						accountName = rows[i][j+1]
+					if isAcctLabel && j+1 < len(rows[i]) && accountNumber == "" {
+						accountNumber = normalizeCell(rows[i][j+1])
 					}
+					if (nc == "Name:" || strings.EqualFold(nc, "Account Name") || strings.EqualFold(nc, "Name")) && j+1 < len(rows[i]) {
+						accountName = normalizeCell(rows[i][j+1])
+					}
+				}
+				if accountNumber != "" {
+					break
 				}
 			}
 		}
@@ -215,28 +239,37 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// label in one cell and value in adjacent or next-row cell, or merged cells.
 		acctLabelRe := regexp.MustCompile(`(?i)\b(?:a[/\\]?c|acct|account)[\s\.:#-]*(?:no|number)?\b`)
 		acctNumberRe := regexp.MustCompile(`\d{6,}`)
+		acctAlphaNumRe := regexp.MustCompile(`[A-Za-z0-9]{6,}`) // for alphanumeric account numbers
+		extractCandFromCell := func(cell string) string {
+			v := normalizeCell(cell)
+			if m := acctNumberRe.FindString(v); m != "" {
+				return strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+			}
+			if m := acctAlphaNumRe.FindString(v); m != "" {
+				return strings.TrimSpace(m)
+			}
+			return ""
+		}
 		for i := 0; i < 20 && i < len(rows); i++ {
 			for j, cell := range rows[i] {
 				v := normalizeCell(cell)
 				// If cell contains a label, try to extract digits from same cell
 				if acctLabelRe.MatchString(v) {
-					if m := acctNumberRe.FindString(v); m != "" {
-						accountNumber = strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+					if m := extractCandFromCell(v); m != "" {
+						accountNumber = m
 						break
 					}
 					// try adjacent cell on same row
 					if j+1 < len(rows[i]) {
-						cand := normalizeCell(rows[i][j+1])
-						if m := acctNumberRe.FindString(cand); m != "" {
-							accountNumber = strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+						if m := extractCandFromCell(rows[i][j+1]); m != "" {
+							accountNumber = m
 							break
 						}
 					}
 					// try same column next row (merged/stacked label)
 					if i+1 < len(rows) && j < len(rows[i+1]) {
-						cand := normalizeCell(rows[i+1][j])
-						if m := acctNumberRe.FindString(cand); m != "" {
-							accountNumber = strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+						if m := extractCandFromCell(rows[i+1][j]); m != "" {
+							accountNumber = m
 							break
 						}
 					}
@@ -314,8 +347,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 
-			// Second pass: no label found — search any header cell for >=7-digit sequences
+			// Second pass: no label found — search any header cell for >=7-digit sequences.
+			// Only scan rows 0..19 (true header area); do NOT scan transaction data rows to
+			// avoid picking up reference numbers from narrative/cheque columns.
 			if found == "" {
+				log.Printf("[BANK-UPLOAD-DEBUG] Label scan found nothing; dumping first 20 rows for inspection")
+				for i := 0; i < 20 && i < len(rows); i++ {
+					log.Printf("[BANK-UPLOAD-DEBUG] header-row[%d]=%q", i, rows[i])
+				}
 				digitsRe := acctNumberRe
 				for i := 0; i < 20 && i < len(rows); i++ {
 					for _, cell := range rows[i] {
@@ -372,10 +411,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			log.Printf("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning header for verified candidates", accountNumber)
 			candidates := []string{}
 			seen := map[string]bool{}
-			// use the stricter acctNumberRe (>=7 digits) to collect candidates
+			alphaNumCandRe := regexp.MustCompile(`[A-Za-z0-9]{7,}`) // include alphanumeric for BG/NEFT reference-style accounts
+			// Scan first 20 rows: collect all digit (>=7) and alphanumeric (>=7) candidates
 			for i := 0; i < 20 && i < len(rows); i++ {
 				for _, cell := range rows[i] {
 					v := normalizeCell(cell)
+					// Pure digit candidates
 					for _, m := range acctNumberRe.FindAllString(v, -1) {
 						cand := strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
 						if cand == "" {
@@ -386,8 +427,22 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 							candidates = append(candidates, cand)
 						}
 					}
+					// Alphanumeric candidates (only if no digit run matched this cell)
+					for _, m := range alphaNumCandRe.FindAllString(v, -1) {
+						cand := strings.TrimSpace(m)
+						if cand == "" || seen[cand] {
+							continue
+						}
+						// Skip if already covered by digit-only pass
+						if acctNumberRe.MatchString(cand) {
+							continue
+						}
+						seen[cand] = true
+						candidates = append(candidates, cand)
+					}
 				}
 			}
+			log.Printf("[BANK-UPLOAD-DEBUG] Candidate scan: %d candidates from first 20 rows", len(candidates))
 			matched := false
 			for _, cand := range candidates {
 				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", cand)
@@ -414,6 +469,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 			if !matched {
 				log.Printf("[BANK-UPLOAD-DEBUG] Account not found in masterbankaccount after candidate scan: %v", candidates)
+				log.Printf("[BANK-UPLOAD-DEBUG] Dumping first 20 rows for inspection:")
+				for i := 0; i < 20 && i < len(rows); i++ {
+					log.Printf("[BANK-UPLOAD-DEBUG] row[%d]=%q", i, rows[i])
+				}
 				return nil, ErrAccountNotFound
 			}
 		} else {
@@ -2796,4 +2855,3 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 }
 
 // 1. Get all bank statements (POST, req: user_id)
-

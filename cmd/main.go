@@ -34,7 +34,7 @@ func InitDB() (*sql.DB, error) {
 }
 
 func main() {
-	_ = godotenv.Load(".env")
+	_ = godotenv.Overload("../.env") // Overload forces .env to win over stale shell exports
 
 	fmt.Println("ENV CHECK:")
 	fmt.Println("  DB_USER:", os.Getenv("DB_USER"))
