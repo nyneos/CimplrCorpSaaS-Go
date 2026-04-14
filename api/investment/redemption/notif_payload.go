@@ -34,6 +34,7 @@ package redemption
 //   BySchemeKPIs       — []map{group_name, count, total_net_credited}  grouped by initiation_scheme_name
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -153,7 +154,7 @@ func computeRedemptionInitiationKPIs(rows []RedemptionInitiationRow, groupField 
 	for _, row := range rows {
 		key := redemptionStrField(row, groupField)
 		if key == "" {
-			key = "(unknown)"
+			key = constants.Unknown
 		}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &RedemptionInitiationKPIRow{GroupName: key}
@@ -274,7 +275,7 @@ func computeRedemptionConfirmationKPIs(rows []RedemptionConfirmationRow, groupFi
 	for _, row := range rows {
 		key := redemptionStrField(row, groupField)
 		if key == "" {
-			key = "(unknown)"
+			key = constants.Unknown
 		}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &RedemptionConfirmationKPIRow{GroupName: key}
@@ -300,14 +301,14 @@ func BuildRedemptionConfirmationNotifPayload(
 	requestedBy string,
 ) *RedemptionConfirmationNotifPayload {
 	p := &RedemptionConfirmationNotifPayload{
-		Action:           action,
-		RequestedBy:      requestedBy,
-		Count:            len(confirmationIDs),
-		ActionAt:         time.Now().Format(time.RFC3339),
-		Confirmations:    []RedemptionConfirmationRow{},
-		ConfirmationIDs:  confirmationIDs,
-		ByEntityKPIs:     []RedemptionConfirmationKPIRow{},
-		BySchemeKPIs:     []RedemptionConfirmationKPIRow{},
+		Action:          action,
+		RequestedBy:     requestedBy,
+		Count:           len(confirmationIDs),
+		ActionAt:        time.Now().Format(time.RFC3339),
+		Confirmations:   []RedemptionConfirmationRow{},
+		ConfirmationIDs: confirmationIDs,
+		ByEntityKPIs:    []RedemptionConfirmationKPIRow{},
+		BySchemeKPIs:    []RedemptionConfirmationKPIRow{},
 	}
 	if len(confirmationIDs) == 0 {
 		return p

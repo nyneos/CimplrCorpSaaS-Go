@@ -31,7 +31,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set(constants.ContentTypeText, "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }
@@ -217,22 +217,22 @@ type LogRowTemplate struct {
 }
 
 type LogRow struct {
-	OutboxID        string           `json:"outbox_id"`
-	CorrelationID   string           `json:"correlation_id"`
-	EventName       string           `json:"event_name"`
-	Channel         string           `json:"channel"`
-	Recipient       string           `json:"recipient"`
-	Status          string           `json:"status"`
-	RetryCount      int              `json:"retry_count"`
-	LatencyMs       *float64         `json:"latency_ms,omitempty"`
-	CreatedAt       string           `json:"created_at"`
-	UpdatedAt       *string          `json:"updated_at,omitempty"`
-	ErrorMessage    *string          `json:"error_message,omitempty"`
-	AuditID         string           `json:"audit_id"`
-	SenderName      *string          `json:"sender_name,omitempty"`
-	SenderEmail     *string          `json:"sender_email,omitempty"`
-	RenderedSubject *string          `json:"rendered_subject,omitempty"`
-	PriorityLevel   int              `json:"priority_level"`
+	OutboxID        string   `json:"outbox_id"`
+	CorrelationID   string   `json:"correlation_id"`
+	EventName       string   `json:"event_name"`
+	Channel         string   `json:"channel"`
+	Recipient       string   `json:"recipient"`
+	Status          string   `json:"status"`
+	RetryCount      int      `json:"retry_count"`
+	LatencyMs       *float64 `json:"latency_ms,omitempty"`
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       *string  `json:"updated_at,omitempty"`
+	ErrorMessage    *string  `json:"error_message,omitempty"`
+	AuditID         string   `json:"audit_id"`
+	SenderName      *string  `json:"sender_name,omitempty"`
+	SenderEmail     *string  `json:"sender_email,omitempty"`
+	RenderedSubject *string  `json:"rendered_subject,omitempty"`
+	PriorityLevel   int      `json:"priority_level"`
 	// Technical Details panel
 	VariablesPayload map[string]interface{} `json:"variables_payload"`
 	// Template details panel

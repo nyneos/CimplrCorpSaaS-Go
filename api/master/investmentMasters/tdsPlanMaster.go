@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,9 +77,9 @@ func validateTDSPlanFields(input map[string]interface{}) string {
 
 	// Check deduction_timing
 	if deductionTiming, ok := input["deduction_timing"].(string); ok && deductionTiming != "" {
-		validTimings := map[string]bool{"ACCRUAL": true, "RECEIPT": true, "MATURITY": true}
+		validTimings := map[string]bool{"ACCRUAL": true, "RECEIPT": true, "MATURITY": true, "ACCRUAL_ANNUAL": true}
 		if !validTimings[deductionTiming] {
-			return fmt.Sprintf("Invalid deduction_timing '%s'. Must be ACCRUAL, RECEIPT, or MATURITY.", deductionTiming)
+			return fmt.Sprintf("Invalid deduction_timing '%s'. Must be ACCRUAL_ANNUAL, ACCRUAL, RECEIPT, or MATURITY.", deductionTiming)
 		}
 	}
 
@@ -114,7 +116,7 @@ func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
 	}
 
 	if strings.Contains(errStr, "fd_tds_deduction_timing_chk") {
-		return "Invalid deduction timing. Must be ACCRUAL, RECEIPT, or MATURITY.", http.StatusOK
+		return "Invalid deduction timing. Must be ACCRUAL_ANNUAL,ACCRUAL, RECEIPT, or MATURITY.", http.StatusOK
 	}
 
 	if strings.Contains(errStr, "fd_tds_rate_chk") {
@@ -132,7 +134,7 @@ func getUserFriendlyTDSPlanError(err error, context string) (string, int) {
 	if strings.Contains(errStr, "foreign key constraint") || strings.Contains(errStr, "violates foreign key") {
 		return "Referenced record not found or is invalid.", http.StatusOK
 	}
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		return "Invalid data format or value.", http.StatusOK
 	}
 	if strings.Contains(errStr, "not-null constraint") || strings.Contains(errStr, "null value") {
@@ -170,8 +172,8 @@ func GetTdsPlansApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.threshold_amount,
 				m.threshold_type,
 				m.deduction_timing,
-				m.applicable_from,
-				m.applicable_to,
+				TO_CHAR(m.applicable_from, 'YYYY-MM-DD') AS applicable_from,
+				TO_CHAR(m.applicable_to, 'YYYY-MM-DD') AS applicable_to,
 				m.description,
 				m.is_active
 			FROM investment.fd_tds_plan_master m
@@ -275,7 +277,7 @@ func CreateTDSPlanSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyTDSPlanError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyTDSPlanError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -544,7 +546,7 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -592,14 +594,24 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		header := rows[0]
 		data := rows[1:]
-		colMap := make(map[string]int)
-		for i, col := range header {
-			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+
+		// normalize header keys (remove non-alphanumeric, lowercase)
+		normalize := func(s string) string {
+			s = strings.ToLower(strings.TrimSpace(s))
+			// remove any character that is not a-z or 0-9
+			re := regexp.MustCompile(`[^a-z0-9]`)
+			return re.ReplaceAllString(s, "")
 		}
 
+		colMap := make(map[string]int)
+		for i, col := range header {
+			colMap[normalize(col)] = i
+		}
+
+		// required columns (normalize keys used above)
 		requiredCols := []string{"tds_plan_code", "tds_plan_name", "tds_section", "tds_rate"}
 		for _, rc := range requiredCols {
-			if _, ok := colMap[rc]; !ok {
+			if _, ok := colMap[normalize(rc)]; !ok {
 				api.RespondWithError(w, http.StatusBadRequest, "Required column '"+rc+"' not found")
 				return
 			}
@@ -607,27 +619,36 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var inputs []map[string]interface{}
 		var errorsList []map[string]interface{}
+
+		// helper to send a concise fail-fast response
+		sendFail := func(row int, errMsg string) {
+			summary := fmt.Sprintf("TDS upload aborted: row %d failed validation: %s", row, errMsg)
+			api.RespondWithPayload(w, false, summary, nil)
+		}
 		for ri, row := range data {
-			code := getColumnValue(row, colMap, "tds_plan_code")
-			name := getColumnValue(row, colMap, "tds_plan_name")
-			section := getColumnValue(row, colMap, "tds_section")
-			rateStr := getColumnValue(row, colMap, "tds_rate")
+			// helper to fetch by normalized name
+			get := func(col string) string { return getColumnValue(row, colMap, normalize(col)) }
+
+			code := get("tds_plan_code")
+			name := get("tds_plan_name")
+			section := get("tds_section")
+			rateStr := get("tds_rate")
 			if code == "" || name == "" || section == "" || rateStr == "" {
-				errorsList = append(errorsList, map[string]interface{}{"row": ri + 2, constants.ValueSuccess: false, constants.ValueError: "Missing required columns"})
-				continue
+				sendFail(ri+2, "Missing required columns")
+				return
 			}
 			rate := 0.0
 			if parsed, err := parseFloatPtr(rateStr); err == nil {
 				rate = *parsed
 			}
 			hasPan := false
-			if v := getColumnValue(row, colMap, "has_pan"); v != "" {
+			if v := get("has_pan"); v != "" {
 				if p, err := parseBoolPtr(v); err == nil {
 					hasPan = *p
 				}
 			}
 			thr := (*float64)(nil)
-			if v := getColumnValue(row, colMap, "threshold_amount"); v != "" {
+			if v := get("threshold_amount"); v != "" {
 				if p, err := parseFloatPtr(v); err == nil {
 					thr = p
 				}
@@ -639,23 +660,111 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"tds_rate":         rate,
 				"has_pan":          hasPan,
 				"threshold_amount": thr,
-				"threshold_type":   getColumnValue(row, colMap, "threshold_type"),
-				"deduction_timing": getColumnValue(row, colMap, "deduction_timing"),
-				"applicable_from":  getColumnValue(row, colMap, "applicable_from"),
-				"applicable_to":    getColumnValue(row, colMap, "applicable_to"),
-				"description":      getColumnValue(row, colMap, "description"),
+				"threshold_type":   get("threshold_type"),
+				"deduction_timing": get("deduction_timing"),
+				"applicable_from":  get("applicable_from"),
+				"applicable_to":    get("applicable_to"),
+				"description":      get("description"),
 				"is_active":        func() *bool { b := true; return &b }(),
+				"source_row":       ri + 2,
 			}
-			// Validate constraints before DB operations
+			// Row-level validations per schema
+			// tds_plan_code: ^TDS-[A-Za-z0-9-]+$, max 50
+			if code == "" {
+				sendFail(ri+2, "tds_plan_code is required")
+				return
+			}
+			if len(code) > 50 {
+				sendFail(ri+2, "tds_plan_code exceeds max length 50")
+				return
+			}
+			codeRe := regexp.MustCompile(`^TDS-[A-Za-z0-9-]+$`)
+			if !codeRe.MatchString(code) {
+				sendFail(ri+2, "tds_plan_code must match pattern ^TDS-[A-Za-z0-9-]+$")
+				return
+			}
+
+			// tds_plan_name: required, maxLength 100
+			if name == "" {
+				sendFail(ri+2, "tds_plan_name is required")
+				return
+			}
+			if len(name) > 100 {
+				sendFail(ri+2, "tds_plan_name exceeds max length 100")
+				return
+			}
+
+			// tds_section: required, /^[A-Za-z0-9]+$/
+			if section == "" {
+				sendFail(ri+2, "tds_section is required")
+				return
+			}
+			secRe := regexp.MustCompile(`^[A-Za-z0-9]+$`)
+			if !secRe.MatchString(section) {
+				sendFail(ri+2, "tds_section must be alphanumeric")
+				return
+			}
+
+			// tds_rate: required, 0 <= rate <= 100
+			if rateStr == "" {
+				sendFail(ri+2, "tds_rate is required")
+				return
+			}
+			if rate < 0 || rate > 100 {
+				sendFail(ri+2, "tds_rate must be between 0 and 100")
+				return
+			}
+
+			// threshold_amount: if provided must be >=0 and REQUIRED per schema
+			if get("threshold_amount") == "" {
+				sendFail(ri+2, "threshold_amount is required")
+				return
+			}
+			if thr != nil && *thr < 0 {
+				sendFail(ri+2, "threshold_amount must be >= 0")
+				return
+			}
+
+			// applicable_from: required and must be a valid date
+			afStr := get("applicable_from")
+			if afStr == "" {
+				sendFail(ri+2, "applicable_from is required")
+				return
+			}
+			var afTime time.Time
+			if t, err := time.Parse(constants.DateFormat, afStr); err == nil {
+				afTime = t
+			} else if t, err := time.Parse(time.RFC3339, afStr); err == nil {
+				afTime = t
+			} else {
+				sendFail(ri+2, "applicable_from must be a valid date (YYYY-MM-DD)")
+				return
+			}
+
+			// applicable_to: optional but if present must be > applicable_from
+			atStr := get("applicable_to")
+			if atStr != "" {
+				var atTime time.Time
+				if t, err := time.Parse(constants.DateFormat, atStr); err == nil {
+					atTime = t
+				} else if t, err := time.Parse(time.RFC3339, atStr); err == nil {
+					atTime = t
+				} else {
+					sendFail(ri+2, "applicable_to must be a valid date (YYYY-MM-DD)")
+					return
+				}
+				if !atTime.After(afTime) {
+					sendFail(ri+2, "applicable_to must be later than applicable_from")
+					return
+				}
+			}
+
+			// Deduction timing / threshold_type validation also covered in validateTDSPlanFields
 			if validationErr := validateTDSPlanFields(inputMap); validationErr != "" {
-				errorsList = append(errorsList, map[string]interface{}{"row": ri + 2, "tds_plan_code": code, constants.ValueSuccess: false, constants.ValueError: validationErr})
-				continue
+				sendFail(ri+2, validationErr)
+				return
 			}
 			inputs = append(inputs, inputMap)
-		}
-		if len(inputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
-			return
 		}
 
 		// Bulk insert (similar to CreateTDSPlan)
@@ -707,31 +816,29 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			existingNames[name] = true
 		}
 
-		// Filter out duplicates and create error reports
+		// Fail-fast on first duplicate (treat duplicates as validation errors)
 		var finalValidInputs []map[string]interface{}
 		for _, input := range inputs {
 			code := input["tds_plan_code"].(string)
 			name := input["tds_plan_name"].(string)
 			if existingCodes[code] {
-				errorsList = append(errorsList, map[string]interface{}{
-					"tds_plan_code":        code,
-					constants.ValueSuccess: false,
-					constants.ValueError:   "TDS plan code already exists and is active.",
-				})
-			} else if existingNames[name] {
-				errorsList = append(errorsList, map[string]interface{}{
-					"tds_plan_code":        code,
-					constants.ValueSuccess: false,
-					constants.ValueError:   "TDS plan name already exists and is active.",
-				})
-			} else {
-				finalValidInputs = append(finalValidInputs, input)
+				// report the source row for the duplicate
+				src := 0
+				if v, ok := input["source_row"].(int); ok {
+					src = v
+				}
+				sendFail(src, "TDS plan code already exists and is active.")
+				return
 			}
-		}
-
-		if len(finalValidInputs) == 0 {
-			api.RespondWithPayload(w, false, "All rows are duplicates", errorsList)
-			return
+			if existingNames[name] {
+				src := 0
+				if v, ok := input["source_row"].(int); ok {
+					src = v
+				}
+				sendFail(src, "TDS plan name already exists and is active.")
+				return
+			}
+			finalValidInputs = append(finalValidInputs, input)
 		}
 
 		valueStrings := make([]string, len(finalValidInputs))
@@ -798,8 +905,18 @@ func UploadTDSPlanSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		api.LogInfo("Transaction committed successfully")
 
-		allResults := append(inserted, errorsList...)
-		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
+		if len(inserted) > 0 {
+			if len(errorsList) > 0 {
+				msg := fmt.Sprintf("%d TDS plans created successfully; %d duplicates skipped", len(inserted), len(errorsList))
+				api.RespondWithPayload(w, true, msg, nil)
+			} else {
+				msg := fmt.Sprintf("%d TDS plans created successfully", len(inserted))
+				api.RespondWithPayload(w, true, msg, nil)
+			}
+			api.LogInfo("TDS plan upload/bulk create: %d inserted, %d errors", len(inserted), len(errorsList))
+			return
+		}
+		api.RespondWithPayload(w, false, "No TDS plans were created", errorsList)
 		api.LogInfo("TDS plan upload/bulk create: %d inserted, %d errors", len(inserted), len(errorsList))
 	}
 }
@@ -849,10 +966,18 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					a.checker_comment,
 					a.reason,
 					a.old_tds_plan_code,
+					a.old_tds_plan_name,
 					a.old_tds_rate,
-					a.old_threshold_amount,
+					a.old_tds_section,
 					a.old_has_pan,
-					a.old_is_active
+					a.old_threshold_amount,
+					a.old_threshold_type,
+					a.old_deduction_timing,
+					a.old_applicable_from,
+					a.old_applicable_to,
+					a.old_description,
+					a.old_is_active,
+					a.old_is_deleted
 				FROM investment.fd_audit_tds_plan a
 				ORDER BY a.tds_plan_id, GREATEST(COALESCE(a.requested_at, '1970-01-01'::timestamp), COALESCE(a.checker_at, '1970-01-01'::timestamp)) DESC
 			),
@@ -873,13 +998,20 @@ func GetTdsPlansWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.tds_plan_code,'') AS tds_plan_code,
 				COALESCE(l.old_tds_plan_code,'') AS old_tds_plan_code,
 				COALESCE(m.tds_plan_name,'') AS tds_plan_name,
+				COALESCE(l.old_tds_plan_name,'') AS old_tds_plan_name,
 				COALESCE(m.tds_section,'') AS tds_section,
 				COALESCE(m.tds_rate,0) AS tds_rate,
 				COALESCE(l.old_tds_rate,0) AS old_tds_rate,
+				COALESCE(l.old_tds_section,'') AS old_tds_section,
 				COALESCE(m.has_pan,false) AS has_pan,
 				COALESCE(l.old_has_pan,false) AS old_has_pan,
 				COALESCE(m.threshold_amount,0) AS threshold_amount,
 				COALESCE(l.old_threshold_amount,0) AS old_threshold_amount,
+				COALESCE(l.old_threshold_type,'') AS old_threshold_type,
+				COALESCE(l.old_deduction_timing,'') AS old_deduction_timing,
+				COALESCE(TO_CHAR(l.old_applicable_from,'YYYY-MM-DD'),'') AS old_applicable_from,
+				COALESCE(TO_CHAR(l.old_applicable_to,'YYYY-MM-DD'),'') AS old_applicable_to,
+				COALESCE(l.old_description,'') AS old_description,
 				COALESCE(m.threshold_type,'') AS threshold_type,
 				COALESCE(m.deduction_timing,'') AS deduction_timing,
 				COALESCE(TO_CHAR(m.applicable_from,'YYYY-MM-DD'),'') AS applicable_from,
@@ -1508,7 +1640,7 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					return
 				}
 
-				sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+				sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				args = append(args, v)
 				pos++
 			}
@@ -1535,6 +1667,20 @@ func UpdateTDSPlan(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		auditCols := []string{"tds_plan_id", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
 		auditVals := []interface{}{req.TdsID, "EDIT", "PENDING_EDIT_APPROVAL", req.Reason, userEmail}
 		auditParams := []string{"$1", "$2", "$3", "$4", "$5", "now()"}
+
+		// Append old_* columns for every field actually being updated
+		paramPos := len(auditVals) + 1 // next $n index
+		for k := range req.Fields {
+			k = strings.ToLower(k)
+			if idx, ok := fieldPairs[k]; ok {
+				oldCol := "old_" + k
+				auditCols = append(auditCols, oldCol)
+				// append the old value from oldVals array
+				auditVals = append(auditVals, oldVals[idx])
+				auditParams = append(auditParams, fmt.Sprintf("$%d", paramPos))
+				paramPos++
+			}
+		}
 
 		auditQuery := fmt.Sprintf("INSERT INTO investment.fd_audit_tds_plan (%s) VALUES (%s)", strings.Join(auditCols, ", "), strings.Join(auditParams, ", "))
 		api.LogInfo("Debug audit insert query: %s", auditQuery)

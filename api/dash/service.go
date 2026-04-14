@@ -3,6 +3,7 @@ package dash
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 )
 
 
@@ -20,7 +21,20 @@ func (s *DashService) Name() string {
 }
 
 func (s *DashService) Start() error {
-	go StartDashService(s.db)
+	port := "4143"
+	if s.config != nil {
+		if v, ok := s.config["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartDashService(s.db, port)
 	return nil
 }
 

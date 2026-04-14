@@ -3,6 +3,7 @@ package fx
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 )
 
 type FXService struct {
@@ -19,7 +20,20 @@ func (s *FXService) Name() string {
 }
 
 func (s *FXService) Start() error {
-	go StartFXService(s.db)
+	port := "3143"
+	if s.config != nil {
+		if v, ok := s.config["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartFXService(s.db, port)
 	return nil
 }
 

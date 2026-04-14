@@ -15,6 +15,7 @@ import (
 
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	catalog "CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/internal/appmanager"
 )
 
@@ -60,9 +61,16 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
+	// Use sslmode=disable when connecting directly to RDS (no SSL terminator).
+	// Switch to sslmode=require only when routing through a Supabase/pgBouncer pooler.
+	// connect_timeout and statement_timeout guard against hung connections.
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
 	pgxConnStr := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		user, pass, host, port, name,
+		"postgres://%s:%s@%s:%s/%s?sslmode=%s&connect_timeout=10&pool_max_conns=30&pool_min_conns=2&statement_timeout=30000",
+		user, pass, host, port, name, sslMode,
 	)
 
 	ctx := context.Background()
@@ -71,6 +79,13 @@ func main() {
 		log.Fatal("failed to create pgx pool:", err)
 	}
 	defer pgxPool.Close()
+
+	// Fail fast: verify the pool can actually reach the DB before starting services.
+	if pingErr := pgxPool.Ping(ctx); pingErr != nil {
+		log.Fatalf("pgx pool ping failed — check DB_HOST/DB_PORT/DB_SSLMODE in .env: %v", pingErr)
+	}
+	log.Printf("DB connected: host=%s port=%s db=%s sslmode=%s", host, port, name, sslMode)
+
 	appmanager.SetPgxPool(pgxPool)
 
 	manager := appmanager.NewAppManager()
@@ -99,6 +114,10 @@ func main() {
 		log.Fatal("Auth service type assertion failed")
 	}
 	api.SetAuthService(realAuthSvc)
+
+	// Register logout hook: clear in-memory system notifications when a user logs out
+	// so stale pipeline-error alerts don't persist across sessions.
+	auth.OnLogoutHook = catalog.ClearSystemNotifications
 
 	// Graceful shutdown handling
 	sigs := make(chan os.Signal, 1)

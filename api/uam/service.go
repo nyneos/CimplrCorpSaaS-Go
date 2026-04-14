@@ -3,6 +3,7 @@ package uam
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 )
 
 type UAMService struct {
@@ -19,7 +20,20 @@ func (s *UAMService) Name() string {
 }
 
 func (s *UAMService) Start() error {
-	go StartUAMService(s.db)
+	port := "5143"
+	if s.config != nil {
+		if v, ok := s.config["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartUAMService(s.db, port)
 	return nil
 }
 

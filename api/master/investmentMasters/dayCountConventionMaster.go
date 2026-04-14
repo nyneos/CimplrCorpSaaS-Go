@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,7 +33,7 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 	}
 
 	if strings.Contains(errStr, "inv_day_count_convention_type_chk") ||
-		(strings.Contains(errStr, "check constraint") && strings.Contains(errStr, "convention_type")) {
+		(strings.Contains(errStr, constants.CheckConstraint) && strings.Contains(errStr, "convention_type")) {
 		return "Invalid convention_type. Must be one of: ACT_365, ACT_360, ACT_ACT, 30_360.", http.StatusBadRequest
 	}
 
@@ -53,12 +54,12 @@ func getUserFriendlyDayCountError(err error, context string) (string, int) {
 
 // --- Request Types ---
 type DayCountConventionInput struct {
-	DayCountName   string   `json:"day_count_name"`
-	ConventionType string   `json:"convention_type"` // ACT_365|ACT_360|ACT_ACT|30_360
-	Description    *string  `json:"description"`
-	FormulaExample *string  `json:"formula_example"`
-	IsActive       *bool    `json:"is_active"`
-	UsedByBanks    []string `json:"used_by_banks"` // populates fd_day_count_bank_map
+	DayCountCode   string  `json:"day_count_code"`
+	DayCountName   string  `json:"day_count_name"`
+	ConventionType string  `json:"convention_type"` // ACT_365|ACT_360|ACT_ACT|30_360
+	Description    *string `json:"description"`
+	FormulaExample *string `json:"formula_example"`
+	IsActive       *bool   `json:"is_active"`
 }
 
 type CreateDayCountConventionSingleRequest struct {
@@ -100,13 +101,7 @@ func validateDayCountFields(input DayCountConventionInput) error {
 	return nil
 }
 
-// syncDayCountBankMap deletes existing map rows for a day_count_code and inserts the new set.
-// Must be called inside a transaction.
-func syncDayCountBankMap(ctx interface{ Value(interface{}) interface{} }, tx interface {
-	Exec(ctx interface{}, sql string, args ...interface{}) (interface{}, error)
-}, dayCountCode string, bankCodes []string) error {
-	return nil // placeholder - actual implementation inline below
-}
+// bank map table removed from schema; no-op placeholder removed.
 
 // UploadDayCountConventionSimple handles CSV/XLSX upload
 func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
@@ -118,7 +113,7 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -163,16 +158,23 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Build column index map from header row
+		// Normalize header keys (remove non-alphanumeric, lowercase)
+		normalize := func(s string) string {
+			s = strings.ToLower(strings.TrimSpace(s))
+			re := regexp.MustCompile(`[^a-z0-9]`)
+			return re.ReplaceAllString(s, "")
+		}
+
+		// Build column index map from header row using normalized keys
 		header := data[0]
 		colMap := make(map[string]int)
 		for i, col := range header {
-			colMap[strings.ToLower(strings.TrimSpace(col))] = i
+			colMap[normalize(col)] = i
 		}
 
 		requiredCols := []string{"day_count_name", "convention_type"}
 		for _, col := range requiredCols {
-			if _, ok := colMap[col]; !ok {
+			if _, ok := colMap[normalize(col)]; !ok {
 				api.RespondWithError(w, http.StatusBadRequest, "Missing required column: "+col)
 				return
 			}
@@ -180,52 +182,53 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		// Pre-validate rows
+		// Pre-validate rows (fail-fast on first error)
 		var validInputs []DayCountConventionInput
-		var errors []map[string]interface{}
+		var validSourceRows []int
+
+		// helper to fetch by normalized name
+		get := func(row []string, col string) string { return getColumnValue(row, colMap, normalize(col)) }
+
+		// helper to send concise fail-fast response
+		sendFail := func(row int, errMsg string) {
+			summary := fmt.Sprintf("Day count upload aborted: row %d failed validation: %s", row, errMsg)
+			api.RespondWithPayload(w, false, summary, nil)
+		}
 
 		for i, row := range data[1:] {
 			if len(row) == 0 {
 				continue
 			}
 			input := DayCountConventionInput{
-				DayCountName:   getColumnValue(row, colMap, "day_count_name"),
-				ConventionType: strings.ToUpper(getColumnValue(row, colMap, "convention_type")),
+				DayCountName:   get(row, "day_count_name"),
+				ConventionType: strings.ToUpper(get(row, "convention_type")),
 			}
 
-			if desc := getColumnValue(row, colMap, "description"); desc != "" {
+			if desc := get(row, "description"); desc != "" {
 				input.Description = &desc
 			}
-			if fe := getColumnValue(row, colMap, "formula_example"); fe != "" {
+			if fe := get(row, "formula_example"); fe != "" {
 				input.FormulaExample = &fe
 			}
-			isActiveStr := getColumnValue(row, colMap, "is_active")
-			if isActiveStr != "" {
+			if isActiveStr := get(row, "is_active"); isActiveStr != "" {
 				bv, bErr := parseBoolPtr(isActiveStr)
 				if bErr != nil {
-					errors = append(errors, map[string]interface{}{
-						"row_index":            i + 2,
-						constants.ValueSuccess: false,
-						constants.ValueError:   "Invalid is_active value: " + isActiveStr,
-					})
-					continue
+					sendFail(i+2, "Invalid is_active value: "+isActiveStr)
+					return
 				}
 				input.IsActive = bv
 			}
 
 			if err := validateDayCountFields(input); err != nil {
-				errors = append(errors, map[string]interface{}{
-					"row_index":            i + 2,
-					constants.ValueSuccess: false,
-					constants.ValueError:   err.Error(),
-				})
-				continue
+				sendFail(i+2, err.Error())
+				return
 			}
 			validInputs = append(validInputs, input)
+			validSourceRows = append(validSourceRows, i+2)
 		}
 
 		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errors)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, nil)
 			return
 		}
 
@@ -262,22 +265,19 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			existingNames[nm] = true
 		}
 
+		// Fail-fast on first duplicate name
 		var finalValid []DayCountConventionInput
-		for _, input := range validInputs {
+		for i, input := range validInputs {
 			if existingNames[input.DayCountName] {
-				errors = append(errors, map[string]interface{}{
-					"day_count_name":       input.DayCountName,
-					constants.ValueSuccess: false,
-					constants.ValueError:   "Day count convention name already exists and is active.",
-				})
-			} else {
-				finalValid = append(finalValid, input)
+				src := 0
+				if i < len(validSourceRows) {
+					src = validSourceRows[i]
+				}
+				// report concise duplicate error
+				api.RespondWithPayload(w, false, fmt.Sprintf("Day count upload aborted: row %d failed validation: Day count convention name already exists and is active.", src), nil)
+				return
 			}
-		}
-
-		if len(finalValid) == 0 {
-			api.RespondWithPayload(w, false, "All rows failed validation or are duplicates", errors)
-			return
+			finalValid = append(finalValid, input)
 		}
 
 		// Batch insert
@@ -346,15 +346,19 @@ func UploadDayCountConventionSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Commit failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrCommitFailedUser)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
-		allResults := append(insertedRecords, errors...)
-		success := len(insertedRecords) > 0
-		api.RespondWithPayload(w, success, "", allResults)
-		api.LogInfo("DayCount upload: %d inserted, %d errors from file %s", len(insertedRecords), len(errors), handler.Filename)
+		if len(insertedRecords) > 0 {
+			msg := fmt.Sprintf("%d day count conventions created successfully", len(insertedRecords))
+			api.RespondWithPayload(w, true, msg, nil)
+			api.LogInfo("DayCount upload: %d inserted from file %s", len(insertedRecords), handler.Filename)
+			return
+		}
+		api.RespondWithPayload(w, false, "No records were created", nil)
+		api.LogInfo("DayCount upload: 0 inserted from file %s", handler.Filename)
 	}
 }
 
@@ -367,7 +371,23 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		req.DayCountCode = strings.ToUpper(strings.TrimSpace(req.DayCountCode))
 		req.ConventionType = strings.ToUpper(strings.TrimSpace(req.ConventionType))
+
+		// validate code
+		if req.DayCountCode == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
+			return
+		}
+		if len(req.DayCountCode) > 50 {
+			api.RespondWithError(w, http.StatusBadRequest, "day_count_code too long")
+			return
+		}
+		codeRe := regexp.MustCompile(`^DC-[A-Z0-9-]+$`)
+		if !codeRe.MatchString(req.DayCountCode) {
+			api.RespondWithError(w, http.StatusBadRequest, "day_count_code must match pattern DC-[A-Z0-9-]+")
+			return
+		}
 
 		if err := validateDayCountFields(req.DayCountConventionInput); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, err.Error())
@@ -394,43 +414,27 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
 
 		var dayCountCode string
+		var dayCountID interface{}
 		err = tx.QueryRow(ctx, `
 			INSERT INTO investment.fd_day_count_convention_master
-				(day_count_name, convention_type, description, formula_example, is_active)
-			VALUES ($1,$2,$3,$4,$5)
-			RETURNING day_count_code
-		`, req.DayCountName, req.ConventionType, req.Description, req.FormulaExample, req.IsActive).Scan(&dayCountCode)
+				(day_count_code, day_count_name, convention_type, description, formula_example, is_active)
+			VALUES ($1,$2,$3,$4,$5,$6)
+			RETURNING day_count_code, day_count_id
+		`, req.DayCountCode, req.DayCountName, req.ConventionType, req.Description, req.FormulaExample, req.IsActive).Scan(&dayCountCode, &dayCountID)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Insert failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
 
-		// Insert bank map entries if provided
-		if len(req.UsedByBanks) > 0 {
-			bmValues := make([]string, len(req.UsedByBanks))
-			bmArgs := make([]interface{}, 0, len(req.UsedByBanks)*2)
-			for i, bc := range req.UsedByBanks {
-				bmValues[i] = fmt.Sprintf("($%d,$%d)", i*2+1, i*2+2)
-				bmArgs = append(bmArgs, dayCountCode, bc)
-			}
-			_, err = tx.Exec(ctx, fmt.Sprintf(`
-				INSERT INTO investment.fd_day_count_bank_map (day_count_code, bank_code)
-				VALUES %s ON CONFLICT (day_count_code, bank_code) DO NOTHING
-			`, strings.Join(bmValues, ",")), bmArgs...)
-			if err != nil {
-				msg, status := getUserFriendlyDayCountError(err, "Bank map insert failed")
-				api.RespondWithError(w, status, msg)
-				return
-			}
-		}
+		// bank map removed from schema; no-op
 
 		// Audit record
 		if _, err := tx.Exec(ctx, `
@@ -452,6 +456,7 @@ func CreateDayCountConventionSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			constants.ValueSuccess: true,
 			"day_count_code":       dayCountCode,
+			"day_count_id":         dayCountID,
 			"day_count_name":       req.DayCountName,
 			"requested_by":         userEmail,
 		})
@@ -488,13 +493,42 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var validRows []DayCountConventionInput
 		var errResults []map[string]interface{}
+		codeRe := regexp.MustCompile(`^DC-[A-Z0-9-]+$`)
+		batchCodes := make(map[string]bool)
 
 		for i, row := range req.Rows {
+			row.DayCountCode = strings.ToUpper(strings.TrimSpace(row.DayCountCode))
 			row.ConventionType = strings.ToUpper(strings.TrimSpace(row.ConventionType))
 			if row.IsActive == nil {
 				t := true
 				row.IsActive = &t
 			}
+			if row.DayCountCode == "" {
+				errResults = append(errResults, map[string]interface{}{
+					"row_index":            i,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Missing day_count_code",
+				})
+				continue
+			}
+			if len(row.DayCountCode) > 50 || !codeRe.MatchString(row.DayCountCode) {
+				errResults = append(errResults, map[string]interface{}{
+					"row_index":            i,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Invalid day_count_code",
+				})
+				continue
+			}
+			if batchCodes[row.DayCountCode] {
+				errResults = append(errResults, map[string]interface{}{
+					"row_index":            i,
+					constants.ValueSuccess: false,
+					constants.ValueError:   "Duplicate day_count_code in payload",
+				})
+				continue
+			}
+			batchCodes[row.DayCountCode] = true
+
 			if err := validateDayCountFields(row); err != nil {
 				errResults = append(errResults, map[string]interface{}{
 					"row_index":            i,
@@ -518,14 +552,14 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer tx.Rollback(ctx)
 
-		names := make([]string, len(validRows))
+		codes := make([]string, len(validRows))
 		for i, r := range validRows {
-			names[i] = r.DayCountName
+			codes[i] = r.DayCountCode
 		}
 		dupRows, err := tx.Query(ctx, `
-			SELECT day_count_name FROM investment.fd_day_count_convention_master
-			WHERE day_count_name = ANY($1::text[]) AND COALESCE(is_deleted,false) = false
-		`, names)
+			SELECT day_count_code FROM investment.fd_day_count_convention_master
+			WHERE day_count_code = ANY($1::text[]) AND COALESCE(is_deleted,false) = false
+		`, codes)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Duplicate check failed")
 			api.RespondWithError(w, status, msg)
@@ -533,25 +567,25 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		defer dupRows.Close()
 
-		existingNames := make(map[string]bool)
+		existingCodes := make(map[string]bool)
 		for dupRows.Next() {
 			var nm string
 			if err := dupRows.Scan(&nm); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Duplicate scan failed")
 				return
 			}
-			existingNames[nm] = true
+			existingCodes[nm] = true
 		}
 		dupRows.Close()
 
 		var finalValid []DayCountConventionInput
 		for i, input := range validRows {
-			if existingNames[input.DayCountName] {
+			if existingCodes[input.DayCountCode] {
 				errResults = append(errResults, map[string]interface{}{
 					"row_index":            i,
-					"day_count_name":       input.DayCountName,
+					"day_count_code":       input.DayCountCode,
 					constants.ValueSuccess: false,
-					constants.ValueError:   "Day count name already exists and is active.",
+					constants.ValueError:   "Day count code already exists.",
 				})
 			} else {
 				finalValid = append(finalValid, input)
@@ -564,16 +598,16 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		valueStrings := make([]string, len(finalValid))
-		valueArgs := make([]interface{}, 0, len(finalValid)*5)
+		valueArgs := make([]interface{}, 0, len(finalValid)*6)
 		for i, input := range finalValid {
-			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", i*5+1, i*5+2, i*5+3, i*5+4, i*5+5)
-			valueArgs = append(valueArgs, input.DayCountName, input.ConventionType, input.Description, input.FormulaExample, input.IsActive)
+			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6)
+			valueArgs = append(valueArgs, input.DayCountCode, input.DayCountName, input.ConventionType, input.Description, input.FormulaExample, input.IsActive)
 		}
 
 		batchInsertQuery := fmt.Sprintf(`
 			INSERT INTO investment.fd_day_count_convention_master
-				(day_count_name, convention_type, description, formula_example, is_active)
-			VALUES %s RETURNING day_count_code
+				(day_count_code, day_count_name, convention_type, description, formula_example, is_active)
+			VALUES %s RETURNING day_count_code, day_count_id
 		`, strings.Join(valueStrings, ","))
 
 		insertRows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
@@ -586,36 +620,20 @@ func CreateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		var insertedCodes []string
 		var insertedRecords []map[string]interface{}
-		codeIdx := 0
 
 		for insertRows.Next() {
 			var code string
-			if err := insertRows.Scan(&code); err != nil {
+			var id interface{}
+			if err := insertRows.Scan(&code, &id); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
 				return
-			}
-			// Insert bank maps if any
-			if codeIdx < len(finalValid) && len(finalValid[codeIdx].UsedByBanks) > 0 {
-				bmValues := make([]string, len(finalValid[codeIdx].UsedByBanks))
-				bmArgs := make([]interface{}, 0, len(finalValid[codeIdx].UsedByBanks)*2)
-				for j, bc := range finalValid[codeIdx].UsedByBanks {
-					bmValues[j] = fmt.Sprintf("($%d,$%d)", j*2+1, j*2+2)
-					bmArgs = append(bmArgs, code, bc)
-				}
-				_, bmerr := tx.Exec(ctx, fmt.Sprintf(`
-					INSERT INTO investment.fd_day_count_bank_map (day_count_code, bank_code)
-					VALUES %s ON CONFLICT (day_count_code, bank_code) DO NOTHING
-				`, strings.Join(bmValues, ",")), bmArgs...)
-				if bmerr != nil {
-					api.LogError("Bank map insert failed for %s: %v", code, bmerr)
-				}
 			}
 			insertedCodes = append(insertedCodes, code)
 			insertedRecords = append(insertedRecords, map[string]interface{}{
 				constants.ValueSuccess: true,
 				"day_count_code":       code,
+				"day_count_id":         id,
 			})
-			codeIdx++
 		}
 		insertRows.Close()
 
@@ -659,11 +677,11 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
-		if len(req.Fields) == 0 && req.UsedByBanks == nil {
-			api.RespondWithError(w, http.StatusBadRequest, "No fields or used_by_banks provided for update")
+		if len(req.Fields) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No fields provided for update")
 			return
 		}
 
@@ -719,7 +737,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for k, v := range req.Fields {
 				k = strings.ToLower(k)
 				if _, ok := fieldPairs[k]; ok {
-					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 					args = append(args, v)
 					pos++
 				}
@@ -736,33 +754,7 @@ func UpdateDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// Sync bank map if provided
-		if req.UsedByBanks != nil {
-			// Delete existing
-			if _, err := tx.Exec(ctx, `DELETE FROM investment.fd_day_count_bank_map WHERE day_count_code=$1`, req.DayCountCode); err != nil {
-				msg, status := getUserFriendlyDayCountError(err, "Bank map delete failed")
-				api.RespondWithError(w, status, msg)
-				return
-			}
-			// Insert new
-			if len(*req.UsedByBanks) > 0 {
-				bmValues := make([]string, len(*req.UsedByBanks))
-				bmArgs := make([]interface{}, 0, len(*req.UsedByBanks)*2)
-				for i, bc := range *req.UsedByBanks {
-					bmValues[i] = fmt.Sprintf("($%d,$%d)", i*2+1, i*2+2)
-					bmArgs = append(bmArgs, req.DayCountCode, bc)
-				}
-				_, err = tx.Exec(ctx, fmt.Sprintf(`
-					INSERT INTO investment.fd_day_count_bank_map (day_count_code, bank_code)
-					VALUES %s ON CONFLICT (day_count_code, bank_code) DO NOTHING
-				`, strings.Join(bmValues, ",")), bmArgs...)
-				if err != nil {
-					msg, status := getUserFriendlyDayCountError(err, "Bank map insert failed")
-					api.RespondWithError(w, status, msg)
-					return
-				}
-			}
-		}
+		// bank map removed from schema; skipping bank map sync
 
 		// Build audit record
 		auditCols := []string{"day_count_code", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
@@ -811,7 +803,6 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Rows   []struct {
 				DayCountCode string                 `json:"day_count_code"`
 				Fields       map[string]interface{} `json:"fields"`
-				UsedByBanks  *[]string              `json:"used_by_banks"`
 				Reason       string                 `json:"reason"`
 			} `json:"rows"`
 		}
@@ -841,7 +832,6 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		type validUpdate struct {
 			DayCountCode string
 			Fields       map[string]interface{}
-			UsedByBanks  *[]string
 			Reason       string
 		}
 
@@ -858,7 +848,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
-			if len(row.Fields) == 0 && row.UsedByBanks == nil {
+			if len(row.Fields) == 0 {
 				errResults = append(errResults, map[string]interface{}{
 					"row_index":            i,
 					"day_count_code":       row.DayCountCode,
@@ -867,7 +857,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				})
 				continue
 			}
-			validUpdates = append(validUpdates, validUpdate{row.DayCountCode, row.Fields, row.UsedByBanks, row.Reason})
+			validUpdates = append(validUpdates, validUpdate{row.DayCountCode, row.Fields, row.Reason})
 			allCodes = append(allCodes, row.DayCountCode)
 		}
 
@@ -897,9 +887,9 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer oldRows.Close()
 
 		type oldRecord struct {
-			Name, Type         string
-			Desc, Formula      *string
-			IsActive           bool
+			Name, Type    string
+			Desc, Formula *string
+			IsActive      bool
 		}
 		oldMap := make(map[string]oldRecord)
 		for oldRows.Next() {
@@ -943,7 +933,7 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				for k, v := range update.Fields {
 					k = strings.ToLower(k)
 					if _, ok := fieldPairs[k]; ok {
-						sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 						args = append(args, v)
 						pos++
 					}
@@ -956,43 +946,14 @@ func UpdateDayCountConventionBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						errResults = append(errResults, map[string]interface{}{
 							"day_count_code":       update.DayCountCode,
 							constants.ValueSuccess: false,
-							constants.ValueError:   "Update failed: " + err.Error(),
+							constants.ValueError:   constants.ErrUpdateFailed + err.Error(),
 						})
 						continue
 					}
 				}
 			}
 
-			if update.UsedByBanks != nil {
-				if _, err := tx.Exec(ctx, `DELETE FROM investment.fd_day_count_bank_map WHERE day_count_code=$1`, update.DayCountCode); err != nil {
-					errResults = append(errResults, map[string]interface{}{
-						"day_count_code":       update.DayCountCode,
-						constants.ValueSuccess: false,
-						constants.ValueError:   "Bank map clear failed: " + err.Error(),
-					})
-					continue
-				}
-				if len(*update.UsedByBanks) > 0 {
-					bmValues := make([]string, len(*update.UsedByBanks))
-					bmArgs := make([]interface{}, 0, len(*update.UsedByBanks)*2)
-					for i, bc := range *update.UsedByBanks {
-						bmValues[i] = fmt.Sprintf("($%d,$%d)", i*2+1, i*2+2)
-						bmArgs = append(bmArgs, update.DayCountCode, bc)
-					}
-					_, err = tx.Exec(ctx, fmt.Sprintf(`
-						INSERT INTO investment.fd_day_count_bank_map (day_count_code, bank_code)
-						VALUES %s ON CONFLICT (day_count_code, bank_code) DO NOTHING
-					`, strings.Join(bmValues, ",")), bmArgs...)
-					if err != nil {
-						errResults = append(errResults, map[string]interface{}{
-							"day_count_code":       update.DayCountCode,
-							constants.ValueSuccess: false,
-							constants.ValueError:   "Bank map insert failed: " + err.Error(),
-						})
-						continue
-					}
-				}
-			}
+			// bank map removed from schema; skipping bank map updates
 
 			// Audit
 			auditCols := []string{"day_count_code", "action_type", "processing_status", "reason", "requested_by", "requested_at"}
@@ -1050,7 +1011,7 @@ func DeleteDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No day_count_codes provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1151,7 +1112,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No day_count_codes provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1170,7 +1131,7 @@ func BulkApproveDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1233,7 +1194,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.DayCountCodes) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No day_count_codes provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoDayCountCodesProvided)
 			return
 		}
 
@@ -1252,7 +1213,7 @@ func BulkRejectDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyDayCountError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyDayCountError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1289,18 +1250,13 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, `
-			SELECT m.day_count_code, m.day_count_name, m.convention_type,
-			       COALESCE(m.description,'') AS description,
-			       COALESCE(m.formula_example,'') AS formula_example,
-			       m.is_active,
-			       COALESCE(array_agg(bm.bank_code ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks,
-			       COALESCE(array_agg(COALESCE(mb.bank_name,'') ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_bank_names
+			SELECT m.day_count_id, m.day_count_code, m.day_count_name, m.convention_type,
+				   COALESCE(m.description,'') AS description,
+				   COALESCE(m.formula_example,'') AS formula_example,
+				   m.is_active
 			FROM investment.fd_day_count_convention_master m
 			INNER JOIN investment.fd_audit_day_count_convention a ON a.day_count_code = m.day_count_code
-			LEFT JOIN investment.fd_day_count_bank_map bm ON bm.day_count_code = m.day_count_code
-			LEFT JOIN masterbank mb ON mb.bank_id::text = bm.bank_code
 			WHERE a.processing_status='APPROVED' AND m.is_active=true AND COALESCE(m.is_deleted,false)=false
-			GROUP BY m.day_count_code, m.day_count_name, m.convention_type, m.description, m.formula_example, m.is_active
 			ORDER BY m.day_count_name
 		`)
 		if err != nil {
@@ -1312,30 +1268,22 @@ func GetDayCountConventionsApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFun
 
 		out := make([]map[string]interface{}, 0)
 		for rows.Next() {
+			var id interface{}
 			var code, name, convType, desc, formula string
 			var isActive bool
-			var usedByBanks []string
-			var usedByBankNames []string
 
-			if err := rows.Scan(&code, &name, &convType, &desc, &formula, &isActive, &usedByBanks, &usedByBankNames); err != nil {
+			if err := rows.Scan(&id, &code, &name, &convType, &desc, &formula, &isActive); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Scan error: "+err.Error())
 				return
 			}
-			if usedByBanks == nil {
-				usedByBanks = []string{}
-			}
-			if usedByBankNames == nil {
-				usedByBankNames = []string{}
-			}
 			out = append(out, map[string]interface{}{
-				"day_count_code":    code,
-				"day_count_name":    name,
-				"convention_type":   convType,
-				"description":       desc,
-				"formula_example":   formula,
-				"is_active":         isActive,
-				"used_by_banks":     usedByBanks,
-				"used_by_bank_names": usedByBankNames,
+				"day_count_id":    id,
+				"day_count_code":  code,
+				"day_count_name":  name,
+				"convention_type": convType,
+				"description":     desc,
+				"formula_example": formula,
+				"is_active":       isActive,
 			})
 		}
 		api.RespondWithPayload(w, true, "", out)
@@ -1382,6 +1330,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				GROUP BY day_count_code
 			)
 			SELECT
+				m.day_count_id,
 				m.day_count_code,
 				COALESCE(m.day_count_name,'')         AS day_count_name,
 				COALESCE(l.old_day_count_name,'')     AS old_day_count_name,
@@ -1394,6 +1343,7 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.is_active,false)           AS is_active,
 				COALESCE(l.old_is_active,false)       AS old_is_active,
 				COALESCE(m.is_deleted,false)          AS is_deleted,
+				COALESCE(m.day_count_id::text,'')     AS day_count_id_text,
 
 				COALESCE(l.processing_status,'')      AS processing_status,
 				COALESCE(l.action_type,'')            AS action_type,
@@ -1410,16 +1360,11 @@ func GetDayCountConventionsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.edited_by,'')              AS edited_by,
 				COALESCE(h.edited_at,'')              AS edited_at,
 				COALESCE(h.deleted_by,'')             AS deleted_by,
-				COALESCE(h.deleted_at,'')             AS deleted_at,
-
-				COALESCE(array_agg(bm.bank_code ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks,
-				COALESCE(array_agg(COALESCE(mb.bank_name,'') ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_bank_names
+				COALESCE(h.deleted_at,'')             AS deleted_at
 
 			FROM investment.fd_day_count_convention_master m
 			LEFT JOIN latest_audit l ON l.day_count_code = m.day_count_code
 			LEFT JOIN history h      ON h.day_count_code = m.day_count_code
-			LEFT JOIN investment.fd_day_count_bank_map bm ON bm.day_count_code = m.day_count_code
-			LEFT JOIN masterbank mb ON mb.bank_id::text = bm.bank_code
 			WHERE COALESCE(m.is_deleted,false) = false
 			GROUP BY
 				m.day_count_code, m.day_count_name, l.old_day_count_name,
@@ -1605,7 +1550,7 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if req.DayCountCode == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "day_count_code is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrDayCountCodeRequired)
 			return
 		}
 
@@ -1623,17 +1568,12 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, `
-			SELECT m.day_count_code, m.day_count_name, m.convention_type,
-			       COALESCE(m.description,'') AS description,
-			       COALESCE(m.formula_example,'') AS formula_example,
-			       m.is_active, COALESCE(m.is_deleted,false) AS is_deleted,
-			       COALESCE(array_agg(bm.bank_code ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_banks,
-			       COALESCE(array_agg(COALESCE(mb.bank_name,'') ORDER BY bm.bank_code) FILTER (WHERE bm.bank_code IS NOT NULL), '{}') AS used_by_bank_names
+			SELECT m.day_count_id, m.day_count_code, m.day_count_name, m.convention_type,
+				   COALESCE(m.description,'') AS description,
+				   COALESCE(m.formula_example,'') AS formula_example,
+				   m.is_active, COALESCE(m.is_deleted,false) AS is_deleted
 			FROM investment.fd_day_count_convention_master m
-			LEFT JOIN investment.fd_day_count_bank_map bm ON bm.day_count_code = m.day_count_code
-			LEFT JOIN masterbank mb ON mb.bank_id::text = bm.bank_code
 			WHERE m.day_count_code = $1
-			GROUP BY m.day_count_code, m.day_count_name, m.convention_type, m.description, m.formula_example, m.is_active, m.is_deleted
 		`, req.DayCountCode)
 		if err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Get failed")
@@ -1647,33 +1587,24 @@ func GetDayCountConvention(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		var id interface{}
 		var code, name, convType, desc, formula string
 		var isActive, isDeleted bool
-		var usedByBanks []string
-		var usedByBankNames []string
 
-		if err := rows.Scan(&code, &name, &convType, &desc, &formula, &isActive, &isDeleted, &usedByBanks, &usedByBankNames); err != nil {
+		if err := rows.Scan(&id, &code, &name, &convType, &desc, &formula, &isActive, &isDeleted); err != nil {
 			msg, status := getUserFriendlyDayCountError(err, "Scan failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
-		if usedByBanks == nil {
-			usedByBanks = []string{}
-		}
-		if usedByBankNames == nil {
-			usedByBankNames = []string{}
-		}
-
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
-			"day_count_code":     code,
-			"day_count_name":     name,
-			"convention_type":    convType,
-			"description":        desc,
-			"formula_example":    formula,
-			"is_active":          isActive,
-			"is_deleted":         isDeleted,
-			"used_by_banks":      usedByBanks,
-			"used_by_bank_names": usedByBankNames,
+			"day_count_id":    id,
+			"day_count_code":  code,
+			"day_count_name":  name,
+			"convention_type": convType,
+			"description":     desc,
+			"formula_example": formula,
+			"is_active":       isActive,
+			"is_deleted":      isDeleted,
 		})
 		api.LogInfo("GetDayCountConvention: code=%s by %s", code, userEmail)
 	}

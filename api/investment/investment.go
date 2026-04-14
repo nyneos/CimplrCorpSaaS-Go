@@ -8,6 +8,12 @@ import (
 	"CimplrCorpSaas/api"
 	accountingworkbench "CimplrCorpSaas/api/investment/accountingWorkbench"
 	amfisync "CimplrCorpSaas/api/investment/amfi-sync"
+	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
+	fdBooking "CimplrCorpSaas/api/investment/fdBookingWorkbench"
+	fdInterestWorkbench "CimplrCorpSaas/api/investment/fdInterestAndTdsWorkbench"
+	fdMaster "CimplrCorpSaas/api/investment/fdMaster"
+	fdMaturityAndRollover "CimplrCorpSaas/api/investment/fdMaturityAndRollover"
+	fdReceipt "CimplrCorpSaas/api/investment/fdReceipt"
 	investmentsuite "CimplrCorpSaas/api/investment/investment-suite"
 	onboard "CimplrCorpSaas/api/investment/onboarding"
 	portfolio "CimplrCorpSaas/api/investment/portfolio"
@@ -16,7 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
+func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/investment/health", func(w http.ResponseWriter, r *http.Request) {
@@ -161,12 +167,20 @@ func StartInvestmentService(pool *pgxpool.Pool, db *sql.DB) {
 	// AMFI data retrieval endpoints
 	mux.HandleFunc("/investment/amfi/get-schemes", amfisync.GetSchemeDataHandler(pool))
 
+	// FD Booking Workbench (booking + confirmation)
+	fdBooking.RegisterFDBookingRoutes(mux, pool, db)
+	fdMaster.RegisterFDMasterRoutes(mux, pool, db)
+	fdAccrual.RegisterFDAccrualRoutes(mux, pool, db)
+	fdReceipt.RegisterFDReceiptRoutes(mux, pool, db)
+	fdInterestWorkbench.RegisterFDInterestWorkbenchRoutes(mux, pool, db)
+	fdMaturityAndRollover.RegisterFDMaturityRoutes(mux, pool, db)
+
 	// Example routes for future implementation:
 	// mux.HandleFunc("/investment/portfolio", portfolioHandler)
 	// mux.HandleFunc("/investment/schemes", schemesHandler)
 
-	log.Println("Investment Service started on :7143")
-	err := http.ListenAndServe(":7143", mux)
+	log.Printf("Investment Service started on :%s", port)
+	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("Investment service failed: %v", err)
 	}

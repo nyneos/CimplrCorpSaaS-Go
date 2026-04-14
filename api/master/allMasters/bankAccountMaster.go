@@ -4,7 +4,6 @@ import (
 	api "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	exposures "CimplrCorpSaas/api/fx/exposures"
-	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -387,7 +386,7 @@ func UpdateBankAccountMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					}
 
 					if col, ok := simpleCols[k]; ok {
-						sets = append(sets, fmt.Sprintf("%s=$%d", col, pos))
+						sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, col, pos))
 						args = append(args, fmt.Sprint(v))
 						pos += 1
 						continue
@@ -1222,7 +1221,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.Background()
+			ctx := r.Context()
 
 		// Step 1: Get user_id
 		userID := ""
@@ -1401,6 +1400,159 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					for i := range newCopyRows {
 						if len(newCopyRows[i]) <= colIdx+1 {
 							continue
+						}
+
+						// SANITIZER: allow `bank_id` and `entity_id` input to be either an id or a human-friendly name.
+						// Use preloaded context data (set by PreValidationMiddleware / admin override) to map names to ids
+						// without querying the DB per-row. Fail fast with a single readable error if unknown names are present.
+						bankColIdx := -1
+						entityColIdx := -1
+						for i, col := range mappedTargets {
+							if col == "bank_id" {
+								bankColIdx = i
+							}
+							if col == "entity_id" {
+								entityColIdx = i
+							}
+						}
+
+						// Build bank name->id and id set from context
+						var bankNameToID map[string]string
+						var bankShortToID map[string]string
+						var bankIDSet map[string]bool
+						if bankColIdx != -1 {
+							bankNameToID = make(map[string]string)
+							bankShortToID = make(map[string]string)
+							bankIDSet = make(map[string]bool)
+							if raw := ctx.Value("BankInfo"); raw != nil {
+								if banksSlice, ok := raw.([]map[string]string); ok {
+									for _, b := range banksSlice {
+										id := strings.TrimSpace(b["bank_id"])
+										name := strings.ToLower(strings.TrimSpace(b["bank_name"]))
+										short := strings.ToLower(strings.TrimSpace(b["bank_short_name"]))
+										if id != "" {
+											bankIDSet[strings.ToLower(id)] = true
+										}
+										if name != "" {
+											bankNameToID[name] = id
+										}
+										if short != "" {
+											bankShortToID[short] = id
+										}
+									}
+								}
+							}
+						}
+
+						// Build entity name->id map from context
+						var entityNameToID map[string]string
+						if entityColIdx != -1 {
+							entityNameToID = make(map[string]string)
+							names := api.GetEntityNamesFromCtx(ctx)
+							ids := api.GetEntityIDsFromCtx(ctx)
+							if len(names) == len(ids) {
+								for i := range names {
+									n := strings.ToLower(strings.TrimSpace(names[i]))
+									if n != "" && ids[i] != "" {
+										entityNameToID[n] = ids[i]
+									}
+								}
+							} else {
+								// best-effort: if lengths differ, still try to map by name appearance
+								for i, nRaw := range names {
+									n := strings.ToLower(strings.TrimSpace(nRaw))
+									if n == "" {
+										continue
+									}
+									if i < len(ids) && ids[i] != "" {
+										entityNameToID[n] = ids[i]
+									}
+								}
+							}
+						}
+
+						// Validate and rewrite values in newCopyRows for bank_id and entity_id
+						unknownBanks := make(map[string]bool)
+						unknownEntities := make(map[string]bool)
+						for ri := range newCopyRows {
+							// bank
+							if bankColIdx != -1 {
+								if len(newCopyRows[ri]) > bankColIdx+1 {
+									v := newCopyRows[ri][bankColIdx+1]
+									if v != nil {
+										if s, ok := v.(string); ok {
+											sval := strings.TrimSpace(s)
+											if sval == "" {
+												newCopyRows[ri][bankColIdx+1] = nil
+											} else {
+												low := strings.ToLower(sval)
+												// if it's already an id
+												if bankIDSet[low] {
+													// ensure stored id uses original casing (keep as provided)
+													newCopyRows[ri][bankColIdx+1] = sval
+												} else if id, ok := bankNameToID[low]; ok && id != "" {
+													newCopyRows[ri][bankColIdx+1] = id
+												} else if id, ok := bankShortToID[low]; ok && id != "" {
+													newCopyRows[ri][bankColIdx+1] = id
+												} else {
+													unknownBanks[sval] = true
+												}
+											}
+										}
+									}
+								}
+							}
+							// entity
+							if entityColIdx != -1 {
+								if len(newCopyRows[ri]) > entityColIdx+1 {
+									v := newCopyRows[ri][entityColIdx+1]
+									if v != nil {
+										if s, ok := v.(string); ok {
+											sval := strings.TrimSpace(s)
+											if sval == "" {
+												newCopyRows[ri][entityColIdx+1] = nil
+											} else {
+												low := strings.ToLower(sval)
+												if id, ok := entityNameToID[low]; ok && id != "" {
+													newCopyRows[ri][entityColIdx+1] = id
+												} else {
+													// also allow direct id if matches any known id
+													for _, idCandidate := range api.GetEntityIDsFromCtx(ctx) {
+														if strings.EqualFold(strings.TrimSpace(idCandidate), sval) {
+															newCopyRows[ri][entityColIdx+1] = idCandidate
+															goto entityDone
+														}
+													}
+													unknownEntities[sval] = true
+												}
+											}
+										}
+									}
+								}
+							}
+						entityDone: // label for goto
+						}
+
+						if len(unknownBanks) > 0 || len(unknownEntities) > 0 {
+							// Build readable error listing unique unknowns
+							msgs := []string{}
+							if len(unknownBanks) > 0 {
+								var bvals []string
+								for k := range unknownBanks {
+									bvals = append(bvals, k)
+								}
+								msgs = append(msgs, fmt.Sprintf("Unknown bank identifiers/names: %s", strings.Join(bvals, ", ")))
+							}
+							if len(unknownEntities) > 0 {
+								var evals []string
+								for k := range unknownEntities {
+									evals = append(evals, k)
+								}
+								msgs = append(msgs, fmt.Sprintf("Unknown entity identifiers/names: %s", strings.Join(evals, ", ")))
+							}
+							tx.Rollback(ctx)
+							api.RespondWithError(w, http.StatusBadRequest, strings.Join(msgs, "; "))
+							return
 						}
 						v := newCopyRows[i][colIdx+1]
 						if v == nil {

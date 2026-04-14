@@ -15,9 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const notificationPort = "9111"
-
-func StartNotificationService(pool *pgxpool.Pool, db *sql.DB) {
+func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 	mux := http.NewServeMux()
 
 	if pool == nil {
@@ -85,8 +83,8 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB) {
 	// Register browser push subscription routes (VAPID public key, register, unregister)
 	push.RegisterSubscriptionRoutes(mux, pool)
 
-	log.Printf("Notification Service started on :%s", notificationPort)
-	if err := http.ListenAndServe(":"+notificationPort, mux); err != nil {
+	log.Printf("Notification Service started on :%s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Notification Service failed: %v", err)
 	}
 }

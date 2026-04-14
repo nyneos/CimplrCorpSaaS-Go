@@ -61,6 +61,7 @@ package catalog
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	notificationFunctions "CimplrCorpSaas/api/notification/functions"
 	"context"
 	"encoding/json"
@@ -157,6 +158,130 @@ type outboxRow struct {
 	entityName string
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveActorEntity
+// ─────────────────────────────────────────────────────────────────────────────
+
+// actorResolution carries the result of resolveActorEntity so callers get full
+// context (which field matched, the resolved user ID/email/name) without extra
+// DB round-trips later in the pipeline.
+type actorResolution struct {
+	UserID    string // public.users.id  (e.g. CIMPLR00D93E14F91E0B)
+	Email     string // public.users.email
+	Name      string // public.users.employee_name
+	Entity    string // public.users.business_unit_name  (empty = no restriction)
+	MatchedBy string // which identifier tier resolved this actor: "id","email","username","mobile","name"
+	Ambiguous bool   // true when name matched >1 row (entity still returned but flagged)
+}
+
+// resolveActorEntity maps any caller-supplied actor identifier to the user's
+// business_unit_name so the dispatcher can select the right entity-scoped event.
+//
+// IDENTIFIER PRIORITY (most-unique → least-unique):
+//
+//	Tier 1  id                    — CIMPLR00… PK, DB-unique, unambiguous
+//	Tier 2  email                 — DB UNIQUE constraint, case-insensitive match
+//	Tier 3  username_or_employee_id — DB UNIQUE constraint, case-insensitive
+//	Tier 4  mobile                — NOT unique-constrained; accepted only when exactly 1 row matches
+//	Tier 5  employee_name         — NOT unique; accepted only when exactly 1 row matches
+//
+// Each tier is tried in order. The first tier that produces exactly one row wins.
+// If name/mobile match >1 row the resolution is rejected (returns empty entity) to
+// avoid silently sending notifications to the wrong entity — an explicit error is
+// logged so the caller knows to fix the payload.
+//
+// The caller should always prefer passing `user_id` or `email` in the payload.
+func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue string) actorResolution {
+	if actorValue == "" {
+		return actorResolution{}
+	}
+
+	type row struct {
+		userID string
+		email  string
+		name   string
+		entity string
+	}
+
+	scan := func(q string, args ...interface{}) ([]row, error) {
+		rows, err := pool.Query(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.userID, &r.email, &r.name, &r.entity); err == nil {
+				out = append(out, r)
+			}
+		}
+		return out, rows.Err()
+	}
+
+	const sel = `SELECT id::text, COALESCE(email,''), COALESCE(employee_name,''), COALESCE(business_unit_name,'') FROM public.users`
+
+	// ── Tier 1: CIMPLR ID prefix or exact PK match ─────────────────────────
+	if rows, err := scan(sel+` WHERE id::text = $1`, actorValue); err == nil && len(rows) == 1 {
+		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by user_id → entity=%q", actorValue, rows[0].entity)
+		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "id"}
+	}
+
+	// ── Tier 2: email (case-insensitive, DB-unique) ─────────────────────────
+	if rows, err := scan(sel+` WHERE lower(email) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
+		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by email → entity=%q", actorValue, rows[0].entity)
+		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "email"}
+	}
+
+	// ── Tier 3: username_or_employee_id (case-insensitive, DB-unique) ───────
+	if rows, err := scan(sel+` WHERE lower(username_or_employee_id) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
+		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by username_or_employee_id → entity=%q", actorValue, rows[0].entity)
+		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "username"}
+	}
+
+	// ── Tier 4: mobile (NOT unique — reject if multiple rows match) ─────────
+	if rows, err := scan(sel+` WHERE mobile = $1`, actorValue); err == nil {
+		switch len(rows) {
+		case 1:
+			api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by mobile → entity=%q", actorValue, rows[0].entity)
+			return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "mobile"}
+		case 0:
+			// no match, continue to next tier
+		default:
+			api.LogError("[NOTIF] resolveActorEntity: actor=%q matched %d users by mobile — ambiguous, skipping tier", actorValue, len(rows))
+		}
+	}
+
+	// ── Tier 5: employee_name (NOT unique — reject if multiple rows match) ──
+	if rows, err := scan(sel+` WHERE lower(employee_name) = lower($1)`, actorValue); err == nil {
+		switch len(rows) {
+		case 1:
+			api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by employee_name → entity=%q", actorValue, rows[0].entity)
+			return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "name"}
+		case 0:
+			// no match
+		default:
+			api.LogError(
+				"[NOTIF] resolveActorEntity: actor=%q matched %d users by employee_name — AMBIGUOUS (multiple users share this name). "+
+					"Entity resolution skipped to prevent wrong-entity notification. "+
+					"FIX: pass user_id or email in the notification payload instead of a display name.",
+				actorValue, len(rows),
+			)
+			// Return with Ambiguous flag — entity intentionally left empty
+			return actorResolution{MatchedBy: "name", Ambiguous: true}
+		}
+	}
+
+	// ── No tier matched ──────────────────────────────────────────────────────
+	api.LogError(
+		"[NOTIF] resolveActorEntity: actor=%q did not match any user (tried id / email / username_or_employee_id / mobile / employee_name). "+
+			"Entity will be empty — only global events will fire. "+
+			"FIX: ensure the payload carries user_id (CIMPLR00…) or email.",
+		actorValue,
+	)
+	return actorResolution{}
+}
+
 func dispatchNotification(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -166,46 +291,98 @@ func dispatchNotification(
 ) error {
 	api.LogInfo("[NOTIF] dispatchNotification START correlation=%s route=%s", correlationID, sourceRoute)
 
-	// Step 1a — identify the triggering actor from the payload so we can resolve their entity.
+	// Step 1a — collect actor value from the payload.
+	// Callers should pass user_id (CIMPLR00…) or email for best results.
+	// Other identifiers (username_or_employee_id, mobile, employee_name) are
+	// accepted as fallbacks — see resolveActorEntity for the full priority chain.
 	actorValue := payloadString(payload,
-		"ApprovedBy", "CheckerBy",
+		"UserID",                           // ← preferred: stable CIMPLR00… ID
+		"user_id", "actor_user_id",         // ← lowercase aliases used by FD/booking callers
+		"ApprovedByEmail", "ApproverEmail", // ← preferred: email
+		"actor_email", "email",             // ← lowercase email aliases
+		"ApprovedBy", "CheckerBy", // may be email OR name depending on caller
 		"RejectedBy",
 		"RequestedBy",
 		"UploadedBy", "CreatedBy", "UpdatedBy",
-		"Approver", "ApproverEmail", "ApprovedByEmail",
-		"UserID",
+		"Approver",
 	)
 
-	// Step 1b — resolve the actor's entity (business_unit_name) from the users table.
-	// Priority: session cache (free) → DB lookup → empty (no restriction).
-	// This entity is used to select WHICH event fires: we prefer the entity-scoped event
-	// that matches the actor's business_unit_name. If none exists, fall back to the
-	// global event (entity_name IS NULL / empty).
-	var actorEntity string
-	if actorValue != "" {
-		if _, _, _, ok := lookupSenderFromSession(actorValue); ok {
-			// session found — also get entity from DB since session doesn't carry it
+	// Step 1b — resolve the actor to a business_unit_name (entity) using a
+	// priority-ordered, unambiguous lookup.  See resolveActorEntity doc-comment
+	// for the full tier chain and ambiguity rules.
+	resolution := resolveActorEntity(ctx, pool, actorValue)
+	actorEntity := resolution.Entity
+
+	// Step 1b-fallback — if actor resolution didn't yield an entity, try reading
+	// entity_name or entity_id directly from the payload. Booking/FD callers pass
+	// these keys so we can match the entity-scoped event without a user DB round-trip.
+	if actorEntity == "" {
+		if en := payloadString(payload, "EntityName", "entity_name"); en != "" {
+			actorEntity = en
+		} else if eid := payloadString(payload, "EntityID", "entity_id"); eid != "" {
+			// Resolve entity_id → entity_name via masterentitycash
+			var ename string
+			if err := pool.QueryRow(ctx,
+				`SELECT COALESCE(entity_name,'') FROM masterentitycash WHERE entity_id = $1 AND (is_deleted=false OR is_deleted IS NULL) LIMIT 1`,
+				eid,
+			).Scan(&ename); err == nil && ename != "" {
+				actorEntity = ename
+			}
 		}
-		// Always try DB for entity — session doesn't store business_unit_name
-		var bu string
-		q := `SELECT COALESCE(business_unit_name,'') FROM users WHERE id::text=$1 OR email=$1 LIMIT 1`
-		if err := pool.QueryRow(ctx, q, actorValue).Scan(&bu); err == nil {
-			actorEntity = bu
+		if actorEntity != "" {
+			api.LogInfo("[NOTIF] entity resolved from payload key for correlation=%s: entity=%q", correlationID, actorEntity)
 		}
-		api.LogInfo("[NOTIF] actor=%s resolved entity=%q", actorValue, actorEntity)
+	}
+
+	// If we got an actorValue but could not resolve it at all, warn the user in-app.
+	if actorValue != "" && resolution.UserID == "" {
+		PushSystemNotification(resolution, SystemNotifParams{
+			Level:         LevelWarn,
+			Subject:       "Notification may not have been sent",
+			Body:          fmt.Sprintf("Your user identity (%q) could not be resolved. Notifications for '%s' may be missing. Contact your admin.", actorValue, sourceRoute),
+			Source:        "notification_pipeline",
+			Route:         sourceRoute,
+			CorrelationID: correlationID,
+		})
 	}
 
 	// Step 1c — resolve events for this route filtered by actor's entity.
 	// Logic:
-	//   - If actor has an entity → prefer that entity's event; fall back to global (entity='') event.
-	//   - If actor has no entity → use only global (entity='') events.
-	//   - External/extra recipients (raw email in template_recipient, no users row) always get notified regardless.
-	events, err := lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
+	//   - Admin actors (IsAdminUser) → use lookupEvents (unrestricted, all entities), notification
+	//     is fired for ALL entities (org-wide broadcast).
+	//   - Non-admin actor with entity → org-pool match (entity + ancestors + descendants + global).
+	//   - Non-admin actor with no entity → global events only.
+	//   - External/extra recipients (raw email in template_recipient, no users row) always get notified.
+	isAdmin := resolution.UserID != "" && middlewares.IsAdminUser(resolution.UserID)
+	var events []resolvedEvent
+	var err error
+	if isAdmin {
+		api.LogInfo("[NOTIF] admin actor %q — using unrestricted event lookup (all entities) for route=%s", resolution.UserID, sourceRoute)
+		events, err = lookupEvents(ctx, pool, sourceRoute)
+	} else {
+		events, err = lookupEventsForActor(ctx, pool, sourceRoute, actorEntity)
+	}
 	if err != nil {
+		PushSystemNotification(resolution, SystemNotifParams{
+			Level:         LevelError,
+			Subject:       "Notification system error",
+			Body:          fmt.Sprintf("Failed to look up notification events for '%s'. Please contact support. (err: %v)", sourceRoute, err),
+			Source:        "notification_pipeline",
+			Route:         sourceRoute,
+			CorrelationID: correlationID,
+		})
 		return fmt.Errorf("lookupEventsForActor: %w", err)
 	}
 	if len(events) == 0 {
 		api.LogInfo("[NOTIF] no active approved event for route=%s entity=%q — skipping", sourceRoute, actorEntity)
+		PushSystemNotification(resolution, SystemNotifParams{
+			Level:         LevelWarn,
+			Subject:       "Notification not configured",
+			Body:          fmt.Sprintf("No active approved notification event found for '%s' (entity: %q). Ask your admin to configure and approve a notification event for this action.", sourceRoute, actorEntity),
+			Source:        "notification_pipeline",
+			Route:         sourceRoute,
+			CorrelationID: correlationID,
+		})
 		return nil
 	}
 	api.LogInfo("[NOTIF] resolved %d event(s) for route=%s entity=%q", len(events), sourceRoute, actorEntity)
@@ -213,7 +390,7 @@ func dispatchNotification(
 	var firstErr error
 	for _, ev := range events {
 		ev := ev // capture
-		if err := dispatchForEvent(ctx, pool, sourceRoute, correlationID, payload, &ev); err != nil {
+		if err := dispatchForEvent(ctx, pool, sourceRoute, correlationID, payload, &ev, resolution); err != nil {
 			api.LogError("[NOTIF] dispatchForEvent event=%s entity=%s err=%v", ev.eventID, ev.entityName, err)
 			if firstErr == nil {
 				firstErr = err
@@ -231,14 +408,31 @@ func dispatchForEvent(
 	correlationID string,
 	payload map[string]interface{},
 	event *resolvedEvent,
+	actor actorResolution, // used to send system notifications back to the triggering user
 ) error {
 	api.LogInfo("[NOTIF] dispatchForEvent event=%s entity=%q correlation=%s", event.eventID, event.entityName, correlationID)
 	channels, err := lookupEnabledChannels(ctx, pool, event.eventID)
 	if err != nil {
+		PushSystemNotification(actor, SystemNotifParams{
+			Level:         LevelError,
+			Subject:       "Notification system error",
+			Body:          fmt.Sprintf("Failed to load notification channels for event %s on '%s'. (err: %v)", event.eventID, sourceRoute, err),
+			Source:        "notification_pipeline",
+			Route:         sourceRoute,
+			CorrelationID: correlationID,
+		})
 		return fmt.Errorf("lookupEnabledChannels: %w", err)
 	}
 	if len(channels) == 0 {
 		api.LogInfo("[NOTIF] no enabled channels for event=%s", event.eventID)
+		PushSystemNotification(actor, SystemNotifParams{
+			Level:         LevelWarn,
+			Subject:       "Notification not sent — no channels enabled",
+			Body:          fmt.Sprintf("The notification event for '%s' exists but all delivery channels (Email/SMS/Push/WhatsApp) are disabled. Ask your admin to enable at least one channel.", sourceRoute),
+			Source:        "notification_pipeline",
+			Route:         sourceRoute,
+			CorrelationID: correlationID,
+		})
 		return nil
 	}
 	api.LogInfo("[NOTIF] event=%s has %d enabled channel(s)", event.eventID, len(channels))
@@ -257,10 +451,26 @@ func dispatchForEvent(
 		tpls, err := lookupTemplates(ctx, pool, event.eventID, ch.channel)
 		if err != nil {
 			api.LogError("[NOTIF] lookupTemplates event=%s ch=%s: %v", event.eventID, ch.channel, err)
+			PushSystemNotification(actor, SystemNotifParams{
+				Level:         LevelError,
+				Subject:       "Notification template error",
+				Body:          fmt.Sprintf("Failed to load %s template for '%s'. (err: %v)", ch.channel, sourceRoute, err),
+				Source:        "notification_pipeline",
+				Route:         sourceRoute,
+				CorrelationID: correlationID,
+			})
 			continue
 		}
 		if len(tpls) == 0 {
 			api.LogInfo("[NOTIF] no approved template for event=%s ch=%s", event.eventID, ch.channel)
+			PushSystemNotification(actor, SystemNotifParams{
+				Level:         LevelWarn,
+				Subject:       "Notification not sent — template not approved",
+				Body:          fmt.Sprintf("No approved %s template found for '%s'. Ask your admin to approve a template for this notification event.", ch.channel, sourceRoute),
+				Source:        "notification_pipeline",
+				Route:         sourceRoute,
+				CorrelationID: correlationID,
+			})
 			continue
 		}
 		api.LogInfo("[NOTIF] resolved %d template(s) for event=%s ch=%s", len(tpls), event.eventID, ch.channel)
@@ -270,10 +480,26 @@ func dispatchForEvent(
 			recipients, err := lookupRecipients(ctx, pool, &tpl, payload, event.entityName)
 			if err != nil {
 				api.LogError("[NOTIF] lookupRecipients tpl=%s: %v", tpl.auditID, err)
+				PushSystemNotification(actor, SystemNotifParams{
+					Level:         LevelError,
+					Subject:       "Notification recipient error",
+					Body:          fmt.Sprintf("Failed to resolve recipients for %s template on '%s'. (err: %v)", ch.channel, sourceRoute, err),
+					Source:        "notification_pipeline",
+					Route:         sourceRoute,
+					CorrelationID: correlationID,
+				})
 				continue
 			}
 			if len(recipients) == 0 {
 				api.LogInfo("[NOTIF] no recipients resolved for event=%s ch=%s auditID=%s", event.eventID, ch.channel, tpl.auditID)
+				PushSystemNotification(actor, SystemNotifParams{
+					Level:         LevelWarn,
+					Subject:       "Notification not sent — no recipients",
+					Body:          fmt.Sprintf("No recipients configured for the %s notification on '%s'. Ask your admin to add recipients to the notification template.", ch.channel, sourceRoute),
+					Source:        "notification_pipeline",
+					Route:         sourceRoute,
+					CorrelationID: correlationID,
+				})
 				continue
 			}
 			api.LogInfo("[NOTIF] resolved %d recipient(s) for event=%s ch=%s auditID=%s priority=%d",
@@ -284,51 +510,45 @@ func dispatchForEvent(
 
 	if len(work) == 0 {
 		api.LogInfo("[NOTIF] no work items after template+recipient resolution — nothing to dispatch")
+		// Individual channel errors already pushed above; no need to push again here.
 		return nil
 	}
 
 	// Step 4 — evaluate templates per recipient concurrently
 
-	// Resolve the identity of the person who TRIGGERED this event so that
-	// outbox.sender_* and send_history.sender_* are always populated.
-	//
-	// Strategy (fastest → slowest):
-	//   1. Pick the first non-empty actor UUID from the payload using every key
-	//      any event can carry (RequestedBy, CheckerBy, ApprovedBy, …).
-	//   2. Check the in-memory active session map — already has UserID + Email + Name,
-	//      so no DB hit needed for logged-in users.
-	//   3. Fall back to a DB query (id OR email match) for non-session actors.
-	//   4. If everything fails, store the raw string as sender_name so the field
-	//      is never blank.
+	// Resolve sender identity for outbox/send_history population.
+	// We reuse resolveActorEntity (the same 5-tier lookup used for entity resolution)
+	// rather than duplicating a separate DB query here.  Session cache is checked first
+	// (free, no DB hit); resolveActorEntity is called only as a fallback.
 	var senderID, senderEmail, senderName, senderCode, senderIdentifier string
-	actorValue := payloadString(payload,
+	senderActorValue := payloadString(payload,
+		"UserID",
+		"ApprovedByEmail", "ApproverEmail",
 		"ApprovedBy", "CheckerBy",
 		"RejectedBy",
 		"RequestedBy",
 		"UploadedBy", "CreatedBy", "UpdatedBy",
-		"Approver", "ApproverEmail", "ApprovedByEmail",
-		"UserID",
+		"Approver",
 	)
-	if actorValue != "" {
-		// Pass 1 — check active sessions (in-memory, free)
-		if uid, uemail, uname, ok := lookupSenderFromSession(actorValue); ok {
+	if senderActorValue != "" {
+		// Pass 1 — check active sessions (in-memory, free, no DB hit)
+		if uid, uemail, uname, ok := lookupSenderFromSession(senderActorValue); ok {
 			senderID = uid
 			senderEmail = uemail
 			senderName = uname
-			api.LogInfo("dispatchNotification: resolved sender from session userID=%s name=%s email=%s", uid, uname, uemail)
+			api.LogInfo("[NOTIF] sender resolved from session userID=%s name=%s email=%s", uid, uname, uemail)
 		} else {
-			// Pass 2 — hit the DB (id::text = $1 OR email = $1)
-			var uid, uemail, uname string
-			q := `SELECT id::text, COALESCE(email,''), COALESCE(employee_name,'') FROM users WHERE id::text=$1 OR email=$1 LIMIT 1`
-			if err := pool.QueryRow(ctx, q, actorValue).Scan(&uid, &uemail, &uname); err == nil {
-				senderID = uid
-				senderEmail = uemail
-				senderName = uname
-				api.LogInfo("dispatchNotification: resolved sender from DB userID=%s name=%s email=%s", uid, uname, uemail)
+			// Pass 2 — use the same 5-tier resolver (avoids duplicating query logic)
+			res := resolveActorEntity(ctx, pool, senderActorValue)
+			if res.UserID != "" {
+				senderID = res.UserID
+				senderEmail = res.Email
+				senderName = res.Name
+				api.LogInfo("[NOTIF] sender resolved via resolveActorEntity matchedBy=%s userID=%s name=%s email=%s", res.MatchedBy, res.UserID, res.Name, res.Email)
 			} else {
-				// Pass 3 — raw fallback so sender_name is never blank
-				senderName = actorValue
-				api.LogInfo("dispatchNotification: actor '%s' not in session or DB (%v); using raw value as sender_name", actorValue, err)
+				// Last resort — store raw value so sender_name is never blank
+				senderName = senderActorValue
+				api.LogInfo("[NOTIF] sender unresolved for actor=%q; using raw value as sender_name", senderActorValue)
 			}
 		}
 	}
@@ -449,6 +669,14 @@ func dispatchForEvent(
 	// Step 5 — batch insert into outbox (idempotent via unique index)
 	outboxIDMap, err := insertOutbox(ctx, pool, outboxRows)
 	if err != nil {
+		PushSystemNotification(actor, SystemNotifParams{
+			Level:         LevelError,
+			Subject:       "Notification delivery failed",
+			Body:          fmt.Sprintf("Your action on '%s' was saved successfully, but the notification could not be queued (outbox insert error). Recipients may not be notified. Please inform your admin. (err: %v)", sourceRoute, err),
+			Source:        "notification_pipeline",
+			Route:         sourceRoute,
+			CorrelationID: correlationID,
+		})
 		return err
 	}
 
@@ -511,32 +739,44 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 
 // lookupEventsForActor selects which event(s) to fire based on the triggering actor's entity.
 //
-// Uses a recursive CTE on cashentityrelationships to walk UP the hierarchy (ancestors)
-// so that a child-entity actor matches a parent-entity event.
+// Uses a BIDIRECTIONAL recursive CTE on cashentityrelationships to build the actor's full
+// "org pool": self + all ancestors + all descendants. Any event scoped to any entity in
+// this pool — or globally (entity_name='') — is eligible.
+//
+// This implements the org-pool model: a notification event created for a parent entity is
+// valid for children, and vice versa. The full organisation shares one notification pool.
 //
 // Rules:
-//  1. If actorEntity != "" → build the ancestor chain (entity + all parents).
-//     Return event(s) whose entity_name is IN that ancestor set (most-specific first).
-//     Also include global events (entity_name = '') as final fallback.
-//  2. If actorEntity == "" → return only global events (entity_name = '' or NULL).
+//  1. If actorEntity != "" → build the full org pool (entity + all ancestors + all descendants).
+//     Return event(s) whose entity_name is IN that pool (self/closest match first).
+//     Also include global events (entity_name = "") as final fallback.
+//  2. If actorEntity == "" → return only global events (entity_name = "" or NULL).
 //
 // Example: actor is in "BU-North" (child of "APAC" which is child of "Global").
-//   ancestor set = {"BU-North", "APAC", "Global"}
-//   → fires BU-North event if it exists, else APAC event, else Global event, else entity-less event.
+//
+//	org pool = {"BU-North", "APAC", "Global", <all siblings/cousins reachable via APAC/Global>}
+//	→ any event scoped to any entity in the pool (or global) fires.
+//	→ self-entity match (depth=0) is ranked first, then nearest relatives, then global.
 func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
 	q := `
-		WITH RECURSIVE actor_ancestors AS (
-			-- Anchor: the actor's own entity
+		WITH RECURSIVE org_pool AS (
+			-- Anchor: the actor's own entity (depth 0)
 			SELECT entity_name, 0 AS depth
 			FROM masterentitycash
 			WHERE entity_name = $2
 			  AND (is_deleted = false OR is_deleted IS NULL)
-			UNION ALL
-			-- Walk UP: find parents of the current entity
-			SELECT r.parent_entity_name, aa.depth + 1
+			UNION
+			-- Walk UP: find ancestors (parents) of entities already in the pool
+			SELECT r.parent_entity_name, op.depth - 1
 			FROM cashentityrelationships r
-			INNER JOIN actor_ancestors aa ON aa.entity_name = r.child_entity_name
-			WHERE aa.depth < 10  -- safety cap
+			INNER JOIN org_pool op ON op.entity_name = r.child_entity_name
+			WHERE op.depth > -10  -- safety cap upward
+			UNION
+			-- Walk DOWN: find descendants (children) of entities already in the pool
+			SELECT r.child_entity_name, op.depth + 1
+			FROM cashentityrelationships r
+			INNER JOIN org_pool op ON op.entity_name = r.parent_entity_name
+			WHERE op.depth < 10   -- safety cap downward
 		)
 		SELECT e.event_id, COALESCE(e.entity_name,'')
 		FROM notification_svc.event e
@@ -549,21 +789,20 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 		  )
 		  AND (
 			CASE
-			  -- Actor has a known entity: match if event entity_name is in the ancestor chain OR is global
+			  -- Actor has a known entity: match any event in the full org pool OR global
 			  WHEN $2 <> ''
-			  THEN COALESCE(e.entity_name,'') IN (SELECT entity_name FROM actor_ancestors)
+			  THEN COALESCE(e.entity_name,'') IN (SELECT entity_name FROM org_pool)
 			    OR COALESCE(e.entity_name,'') = ''
 			  -- Actor has no entity: only global events
 			  ELSE COALESCE(e.entity_name,'') = ''
 			END
 		  )
 		ORDER BY
-			-- Most-specific match first: prefer the event whose entity is deepest in hierarchy
-			-- (highest depth value = closest ancestor to actor)
-			COALESCE((
-				SELECT aa.depth FROM actor_ancestors aa
-				WHERE aa.entity_name = COALESCE(e.entity_name,'') LIMIT 1
-			), -1) DESC,
+			-- Self-entity (depth=0) first, then nearest relatives by absolute depth distance
+			ABS(COALESCE((
+				SELECT op.depth FROM org_pool op
+				WHERE op.entity_name = COALESCE(e.entity_name,'') LIMIT 1
+			), 999)) ASC,
 			-- prefer events with an enabled notification_config
 			(EXISTS (SELECT 1 FROM notification_svc.notification_config nc WHERE nc.event_id = e.event_id AND nc.is_enabled = true)) DESC,
 			-- then prefer events with an approved template

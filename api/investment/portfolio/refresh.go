@@ -25,7 +25,7 @@ func RefreshPortfolioSnapshots(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && r.ContentLength > 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONPrefix+err.Error())
 			return
 		}
 

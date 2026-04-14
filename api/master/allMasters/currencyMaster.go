@@ -2,7 +2,7 @@ package allMaster
 
 import (
 	"CimplrCorpSaas/api"
-	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/api/auth"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,12 +143,21 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// Get created_by from session
+		createdBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				createdBy = s.Name
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		createdBy := session.Name
+
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
 			if len(cur.CurrencyCode) != 3 {
@@ -273,6 +282,27 @@ func CreateCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 // GET handler to fetch all currency records
 func GetAllCurrencyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
+			return
+		}
+		// Get created_by from session
+		createdBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				createdBy = s.Name
+				break
+			}
+		}
+		if createdBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+
 		ctx := r.Context()
 
 		// --- Query: mastercurrency + latest audit info per currency (for ordering) ---
@@ -443,12 +473,24 @@ func UpdateCurrencyMasterBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// if session == nil {
+		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	return
+		// }
+		// updatedBy := session.Name
+		updatedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				updatedBy = s.Name
+				break
+			}
+		}
+		if updatedBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		updatedBy := session.Name
 		var results []map[string]interface{}
 		for _, cur := range req.Currency {
 			ctx := r.Context()
@@ -588,12 +630,25 @@ func BulkRejectAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// if session == nil {
+		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	return
+		// }
+		// checkerBy := session.Name
+
+		checkerBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				checkerBy = s.Name
+				break
+			}
+		}
+		if checkerBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		checkerBy := session.Name
 		query := `UPDATE auditactioncurrency SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE currency_id = ANY($3) RETURNING action_id,currency_id`
 		rows, err := pgxPool.Query(r.Context(), query, checkerBy, req.Comment, pq.Array(req.CurrencyIDs))
 		if err != nil {
@@ -636,13 +691,24 @@ func BulkApproveAuditActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- Step 2: Get pre-validated context values ---
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// if session == nil {
+		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	return
+		// }
+		// checkerBy := session.Name
+		checkerBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				checkerBy = s.Name
+				break
+			}
+		}
+		if checkerBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		checkerBy := session.Name
-
 		ctx := r.Context()
 
 		// --- Step 3: Delete records pending approval ---
@@ -730,12 +796,24 @@ func BulkDeleteCurrencyAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Get pre-validated context values
-		session := middlewares.GetSessionFromContext(r.Context())
-		if session == nil {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// session := middlewares.GetSessionFromContext(r.Context())
+		// if session == nil {
+		// 	api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+		// 	return
+		// }
+		// requestedBy := session.Name
+		requestedBy := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				requestedBy = s.Name
+				break
+			}
+		}
+		if requestedBy == "" {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		requestedBy := session.Name
 		ctx := r.Context()
 		var results []string
 		for _, currencyID := range req.CurrencyIDs {

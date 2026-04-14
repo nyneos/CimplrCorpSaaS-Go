@@ -89,12 +89,12 @@ func CreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		// Check for duplicate limit combination
 		key := LimitUniqueKey{
-			EntityName: req.EntityName,
-			BankName: req.BankName,
-			CoreLimitType: coreLimitType,
-			LimitType: req.LimitType,
-			LimitSubType: req.LimitSubType,
-			CurrencyCode: strings.ToUpper(req.CurrencyCode),
+			EntityName:     req.EntityName,
+			BankName:       req.BankName,
+			CoreLimitType:  coreLimitType,
+			LimitType:      req.LimitType,
+			LimitSubType:   req.LimitSubType,
+			CurrencyCode:   strings.ToUpper(req.CurrencyCode),
 			ExcludeLimitID: "",
 		}
 		if err := checkLimitUniqueness(ctx, pgxPool, key); err != nil {
@@ -406,7 +406,9 @@ func BulkCreateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if len(createdLimitIDs) > 0 {
-			payload := BuildLimitNotifPayload(context.Background(), pgxPool, createdLimitIDs, "CREATE", requestedBy)
+			// Pass req.UserID (not display name) so the notification dispatcher can resolve
+			// the actor's entity via: SELECT business_unit_name FROM users WHERE id::text=$1
+			payload := BuildLimitNotifPayload(context.Background(), pgxPool, createdLimitIDs, "CREATE", req.UserID)
 			go catalog.TriggerNotification(
 				context.Background(), pgxPool,
 				"/cash/limit/bulk-create",
@@ -623,7 +625,8 @@ func UpdateBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Notify: limit updated with FULL record data
 		capturedLimitID := req.LimitID
 		capturedUser := req.UserID
-		payload := BuildLimitNotifPayload(context.Background(), pgxPool, []string{capturedLimitID}, "UPDATE", requestedBy)
+		// Pass UserID (not display name) so dispatcher resolves actor entity correctly
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, []string{capturedLimitID}, "UPDATE", capturedUser)
 		go catalog.TriggerNotification(
 			context.Background(), pgxPool,
 			"/cash/limit/update",
@@ -703,6 +706,7 @@ func DeleteBankLimit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 		// Notify: limits submitted for deletion with FULL record data
+		// capturedUser = req.UserID (not display name) so dispatcher resolves entity correctly
 		capturedUser := req.UserID
 		capturedIDs := req.LimitIDs
 		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "DELETE", capturedUser)
@@ -1026,10 +1030,11 @@ func BulkApproveBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"deleted":        deleted,
 		})
 		// Notify: limits approved with FULL record data
+		// Pass req.UserID (not display name) so dispatcher resolves actor entity correctly
 		capturedUser := req.UserID
 		capturedIDs := req.LimitIDs
 		capturedDeleted := deleted
-		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", checkerBy)
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "APPROVE", capturedUser)
 		payloadMap := payload.ToMap()
 		payloadMap["DeletedIDs"] = capturedDeleted
 		go catalog.TriggerNotification(
@@ -1116,9 +1121,10 @@ func BulkRejectBankLimits(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"rejected_count": len(actionIDs),
 		})
 		// Notify: limits rejected with FULL record data
+		// Pass req.UserID (not display name) so dispatcher resolves actor entity correctly
 		capturedUser := req.UserID
 		capturedIDs := req.LimitIDs
-		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", checkerBy)
+		payload := BuildLimitNotifPayload(context.Background(), pgxPool, capturedIDs, "REJECT", capturedUser)
 		go catalog.TriggerNotification(
 			context.Background(), pgxPool,
 			"/cash/limit/reject",

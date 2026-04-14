@@ -12,7 +12,7 @@ import (
 func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -23,7 +23,7 @@ func GetUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, constants.ErrInvalidJSONPrefix+err.Error(), http.StatusBadRequest)
 			return
 		}
 

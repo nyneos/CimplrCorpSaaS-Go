@@ -13,6 +13,7 @@ services:
     start_order: 3
     config:
       port: 8081
+      path_prefix: 
       load_balancer: round_robin
       vip_failover: true
   - name: auth

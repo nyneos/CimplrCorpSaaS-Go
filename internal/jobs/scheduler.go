@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
+	approvalengine "CimplrCorpSaas/api/approvalengine"
+	fdAccrual "CimplrCorpSaas/api/investment/fdAccrual"
 	cashjobs "CimplrCorpSaas/internal/jobs/cash"
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	investmentjobs "CimplrCorpSaas/internal/jobs/investment"
@@ -33,109 +36,138 @@ func (s *CronService) Name() string {
 func (s *CronService) Start() error {
 	log.Println("Starting cron service...")
 
-	// Create default AMFI config from config file
+	// ---------------- AMFI ----------------
 	amfiConfig := investmentjobs.NewDefaultConfig()
-
-	// Override batch size from services.yaml if provided
 	if s.config != nil {
 		if batchSize, ok := s.config["batch_size"].(int); ok && batchSize > 0 {
 			amfiConfig.BatchSize = batchSize
 		}
 	}
 
-	// Start the AMFI data downloader
-	err := investmentjobs.RunAMFIDataDownloader(amfiConfig, s.db)
-	if err != nil {
+	if err := investmentjobs.RunAMFIDataDownloader(amfiConfig, s.db); err != nil {
 		return fmt.Errorf("failed to start AMFI data downloader: %v", err)
 	}
-
 	logger.GlobalLogger.LogAudit("Cron service started with AMFI downloader")
-	log.Println("Cron service started — AMFI Downloader scheduled")
 
-	// Start the Sweep Scheduler
-	sweepConfig := cashjobs.NewDefaultSweepConfig()
+	// // ---------------- Sweep V1 ----------------
+	// sweepConfig := cashjobs.NewDefaultSweepConfig()
+	// if s.config != nil {
+	// 	if val, ok := s.config["sweep_schedule"].(string); ok && val != "" {
+	// 		sweepConfig.Schedule = val
+	// 	}
+	// 	if val, ok := s.config["sweep_batch_size"].(int); ok && val > 0 {
+	// 		sweepConfig.BatchSize = val
+	// 	}
+	// }
 
-	// Override sweep config from services.yaml if provided
-	if s.config != nil {
-		if sweepSchedule, ok := s.config["sweep_schedule"].(string); ok && sweepSchedule != "" {
-			sweepConfig.Schedule = sweepSchedule
-		}
-		if sweepBatchSize, ok := s.config["sweep_batch_size"].(int); ok && sweepBatchSize > 0 {
-			sweepConfig.BatchSize = sweepBatchSize
-		}
-	}
+	// if err := cashjobs.RunSweepScheduler(sweepConfig, s.db); err != nil {
+	// 	return fmt.Errorf("failed to start sweep scheduler: %v", err)
+	// }
+	// logger.GlobalLogger.LogAudit("Sweep scheduler started")
 
-	err = cashjobs.RunSweepScheduler(sweepConfig, s.db)
-	if err != nil {
-		return fmt.Errorf("failed to start sweep scheduler: %v", err)
-	}
-
-	logger.GlobalLogger.LogAudit("Sweep scheduler started")
-	log.Println("Cron service started — Sweep Scheduler scheduled")
-
-	// Start the Sweep V2 Scheduler
+	// ---------------- Sweep V2 ----------------
 	sweepConfigV2 := cashjobs.NewDefaultSweepConfigV2()
-
-	// Override sweep V2 config from services.yaml if provided
 	if s.config != nil {
-		if sweepSchedule, ok := s.config["sweep_schedule_v2"].(string); ok && sweepSchedule != "" {
-			sweepConfigV2.Schedule = sweepSchedule
+		if val, ok := s.config["sweep_schedule_v2"].(string); ok && val != "" {
+			sweepConfigV2.Schedule = val
 		}
-		if sweepBatchSize, ok := s.config["sweep_batch_size_v2"].(int); ok && sweepBatchSize > 0 {
-			sweepConfigV2.BatchSize = sweepBatchSize
+		if val, ok := s.config["sweep_batch_size_v2"].(int); ok && val > 0 {
+			sweepConfigV2.BatchSize = val
 		}
 	}
 
-	err = cashjobs.RunSweepSchedulerV2(sweepConfigV2, s.db)
-	if err != nil {
+	if err := cashjobs.RunSweepSchedulerV2(sweepConfigV2, s.db); err != nil {
 		return fmt.Errorf("failed to start sweep V2 scheduler: %v", err)
 	}
-
 	logger.GlobalLogger.LogAudit("Sweep V2 scheduler started")
-	log.Println("Cron service started — Sweep V2 Scheduler scheduled")
 
-	// Start the Auto-Categorization Scheduler
+	// ---------------- Categorization ----------------
 	categorizationConfig := cashjobs.NewDefaultCategorizationConfig()
-
-	// Override categorization config from services.yaml if provided
 	if s.config != nil {
-		if catSchedule, ok := s.config["categorization_schedule"].(string); ok && catSchedule != "" {
-			categorizationConfig.Schedule = catSchedule
+		if val, ok := s.config["categorization_schedule"].(string); ok && val != "" {
+			categorizationConfig.Schedule = val
 		}
-		if catBatchSize, ok := s.config["categorization_batch_size"].(int); ok && catBatchSize > 0 {
-			categorizationConfig.BatchSize = catBatchSize
+		if val, ok := s.config["categorization_batch_size"].(int); ok && val > 0 {
+			categorizationConfig.BatchSize = val
 		}
 	}
 
-	err = cashjobs.RunCategorizationScheduler(categorizationConfig, s.db)
-	if err != nil {
+	if err := cashjobs.RunCategorizationScheduler(categorizationConfig, s.db); err != nil {
 		return fmt.Errorf("failed to start categorization scheduler: %v", err)
 	}
-
 	logger.GlobalLogger.LogAudit("Auto-categorization scheduler started")
-	log.Println("Cron service started — Auto-Categorization Scheduler scheduled")
 
-	// Start Outbox Worker — polls notification_svc.outbox and delivers emails
-	// via SEND_ENDPOINT_URL. Controlled by OUTBOX_WORKER_ENABLED env var.
+	// ---------------- Background Workers ----------------
 	ctx := context.Background()
+
 	go dinojobs.StartOutboxWorker(ctx, s.db)
-	logger.GlobalLogger.LogAudit("Outbox worker goroutine launched")
-	log.Println("Cron service started — Outbox Worker goroutine launched")
-
 	go dinojobs.StartInboxWorker(ctx, s.db)
-	logger.GlobalLogger.LogAudit("In-app inbox worker goroutine launched")
-	log.Println("Cron service started — In-App Inbox Worker goroutine launched")
-
 	go dinojobs.StartBrowserPushWorker(ctx, s.db)
-	logger.GlobalLogger.LogAudit("Browser push worker goroutine launched")
-	log.Println("Cron service started — Browser Push Worker goroutine launched")
+	go approvalengine.StartSLAWorker(ctx, s.db)
+	go fdAccrual.StartAccrualSchedulerWorker(s.db)
+	go investmentjobs.StartReceiptReconcileWorker(s.db)
+	go investmentjobs.StartAutoRenewalWorker(s.db)
+
+	logger.GlobalLogger.LogAudit("All background workers started")
+
+	// ---------------- DB Cleanup Worker ----------------
+	go s.startDBCleanupWorker()
+	logger.GlobalLogger.LogAudit("DB cleanup worker started")
+	log.Println("Cron service started — DB Cleanup Worker running")
 
 	return nil
 }
 
 func (s *CronService) Stop() error {
-	// The cron jobs are managed internally by RunAMFIDataDownloader
-	// We could add a way to stop them if needed in the future
 	log.Println("Cron service stopped.")
 	return nil
+}
+
+//
+// ---------------- DB CLEANUP WORKER ----------------
+//
+
+func (s *CronService) startDBCleanupWorker() {
+	interval := 100 // default seconds (safe)
+
+	// config override
+	if s.config != nil {
+		if val, ok := s.config["db_cleanup_interval"].(int); ok && val > 0 {
+			interval = val
+		}
+	}
+
+	log.Printf("DB Cleanup Worker running every %d seconds\n", interval)
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanupIdleConnections()
+		}
+	}
+}
+
+func (s *CronService) cleanupIdleConnections() {
+	query := `
+		SELECT pg_terminate_backend(pid)
+		FROM pg_stat_activity
+		WHERE usename = current_user
+		  AND pid <> pg_backend_pid()
+		  AND state = 'idle'
+		  AND now() - state_change > interval '5 minutes';
+	`
+
+	tag, err := s.db.Exec(context.Background(), query)
+	if err != nil {
+		log.Println("DB cleanup error:", err)
+		if logger.GlobalLogger != nil {
+			logger.GlobalLogger.LogAudit("DB cleanup failed: " + err.Error())
+		}
+		return
+	}
+
+	log.Printf("DB cleanup executed. Rows affected: %d\n", tag.RowsAffected())
 }

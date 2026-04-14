@@ -194,7 +194,7 @@ func computeProjectionKPIs(items []map[string]interface{}, groupField string) []
 			groupVal = fmt.Sprintf("%v", v)
 		}
 		if groupVal == "" {
-			groupVal = "(unknown)"
+			groupVal = constants.Unknown
 		}
 
 		if _, exists := groups[groupVal]; !exists {

@@ -4,15 +4,38 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"CimplrCorpSaas/api/utils"
+	"context"
+	crand "crypto/rand"
 	"database/sql"
 	"encoding/json"
-
 	"fmt"
+	"math/big"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
+
+// generateRandomPassword returns a cryptographically random password of the
+// requested length using a charset that satisfies most complexity requirements.
+func generateRandomPassword(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	charsetLen := big.NewInt(int64(len(charset)))
+	result := make([]byte, length)
+	for i := range result {
+		idx, err := crand.Int(crand.Reader, charsetLen)
+		if err != nil {
+			return "", err
+		}
+		result[i] = charset[idx.Int64()]
+	}
+	return string(result), nil
+}
 
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
@@ -25,7 +48,7 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 }
 
 // Handler: Create user
-func CreateUser(db *sql.DB) http.HandlerFunc {
+func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			AuthenticationType   string `json:"authentication_type"`
@@ -37,6 +60,10 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			Address              string `json:"address"`
 			BusinessUnitName     string `json:"business_unit_name"`
 			UserID               string `json:"user_id"`
+			// Password provisioning
+			PasswordType        string `json:"password_type"`         // "auto" | "custom"
+			Password            string `json:"password"`              // plain-text for "custom"
+			ForcePasswordChange bool   `json:"force_password_change"` // require change on first login
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, "Invalid request body")
@@ -55,24 +82,67 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
+
+		// --- Password provisioning -----------------------------------------------
+		cimplr := req.Password
+		if req.PasswordType == "auto" || cimplr == "" {
+			// var genErr error
+			// cimplr, genErr = generateRandomPassword(16)
+			// if genErr != nil {
+			// 	respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
+			// 	return
+			// }
+			cimplr = "changeme"
+		}
+		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(cimplr), bcrypt.DefaultCost)
+		if hashErr != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+			return
+		}
+		// -------------------------------------------------------------------------
+
 		tx, err := db.Begin()
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		defer tx.Rollback()
+
+		// Uniqueness checks: ensure username_or_employee_id and email are unique
+		var existingID string
+		var existingUsername, existingEmail string
+		err = tx.QueryRow("SELECT id, username_or_employee_id, email FROM users WHERE username_or_employee_id = $1 OR email = $2 LIMIT 1", req.UsernameOrEmployeeID, req.Email).Scan(&existingID, &existingUsername, &existingEmail)
+		if err == nil {
+			// conflict
+			msg := ""
+			if existingUsername == req.UsernameOrEmployeeID && existingEmail == req.Email {
+				msg = fmt.Sprintf("user with username '%s' and email '%s' already exists (id=%s)", existingUsername, existingEmail, existingID)
+			} else if existingUsername == req.UsernameOrEmployeeID {
+				msg = fmt.Sprintf("username '%s' already exists (id=%s)", existingUsername, existingID)
+			} else {
+				msg = fmt.Sprintf("email '%s' already exists (id=%s)", existingEmail, existingID)
+			}
+			respondWithError(w, http.StatusBadRequest, msg)
+			return
+		} else if err != sql.ErrNoRows {
+			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			return
+		}
 		var userId string
 		err = tx.QueryRow(`INSERT INTO users (
-			authentication_type,
-			employee_name,
-			username_or_employee_id,
-			email,
-			mobile,
-			address,
-			business_unit_name,
-			status,
-			created_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8) RETURNING id`,
+				authentication_type,
+				employee_name,
+				username_or_employee_id,
+				email,
+				mobile,
+				address,
+				business_unit_name,
+				password,
+				force_password_change,
+				status,
+				created_at,
+				created_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', NOW(), $10) RETURNING id`,
 			req.AuthenticationType,
 			req.EmployeeName,
 			req.UsernameOrEmployeeID,
@@ -80,6 +150,8 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			req.Mobile,
 			req.Address,
 			req.BusinessUnitName,
+			string(hashedPassword),
+			req.ForcePasswordChange,
 			createdBy,
 		).Scan(&userId)
 		if err != nil {
@@ -98,11 +170,29 @@ func CreateUser(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		tx.Commit()
+
+		// Fire welcome / credentials email (fire-and-forget)
+		if pool != nil {
+			go catalog.TriggerNotification(
+				context.Background(), pool,
+				"/uam/users/create-user",
+				"USR-"+userId,
+				map[string]interface{}{
+					"UserID":       userId,
+					"EmployeeName": req.EmployeeName,
+					"Email":        req.Email,
+					"Role":         req.Role,
+					"Password":     cimplr,
+				},
+			)
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"user_id": userId,
-			"role_id": roleId,
+			"success":        true,
+			"user_id":        userId,
+			"role_id":        roleId,
+			"plain_password": cimplr,
 		})
 	}
 }
@@ -143,17 +233,36 @@ func GetUsers(db *sql.DB) http.HandlerFunc {
 		total, _ := utils.CountTotal(db, countQuery, countArgs...)
 		pagination.SetPaginationStats(total)
 
-		// Build paginated query with dynamic parameter positions
+		// Build paginated query with dynamic parameter positions.
+		// Fetch role info via LEFT JOIN LATERAL to avoid per-row queries.
 		args := []interface{}{pq.Array(buNames)}
 		pIdx := 2
-		query := "SELECT * FROM users WHERE business_unit_name = ANY($1::text[])"
+		query := `SELECT u.*,
+	COALESCE(rr.role_name, '') AS role_name,
+	COALESCE(rr.role_status, '') AS role_status,
+	COALESCE(rr.role_permission_status, '') AS role_permission_status,
+	COALESCE(rr.role_code, '') AS role_code
+FROM users u
+LEFT JOIN LATERAL (
+	SELECT r.name AS role_name,
+				 COALESCE(r.status, '') AS role_status,
+				 COALESCE(r.roles_permission_status, '') AS role_permission_status,
+				 COALESCE(r.role_code, r.rolecode) AS role_code
+	FROM user_roles ur
+	JOIN roles r ON ur.role_id = r.id
+	WHERE ur.user_id = u.id
+	LIMIT 1
+) rr ON true
+WHERE u.business_unit_name = ANY($1::text[])`
 		if status != "" {
-			query += fmt.Sprintf(" AND status = $%d", pIdx)
+			query += fmt.Sprintf(" AND u.status = $%d", pIdx)
 			args = append(args, status)
 			pIdx++
 		}
 		// limit and offset take the next two parameter positions
-		query += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d OFFSET $%d", pIdx, pIdx+1)
+		// Order by the latest of created_at, approved_at, updated_at or rejected_at so
+		// recently created/approved/updated/rejected users surface first.
+		query += fmt.Sprintf(" ORDER BY GREATEST(COALESCE(u.created_at, '1970-01-01'::timestamp), COALESCE(u.approved_at, '1970-01-01'::timestamp), COALESCE(u.updated_at, '1970-01-01'::timestamp), COALESCE(u.rejected_at, '1970-01-01'::timestamp)) DESC LIMIT $%d OFFSET $%d", pIdx, pIdx+1)
 		args = append(args, pagination.Limit, pagination.Offset)
 
 		rows, err := db.Query(query, args...)
@@ -362,10 +471,29 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 		fields := map[string]interface{}{}
 		for k, v := range req {
 			if allowed[k] {
+				// Hash password before storing
+				if k == "password" {
+					if pw, ok := v.(string); ok && pw != "" {
+						hashed, err := auth.HashPassword(pw)
+						if err != nil {
+							respondWithError(w, http.StatusInternalServerError, "Failed to hash password")
+							return
+						}
+						v = hashed
+					}
+				}
 				fields[k] = v
 			}
 		}
 		fields["updated_by"] = updatedBy
+		// record update timestamp for auditing
+		fields["updated_at"] = time.Now()
+		// When an update occurs, default the status to 'pending' so the
+		// update goes through the approval workflow unless the caller
+		// explicitly provided a status field.
+		if _, hasStatus := fields["status"]; hasStatus {
+			fields["status"] = "pending"
+		}
 		if len(fields) == 0 {
 			respondWithError(w, http.StatusBadRequest, "No valid fields to update")
 			return
@@ -432,11 +560,12 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 func DeleteUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"` // for middleware
-			ID     string `json:"id"`      // user to delete
+			UserID string   `json:"user_id"` // for middleware
+			ID     string   `json:"id"`      // single user to delete (backwards compat)
+			Ids    []string `json:"ids"`     // bulk ids to delete
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || req.ID == "" {
-			respondWithError(w, http.StatusBadRequest, "Missing user_id or id in request body")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || (req.ID == "" && len(req.Ids) == 0) {
+			respondWithError(w, http.StatusBadRequest, "Missing user_id or id/ids in request body")
 			return
 		}
 		buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
@@ -444,9 +573,28 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 			return
 		}
+		// Determine who requested the delete for auditing
+		deleter := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				deleter = s.Email
+				break
+			}
+		}
+		if deleter == "" {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+		// determine target ids (single or bulk)
+		targetIds := req.Ids
+		if len(targetIds) == 0 && strings.TrimSpace(req.ID) != "" {
+			targetIds = []string{req.ID}
+		}
+
 		rows, err := db.Query(
-			"UPDATE users SET status = 'Delete-Approval' WHERE id = $1 AND business_unit_name = ANY($2::text[]) RETURNING *",
-			req.ID, pq.Array(buNames),
+			"UPDATE users SET status = 'Delete-Approval', updated_by = $1, updated_at = NOW() WHERE id = ANY($2) AND business_unit_name = ANY($3::text[]) RETURNING *",
+			deleter, pq.Array(targetIds), pq.Array(buNames),
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -454,24 +602,24 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 		cols, _ := rows.Columns()
-		if !rows.Next() {
-			respondWithError(w, http.StatusNotFound, "User not found")
-			return
-		}
-		vals := make([]interface{}, len(cols))
-		valPtrs := make([]interface{}, len(cols))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
-		}
-		rows.Scan(valPtrs...)
-		userMap := map[string]interface{}{}
-		for i, col := range cols {
-			userMap[col] = vals[i]
+		updated := []map[string]interface{}{}
+		for rows.Next() {
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			rows.Scan(valPtrs...)
+			userMap := map[string]interface{}{}
+			for i, col := range cols {
+				userMap[col] = vals[i]
+			}
+			updated = append(updated, userMap)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"user":    userMap,
+			"users":   updated,
 		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,60 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// Helpers to map bank code <-> bank name using prevalidation context (BankInfo)
+func bankNameShortFromCode(ctx context.Context, code string) (string, string) {
+	if code == "" {
+		return "", ""
+	}
+	v := ctx.Value("BankInfo")
+	switch banks := v.(type) {
+	case []map[string]string:
+		for _, b := range banks {
+			if id, ok := b["bank_id"]; ok && id == code {
+				name := ""
+				short := ""
+				if n, ok := b["bank_name"]; ok {
+					name = n
+				}
+				if s, ok := b["bank_short_name"]; ok {
+					short = s
+				}
+				return name, short
+			}
+		}
+	case map[string]string:
+		if id, ok := banks["bank_id"]; ok && id == code {
+			return banks["bank_name"], banks["bank_short_name"]
+		}
+	}
+	return "", ""
+}
+
+func bankCodeFromName(ctx context.Context, name string) (string, bool) {
+	if strings.TrimSpace(name) == "" {
+		return "", false
+	}
+	v := ctx.Value("BankInfo")
+	lname := strings.ToLower(strings.TrimSpace(name))
+	switch banks := v.(type) {
+	case []map[string]string:
+		for _, b := range banks {
+			if bn, ok := b["bank_name"]; ok && strings.ToLower(strings.TrimSpace(bn)) == lname {
+				if id, ok2 := b["bank_id"]; ok2 {
+					return id, true
+				}
+			}
+		}
+	case map[string]string:
+		if bn, ok := banks["bank_name"]; ok && strings.ToLower(strings.TrimSpace(bn)) == lname {
+			if id, ok2 := banks["bank_id"]; ok2 {
+				return id, true
+			}
+		}
+	}
+	return "", false
+}
 
 // getUserFriendlyPenaltyError converts database errors to user-friendly messages.
 // It unwraps pgconn.PgError for precise constraint/type details.
@@ -150,13 +205,128 @@ func validatePenaltyFields(input PenaltyStructureInput) error {
 	return nil
 }
 
+// penaltyStructureExists checks whether an equivalent active (not deleted) penalty structure
+// already exists in the DB matching the unique index expression. It must be called inside
+// a transaction when possible to avoid race, but accepts either tx or pool via Querier.
+func penaltyStructureExists(ctx context.Context, querier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}, input PenaltyStructureInput) (bool, error) {
+	// Prepare params matching the unique index expression
+	// For the "(min_amount_range is null)" parts we pass booleans
+	minAmtNull := input.MinAmountRange == nil
+	maxAmtNull := input.MaxAmountRange == nil
+	minHeldNull := input.MinHeldDays == nil
+	maxHeldNull := input.MaxHeldDays == nil
+
+	q := `SELECT penalty_id FROM investment.fd_penalty_structure_master
+		WHERE bank_code = $1
+		  AND ((min_amount_range IS NULL) = $2) AND min_amount_range IS NOT DISTINCT FROM $3
+		  AND ((max_amount_range IS NULL) = $4) AND max_amount_range IS NOT DISTINCT FROM $5
+		  AND min_tenor_days = $6
+		  AND max_tenor_days = $7
+		  AND ((min_held_days IS NULL) = $8) AND min_held_days IS NOT DISTINCT FROM $9
+		  AND ((max_held_days IS NULL) = $10) AND max_held_days IS NOT DISTINCT FROM $11
+		  AND penalty_type = $12
+		  AND penalty_value = $13
+		  AND calculation_method = $14
+		  AND COALESCE(is_deleted,false) = false
+		LIMIT 1` // LIMIT 1 is enough
+
+	row := querier.QueryRow(ctx, q,
+		input.BankCode,
+		minAmtNull, input.MinAmountRange,
+		maxAmtNull, input.MaxAmountRange,
+		input.MinTenorDays,
+		input.MaxTenorDays,
+		minHeldNull, input.MinHeldDays,
+		maxHeldNull, input.MaxHeldDays,
+		strings.ToUpper(input.PenaltyType),
+		input.PenaltyValue,
+		input.CalculationMethod,
+	)
+	var id string
+	if err := row.Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// penaltyStructureFindConflict returns a map of column values for an existing
+// active penalty structure that matches the unique-index expression for the
+// provided input. Returns (nil, nil) when no conflict found.
+func penaltyStructureFindConflict(ctx context.Context, querier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}, input PenaltyStructureInput) (map[string]interface{}, error) {
+	minAmtNull := input.MinAmountRange == nil
+	maxAmtNull := input.MaxAmountRange == nil
+	minHeldNull := input.MinHeldDays == nil
+	maxHeldNull := input.MaxHeldDays == nil
+
+	q := `SELECT penalty_id, bank_code, min_amount_range, max_amount_range, min_tenor_days, max_tenor_days, min_held_days, max_held_days, penalty_type, penalty_value, calculation_method, effective_from, effective_to
+		FROM investment.fd_penalty_structure_master
+		WHERE bank_code = $1
+		  AND ((min_amount_range IS NULL) = $2) AND min_amount_range IS NOT DISTINCT FROM $3
+		  AND ((max_amount_range IS NULL) = $4) AND max_amount_range IS NOT DISTINCT FROM $5
+		  AND min_tenor_days = $6
+		  AND max_tenor_days = $7
+		  AND ((min_held_days IS NULL) = $8) AND min_held_days IS NOT DISTINCT FROM $9
+		  AND ((max_held_days IS NULL) = $10) AND max_held_days IS NOT DISTINCT FROM $11
+		  AND penalty_type = $12
+		  AND penalty_value = $13
+		  AND calculation_method = $14
+		  AND COALESCE(is_deleted,false) = false
+		LIMIT 1`
+
+	row := querier.QueryRow(ctx, q,
+		input.BankCode,
+		minAmtNull, input.MinAmountRange,
+		maxAmtNull, input.MaxAmountRange,
+		input.MinTenorDays,
+		input.MaxTenorDays,
+		minHeldNull, input.MinHeldDays,
+		maxHeldNull, input.MaxHeldDays,
+		strings.ToUpper(input.PenaltyType),
+		input.PenaltyValue,
+		input.CalculationMethod,
+	)
+
+	// scan into interface{} columns so we can echo the raw values back
+	var pid, bcode, minAmt, maxAmt, minTenor, maxTenor, minHeld, maxHeld, pType, pValue, calcMethod, effFrom, effTo interface{}
+	if err := row.Scan(&pid, &bcode, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &effFrom, &effTo); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	m := map[string]interface{}{
+		"penalty_id":         pid,
+		"bank_code":          bcode,
+		"min_amount_range":   minAmt,
+		"max_amount_range":   maxAmt,
+		"min_tenor_days":     minTenor,
+		"max_tenor_days":     maxTenor,
+		"min_held_days":      minHeld,
+		"max_held_days":      maxHeld,
+		"penalty_type":       pType,
+		"penalty_value":      pValue,
+		"calculation_method": calcMethod,
+		"effective_from":     effFrom,
+		"effective_to":       effTo,
+	}
+	return m, nil
+}
+
 // --- Single Create Handler ---
 func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req CreatePenaltyStructureSingleRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
-			return
+
 		}
 
 		// Set defaults
@@ -188,11 +358,20 @@ func CreatePenaltyStructureSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
+
+		// Check uniqueness before attempting insert to provide a friendly error
+		if conflict, err := penaltyStructureFindConflict(ctx, tx, input); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			return
+		} else if conflict != nil {
+			api.RespondWithPayload(w, false, fmt.Sprintf("Penalty create aborted: a matching active penalty structure already exists (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]), nil)
+			return
+		}
 
 		insertQuery := `
             INSERT INTO investment.fd_penalty_structure_master (
@@ -328,15 +507,48 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Build batch insert (columns aligned to DDL)
-		valueStrings := make([]string, len(finalValidInputs))
-		valueArgs := make([]interface{}, 0, len(finalValidInputs)*15)
+		// Pre-check uniqueness for each final row to provide readable per-row errors
+		// Use transaction to minimize race window
+		for i := 0; i < len(finalValidInputs); {
+			conflict, err := penaltyStructureFindConflict(ctx, tx, finalValidInputs[i])
+			if err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed uniqueness check: "+err.Error())
+				return
+			}
+			if conflict != nil {
+				// mark as error and remove from finalValidInputs
+				errorsList = append(errorsList, map[string]interface{}{
+					"row_index":            i,
+					constants.ValueSuccess: false,
+					constants.ValueError:   fmt.Sprintf("Duplicate active penalty structure exists (penalty_id=%v, bank_code=%v)", conflict["penalty_id"], conflict["bank_code"]),
+					"bank_code":            finalValidInputs[i].BankCode,
+				})
+				// remove element i
+				finalValidInputs = append(finalValidInputs[:i], finalValidInputs[i+1:]...)
+			} else {
+				i++
+			}
+		}
+
+		// Perform per-row INSERT ... RETURNING inside the transaction to avoid
+		// multi-row RETURNING SQL syntax complexities. This is slightly more
+		// DB round-trips but is safe and straightforward.
+		var insertedRecords []map[string]interface{}
+		var penaltyIDs []string
 
 		for i, row := range finalValidInputs {
-			valueStrings[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-				i*15+1, i*15+2, i*15+3, i*15+4, i*15+5, i*15+6, i*15+7, i*15+8, i*15+9, i*15+10, i*15+11, i*15+12, i*15+13, i*15+14, i*15+15)
+			insertQuery := `
+				INSERT INTO investment.fd_penalty_structure_master (
+					bank_code, min_amount_range, max_amount_range, min_tenor_days,
+					max_tenor_days, min_held_days, max_held_days, penalty_type,
+					penalty_value, calculation_method, no_interest_if_withdrawn_before,
+					description, effective_from, effective_to, is_active
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+				RETURNING penalty_id, bank_code
+			`
 
-			valueArgs = append(valueArgs,
+			var id, code string
+			if err := tx.QueryRow(ctx, insertQuery,
 				row.BankCode,
 				row.MinAmountRange,
 				row.MaxAmountRange,
@@ -352,38 +564,13 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.EffectiveFrom,
 				row.EffectiveTo,
 				row.IsActive,
-			)
-		}
-
-		batchInsertQuery := fmt.Sprintf(`
-            INSERT INTO investment.fd_penalty_structure_master (
-                bank_code, min_amount_range, max_amount_range, min_tenor_days,
-                max_tenor_days, min_held_days, max_held_days, penalty_type,
-                penalty_value, calculation_method, no_interest_if_withdrawn_before,
-                description, effective_from, effective_to, is_active
-            ) VALUES %s
-            RETURNING penalty_id, bank_code
-        `, strings.Join(valueStrings, ","))
-
-		rows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
-		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
-			api.LogError("Batch insert failed: %v", err)
-			return
-		}
-		defer rows.Close()
-
-		var insertedRecords []map[string]interface{}
-		var penaltyIDs []string
-
-		for rows.Next() {
-			var id, code string
-			if err := rows.Scan(&id, &code); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
-				api.LogError("Insert result scan failed: %v", err)
+			).Scan(&id, &code); err != nil {
+				msg, status := getUserFriendlyPenaltyError(err, "Insert failed for row")
+				api.RespondWithError(w, status, msg)
+				api.LogError("Insert failed for row %d: %v", i, err)
 				return
 			}
+
 			penaltyIDs = append(penaltyIDs, id)
 			insertedRecords = append(insertedRecords, map[string]interface{}{
 				constants.ValueSuccess: true,
@@ -392,7 +579,7 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		// Batch audit insert
+		// Batch audit insert for created penalty IDs
 		if len(penaltyIDs) > 0 {
 			auditValues := make([]string, len(penaltyIDs))
 			auditArgs := make([]interface{}, 0, len(penaltyIDs)*2)
@@ -402,10 +589,10 @@ func CreatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			auditQuery := fmt.Sprintf(`
-                INSERT INTO investment.fd_audit_penalty_structure 
-                    (penalty_id, action_type, processing_status, requested_by, requested_at)
-                VALUES %s
-            `, strings.Join(auditValues, ","))
+				INSERT INTO investment.fd_audit_penalty_structure 
+					(penalty_id, action_type, processing_status, requested_by, requested_at)
+				VALUES %s
+			`, strings.Join(auditValues, ","))
 
 			if _, err := tx.Exec(ctx, auditQuery, auditArgs...); err != nil {
 				msg, status := getUserFriendlyPenaltyError(err, constants.ErrBatchAuditFailed)
@@ -468,8 +655,8 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		// Fetch existing row for old values
-		 // Cast date columns to text (YYYY-MM-DD) to avoid binary-date scan errors
-		 sel := `
+		// Cast date columns to text (YYYY-MM-DD) to avoid binary-date scan errors
+		sel := `
 		     SELECT bank_code, min_amount_range, max_amount_range, min_tenor_days,
 			     max_tenor_days, min_held_days, max_held_days, penalty_type,
 			     penalty_value, calculation_method, no_interest_if_withdrawn_before,
@@ -544,7 +731,7 @@ func UpdatePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					// Cast via text to allow Postgres to coerce into the enum type
 					sets = append(sets, fmt.Sprintf("%s=$%d::text", k, pos))
 				} else {
-					sets = append(sets, fmt.Sprintf("%s=$%d", k, pos))
+					sets = append(sets, fmt.Sprintf(constants.FormatSQLColumnArgAlt, k, pos))
 				}
 				args = append(args, v)
 				pos++
@@ -860,7 +1047,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -879,7 +1066,7 @@ func DeletePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -958,14 +1145,14 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID         string   `json:"user_id"`
 			PenaltyIDs     []string `json:"penalty_ids"`
-			CheckerComment string   `json:"checker_comment"`
+			CheckerComment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -984,7 +1171,7 @@ func BulkApprovePenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -1068,7 +1255,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		var req struct {
 			UserID         string   `json:"user_id"`
 			PenaltyIDs     []string `json:"penalty_ids"`
-			CheckerComment string   `json:"checker_comment"`
+			CheckerComment string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -1076,7 +1263,7 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.PenaltyIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "penalty_ids is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoPenaltyIDsProvided)
 			return
 		}
 
@@ -1095,122 +1282,35 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Transaction begin failed")
+			msg, status := getUserFriendlyPenaltyError(err, constants.ErrTransactionFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
 		defer tx.Rollback(ctx)
 
-		// Select pending audit rows and old values needed to revert EDITs by penalty_id
-		sel := `
-            SELECT audit_id, penalty_id, action_type,
-                   old_bank_code, old_min_amount_range, old_max_amount_range,
-                   old_min_tenor_days, old_max_tenor_days, old_min_held_days, old_max_held_days,
-                   old_penalty_type, old_penalty_value, old_calculation_method,
-                   old_no_interest_if_withdrawn_before, old_description, old_effective_from, old_effective_to, old_is_active
-            FROM investment.fd_audit_penalty_structure
-            WHERE penalty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%'
-            FOR UPDATE
-        `
-
-		rows, err := tx.Query(ctx, sel, req.PenaltyIDs)
+		// Simple bulk-reject: mark matching audit rows as REJECTED only (do not modify master rows).
+		res, err := tx.Exec(ctx, `
+			UPDATE investment.fd_audit_penalty_structure
+			SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2
+			WHERE penalty_id = ANY($3::text[]) AND processing_status LIKE '%PENDING%'
+		`, userEmail, req.CheckerComment, req.PenaltyIDs)
 		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Fetch audit rows failed")
+			msg, status := getUserFriendlyPenaltyError(err, "Rejection failed")
 			api.RespondWithError(w, status, msg)
-			api.LogError("Bulk reject: fetch audits failed: %v", err)
-			return
-		}
-		defer rows.Close()
-
-		type auditOld struct {
-			AuditID          string
-			PenaltyID        string
-			ActionType       string
-			OldBankCode      *string
-			OldMinAmount     *float64
-			OldMaxAmount     *float64
-			OldMinTenor      *int
-			OldMaxTenor      *int
-			OldMinHeld       *int
-			OldMaxHeld       *int
-			OldPenaltyType   *string
-			OldPenaltyValue  *float64
-			OldCalcMethod    *string
-			OldNoInterest    *int
-			OldDescription   *string
-			OldEffectiveFrom *string
-			OldEffectiveTo   *string
-			OldIsActive      *bool
-		}
-
-		var audits []auditOld
-		for rows.Next() {
-			var a auditOld
-			if err := rows.Scan(&a.AuditID, &a.PenaltyID, &a.ActionType,
-				&a.OldBankCode, &a.OldMinAmount, &a.OldMaxAmount,
-				&a.OldMinTenor, &a.OldMaxTenor, &a.OldMinHeld, &a.OldMaxHeld,
-				&a.OldPenaltyType, &a.OldPenaltyValue, &a.OldCalcMethod,
-				&a.OldNoInterest, &a.OldDescription, &a.OldEffectiveFrom, &a.OldEffectiveTo, &a.OldIsActive); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
-				api.LogError("Bulk reject: audit scan failed: %v", err)
-				return
-			}
-			audits = append(audits, a)
-		}
-
-		if len(audits) == 0 {
-			api.RespondWithPayload(w, false, "No matching pending audit records found for provided penalty_ids", nil)
+			api.LogError("Bulk reject: exec failed: %v", err)
 			return
 		}
 
-		var success []map[string]interface{}
-		var errorsList []map[string]interface{}
+		// pgx ExecResult.RowsAffected may be used to determine how many rows were updated
+		updated := int(res.RowsAffected())
 
-		for _, a := range audits {
-			act := strings.ToUpper(a.ActionType)
-			switch act {
-			case "EDIT":
-				// Revert master to old values
-				q := `UPDATE investment.fd_penalty_structure_master SET
-                    bank_code=$1, min_amount_range=$2, max_amount_range=$3,
-                    min_tenor_days=$4, max_tenor_days=$5, min_held_days=$6, max_held_days=$7,
-                    penalty_type=$8, penalty_value=$9, calculation_method=$10,
-                    no_interest_if_withdrawn_before=$11, description=$12,
-                    effective_from=$13, effective_to=$14, is_active=$15
-                    WHERE penalty_id=$16`
-				if _, err := tx.Exec(ctx, q,
-					a.OldBankCode, a.OldMinAmount, a.OldMaxAmount,
-					a.OldMinTenor, a.OldMaxTenor, a.OldMinHeld, a.OldMaxHeld,
-					a.OldPenaltyType, a.OldPenaltyValue, a.OldCalcMethod,
-					a.OldNoInterest, a.OldDescription,
-					a.OldEffectiveFrom, a.OldEffectiveTo, a.OldIsActive,
-					a.PenaltyID); err != nil {
-					errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
-					continue
-				}
-			case "CREATE":
-				// Remove the created master row
-				if _, err := tx.Exec(ctx, `DELETE FROM investment.fd_penalty_structure_master WHERE penalty_id=$1`, a.PenaltyID); err != nil {
-					errorsList = append(errorsList, map[string]interface{}{"penalty_id": a.PenaltyID, "audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
-					continue
-				}
-			case "DELETE":
-				// Nothing to revert if delete was only pending; if delete was applied, we currently don't handle rollback here
-				// Keep as no-op (audit will be marked REJECTED)
-			default:
-				// Unknown action: record error and continue
-				errorsList = append(errorsList, map[string]interface{}{"audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: "unknown action_type"})
-				continue
-			}
-
-			// Mark audit as rejected
-			if _, err := tx.Exec(ctx, `UPDATE investment.fd_audit_penalty_structure SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE audit_id=$3`, userEmail, req.CheckerComment, a.AuditID); err != nil {
-				errorsList = append(errorsList, map[string]interface{}{"audit_id": a.AuditID, constants.ValueSuccess: false, constants.ValueError: err.Error()})
-				continue
-			}
-
-			success = append(success, map[string]interface{}{constants.ValueSuccess: true, "audit_id": a.AuditID, "penalty_id": a.PenaltyID})
-		}
+		// Form simple success response
+		api.RespondWithPayload(w, updated > 0, "", map[string]interface{}{
+			constants.ValueSuccess: true,
+			"rejected_count":       updated,
+			"checker":              userEmail,
+		})
+		api.LogInfo("Bulk reject: %d audit rows rejected by %s", updated, userEmail)
 
 		if err := tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyPenaltyError(err, constants.ErrCommitFailedUser)
@@ -1218,10 +1318,6 @@ func BulkRejectPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.LogError("Bulk reject commit failed: %v", err)
 			return
 		}
-
-		allResults := append(success, errorsList...)
-		api.RespondWithPayload(w, len(success) > 0, "", allResults)
-		api.LogInfo("Bulk reject completed: %d rejected, %d errors", len(success), len(errorsList))
 	}
 }
 
@@ -1245,20 +1341,21 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 		}
 
-		ctx := r.Context()
-		baseQuery := `
-            SELECT m.penalty_id, m.bank_code,
-                   COALESCE(mb.bank_name,'') AS bank_name,
-                   COALESCE(mb.bank_short_name,'') AS bank_short_name,
-                   m.min_amount_range, m.max_amount_range, m.min_tenor_days,
-                   m.max_tenor_days, m.min_held_days, m.max_held_days, m.penalty_type,
-                   m.penalty_value, m.calculation_method, m.no_interest_if_withdrawn_before,
-                   m.description, m.effective_from, m.effective_to, m.is_active
-            FROM investment.fd_penalty_structure_master m
-            LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
-            WHERE m.is_active = true AND (m.is_deleted IS NULL OR m.is_deleted = false)
-              AND m.effective_from <= now()::date AND (m.effective_to IS NULL OR m.effective_to >= now()::date)
-        `
+		 ctx := r.Context()
+		 // Cast date columns to text (YYYY-MM-DD) so pgx can scan into string vars
+		 baseQuery := `
+		     SELECT m.penalty_id, m.bank_code,
+			     COALESCE(mb.bank_name,'') AS bank_name,
+			     COALESCE(mb.bank_short_name,'') AS bank_short_name,
+			     m.min_amount_range, m.max_amount_range, m.min_tenor_days,
+			     m.max_tenor_days, m.min_held_days, m.max_held_days, m.penalty_type,
+			     m.penalty_value, m.calculation_method, m.no_interest_if_withdrawn_before,
+			     m.description, TO_CHAR(m.effective_from,'YYYY-MM-DD') AS effective_from, TO_CHAR(m.effective_to,'YYYY-MM-DD') AS effective_to, m.is_active
+		     FROM investment.fd_penalty_structure_master m
+		     LEFT JOIN masterbank mb ON mb.bank_id::text = m.bank_code
+		     WHERE m.is_active = true AND (m.is_deleted IS NULL OR m.is_deleted = false)
+			AND m.effective_from <= now()::date AND (m.effective_to IS NULL OR m.effective_to >= now()::date)
+		 `
 
 		var args []interface{}
 		if bankCode != "" {
@@ -1266,13 +1363,8 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			args = append(args, bankCode)
 		}
 
-		// Add ordering + pagination
-		if len(args) == 0 {
-			baseQuery += fmt.Sprintf(" ORDER BY effective_from DESC LIMIT %d OFFSET %d", limit, offset)
-		} else {
-			// param position for limit/offset is safe to inline as integers
-			baseQuery += fmt.Sprintf(" ORDER BY effective_from DESC LIMIT %d OFFSET %d", limit, offset)
-		}
+		// Add ordering + pagination (order by actual date column to ensure correct ordering)
+		baseQuery += fmt.Sprintf(" ORDER BY m.effective_from DESC LIMIT %d OFFSET %d", limit, offset)
 
 		rows, err := pgxPool.Query(ctx, baseQuery, args...)
 		if err != nil {
@@ -1309,10 +1401,22 @@ func GetPenaltyStructuresApprovedActive(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			}
 
 			results = append(results, map[string]interface{}{
-				"penalty_id":                      id,
-				"bank_code":                       bank,
-				"bank_name":                       bankName,
-				"bank_short_name":                 bankShortName,
+				"penalty_id": id,
+				"bank_code":  bank,
+				"bank_name": func() string {
+					n, _ := bankNameShortFromCode(ctx, bank)
+					if n == "" {
+						return bankName
+					}
+					return n
+				}(),
+				"bank_short_name": func() string {
+					_, s := bankNameShortFromCode(ctx, bank)
+					if s == "" {
+						return bankShortName
+					}
+					return s
+				}(),
 				"min_amount_range":                minAmt,
 				"max_amount_range":                maxAmt,
 				"min_tenor_days":                  minTenor,
@@ -1664,9 +1768,21 @@ func GetPenaltyStructureAuditHistory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_comment":   checkerComment,
 
 				// Current/New values
-				"bank_code":                       curBank,
-				"bank_name":                       curBankName,
-				"bank_short_name":                 curBankShortName,
+				"bank_code": curBank,
+				"bank_name": func() string {
+					n, _ := bankNameShortFromCode(ctx, curBank)
+					if n == "" {
+						return curBankName
+					}
+					return n
+				}(),
+				"bank_short_name": func() string {
+					_, s := bankNameShortFromCode(ctx, curBank)
+					if s == "" {
+						return curBankShortName
+					}
+					return s
+				}(),
 				"min_amount_range":                curMinAmt,
 				"max_amount_range":                curMaxAmt,
 				"min_tenor_days":                  curMinTenor,
@@ -1722,7 +1838,7 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Expect multipart form with 'file' and form value 'user_id'
 		userID := r.FormValue("user_id")
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIIsRequired)
 			return
 		}
 
@@ -1785,7 +1901,12 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		var validInputs []PenaltyStructureInput
-		var errorsList []map[string]interface{}
+
+		// sendFail sends a concise human-readable fail-fast response
+		sendFail := func(row int, msg string) {
+			summary := fmt.Sprintf("Penalty upload aborted: row %d failed validation: %s", row, msg)
+			api.RespondWithPayload(w, false, summary, nil)
+		}
 
 		for rowIdx, row := range data {
 			// Helper to get value safely
@@ -1813,15 +1934,15 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			minTenor, errMin := strconv.Atoi(minTenorStr)
 			maxTenor, errMax := strconv.Atoi(maxTenorStr)
 			if errMin != nil || errMax != nil {
-				errorsList = append(errorsList, map[string]interface{}{"row_index": rowIdx, constants.ValueSuccess: false, constants.ValueError: "invalid tenor days"})
-				continue
+				sendFail(rowIdx+2, "invalid min_tenor_days or max_tenor_days")
+				return
 			}
 
 			// penalty value
 			pvPtr, err := parseFloatPtr(penaltyValueStr)
 			if err != nil || pvPtr == nil {
-				errorsList = append(errorsList, map[string]interface{}{"row_index": rowIdx, constants.ValueSuccess: false, constants.ValueError: "invalid penalty_value"})
-				continue
+				sendFail(rowIdx+2, "invalid penalty_value")
+				return
 			}
 
 			// parse optional fields
@@ -1842,6 +1963,23 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			// bank_code column may contain either the bank_id or the bank_name.
+			// First check if it directly matches an approved bank_id (via context lookup).
+			if bankCode != "" {
+				// bankNameShortFromCode returns name if code exists in context
+				if name, _ := bankNameShortFromCode(ctx, bankCode); name == "" {
+					// Not found as an ID, try resolving as a bank name
+					if code, ok := bankCodeFromName(ctx, bankCode); ok {
+						bankCode = code
+					} else {
+						sendFail(rowIdx+2, "bank identifier not recognized (not an approved bank id or name): "+bankCode)
+						return
+					}
+				}
+			} else {
+				sendFail(rowIdx+2, "bank_code is required")
+				return
+			}
 			input := PenaltyStructureInput{
 				BankCode:                    bankCode,
 				MinAmountRange:              minAmtPtr,
@@ -1866,15 +2004,24 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 
 			if err := validatePenaltyFields(input); err != nil {
-				errorsList = append(errorsList, map[string]interface{}{"row_index": rowIdx, constants.ValueSuccess: false, constants.ValueError: err.Error(), "bank_code": input.BankCode})
-				continue
+				sendFail(rowIdx+2, err.Error())
+				return
+			}
+
+			// Check unique constraint pre-insert to provide friendly error
+			if conflict, err := penaltyStructureFindConflict(ctx, pgxPool, input); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+				return
+			} else if conflict != nil {
+				sendFail(rowIdx+2, fmt.Sprintf("conflicts with existing active penalty structure (penalty_id=%v, bank_code=%v, penalty_type=%v, min_tenor_days=%v, max_tenor_days=%v, penalty_value=%v)", conflict["penalty_id"], conflict["bank_code"], conflict["penalty_type"], conflict["min_tenor_days"], conflict["max_tenor_days"], conflict["penalty_value"]))
+				return
 			}
 
 			validInputs = append(validInputs, input)
 		}
 
 		if len(validInputs) == 0 {
-			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, errorsList)
+			api.RespondWithPayload(w, false, constants.ErrAllRowsFailedValidation, nil)
 			return
 		}
 
@@ -1911,39 +2058,55 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			)
 		}
 
-		batchInsertQuery := fmt.Sprintf(`
-            INSERT INTO investment.fd_penalty_structure_master (
-                bank_code, min_amount_range, max_amount_range, min_tenor_days,
-                max_tenor_days, min_held_days, max_held_days, penalty_type,
-                penalty_value, calculation_method, no_interest_if_withdrawn_before,
-                description, effective_from, effective_to, is_active
-            ) VALUES %s
-            RETURNING penalty_id
-        `, strings.Join(valueStrings, ","))
-
-		rows, err := tx.Query(ctx, batchInsertQuery, valueArgs...)
-		if err != nil {
-			msg, status := getUserFriendlyPenaltyError(err, "Batch insert failed")
-			api.RespondWithError(w, status, msg)
-			api.LogError("Upload: batch insert failed: %v", err)
-			return
-		}
-		defer rows.Close()
-
-		var inserted []map[string]interface{}
+		// Perform per-row INSERT ... RETURNING inside the transaction to avoid
+		// multi-row RETURNING SQL syntax complexities. This is slightly more
+		// DB round-trips but is safe and straightforward.
+		var insertedRecords []map[string]interface{}
 		var penaltyIDs []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "Scan failed: "+err.Error())
-				api.LogError("Upload: scan failed: %v", err)
+
+		for i, row := range validInputs {
+			insertQuery := `
+				INSERT INTO investment.fd_penalty_structure_master (
+					bank_code, min_amount_range, max_amount_range, min_tenor_days,
+					max_tenor_days, min_held_days, max_held_days, penalty_type,
+					penalty_value, calculation_method, no_interest_if_withdrawn_before,
+					description, effective_from, effective_to, is_active
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+				RETURNING penalty_id, bank_code
+			`
+
+			var id, code string
+			if err := tx.QueryRow(ctx, insertQuery,
+				row.BankCode,
+				row.MinAmountRange,
+				row.MaxAmountRange,
+				row.MinTenorDays,
+				row.MaxTenorDays,
+				row.MinHeldDays,
+				row.MaxHeldDays,
+				strings.ToUpper(row.PenaltyType),
+				row.PenaltyValue,
+				row.CalculationMethod,
+				row.NoInterestIfWithdrawnBefore,
+				row.Description,
+				row.EffectiveFrom,
+				row.EffectiveTo,
+				row.IsActive,
+			).Scan(&id, &code); err != nil {
+				msg, status := getUserFriendlyPenaltyError(err, "Insert failed for row")
+				api.RespondWithError(w, status, msg)
+				api.LogError("Insert failed for row %d: %v", i, err)
 				return
 			}
+
 			penaltyIDs = append(penaltyIDs, id)
-			inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: true, "penalty_id": id})
+			insertedRecords = append(insertedRecords, map[string]interface{}{
+				"penalty_id": id,
+				"bank_code":  code,
+			})
 		}
 
-		// Batch audit insert
+		// Build audit insert for created penalty IDs
 		if len(penaltyIDs) > 0 {
 			auditVals := make([]string, len(penaltyIDs))
 			auditArgs := make([]interface{}, 0, len(penaltyIDs)*2)
@@ -1967,9 +2130,10 @@ func UploadPenaltyStructureSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		allResults := append(inserted, errorsList...)
-		api.RespondWithPayload(w, len(inserted) > 0, "", allResults)
-		api.LogInfo("Upload completed: %d inserted, %d errors, file=%s", len(inserted), len(errorsList), handler.Filename)
+		allResults := insertedRecords
+		success := len(insertedRecords) > 0
+		api.RespondWithPayload(w, success, "", allResults)
+		api.LogInfo("Upload completed: %d inserted, file=%s", len(insertedRecords), handler.Filename)
 	}
 }
 
@@ -2017,27 +2181,27 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
         `, req.PenaltyID)
 
 		var (
-			pid        string
-			bank       string
-			bankName   string
+			pid           string
+			bank          string
+			bankName      string
 			bankShortName string
-			minAmt     *float64
-			maxAmt     *float64
-			minTenor   int
-			maxTenor   int
-			minHeld    *int
-			maxHeld    *int
-			pType      string
-			pValue     float64
-			calcMethod string
-			noInterest *int
-			desc       *string
-			effFrom    string
-			effTo      *string
-			isActive   *bool
-			isDeleted  *bool
-			createdAt  interface{}
-			updatedAt  interface{}
+			minAmt        *float64
+			maxAmt        *float64
+			minTenor      int
+			maxTenor      int
+			minHeld       *int
+			maxHeld       *int
+			pType         string
+			pValue        float64
+			calcMethod    string
+			noInterest    *int
+			desc          *string
+			effFrom       string
+			effTo         *string
+			isActive      *bool
+			isDeleted     *bool
+			createdAt     interface{}
+			updatedAt     interface{}
 		)
 
 		err := row.Scan(&pid, &bank, &bankName, &bankShortName, &minAmt, &maxAmt, &minTenor, &maxTenor, &minHeld, &maxHeld, &pType, &pValue, &calcMethod, &noInterest, &desc, &effFrom, &effTo, &isActive, &isDeleted, &createdAt, &updatedAt)
@@ -2053,10 +2217,22 @@ func GetPenaltyStructure(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		result := map[string]interface{}{
-			"penalty_id":                      pid,
-			"bank_code":                       bank,
-			"bank_name":                       bankName,
-			"bank_short_name":                 bankShortName,
+			"penalty_id": pid,
+			"bank_code":  bank,
+			"bank_name": func() string {
+				n, _ := bankNameShortFromCode(ctx, bank)
+				if n == "" {
+					return bankName
+				}
+				return n
+			}(),
+			"bank_short_name": func() string {
+				_, s := bankNameShortFromCode(ctx, bank)
+				if s == "" {
+					return bankShortName
+				}
+				return s
+			}(),
 			"min_amount_range":                minAmt,
 			"max_amount_range":                maxAmt,
 			"min_tenor_days":                  minTenor,

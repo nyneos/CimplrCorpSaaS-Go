@@ -7,13 +7,13 @@ import (
 	dinojobs "CimplrCorpSaas/internal/jobs/dino"
 	"CimplrCorpSaas/internal/logger"
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -51,11 +51,13 @@ const (
 	errMethodNotAllowed             = constants.ErrMethodNotAllowed
 )
 
-// stripPathPrefix removes /cimplrapigateway from the request path before routing
-func stripPathPrefix(next http.Handler) http.Handler {
+// stripPathPrefix removes the configured path prefix from the request path before routing.
+// The prefix is passed from services.yaml gateway config (path_prefix key).
+func stripPathPrefix(next http.Handler, pathPrefix string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/cimplrapigateway/") {
-			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/cimplrapigateway")
+		prefix := strings.TrimRight(pathPrefix, "/")
+		if prefix != "" && strings.HasPrefix(r.URL.Path, prefix+"/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
 			if !strings.HasPrefix(r.URL.Path, "/") {
 				r.URL.Path = "/" + r.URL.Path
 			}
@@ -68,6 +70,7 @@ func stripPathPrefix(next http.Handler) http.Handler {
 var (
 	authService     *auth.AuthService
 	authServiceOnce sync.Once
+	ssoConfig       *auth.SSOConfig
 )
 
 func isDevMode() bool {
@@ -78,6 +81,7 @@ func isDevMode() bool {
 func SetAuthService(svc *auth.AuthService) {
 	authServiceOnce.Do(func() {
 		authService = svc
+		ssoConfig = auth.LoadSSOConfig()
 	})
 }
 
@@ -141,6 +145,8 @@ func GetSessionByUserIDHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // LoginHandler handles POST /auth/login
+// After password verification, if MFA is enabled for the user, returns
+// { "mfa_pending": true, "user_id": "..." } instead of a full session.
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
@@ -159,15 +165,25 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientIP := extractClientIP(r)
-	session, err := authService.Login(req.Username, req.Password, clientIP) // Pass IP here
+	session, mfaPending, err := authService.Login(req.Username, req.Password, clientIP)
 	if err != nil {
-		// Log and return JSON error to aid debugging (temporary)
 		log.Printf("Login failed for %s from %s: %v", req.Username, clientIP, err)
 		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+
+	if mfaPending {
+		w.Header().Set(headerContentType, contentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mfa_pending": true,
+			"user_id":     session.UserID,
+			"message":     "MFA verification required",
+		})
+		return
+	}
+
 	w.Header().Set(headerContentType, contentTypeJSON)
 	json.NewEncoder(w).Encode(session)
 }
@@ -196,7 +212,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		http.Error(w, "user_id required", http.StatusBadRequest)
+		http.Error(w, constants.ErrUserIDRequired, http.StatusBadRequest)
 		return
 	}
 	if authService == nil {
@@ -528,7 +544,7 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 }
 
 // StartGateway starts the API gateway server
-func StartGateway() {
+func StartGateway(port string, pathPrefix string) {
 	mux := http.NewServeMux()
 
 	// Initialize and register the SSE server at /events
@@ -656,6 +672,13 @@ func StartGateway() {
 			"ENABLE_ADMIN_OVERRIDE", "ADMIN_USER_IDS", "ADMIN_ROLES", "DEVEL_MODE",
 			"PAYLOAD_ENC_KEY", "RESPONSE_ENC_KEY", "CATEGORIZATION_SCHEDULE",
 			"CATEGORIZATION_BATCH_SIZE", "STREAM_ACCESS_KEYS",
+			// Browser push / VAPID
+			"VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT",
+			"BROWSER_PUSH_ENABLED", "BROWSER_PUSH_POLL_SECS", "BROWSER_PUSH_BATCH_SIZE",
+			"BROWSER_PUSH_DIGEST_MINS", "BROWSER_PUSH_DIGEST_THROTTLE", "BROWSER_PUSH_DIGEST_TOP_N",
+			// Outbox worker
+			"OUTBOX_WORKER_ENABLED", "OUTBOX_WORKER_POLL_SECS",
+			"OUTBOX_WORKER_BATCH_SIZE", "OUTBOX_WORKER_TIMEOUT_SECS",
 		}
 		envEntries := []map[string]string{}
 		for _, k := range envKeys {
@@ -698,6 +721,40 @@ func StartGateway() {
 	mux.HandleFunc("/auth/logout", withCORS(LogoutHandler))
 	mux.HandleFunc("/get-sessions", withCORS(GetSessionsHandler))
 	mux.HandleFunc("/auth/session", withCORS(GetSessionByUserIDHandler))
+
+	// SSO (Multi-provider: Microsoft Azure AD + Google)
+	if ssoConfig != nil && ssoConfig.HasAnyProvider() {
+		mux.HandleFunc("/auth/sso/providers", withCORS(auth.SSOProvidersHandler(ssoConfig)))
+		mux.HandleFunc("/auth/sso/login", withCORS(auth.SSOLoginRedirect(ssoConfig)))
+		if authService != nil {
+			mux.HandleFunc("/auth/sso/callback/", withCORS(auth.SSOCallbackHandler(ssoConfig, authService.DB())))
+			mux.HandleFunc("/auth/sso/logout", withCORS(auth.SSOLogoutHandler(ssoConfig, authService.DB())))
+		}
+		log.Println("SSO endpoints enabled")
+	} else {
+		log.Println("SSO endpoints disabled — set AZURE_CLIENT_ID or GOOGLE_CLIENT_ID to enable")
+	}
+
+	// MFA (TOTP)
+	if authService != nil {
+		mfaDB := authService.DB()
+		mux.HandleFunc("/auth/mfa/setup", withCORS(auth.MFASetupHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/confirm", withCORS(auth.MFAConfirmHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/verify", withCORS(auth.MFAVerifyHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/disable", withCORS(auth.MFADisableHandler(mfaDB)))
+		mux.HandleFunc("/auth/mfa/status", withCORS(auth.MFAStatusHandler(mfaDB)))
+		log.Println("MFA (TOTP) endpoints enabled")
+	}
+
+	// Password Reset (Forgot / Reset)
+	if authService != nil {
+		pwDB := authService.DB()
+		mux.HandleFunc("/auth/forgot-password", withCORS(auth.ForgotPasswordHandler(pwDB)))
+		mux.HandleFunc("/auth/reset-password", withCORS(auth.ResetPasswordHandler(pwDB)))
+		mux.HandleFunc("/auth/validate-reset-token", withCORS(auth.ValidateResetTokenHandler(pwDB)))
+		log.Println("Password reset endpoints enabled")
+	}
+
 	mux.HandleFunc("/fx/", createReverseProxy("http://localhost:3143"))
 	mux.HandleFunc("/dash/", createReverseProxy("http://localhost:4143"))
 	mux.HandleFunc("/uam/", createReverseProxy("http://localhost:5143"))
@@ -706,12 +763,12 @@ func StartGateway() {
 	mux.HandleFunc("/investment/", createReverseProxy("http://localhost:7143"))
 	mux.HandleFunc("/notification/", createReverseProxy("http://localhost:9111"))
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("API Gateway is active"))
-	})
+	}))
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		logr := logger.GlobalLogger
 		msg := "[Gateway] [Error] " + r.URL.Path + " from " + r.RemoteAddr + " (route not found)"
 		if logr != nil {
@@ -721,15 +778,14 @@ func StartGateway() {
 		}
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("404 - Route not found"))
-	})
-
-	log.Println("API Gateway started on :8081")
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
+	}))
+	u := os.Getenv("PORT")
+	if port != (u) && u != "" {
+		log.Printf("Prioitizing env Port %s over yaml port %s (if deployment didn't have that port open)", os.Getenv("PORT"), port)
+		port = os.Getenv("PORT")
 	}
-	log.Printf("API Gateway listening on :%s", port)
-	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux))))
+	log.Printf("API Gateway listening on :%s (path prefix: %s)", port, pathPrefix)
+	handler := encryptResponse(LoggingMiddleware(decryptPayload(stripPathPrefix(mux, pathPrefix))))
 	cert := os.Getenv("TLS_CERT")
 	key := os.Getenv("TLS_KEY")
 	var err error

@@ -14,14 +14,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartMasterService(db *sql.DB) {
+func StartMasterService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
+	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
@@ -96,25 +96,25 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/v2/cashflow-category/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCashFlowCategories(pgxPool)))
 	mux.Handle("/master/cashflow-category/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategory(pgxPool)))
 
-	mux.Handle("/master/cashflow-category/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadCashFlowCategorySimple(pgxPool)))
+	mux.Handle("/master/cashflow-category/upload-simple", (allMaster.UploadCashFlowCategorySimple(pgxPool)))
 	// Currency Master routes (pgx-backed)
-	mux.Handle("/master/currency/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateCurrencyMaster(pgxPool)))
-	mux.Handle("/master/currency/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllCurrencyMaster(pgxPool)))
-	mux.Handle("/master/currency/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateCurrencyMasterBulk(pgxPool)))
-	mux.Handle("/master/currency/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveAuditActions(pgxPool)))
-	mux.Handle("/master/currency/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectAuditActions(pgxPool)))
-	mux.Handle("/master/currency/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteCurrencyAudit(pgxPool)))
-	mux.Handle("/master/currency/active-approved", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
+	mux.Handle("/master/currency/create", (allMaster.CreateCurrencyMaster(pgxPool)))
+	mux.Handle("/master/currency/all", (allMaster.GetAllCurrencyMaster(pgxPool)))
+	mux.Handle("/master/currency/update", (allMaster.UpdateCurrencyMasterBulk(pgxPool)))
+	mux.Handle("/master/currency/bulk-approve", (allMaster.BulkApproveAuditActions(pgxPool)))
+	mux.Handle("/master/currency/bulk-reject", (allMaster.BulkRejectAuditActions(pgxPool)))
+	mux.Handle("/master/currency/bulk-delete", (allMaster.BulkDeleteCurrencyAudit(pgxPool)))
+	mux.Handle("/master/currency/active-approved", (allMaster.GetActiveApprovedCurrencyCodes(pgxPool)))
 
 	// Bank Master routes (pgx-backed)
-	mux.Handle("/master/bank/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankMaster(pgxPool)))
-	mux.Handle("/master/bank/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadBank(pgxPool)))
-	mux.Handle("/master/bank/all", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAllBankMaster(pgxPool)))
-	mux.Handle("/master/bank/names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetBankNamesWithID(pgxPool)))
-	mux.Handle("/master/bank/update", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateBankMasterBulk(pgxPool)))
-	mux.Handle("/master/bank/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectBankAuditActions(pgxPool)))
-	mux.Handle("/master/bank/bulk-delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkDeleteBankAudit(pgxPool)))
+	mux.Handle("/master/bank/create", (allMaster.CreateBankMaster(pgxPool)))
+	mux.Handle("/master/bank/upload", (allMaster.UploadBank(pgxPool)))
+	mux.Handle("/master/bank/all", (allMaster.GetAllBankMaster(pgxPool)))
+	mux.Handle("/master/bank/names", (allMaster.GetBankNamesWithID(pgxPool)))
+	mux.Handle("/master/bank/update", (allMaster.UpdateBankMasterBulk(pgxPool)))
+	mux.Handle("/master/bank/bulk-approve", (allMaster.BulkApproveBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-reject", (allMaster.BulkRejectBankAuditActions(pgxPool)))
+	mux.Handle("/master/bank/bulk-delete", (allMaster.BulkDeleteBankAudit(pgxPool)))
 
 	// Bank Account Master routes
 	mux.Handle("/master/bankaccount/create", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateBankAccountMaster(pgxPool)))
@@ -342,7 +342,8 @@ func StartMasterService(db *sql.DB) {
 	mux.Handle("/master/bank-rate-card/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankRateCardSimple(pgxPool)))
 	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
 
-	err = http.ListenAndServe(":2143", mux)
+	log.Printf("Master Service started on :%s", port)
+	err = http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}

@@ -140,29 +140,29 @@ func UpsertNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		pos := 1
 
 		if req.IsEnabled != nil {
-			sets = append(sets, fmt.Sprintf("is_enabled = $%d", pos))
+			sets = append(sets, fmt.Sprintf(constants.FormatIsEnabled, pos))
 			args = append(args, *req.IsEnabled)
 			pos++
 		}
 		if req.RetryMax != nil {
-			sets = append(sets, fmt.Sprintf("retry_max = $%d", pos))
+			sets = append(sets, fmt.Sprintf(constants.FormatRetryMax, pos))
 			args = append(args, *req.RetryMax)
 			pos++
 		}
 		if req.RetryBackoffSec != nil {
-			sets = append(sets, fmt.Sprintf("retry_backoff_secs = $%d", pos))
+			sets = append(sets, fmt.Sprintf(constants.FormatRetryBackoffSecs, pos))
 			args = append(args, *req.RetryBackoffSec)
 			pos++
 		}
 		if req.PriorityLevel != nil {
-			sets = append(sets, fmt.Sprintf("priority_level = $%d", pos))
+			sets = append(sets, fmt.Sprintf(constants.FormatPriorityLevel, pos))
 			args = append(args, *req.PriorityLevel)
 			pos++
 		}
-		sets = append(sets, fmt.Sprintf("updated_by = $%d", pos))
+		sets = append(sets, fmt.Sprintf(constants.FormatUpdatedBy, pos))
 		args = append(args, editor)
 		pos++
-		sets = append(sets, "updated_at = now()")
+		sets = append(sets, constants.FormatUpdatedAt)
 
 		// Defaults for the INSERT path
 		isEnabled := true
@@ -239,10 +239,19 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req.Channel = strings.ToUpper(strings.TrimSpace(req.Channel))
 
 		ctx := r.Context()
+		buNames, isAdmin := callerContext(ctx)
 
 		var whereParts []string
 		var args []interface{}
 		pos := 1
+
+		// Entity filter: restrict to configs whose parent event is in caller's accessible pool.
+		// buNames is already resolved by PreValidation middleware \u2014 no extra DB call.
+		if !isAdmin && len(buNames) > 0 {
+			whereParts = append(whereParts, fmt.Sprintf("(COALESCE(e.entity_name,'') = '' OR COALESCE(e.entity_name,'') = ANY($%d::text[]))", pos))
+			args = append(args, buNames)
+			pos++
+		}
 		if req.EventID != "" {
 			whereParts = append(whereParts, fmt.Sprintf("nc.event_id = $%d", pos))
 			args = append(args, req.EventID)
@@ -448,22 +457,22 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var uArgs []interface{}
 			uPos := 1
 			if row.IsEnabled != nil {
-				sets = append(sets, fmt.Sprintf("is_enabled = $%d", uPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatIsEnabled, uPos))
 				uArgs = append(uArgs, *row.IsEnabled)
 				uPos++
 			}
 			if row.RetryMax != nil {
-				sets = append(sets, fmt.Sprintf("retry_max = $%d", uPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatRetryMax, uPos))
 				uArgs = append(uArgs, *row.RetryMax)
 				uPos++
 			}
 			if row.RetryBackoffSec != nil {
-				sets = append(sets, fmt.Sprintf("retry_backoff_secs = $%d", uPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatRetryBackoffSecs, uPos))
 				uArgs = append(uArgs, *row.RetryBackoffSec)
 				uPos++
 			}
 			if row.PriorityLevel != nil {
-				sets = append(sets, fmt.Sprintf("priority_level = $%d", uPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatPriorityLevel, uPos))
 				uArgs = append(uArgs, *row.PriorityLevel)
 				uPos++
 			}
@@ -471,7 +480,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: "no fields to update"})
 				continue
 			}
-			sets = append(sets, fmt.Sprintf("updated_by = $%d", uPos), "updated_at = now()")
+			sets = append(sets, fmt.Sprintf(constants.FormatUpdatedBy, uPos), constants.FormatUpdatedAt)
 			uArgs = append(uArgs, editor)
 			uPos++
 			uArgs = append(uArgs, configID)
@@ -486,7 +495,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			if err := tx.QueryRow(ctx, updQ, uArgs...).Scan(
 				&newConfigID, &newEventID, &newChannel, &newEnabled, &newRetry, &newBackoff, &newPriority,
 			); err != nil {
-				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: "update failed: " + err.Error()})
+				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrUpdateFailed + err.Error()})
 				continue
 			}
 
@@ -501,7 +510,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				row.Reason, editor,
 				oldEnabled, oldRetryMax, oldRetryBackoff, oldPriority,
 			); err != nil {
-				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: "audit insert failed: " + err.Error()})
+				results = append(results, result{ConfigID: configID, EventID: row.EventID, Channel: row.Channel, Success: false, Error: constants.ErrAuditInsertFailed + err.Error()})
 				continue
 			}
 
@@ -519,7 +528,7 @@ func ToggleNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 
@@ -594,7 +603,7 @@ func BulkApproveNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 
@@ -708,29 +717,29 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			var rArgs []interface{}
 			rPos := 1
 			if rb.oldEnabled != nil {
-				sets = append(sets, fmt.Sprintf("is_enabled = $%d", rPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatIsEnabled, rPos))
 				rArgs = append(rArgs, *rb.oldEnabled)
 				rPos++
 			}
 			if rb.oldRetryMax != nil {
-				sets = append(sets, fmt.Sprintf("retry_max = $%d", rPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatRetryMax, rPos))
 				rArgs = append(rArgs, *rb.oldRetryMax)
 				rPos++
 			}
 			if rb.oldRetryBackoff != nil {
-				sets = append(sets, fmt.Sprintf("retry_backoff_secs = $%d", rPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatRetryBackoffSecs, rPos))
 				rArgs = append(rArgs, *rb.oldRetryBackoff)
 				rPos++
 			}
 			if rb.oldPriority != nil {
-				sets = append(sets, fmt.Sprintf("priority_level = $%d", rPos))
+				sets = append(sets, fmt.Sprintf(constants.FormatPriorityLevel, rPos))
 				rArgs = append(rArgs, *rb.oldPriority)
 				rPos++
 			}
 			if len(sets) == 0 {
 				continue
 			}
-			sets = append(sets, fmt.Sprintf("updated_by = $%d", rPos), "updated_at = now()")
+			sets = append(sets, fmt.Sprintf(constants.FormatUpdatedBy, rPos), constants.FormatUpdatedAt)
 			rArgs = append(rArgs, checker, rb.configID)
 			rPos++
 			rQ := fmt.Sprintf("UPDATE notification_svc.notification_config SET %s WHERE config_id = $%d", strings.Join(sets, ", "), rPos)
@@ -740,7 +749,7 @@ func BulkRejectNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			api.RespondWithPayload(w, false, "commit failed: "+err.Error(), nil)
+			api.RespondWithPayload(w, false, constants.ErrCommitFailed+err.Error(), nil)
 			return
 		}
 

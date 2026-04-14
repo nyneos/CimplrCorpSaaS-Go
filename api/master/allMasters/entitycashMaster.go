@@ -1196,22 +1196,142 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 }
 
 // Delete cash entity (and descendants if Delete-Approval)
+// func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
+// 	return func(w http.ResponseWriter, r *http.Request) {
+// 		ctx := r.Context()
+// 		var req struct {
+// 			EntityID string `json:"entity_id"`
+// 			Reason   string `json:"reason"`
+// 			UserID   string `json:"user_id"`
+// 		}
+// 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.EntityID == "" || req.UserID == "" {
+// 			api.RespondWithError(w, http.StatusBadRequest, "Missing entity_id or user_id in body")
+// 			return
+// 		}
+// 		// Get requested_by from session
+// 		requestedBy := ""
+// 		sessions := auth.GetActiveSessions()
+// 		for _, s := range sessions {
+// 			if s.UserID == req.UserID {
+// 				requestedBy = s.Name
+// 				break
+// 			}
+// 		}
+// 		if requestedBy == "" {
+// 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+// 			return
+// 		}
+// 		// Fetch all relationships
+// 		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
+// 		if err != nil {
+// 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships")
+// 			if statusCode == http.StatusOK {
+// 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+// 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+// 			} else {
+// 				api.RespondWithError(w, statusCode, errMsg)
+// 			}
+// 			return
+// 		}
+// 		defer relRows.Close()
+// 		parentMap := map[string][]string{}
+// 		for relRows.Next() {
+// 			var parent, child string
+// 			if err := relRows.Scan(&parent, &child); err == nil {
+// 				parentMap[parent] = append(parentMap[parent], child)
+// 			}
+// 		}
+// 		// Traverse descendants
+// 		getAllDescendants := func(ids []string) []string {
+// 			all := map[string]bool{}
+// 			queue := append([]string{}, ids...)
+// 			for _, id := range ids {
+// 				all[id] = true
+// 			}
+// 			for len(queue) > 0 {
+// 				current := queue[0]
+// 				queue = queue[1:]
+// 				for _, child := range parentMap[current] {
+// 					if !all[child] {
+// 						all[child] = true
+// 						queue = append(queue, child)
+// 					}
+// 				}
+// 			}
+// 			result := []string{}
+// 			for id := range all {
+// 				result = append(result, id)
+// 			}
+// 			return result
+// 		}
+// 		allToDelete := getAllDescendants([]string{req.EntityID})
+// 		// Mark all for delete approval
+// 		// rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, allToDelete)
+// 		// if err != nil {
+// 		// 	errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities for deletion")
+// 		// 	if statusCode == http.StatusOK {
+// 		// 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+// 		// 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+// 		// 	} else {
+// 		// 		api.RespondWithError(w, statusCode, errMsg)
+// 		// 	}
+// 		// 	return
+// 		// }
+// 		// defer rows.Close()
+// 		// updated := []string{}
+// 		// for rows.Next() {
+// 		// 	var eid string
+// 		// 	if err := rows.Scan(&eid); err == nil {
+// 		// 		updated = append(updated, eid)
+// 		// 	}
+// 		// }
+
+//			// Insert audit actions for all
+//			updated := allToDelete // since actual delete is done via approva
+//			var auditErrors []string
+//			for _, eid := range updated {
+//				auditQuery := `INSERT INTO auditactionentity (
+//						entity_id, actiontype, processing_status, reason, requested_by, requested_at
+//					) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`
+//				_, auditErr := pgxPool.Exec(ctx, auditQuery, eid, req.Reason, requestedBy)
+//				if auditErr != nil {
+//					auditErrors = append(auditErrors, eid+":"+auditErr.Error())
+//				}
+//			}
+//			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+//			success := len(auditErrors) == 0 && len(updated) > 0
+//			resp := map[string]interface{}{
+//				constants.ValueSuccess: success,
+//				"updated":              updated,
+//			}
+//			if len(auditErrors) > 0 {
+//				resp["audit_errors"] = auditErrors
+//			}
+//			if len(updated) == 0 {
+//				resp["message"] = "No entities found to delete"
+//			}
+//			json.NewEncoder(w).Encode(resp)
+//		}
+//	}
 func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+
 		var req struct {
 			EntityID string `json:"entity_id"`
 			Reason   string `json:"reason"`
 			UserID   string `json:"user_id"`
 		}
+
+		// ── 1. Validate request ─────────────────────────────
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.EntityID == "" || req.UserID == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "Missing entity_id or user_id in body")
 			return
 		}
-		// Get requested_by from session
+
+		// ── 2. Validate session ─────────────────────────────
 		requestedBy := ""
-		sessions := auth.GetActiveSessions()
-		for _, s := range sessions {
+		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == req.UserID {
 				requestedBy = s.Name
 				break
@@ -1221,93 +1341,121 @@ func DeleteCashEntity(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// Fetch all relationships
-		relRows, err := pgxPool.Query(ctx, `SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity relationships")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+
+		// ── 3. Get entity_name from entity_id ────────────────
+		var rootName string
+		err := pgxPool.QueryRow(ctx,
+			`SELECT entity_name FROM masterentitycash WHERE entity_id = $1 AND is_deleted = false`,
+			req.EntityID,
+		).Scan(&rootName)
+
+		if err != nil || rootName == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid or already deleted entity_id")
 			return
 		}
-		defer relRows.Close()
-		parentMap := map[string][]string{}
-		for relRows.Next() {
+
+		// ── 4. Build parent map (name आधारित) ───────────────
+		rows, err := pgxPool.Query(ctx,
+			`SELECT parent_entity_name, child_entity_name FROM cashentityrelationships`,
+		)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch relationships")
+			return
+		}
+		defer rows.Close()
+
+		parentMap := make(map[string][]string)
+		for rows.Next() {
 			var parent, child string
-			if err := relRows.Scan(&parent, &child); err == nil {
+			if err := rows.Scan(&parent, &child); err == nil {
 				parentMap[parent] = append(parentMap[parent], child)
 			}
 		}
-		// Traverse descendants
-		getAllDescendants := func(ids []string) []string {
-			all := map[string]bool{}
-			queue := append([]string{}, ids...)
-			for _, id := range ids {
-				all[id] = true
-			}
+
+		// ── 5. Traverse hierarchy using NAMES ───────────────
+		getAllDescendants := func(start string) []string {
+			visited := make(map[string]bool)
+			queue := []string{start}
+			visited[start] = true
+
 			for len(queue) > 0 {
-				current := queue[0]
+				curr := queue[0]
 				queue = queue[1:]
-				for _, child := range parentMap[current] {
-					if !all[child] {
-						all[child] = true
+
+				for _, child := range parentMap[curr] {
+					if !visited[child] {
+						visited[child] = true
 						queue = append(queue, child)
 					}
 				}
 			}
-			result := []string{}
-			for id := range all {
-				result = append(result, id)
+
+			result := make([]string, 0, len(visited))
+			for k := range visited {
+				result = append(result, k)
 			}
 			return result
 		}
-		allToDelete := getAllDescendants([]string{req.EntityID})
-		// Mark all for delete approval
-		rows, err := pgxPool.Query(ctx, `UPDATE masterentitycash SET is_deleted = true WHERE entity_id = ANY($1) RETURNING entity_id`, allToDelete)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to mark entities for deletion")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+
+		allNames := getAllDescendants(rootName)
+
+		if len(allNames) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No entities found for deletion")
 			return
 		}
-		defer rows.Close()
-		updated := []string{}
-		for rows.Next() {
-			var eid string
-			if err := rows.Scan(&eid); err == nil {
-				updated = append(updated, eid)
+
+		// ── 6. Convert names → entity_ids ───────────────────
+		idRows, err := pgxPool.Query(ctx,
+			`SELECT entity_id FROM masterentitycash WHERE entity_name = ANY($1) AND is_deleted = false`,
+			allNames,
+		)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch entity IDs")
+			return
+		}
+		defer idRows.Close()
+
+		var allIDs []string
+		for idRows.Next() {
+			var id string
+			if err := idRows.Scan(&id); err == nil {
+				allIDs = append(allIDs, id)
 			}
 		}
-		// Insert audit actions for all
+
+		if len(allIDs) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "No valid entities found to delete")
+			return
+		}
+
+		// ── 7. Insert audit entries (NO delete yet) ─────────
 		var auditErrors []string
-		for _, eid := range updated {
-			auditQuery := `INSERT INTO auditactionentity (
+
+		for _, eid := range allIDs {
+			_, err := pgxPool.Exec(ctx, `
+				INSERT INTO auditactionentity (
 					entity_id, actiontype, processing_status, reason, requested_by, requested_at
-				) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`
-			_, auditErr := pgxPool.Exec(ctx, auditQuery, eid, req.Reason, requestedBy)
-			if auditErr != nil {
-				auditErrors = append(auditErrors, eid+":"+auditErr.Error())
+				)
+				VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())
+				ON CONFLICT DO NOTHING
+			`, eid, req.Reason, requestedBy)
+
+			if err != nil {
+				auditErrors = append(auditErrors, eid+":"+err.Error())
 			}
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		success := len(auditErrors) == 0 && len(updated) > 0
+
+		// ── 8. Response ────────────────────────────────────
 		resp := map[string]interface{}{
-			constants.ValueSuccess: success,
-			"updated":              updated,
+			constants.ValueSuccess: len(auditErrors) == 0,
+			"affected_entity_ids":  allIDs,
+			"affected_names":       allNames,
 		}
+
 		if len(auditErrors) > 0 {
 			resp["audit_errors"] = auditErrors
 		}
-		if len(updated) == 0 {
-			resp["message"] = "No entities found to delete"
-		}
+
 		json.NewEncoder(w).Encode(resp)
 	}
 }
@@ -2070,24 +2218,132 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// ─────────────────────────────────────────────
+//  Validation error types
+// ─────────────────────────────────────────────
+
+// UploadValidationResult tracks whether pre-flight validation passed.
+// On first failure we capture a human-readable message and stop collecting.
+type UploadValidationResult struct {
+	Valid      bool
+	TotalRows  int
+	FirstError string // the one error surfaced to the caller
+}
+
+// addErr records the first error and marks the result invalid.
+func (r *UploadValidationResult) addErr(row int, field, value, msg string) {
+	if r.FirstError == "" {
+		if row > 0 {
+			r.FirstError = fmt.Sprintf("Row %d — %s: %s", row, field, msg)
+		} else {
+			r.FirstError = msg
+		}
+	}
+	r.Valid = false
+}
+
+// uploadEntityError writes a flat {success:false, error:"…"} JSON response.
+func uploadEntityError(w http.ResponseWriter, statusCode int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": false,
+		"error":   msg,
+	})
+}
+
+// uploadEntityValidationFail writes a flat 422 with the first validation error.
+func uploadEntityValidationFail(w http.ResponseWriter, result UploadValidationResult) {
+	uploadEntityError(w, http.StatusUnprocessableEntity, result.FirstError)
+}
+
+// ─────────────────────────────────────────────
+//  csvEntityRow: parsed, normalised row from the file
+// ─────────────────────────────────────────────
+
+type csvEntityRow struct {
+	EntityName                string
+	EntityShortName           string
+	EntityLevel               int // -1 = not supplied
+	ParentEntityName          string
+	IsTopLevelEntity          *bool // nil = not supplied
+	ActiveStatus              string
+	UniqueIdentifier          string
+	EntityRegistrationNumber  string
+	Country                   string
+	BaseOperatingCurrency     string
+	TaxIdentificationNumber   string
+	AddressLine1              string
+	AddressLine2              string
+	City                      string
+	StateProvince             string
+	PostalCode                string
+	ContactPersonName         string
+	ContactPersonEmail        string
+	ContactPersonPhone        string
+	PanGst                    string
+	LegalEntityIdentifier     string
+	LegalEntityType           string
+	ReportingCurrency         string
+	FxTradingAuthority        string
+	InternalFxTradingLimit    string
+	AssociatedTreasuryContact string
+	AssociatedBusinessUnits   string
+	Comments                  string
+}
+
+// parseLevelString: "Level 0" → 0, "0" → 0, "1" → 1 …
+func parseLevelString(s string) (int, bool) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	for _, prefix := range []string{"level ", "lvl ", "level-", "lvl-"} {
+		if strings.HasPrefix(s, prefix) {
+			s = strings.TrimPrefix(s, prefix)
+			break
+		}
+	}
+	switch s {
+	case "0":
+		return 0, true
+	case "1":
+		return 1, true
+	case "2":
+		return 2, true
+	case "3":
+		return 3, true
+	}
+	return -1, false
+}
+
+func parseBoolString(s string) *bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "true", "yes", "1", "y":
+		v := true
+		return &v
+	case "false", "no", "0", "n":
+		v := false
+		return &v
+	}
+	return nil
+}
+
+func strVal(rec []string, pos map[string]int, key string) string {
+	i, ok := pos[key]
+	if !ok || i >= len(rec) {
+		return ""
+	}
+	return strings.TrimSpace(rec[i])
+}
+
+// ─────────────────────────────────────────────
+//  UploadEntitySimple — rewritten handler
+// ─────────────────────────────────────────────
+
 func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		startOverall := time.Now()
 		ctx := r.Context()
 
-		// Quick index ensure (non-fatal)
-		_ = func() error {
-			cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			_, err := pgxPool.Exec(cctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_masterentitycash_name ON masterentitycash (entity_name)`)
-			if err != nil {
-				log.Printf("[UploadEntitySimple] warn: ensure index failed: %v", err)
-			}
-			_, _ = pgxPool.Exec(cctx, `ANALYZE masterentitycash`)
-			return nil
-		}()
-
-		// 1) identify user
+		// ── 1. Identify user ──────────────────────────────────────────────
 		userID := r.FormValue(constants.KeyUserID)
 		if userID == "" {
 			var body struct {
@@ -2097,7 +2353,7 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			userID = body.UserID
 		}
 		if userID == "" {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
+			uploadEntityError(w, http.StatusBadRequest, "user_id is required")
 			return
 		}
 		userName := ""
@@ -2108,85 +2364,345 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 		if userName == "" {
-			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSession)
+			uploadEntityError(w, http.StatusUnauthorized, "Invalid or expired session. Please log in again.")
 			return
 		}
 
-		// 2) parse multipart & file (supports CSV and XLSX via shared parser)
+		// ── 2. Parse multipart & file ─────────────────────────────────────
 		if err := r.ParseMultipartForm(128 << 20); err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to parse multipart form")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, http.StatusBadRequest, "Could not parse the uploaded form. Please try again.")
 			return
 		}
 		f, fh, err := r.FormFile("file")
 		if err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrFileUploadFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, http.StatusBadRequest, "No file found in the request. Please attach a CSV or XLSX file.")
 			return
 		}
 		defer f.Close()
 
 		records, err := parseCashFlowCategoryFile(f, getFileExt(fh.Filename))
 		if err != nil || len(records) < 2 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+			uploadEntityError(w, http.StatusBadRequest,
+				fmt.Sprintf("File '%s' is empty or could not be read. Ensure it has a header row and at least one data row.", fh.Filename))
 			return
 		}
+
 		header := normalizeHeader(records[0])
 		dataRows := records[1:]
 
-		// Get user's accessible entities and currencies from context
-		ctx = r.Context()
+		// ── 3. Build header position map ─────────────────────────────────
+		pos := make(map[string]int, len(header))
+		for i, h := range header {
+			pos[h] = i
+		}
+
+		for _, required := range []string{"entity_name", "entity_level"} {
+			if _, ok := pos[required]; !ok {
+				uploadEntityError(w, http.StatusBadRequest,
+					fmt.Sprintf("Missing required column '%s'. Please check your file template.", required))
+				return
+			}
+		}
+
+		// ── 4. Context: accessible currencies & entities ──────────────────
 		currCodes := api.GetCurrencyCodesFromCtx(ctx)
 		accessibleEntityNames := api.GetEntityNamesFromCtx(ctx)
 
-		// allowed columns mapping (extend if needed)
-		allowed := map[string]bool{
-			"entity_name": true, "entity_short_name": true, "entity_level": true,
-			"parent_entity_name": true, "entity_registration_number": true,
-			"country": true, "base_operating_currency": true, "tax_identification_number": true,
-			"address_line1": true, "address_line2": true, "city": true, "state_province": true, "postal_code": true,
-			"contact_person_name": true, "contact_person_email": true, "contact_person_phone": true,
-			"active_status": true, "is_top_level_entity": true,
-			// newly supported columns
-			"pan_gst": true, "legal_entity_identifier": true, "legal_entity_type": true,
-			"reporting_currency": true, "fx_trading_authority": true, "internal_fx_trading_limit": true,
-			"associated_treasury_contact": true, "associated_business_units": true, "comments": true, "unique_identifier": true,
+		// ── 5. Parse all rows into typed structs ──────────────────────────
+		parsed := make([]csvEntityRow, 0, len(dataRows))
+		for _, rec := range dataRows {
+			lvlStr := strVal(rec, pos, "entity_level")
+			lvl := -1
+			if lvlStr != "" {
+				if v, ok := parseLevelString(lvlStr); ok {
+					lvl = v
+				}
+			}
+			row := csvEntityRow{
+				EntityName:                strVal(rec, pos, "entity_name"),
+				EntityShortName:           strVal(rec, pos, "entity_short_name"),
+				EntityLevel:               lvl,
+				ParentEntityName:          strVal(rec, pos, "parent_entity_name"),
+				IsTopLevelEntity:          parseBoolString(strVal(rec, pos, "is_top_level_entity")),
+				ActiveStatus:              strVal(rec, pos, "active_status"),
+				UniqueIdentifier:          strVal(rec, pos, "unique_identifier"),
+				EntityRegistrationNumber:  strVal(rec, pos, "entity_registration_number"),
+				Country:                   strVal(rec, pos, "country"),
+				BaseOperatingCurrency:     strVal(rec, pos, "base_operating_currency"),
+				TaxIdentificationNumber:   strVal(rec, pos, "tax_identification_number"),
+				AddressLine1:              strVal(rec, pos, "address_line1"),
+				AddressLine2:              strVal(rec, pos, "address_line2"),
+				City:                      strVal(rec, pos, "city"),
+				StateProvince:             strVal(rec, pos, "state_province"),
+				PostalCode:                strVal(rec, pos, "postal_code"),
+				ContactPersonName:         strVal(rec, pos, "contact_person_name"),
+				ContactPersonEmail:        strVal(rec, pos, "contact_person_email"),
+				ContactPersonPhone:        strVal(rec, pos, "contact_person_phone"),
+				PanGst:                    strVal(rec, pos, "pan_gst"),
+				LegalEntityIdentifier:     strVal(rec, pos, "legal_entity_identifier"),
+				LegalEntityType:           strVal(rec, pos, "legal_entity_type"),
+				ReportingCurrency:         strVal(rec, pos, "reporting_currency"),
+				FxTradingAuthority:        strVal(rec, pos, "fx_trading_authority"),
+				InternalFxTradingLimit:    strVal(rec, pos, "internal_fx_trading_limit"),
+				AssociatedTreasuryContact: strVal(rec, pos, "associated_treasury_contact"),
+				AssociatedBusinessUnits:   strVal(rec, pos, "associated_business_units"),
+				Comments:                  strVal(rec, pos, "comments"),
+			}
+			parsed = append(parsed, row)
 		}
 
-		copyCols := make([]string, 0, len(header))
-		headerPos := make(map[string]int, len(header))
-		for i, h := range header {
-			headerPos[h] = i
-			if allowed[h] {
-				copyCols = append(copyCols, h)
+		// ── 6. PHASE 1: Per-row static validation ────────────────────────
+		result := UploadValidationResult{Valid: true, TotalRows: len(parsed)}
+
+		batchNames := make(map[string]int, len(parsed))
+		// track unique_identifier occurrences in the file to detect duplicates within the upload
+		batchUIDs := make(map[string]int, len(parsed))
+		for i, row := range parsed {
+			rowNum := i + 2
+			name := row.EntityName
+
+			if name == "" {
+				result.addErr(rowNum, "entity_name", "", "entity_name is required and cannot be empty")
+				continue
+			}
+
+			if firstRow, seen := batchNames[strings.ToLower(name)]; seen {
+				result.addErr(rowNum, "entity_name", name,
+					fmt.Sprintf("Duplicate entity_name in file — also appears at row %d", firstRow))
+			} else {
+				batchNames[strings.ToLower(name)] = rowNum
+			}
+
+			// unique_identifier must be unique within the file
+			if row.UniqueIdentifier != "" {
+				if firstRow, seen := batchUIDs[strings.ToLower(row.UniqueIdentifier)]; seen {
+					result.addErr(rowNum, "unique_identifier", row.UniqueIdentifier,
+						fmt.Sprintf("Duplicate unique_identifier in file — also appears at row %d", firstRow))
+				} else {
+					batchUIDs[strings.ToLower(row.UniqueIdentifier)] = rowNum
+				}
+			}
+
+			// entity_level and parent_entity_name consistency is NOT validated here —
+			// the hierarchy algorithm (Phase 3) auto-recalculates actual level from the
+			// parent chain. Errors are only raised if a parent is missing from both the
+			// file and the DB, or if the resolved depth exceeds Level 3.
+
+			if row.BaseOperatingCurrency != "" && len(currCodes) > 0 &&
+				!api.IsCurrencyAllowed(ctx, row.BaseOperatingCurrency) {
+				result.addErr(rowNum, "base_operating_currency", row.BaseOperatingCurrency,
+					fmt.Sprintf("Currency '%s' is not in your accessible currency list", row.BaseOperatingCurrency))
+			}
+
+			if row.Country == "" {
+				result.addErr(rowNum, "country", "", "country is required")
+			}
+
+			if row.BaseOperatingCurrency == "" {
+				result.addErr(rowNum, "base_operating_currency", "", "base_operating_currency is required")
+			}
+
+			if row.UniqueIdentifier == "" {
+				result.addErr(rowNum, "unique_identifier", "", "unique_identifier is required and cannot be empty")
+			}
+
+			if row.ActiveStatus != "" {
+				switch strings.ToLower(row.ActiveStatus) {
+				case "active", "inactive":
+					// ok
+				default:
+					result.addErr(rowNum, "active_status", row.ActiveStatus,
+						"active_status must be 'Active' or 'Inactive'")
+				}
 			}
 		}
-		// require entity_name and entity_level
-		if !(contains(copyCols, "entity_name") && contains(copyCols, "entity_level")) {
-			api.RespondWithError(w, http.StatusBadRequest, "CSV/XLSX must include entity_name and entity_level")
+
+		if !result.Valid {
+			uploadEntityValidationFail(w, result)
 			return
 		}
 
-		// 3) start transaction
+		// ── 7. PHASE 2: DB-level validation ──────────────────────────────
+		allBatchNames := make([]string, 0, len(parsed))
+		for _, row := range parsed {
+			if row.EntityName != "" {
+				allBatchNames = append(allBatchNames, row.EntityName)
+			}
+		}
+
+		allParentNames := make([]string, 0)
+		parentNameSet := make(map[string]struct{})
+		for _, row := range parsed {
+			if row.ParentEntityName != "" {
+				lc := strings.ToLower(row.ParentEntityName)
+				if _, seen := parentNameSet[lc]; !seen {
+					parentNameSet[lc] = struct{}{}
+					allParentNames = append(allParentNames, row.ParentEntityName)
+				}
+			}
+		}
+
+		lookupNames := append(allBatchNames, allParentNames...)
+		dbEntities := make(map[string]struct {
+			Level  int
+			Parent string
+		})
+
+		if len(lookupNames) > 0 {
+			dbRows, err := pgxPool.Query(ctx,
+				`SELECT entity_name, entity_level, COALESCE(parent_entity_name, '')
+				 FROM masterentitycash
+				 WHERE entity_name = ANY($1) AND is_deleted = false`,
+				lookupNames,
+			)
+			if err != nil {
+				errMsg, _ := getUserFriendlyEntityCashError(err, "Could not validate against existing records")
+				uploadEntityError(w, http.StatusInternalServerError, errMsg)
+				return
+			}
+			for dbRows.Next() {
+				var name, parent string
+				var level int
+				if err := dbRows.Scan(&name, &level, &parent); err == nil {
+					dbEntities[strings.ToLower(name)] = struct {
+						Level  int
+						Parent string
+					}{level, parent}
+				}
+			}
+			dbRows.Close()
+		}
+
+		// ── 7b. Validate parent existence ────────────────────────────────
+		knownNames := make(map[string]struct{})
+		for k := range dbEntities {
+			knownNames[k] = struct{}{}
+		}
+		for k := range batchNames {
+			knownNames[k] = struct{}{}
+		}
+
+		for i, row := range parsed {
+			rowNum := i + 2
+			if row.ParentEntityName == "" {
+				continue
+			}
+			lc := strings.ToLower(row.ParentEntityName)
+			if _, parentKnown := knownNames[lc]; !parentKnown {
+				// Also check accessible entity names (context-based access control)
+				parentAllowed := false
+				for _, n := range accessibleEntityNames {
+					if strings.EqualFold(strings.TrimSpace(n), row.ParentEntityName) {
+						parentAllowed = true
+						break
+					}
+				}
+				if !parentAllowed {
+					result.addErr(rowNum, "parent_entity_name", row.ParentEntityName,
+						fmt.Sprintf(
+							"Parent entity '%s' does not exist in the system and is not in this upload. "+
+								"Add the parent entity first, or include it in the same file.",
+							row.ParentEntityName))
+				}
+			}
+		}
+
+		// Also validate that no unique_identifier from the upload already exists in the DB
+		// Build list of unique_identifiers to check
+		uidsToCheck := make([]string, 0, len(batchUIDs))
+		for uid := range batchUIDs {
+			uidsToCheck = append(uidsToCheck, uid)
+		}
+		if len(uidsToCheck) > 0 {
+			var existingUID string
+			rows, err := pgxPool.Query(ctx, `SELECT unique_identifier FROM masterentitycash WHERE lower(unique_identifier) = ANY($1) AND is_deleted = false`, uidsToCheck)
+			if err != nil {
+				errMsg, _ := getUserFriendlyEntityCashError(err, "Could not validate unique identifiers against existing records")
+				uploadEntityError(w, http.StatusInternalServerError, errMsg)
+				return
+			}
+			for rows.Next() {
+				if err := rows.Scan(&existingUID); err == nil && existingUID != "" {
+					if rowNum, ok := batchUIDs[strings.ToLower(existingUID)]; ok {
+						result.addErr(rowNum, "unique_identifier", existingUID,
+							"unique_identifier already exists in the system — uploads must use a new unique_identifier or update via edit API")
+					}
+				}
+			}
+			rows.Close()
+		}
+
+		if !result.Valid {
+			uploadEntityValidationFail(w, result)
+			return
+		}
+
+		// ── 8. AUTO-CALCULATE hierarchy levels ───────────────────────────
+		resolved := make(map[string]int, len(parsed))
+		for k, e := range dbEntities {
+			resolved[k] = e.Level
+		}
+
+		for pass := 0; pass < 4; pass++ {
+			progress := false
+			for i := range parsed {
+				row := &parsed[i]
+				lc := strings.ToLower(row.EntityName)
+				if _, done := resolved[lc]; done {
+					continue
+				}
+				if row.EntityLevel == 0 || row.ParentEntityName == "" {
+					resolved[lc] = 0
+					row.EntityLevel = 0
+					top := true
+					row.IsTopLevelEntity = &top
+					progress = true
+					continue
+				}
+				parentLC := strings.ToLower(row.ParentEntityName)
+				if parentLevel, parentDone := resolved[parentLC]; parentDone {
+					computed := parentLevel + 1
+					if computed > 3 {
+						result.addErr(i+2, "entity_level", fmt.Sprintf("%d", computed),
+							fmt.Sprintf(
+								"Entity '%s' would be at Level %d (parent '%s' is Level %d). "+
+									"Maximum depth is Level 3.",
+								row.EntityName, computed, row.ParentEntityName, parentLevel))
+						continue
+					}
+					resolved[lc] = computed
+					row.EntityLevel = computed
+					top := (computed == 0)
+					row.IsTopLevelEntity = &top
+					progress = true
+				}
+			}
+			if !progress {
+				break
+			}
+		}
+
+		for i, row := range parsed {
+			lc := strings.ToLower(row.EntityName)
+			if _, done := resolved[lc]; !done {
+				result.addErr(i+2, "parent_entity_name", row.ParentEntityName,
+					fmt.Sprintf(
+						"Could not resolve hierarchy for '%s'. "+
+							"Check for circular parent references in the file.",
+						row.EntityName))
+			}
+		}
+
+		if !result.Valid {
+			uploadEntityValidationFail(w, result)
+			return
+		}
+
+		// ── 9. Begin transaction & write ─────────────────────────────────
 		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrTxStartFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
 		defer func() {
@@ -2195,285 +2711,351 @@ func UploadEntitySimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}()
 
-		// session tuning
-		if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit = OFF"); err != nil {
-			log.Printf("[UploadEntitySimple] warn: set synchronous_commit failed: %v", err)
-		}
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'"); err != nil {
-			log.Printf("[UploadEntitySimple] warn: set statement_timeout failed: %v", err)
+		_, _ = tx.Exec(ctx, "SET LOCAL synchronous_commit = OFF")
+		_, _ = tx.Exec(ctx, "SET LOCAL statement_timeout = '10min'")
+
+		// Ensure index (non-fatal, outside tx to avoid temp-table conflicts)
+		{
+			cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, _ = pgxPool.Exec(cctx,
+				`CREATE UNIQUE INDEX IF NOT EXISTS idx_masterentitycash_name ON masterentitycash (entity_name)`)
 		}
 
-		// create temp table like master (safe with ON COMMIT DROP)
-		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_me (LIKE masterentitycash INCLUDING DEFAULTS) ON COMMIT DROP`); err != nil {
+		// ── 9a. Temp table ────────────────────────────────────────────────
+		if _, err := tx.Exec(ctx,
+			`CREATE TEMP TABLE tmp_me (LIKE masterentitycash INCLUDING DEFAULTS) ON COMMIT DROP`,
+		); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to create temp table")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
 
-		// Build copyRows in memory (simpler and supports XLSX)
-		copyRows := make([][]interface{}, 0, len(dataRows))
-		skipped := 0
-		for rowIdx, rec := range dataRows {
-			// Validate currency if present
-			currencyCol := headerPos["base_operating_currency"]
-			if currencyCol < len(rec) {
-				currency := strings.TrimSpace(rec[currencyCol])
-				if currency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, currency) {
-					log.Printf("[UploadEntitySimple] Row %d skipped: invalid currency %s", rowIdx+2, currency)
-					skipped++
-					continue
-				}
-			}
-
-			// Validate parent entity if present
-			parentCol := headerPos["parent_entity_name"]
-			if parentCol < len(rec) {
-				parentName := strings.TrimSpace(rec[parentCol])
-				if parentName != "" && len(accessibleEntityNames) > 0 {
-					parentAllowed := false
-					for _, name := range accessibleEntityNames {
-						if strings.EqualFold(strings.TrimSpace(name), parentName) {
-							parentAllowed = true
-							break
-						}
-					}
-					if !parentAllowed {
-						log.Printf("[UploadEntitySimple] Row %d skipped: parent entity not in accessible hierarchy: %s", rowIdx+2, parentName)
-						skipped++
-						continue
-					}
-				}
-			}
-
-			row := make([]interface{}, len(copyCols))
-			for j, col := range copyCols {
-				if pos, ok := headerPos[col]; ok && pos < len(rec) {
-					cell := strings.TrimSpace(rec[pos])
-					if cell == "" {
-						row[j] = nil
-					} else {
-						row[j] = cell
-					}
-				} else {
-					row[j] = nil
-				}
-			}
-			copyRows = append(copyRows, row)
+		// ── 9b. Build COPY rows ───────────────────────────────────────────
+		copyCols := []string{
+			"entity_name", "entity_short_name", "entity_level", "parent_entity_name",
+			"is_top_level_entity", "active_status", "unique_identifier",
+			"entity_registration_number", "country", "base_operating_currency",
+			"tax_identification_number",
+			"address_line1", "address_line2", "city", "state_province", "postal_code",
+			"contact_person_name", "contact_person_email", "contact_person_phone",
+			"pan_gst", "legal_entity_identifier", "legal_entity_type",
+			"reporting_currency", "fx_trading_authority", "internal_fx_trading_limit",
+			"associated_treasury_contact", "associated_business_units", "comments",
 		}
-		rowsCopied := len(copyRows)
-		tStart := time.Now()
-		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_me"}, copyCols, pgx.CopyFromRows(copyRows)); err != nil {
+
+		nullIfEmpty := func(s string) interface{} {
+			if s == "" {
+				return nil
+			}
+			return s
+		}
+
+		copyRows := make([][]interface{}, 0, len(parsed))
+		for _, row := range parsed {
+			isTop := row.IsTopLevelEntity != nil && *row.IsTopLevelEntity
+			// Default to Active; only set Inactive when the column is explicitly 'inactive'
+			activeStatus := "Active"
+			if strings.EqualFold(strings.TrimSpace(row.ActiveStatus), "inactive") {
+				activeStatus = "Inactive"
+			}
+			copyRows = append(copyRows, []interface{}{
+				row.EntityName,
+				nullIfEmpty(row.EntityShortName),
+				row.EntityLevel,
+				nullIfEmpty(row.ParentEntityName),
+				isTop,
+				activeStatus,
+				nullIfEmpty(row.UniqueIdentifier),
+				nullIfEmpty(row.EntityRegistrationNumber),
+				row.Country,
+				row.BaseOperatingCurrency,
+				nullIfEmpty(row.TaxIdentificationNumber),
+				nullIfEmpty(row.AddressLine1),
+				nullIfEmpty(row.AddressLine2),
+				nullIfEmpty(row.City),
+				nullIfEmpty(row.StateProvince),
+				nullIfEmpty(row.PostalCode),
+				nullIfEmpty(row.ContactPersonName),
+				nullIfEmpty(row.ContactPersonEmail),
+				nullIfEmpty(row.ContactPersonPhone),
+				nullIfEmpty(row.PanGst),
+				nullIfEmpty(row.LegalEntityIdentifier),
+				nullIfEmpty(row.LegalEntityType),
+				nullIfEmpty(row.ReportingCurrency),
+				nullIfEmpty(row.FxTradingAuthority),
+				nullIfEmpty(row.InternalFxTradingLimit),
+				nullIfEmpty(row.AssociatedTreasuryContact),
+				nullIfEmpty(row.AssociatedBusinessUnits),
+				nullIfEmpty(row.Comments),
+			})
+		}
+
+		tCopy := time.Now()
+		if _, err := tx.CopyFrom(ctx,
+			pgx.Identifier{"tmp_me"}, copyCols, pgx.CopyFromRows(copyRows),
+		); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "COPY failed")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
-		log.Printf("[UploadEntitySimple] COPY rows=%d elapsed=%v skipped=%d", rowsCopied, time.Since(tStart), skipped)
+		log.Printf("[UploadEntitySimple] COPY rows=%d elapsed=%v", len(copyRows), time.Since(tCopy))
 
-		if _, err := tx.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_tmp_me_name ON tmp_me (entity_name)`); err != nil {
-			log.Printf("[UploadEntitySimple] warn: create index tmp_me failed: %v", err)
+		if _, err := tx.Exec(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_tmp_me_name ON tmp_me (entity_name)`,
+		); err != nil {
+			log.Printf("[UploadEntitySimple] warn: index on tmp_me: %v", err)
 		}
 
-		// 4) insert new entities (anti-join by name)
+		// ── 9c. INSERT new entities ───────────────────────────────────────
 		t1 := time.Now()
-
 		if _, err := tx.Exec(ctx, `
 INSERT INTO masterentitycash (
-	entity_name, entity_short_name, entity_level, entity_registration_number,
-	country, base_operating_currency, tax_identification_number,
+	entity_name, entity_short_name, entity_level, parent_entity_name,
+	is_top_level_entity, active_status, unique_identifier,
+	entity_registration_number, country, base_operating_currency, tax_identification_number,
 	address_line1, address_line2, city, state_province, postal_code,
 	contact_person_name, contact_person_email, contact_person_phone,
-	active_status, is_top_level_entity, is_deleted, parent_entity_name, unique_identifier
+	pan_gst, legal_entity_identifier, legal_entity_type,
+	reporting_currency, fx_trading_authority, internal_fx_trading_limit,
+	associated_treasury_contact, associated_business_units, comments,
+	is_deleted
 )
 SELECT
-	t.entity_name, t.entity_short_name, t.entity_level, t.entity_registration_number,
-	t.country, t.base_operating_currency, t.tax_identification_number,
+	t.entity_name, t.entity_short_name, t.entity_level, t.parent_entity_name,
+	t.is_top_level_entity, COALESCE(NULLIF(t.active_status,''), 'Inactive'), t.unique_identifier,
+	t.entity_registration_number, t.country, t.base_operating_currency, t.tax_identification_number,
 	t.address_line1, t.address_line2, t.city, t.state_province, t.postal_code,
 	t.contact_person_name, t.contact_person_email, t.contact_person_phone,
-	COALESCE(t.active_status, 'Inactive'),
-	COALESCE(t.is_top_level_entity, false),
-	false,
-	t.parent_entity_name, t.unique_identifier
+	t.pan_gst, t.legal_entity_identifier, t.legal_entity_type,
+	t.reporting_currency, t.fx_trading_authority, t.internal_fx_trading_limit,
+	t.associated_treasury_contact, t.associated_business_units, t.comments,
+	false
 FROM tmp_me t
-LEFT JOIN masterentitycash m ON m.entity_name = t.entity_name
+LEFT JOIN masterentitycash m ON m.entity_name = t.entity_name AND m.is_deleted = false
 WHERE m.entity_name IS NULL;
 `); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Insert failed")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
-		log.Printf("[UploadEntitySimple] insert elapsed=%v", time.Since(t1))
+		log.Printf("[UploadEntitySimple] INSERT elapsed=%v", time.Since(t1))
 
-		// 5) update existing entities if changed (by name)
+		// ── 9d. UPDATE changed existing entities ─────────────────────────
 		t2 := time.Now()
 		if _, err := tx.Exec(ctx, `
 UPDATE masterentitycash m
 SET
-	entity_short_name = t.entity_short_name,
-	entity_level = t.entity_level,
+	entity_short_name          = t.entity_short_name,
+	entity_level               = t.entity_level,
+	parent_entity_name         = t.parent_entity_name,
+	is_top_level_entity        = t.is_top_level_entity,
 	entity_registration_number = t.entity_registration_number,
-	country = t.country,
-	base_operating_currency = t.base_operating_currency,
-	tax_identification_number = t.tax_identification_number,
-	address_line1 = t.address_line1,
-	address_line2 = t.address_line2,
-	city = t.city,
-	state_province = t.state_province,
-	postal_code = t.postal_code,
-	contact_person_name = t.contact_person_name,
-	contact_person_email = t.contact_person_email,
-	contact_person_phone = t.contact_person_phone,
-	active_status = COALESCE(t.active_status, m.active_status),
-	is_top_level_entity = COALESCE(t.is_top_level_entity, m.is_top_level_entity),
-	
-	parent_entity_name = t.parent_entity_name
+	country                    = t.country,
+	base_operating_currency    = t.base_operating_currency,
+	tax_identification_number  = t.tax_identification_number,
+	address_line1              = t.address_line1,
+	address_line2              = t.address_line2,
+	city                       = t.city,
+	state_province             = t.state_province,
+	postal_code                = t.postal_code,
+	contact_person_name        = t.contact_person_name,
+	contact_person_email       = t.contact_person_email,
+	contact_person_phone       = t.contact_person_phone,
+	active_status              = COALESCE(NULLIF(t.active_status, ''), m.active_status),
+	pan_gst                    = COALESCE(t.pan_gst,                    m.pan_gst),
+	legal_entity_identifier    = COALESCE(t.legal_entity_identifier,    m.legal_entity_identifier),
+	legal_entity_type          = COALESCE(t.legal_entity_type,          m.legal_entity_type),
+	reporting_currency         = COALESCE(t.reporting_currency,         m.reporting_currency),
+	fx_trading_authority       = COALESCE(t.fx_trading_authority,       m.fx_trading_authority),
+	internal_fx_trading_limit  = COALESCE(t.internal_fx_trading_limit,  m.internal_fx_trading_limit),
+	associated_treasury_contact= COALESCE(t.associated_treasury_contact,m.associated_treasury_contact),
+	associated_business_units  = COALESCE(t.associated_business_units,  m.associated_business_units),
+	comments                   = COALESCE(t.comments,                   m.comments),
+	unique_identifier          = COALESCE(t.unique_identifier,          m.unique_identifier)
 FROM tmp_me t
 WHERE m.entity_name = t.entity_name
-AND (
-	m.entity_short_name IS DISTINCT FROM t.entity_short_name OR
-	m.entity_level IS DISTINCT FROM t.entity_level OR
+  AND m.is_deleted  = false
+  AND (
+	m.entity_short_name          IS DISTINCT FROM t.entity_short_name OR
+	m.entity_level               IS DISTINCT FROM t.entity_level OR
+	m.parent_entity_name         IS DISTINCT FROM t.parent_entity_name OR
+	m.is_top_level_entity        IS DISTINCT FROM t.is_top_level_entity OR
 	m.entity_registration_number IS DISTINCT FROM t.entity_registration_number OR
-	m.country IS DISTINCT FROM t.country OR
-	m.base_operating_currency IS DISTINCT FROM t.base_operating_currency OR
-	m.tax_identification_number IS DISTINCT FROM t.tax_identification_number OR
-	m.address_line1 IS DISTINCT FROM t.address_line1 OR
-	m.address_line2 IS DISTINCT FROM t.address_line2 OR
-	m.city IS DISTINCT FROM t.city OR
-	m.state_province IS DISTINCT FROM t.state_province OR
-	m.postal_code IS DISTINCT FROM t.postal_code OR
-	m.contact_person_name IS DISTINCT FROM t.contact_person_name OR
-	m.contact_person_email IS DISTINCT FROM t.contact_person_email OR
-	m.contact_person_phone IS DISTINCT FROM t.contact_person_phone OR
-	m.active_status IS DISTINCT FROM COALESCE(t.active_status, m.active_status) OR
-	m.is_top_level_entity IS DISTINCT FROM COALESCE(t.is_top_level_entity, m.is_top_level_entity) OR
-	
-	m.parent_entity_name IS DISTINCT FROM t.parent_entity_name
-);
+	m.country                    IS DISTINCT FROM t.country OR
+	m.base_operating_currency    IS DISTINCT FROM t.base_operating_currency OR
+	m.tax_identification_number  IS DISTINCT FROM t.tax_identification_number OR
+	m.address_line1              IS DISTINCT FROM t.address_line1 OR
+	m.address_line2              IS DISTINCT FROM t.address_line2 OR
+	m.city                       IS DISTINCT FROM t.city OR
+	m.state_province             IS DISTINCT FROM t.state_province OR
+	m.postal_code                IS DISTINCT FROM t.postal_code OR
+	m.contact_person_name        IS DISTINCT FROM t.contact_person_name OR
+	m.contact_person_email       IS DISTINCT FROM t.contact_person_email OR
+	m.contact_person_phone       IS DISTINCT FROM t.contact_person_phone OR
+	m.active_status              IS DISTINCT FROM COALESCE(NULLIF(t.active_status,''), m.active_status)
+  );
 `); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrUpdateFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
-		log.Printf("[UploadEntitySimple] update elapsed=%v", time.Since(t2))
+		log.Printf("[UploadEntitySimple] UPDATE elapsed=%v", time.Since(t2))
 
-		// 6) hierarchy sync (recalc levels for affected and their descendants up to depth 3)
+		// ── 9e. Hierarchy sync (cascade to descendants up to L3) ─────────
 		t3 := time.Now()
 		if _, err := tx.Exec(ctx, `
-WITH RECURSIVE affected AS (
-  SELECT entity_id, entity_name, parent_entity_name, 0 AS lvl
-  FROM masterentitycash
-  WHERE entity_name IN (SELECT entity_name FROM tmp_me)
+WITH RECURSIVE sync AS (
+  SELECT
+    m.entity_id,
+    m.entity_name,
+    m.parent_entity_name,
+    CASE
+      WHEN m.parent_entity_name IS NULL OR m.parent_entity_name = ''
+        THEN 0
+      ELSE COALESCE(p.entity_level, 0) + 1
+    END AS correct_level
+  FROM masterentitycash m
+  LEFT JOIN masterentitycash p
+         ON p.entity_name = m.parent_entity_name
+        AND p.is_deleted = false
+  WHERE m.entity_name IN (SELECT entity_name FROM tmp_me)
+    AND m.is_deleted = false
 
   UNION ALL
 
-  SELECT c.entity_id, c.entity_name, c.parent_entity_name, CASE WHEN a.lvl + 1 > 3 THEN 3 ELSE a.lvl + 1 END
+  SELECT
+    c.entity_id,
+    c.entity_name,
+    c.parent_entity_name,
+    s.correct_level + 1
   FROM masterentitycash c
-  JOIN affected a ON c.parent_entity_name = a.entity_name
-  WHERE a.lvl < 3
+  JOIN sync s ON c.parent_entity_name = s.entity_name
+  WHERE c.is_deleted = false
+    AND s.correct_level < 3
 )
 UPDATE masterentitycash m
-SET entity_level = a.lvl,
-    is_top_level_entity = (a.lvl = 0)
-FROM affected a
-WHERE m.entity_id = a.entity_id;
+SET
+  entity_level        = s.correct_level,
+  is_top_level_entity = (s.correct_level = 0)
+FROM sync s
+WHERE m.entity_id = s.entity_id
+  AND (
+    m.entity_level        IS DISTINCT FROM s.correct_level OR
+    m.is_top_level_entity IS DISTINCT FROM (s.correct_level = 0)
+  );
 `); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Hierarchy sync failed")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
-		log.Printf("[UploadEntitySimple] hierarchy elapsed=%v", time.Since(t3))
+		log.Printf("[UploadEntitySimple] hierarchy sync elapsed=%v", time.Since(t3))
 
-		// 7) insert missing name-based relationships (parent_name, child_name)
+		// ── 9f. Sync cashentityrelationships ─────────────────────────────
 		t4 := time.Now()
 		if _, err := tx.Exec(ctx, `
 INSERT INTO cashentityrelationships (parent_entity_name, child_entity_name, status)
 SELECT DISTINCT p.entity_name, c.entity_name, 'Active'
 FROM masterentitycash c
 JOIN masterentitycash p ON c.parent_entity_name = p.entity_name
-WHERE (p.entity_name IN (SELECT entity_name FROM tmp_me)
-       OR c.entity_name IN (SELECT entity_name FROM tmp_me))
-ON CONFLICT (parent_entity_name, child_entity_name) DO NOTHING;
+WHERE (
+  p.entity_name IN (SELECT entity_name FROM tmp_me) OR
+  c.entity_name IN (SELECT entity_name FROM tmp_me)
+)
+AND c.is_deleted = false
+AND p.is_deleted = false
+ON CONFLICT (parent_entity_name, child_entity_name) DO UPDATE
+  SET status = 'Active';
 `); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Relationships sync failed")
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
 		log.Printf("[UploadEntitySimple] relationships elapsed=%v", time.Since(t4))
 
-		// 8) audit insert (CREATE for all affected names)
+		// ── 9g. Audit log ────────────────────────────────────────────────
+		// For each uploaded row:
+		//   • New entity   → CREATE / PENDING_APPROVAL  (no old values)
+		//   • Existing entity with any field change → EDIT / PENDING_EDIT_APPROVAL
+		//     Old values (entity_level, is_top_level_entity, parent_entity_name, …)
+		//     are stored as JSON in the `reason` column.
+		//   • Existing entity where nothing changed → no audit row inserted.
 		t5 := time.Now()
-		if _, err := tx.Exec(ctx, `
-INSERT INTO auditactionentity(entity_id, actiontype, processing_status, requested_by, requested_at)
-SELECT m.entity_id, 'CREATE', 'PENDING_APPROVAL', $1, now()
-FROM masterentitycash m
-WHERE m.entity_name IN (SELECT entity_name FROM tmp_me)
-ON CONFLICT DO NOTHING;
-`, userName); err != nil {
-			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrAuditInsertFailed)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
-			return
+		type auditRow struct {
+			EntityID         string
+			ActionType       string
+			ProcessingStatus string
+			Reason           interface{} // nil for CREATE, JSON string for EDIT
 		}
-		log.Printf("[UploadEntitySimple] audit elapsed=%v", time.Since(t5))
+		auditRows := make([]auditRow, 0, len(parsed))
 
-		// commit
+		for _, row := range parsed {
+			var entityID string
+			err := tx.QueryRow(ctx,
+				`SELECT entity_id FROM masterentitycash WHERE entity_name=$1 AND is_deleted=false`,
+				row.EntityName).Scan(&entityID)
+			if err != nil {
+				continue // entity not found; shouldn't happen post-INSERT
+			}
+
+			if _, existedBefore := dbEntities[strings.ToLower(row.EntityName)]; !existedBefore {
+				// Newly created — simple CREATE
+				auditRows = append(auditRows, auditRow{
+					EntityID:         entityID,
+					ActionType:       "CREATE",
+					ProcessingStatus: "PENDING_APPROVAL",
+					Reason:           nil,
+				})
+			} else {
+				// Existing entity — capture old values as JSON reason
+				old := dbEntities[strings.ToLower(row.EntityName)]
+				oldJSON, _ := json.Marshal(map[string]interface{}{
+					"entity_level":        old.Level,
+					"parent_entity_name":  old.Parent,
+					"is_top_level_entity": old.Level == 0,
+				})
+				auditRows = append(auditRows, auditRow{
+					EntityID:         entityID,
+					ActionType:       "EDIT",
+					ProcessingStatus: "PENDING_EDIT_APPROVAL",
+					Reason:           string(oldJSON),
+				})
+			}
+		}
+
+		for _, ar := range auditRows {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO auditactionentity
+				   (entity_id, actiontype, processing_status, reason, requested_by, requested_at)
+				 VALUES ($1,$2,$3,$4,$5,now())
+				 ON CONFLICT DO NOTHING`,
+				ar.EntityID, ar.ActionType, ar.ProcessingStatus, ar.Reason, userName,
+			); err != nil {
+				errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrAuditInsertFailed)
+				uploadEntityError(w, statusCode, errMsg)
+				return
+			}
+		}
+		log.Printf("[UploadEntitySimple] audit rows=%d elapsed=%v", len(auditRows), time.Since(t5))
+
+		// ── 10. Commit ────────────────────────────────────────────────────
 		if err := tx.Commit(ctx); err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, constants.ErrCommitFailedCapitalized)
-			if statusCode == http.StatusOK {
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-			} else {
-				api.RespondWithError(w, statusCode, errMsg)
-			}
+			uploadEntityError(w, statusCode, errMsg)
 			return
 		}
 		tx = nil
 
 		totalDur := time.Since(startOverall)
-		resp := map[string]interface{}{
-			constants.ValueSuccess: true,
-			"file":                 fh.Filename,
-			"rows":                 rowsCopied,
-			"skipped":              skipped,
-			"duration_ms":          totalDur.Milliseconds(),
-			"batch_id":             uuid.New().String(),
-		}
-		log.Printf("[UploadEntitySimple] finished rows=%d skipped=%d total_ms=%d", rowsCopied, skipped, totalDur.Milliseconds())
+		log.Printf("[UploadEntitySimple] done rows=%d total_ms=%d", len(parsed), totalDur.Milliseconds())
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"file":                 fh.Filename,
+			"rows":                 len(parsed),
+			"duration_ms":          totalDur.Milliseconds(),
+			"batch_id":             uuid.New().String(),
+		})
 	}
 }

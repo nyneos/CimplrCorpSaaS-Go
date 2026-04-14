@@ -1411,18 +1411,18 @@ func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// For CSV/XLS the V2 handler fires its own notification via UploadBankStatementV2Handler.
 		if pool != nil {
 			notifPayload := BuildBankStatementPayload(BuildBankStatementParams{
-				BSID: bankStatementID,
-				AccountNumber: accountNumber,
-				Metadata: &payload.Clean.Metadata,
+				BSID:           bankStatementID,
+				AccountNumber:  accountNumber,
+				Metadata:       &payload.Clean.Metadata,
 				OpeningBalance: openingBalance,
 				ClosingBalance: closingBalance,
-				EntityID: entityIDStr,
-				UploadedBy: requestedBy,
-				FileName: "",
-				TXNS: payload.Clean.Transactions,
-				KPICats: kpiCats,
-				CategoryRules: rules,
-				Status: "PENDING_APPROVAL",
+				EntityID:       entityIDStr,
+				UploadedBy:     requestedBy,
+				FileName:       "",
+				TXNS:           payload.Clean.Transactions,
+				KPICats:        kpiCats,
+				CategoryRules:  rules,
+				Status:         "PENDING_APPROVAL",
 			})
 			go notif.TriggerNotification(
 				context.Background(), pool,
@@ -1452,7 +1452,7 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 			}
 			id = body.ID
 		} else {
-			respondWithError(w, nil, "Method not allowed", http.StatusMethodNotAllowed)
+			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -1502,7 +1502,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 			id = body.ID
 			providedUserID = body.UserID
 		} else {
-			respondWithError(w, nil, "Method not allowed", http.StatusMethodNotAllowed)
+			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 

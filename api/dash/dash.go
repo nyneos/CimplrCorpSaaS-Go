@@ -34,14 +34,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartDashService(db *sql.DB) {
+func StartDashService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
-	port := os.Getenv("DB_PORT")
+	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
@@ -111,6 +111,18 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/landingpage/cash", middlewares.PreValidationMiddleware(pgxPool)(landingpage.GetLandingCashDashboard(pgxPool)))
 	// Combined investment overview (aggregates multiple investment endpoints sequentially)
 	mux.Handle("/dash/investment/overview/combined", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetCombinedInvestmentOverview(pgxPool)))
+	// Full portfolio dashboard — all 14 sub-computations concurrently via sync.WaitGroup goroutines
+	// mux.Handle("/dash/investment/portfolio/dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.PortfolioDashboardHandler(pgxPool)))
+	// FD CFO Dashboard — KPIs, charts, governance, FD list (all FD tables, concurrent)
+	mux.Handle("/dash/investment/fd/cfo-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDCfoDashboard(pgxPool)))
+	// FD Treasury Manager Dashboard — surplus deployment, negotiations, maturity ladder, rate heatmap
+	mux.Handle("/dash/investment/fd/treasury-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDTreasuryDashboard(pgxPool)))
+	// FD Operational Team Dashboard — booking queue, confirmations, exceptions, TDS, SLA
+	mux.Handle("/dash/investment/fd/operational-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDOperationalDashboard(pgxPool)))
+	// FD BOD/EOD Control Room — maturities, confirmations due, accrual runs, receipts, GL postings, checklist
+	mux.Handle("/dash/investment/fd/bod-eod-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDBodEodDashboard(pgxPool)))
+	// FD Audit & Governance Dashboard — audit log, maker-checker rate, overrides, missing evidence, period reopens
+	mux.Handle("/dash/investment/fd/audit-dashboard", middlewares.PreValidationMiddleware(pgxPool)(investmentdashboards.GetFDAuditDashboard(pgxPool)))
 
 	// --- Hedging Proposal Dashboard Routes ---
 	// Forward Dashboard
@@ -197,20 +209,21 @@ func StartDashService(db *sql.DB) {
 	mux.Handle("/dash/planned-inflow-outflow", middlewares.PreValidationMiddleware(pgxPool)(plannedinflowoutflowdash.GetPlannedIODash(pgxPool)))
 
 	// ── Notification Dashboard ────────────────────────────────────────────────
-	mux.Handle("/dash/notification/kpi",               middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetKPI(pgxPool)))
-	mux.Handle("/dash/notification/logs",              middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetLogs(pgxPool)))
+	mux.Handle("/dash/notification/kpi", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetKPI(pgxPool)))
+	mux.Handle("/dash/notification/logs", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetLogs(pgxPool)))
 	mux.Handle("/dash/notification/channel-breakdown", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetChannelBreakdown(pgxPool)))
-	mux.Handle("/dash/notification/hourly-trend",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetHourlyTrend(pgxPool)))
-	mux.Handle("/dash/notification/top-events",        middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTopEvents(pgxPool)))
-	mux.Handle("/dash/notification/timeline",          middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTimeline(pgxPool)))
-	mux.Handle("/dash/notification/retry-stats",       middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetRetryStats(pgxPool)))
-	mux.Handle("/dash/notification/send-history",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetSendHistory(pgxPool)))
-	mux.Handle("/dash/notification/provider-stats",    middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetProviderStats(pgxPool)))
-	mux.Handle("/dash/notification/event-config",      middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetEventConfig(pgxPool)))
-	mux.Handle("/dash/notification/overview",          middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
+	mux.Handle("/dash/notification/hourly-trend", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetHourlyTrend(pgxPool)))
+	mux.Handle("/dash/notification/top-events", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTopEvents(pgxPool)))
+	mux.Handle("/dash/notification/timeline", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetTimeline(pgxPool)))
+	mux.Handle("/dash/notification/retry-stats", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetRetryStats(pgxPool)))
+	mux.Handle("/dash/notification/send-history", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetSendHistory(pgxPool)))
+	mux.Handle("/dash/notification/provider-stats", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetProviderStats(pgxPool)))
+	mux.Handle("/dash/notification/event-config", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetEventConfig(pgxPool)))
+	mux.Handle("/dash/notification/failure-reasons", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetFailureReasons(pgxPool)))
+	mux.Handle("/dash/notification/overview", middlewares.PreValidationMiddleware(pgxPool)(notifDash.GetOverview(pgxPool)))
 
-	log.Println("Dashboard Service started on :4143")
-	err = http.ListenAndServe(":4143", mux)
+	log.Printf("Dashboard Service started on :%s", port)
+	err = http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("Dashboard Service failed: %v", err)
 	}

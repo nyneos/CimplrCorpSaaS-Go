@@ -59,7 +59,7 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 	}
 
 	// Check constraint violations - Known error, return 200
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "category_type_check") {
 			return "Invalid category type. Must be 'Inflow' or 'Outflow'.", http.StatusOK
 		}

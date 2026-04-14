@@ -17,6 +17,7 @@ package push
 //      → { "message": "unsubscribed" }
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,9 +32,9 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 type subscribeRequest struct {
-	UserID    string `json:"user_id"`
-	Endpoint  string `json:"endpoint"`
-	Keys      struct {
+	UserID   string `json:"user_id"`
+	Endpoint string `json:"endpoint"`
+	Keys     struct {
 		P256DH string `json:"p256dh"`
 		Auth   string `json:"auth"`
 	} `json:"keys"`
@@ -70,7 +71,7 @@ func withPool(pool *pgxpool.Pool, fn func(http.ResponseWriter, *http.Request, *p
 
 func handleVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 		return
 	}
 	key := strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY"))
@@ -87,7 +88,7 @@ func handleVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
 
 func handleSubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 		return
 	}
 
@@ -102,7 +103,7 @@ func handleSubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 		userID = userIDFromCtx(r)
 	}
 	if userID == "" {
-		writeErr(w, http.StatusUnauthorized, "user_id required")
+		writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 		return
 	}
 	if req.Endpoint == "" || req.Keys.P256DH == "" || req.Keys.Auth == "" {
@@ -139,7 +140,7 @@ func handleSubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool)
 
 func handleUnsubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) {
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeErr(w, http.StatusMethodNotAllowed, constants.ErrMethodNotAllowed)
 		return
 	}
 	var req unsubscribeRequest
@@ -152,7 +153,7 @@ func handleUnsubscribe(w http.ResponseWriter, r *http.Request, pool *pgxpool.Poo
 		userID = userIDFromCtx(r)
 	}
 	if userID == "" {
-		writeErr(w, http.StatusUnauthorized, "user_id required")
+		writeErr(w, http.StatusUnauthorized, constants.ErrUserIDRequired)
 		return
 	}
 

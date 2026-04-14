@@ -44,6 +44,7 @@ package investmentsuite
 //   BySchemeKPIs       — []map{group_name, count, total_net_amount}  grouped by initiation_scheme_name
 
 import (
+	"CimplrCorpSaas/api/constants"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -162,7 +163,7 @@ func computeProposalKPIs(rows []ProposalRow, groupField string) []ProposalKPIRow
 	for _, row := range rows {
 		key := strField(row, groupField)
 		if key == "" {
-			key = "(unknown)"
+			key = constants.Unknown
 		}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &ProposalKPIRow{GroupName: key}
@@ -282,7 +283,7 @@ func computeInitiationKPIs(rows []InitiationRow, groupField string) []Initiation
 	for _, row := range rows {
 		key := strField(row, groupField)
 		if key == "" {
-			key = "(unknown)"
+			key = constants.Unknown
 		}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &InitiationKPIRow{GroupName: key}
@@ -402,7 +403,7 @@ func computeConfirmationKPIs(rows []ConfirmationRow, groupField string) []Confir
 	for _, row := range rows {
 		key := strField(row, groupField)
 		if key == "" {
-			key = "(unknown)"
+			key = constants.Unknown
 		}
 		if _, ok := groups[key]; !ok {
 			groups[key] = &ConfirmationKPIRow{GroupName: key}

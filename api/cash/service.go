@@ -3,6 +3,7 @@ package cash
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 )
 
 type CashService struct {
@@ -19,7 +20,20 @@ func (s *CashService) Name() string {
 }
 
 func (s *CashService) Start() error {
-	go StartCashService(s.db)
+	port := "6143"
+	if s.config != nil {
+		if v, ok := s.config["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartCashService(s.db, port)
 	return nil
 }
 
