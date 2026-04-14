@@ -6,7 +6,6 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -96,10 +95,8 @@ func uploadCashflowProposalService(
 	log.Printf("Created proposal %s", proposalID)
 
 	if s3storage.IsS3UploadEnabled() {
-		hash := sha256.Sum256(fileBytes)
-		fileHash := fmt.Sprintf("%x", hash[:])
 		folder := s3storage.GetStoragePrefix("projection")
-		s3Key = s3storage.BuildS3Key(folder, "cashflow-projection", fileHash, fileExt)
+		s3Key = s3storage.BuildS3Key(folder, proposalID, "", fileExt)
 		contentType := s3storage.DetectContentType(fileBytes)
 		if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
 			return "", 0, http.StatusInternalServerError, fmt.Errorf("Failed to upload file to S3: %s", uploadErr.Error())

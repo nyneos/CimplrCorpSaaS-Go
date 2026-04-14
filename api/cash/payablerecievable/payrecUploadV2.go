@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -97,10 +98,14 @@ func respondWithErrorTransactionV2(w http.ResponseWriter, status int, errMsg str
 	log.Printf("[ERROR] %s", errMsg)
 	w.Header().Set(ContentTypeJSON, ApplicationJSON)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		constants.ValueSuccess: false,
 		constants.ValueError:   errMsg,
-	})
+	}
+	if status == http.StatusBadRequest {
+		response["message"] = errMsg
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // Batch processor for transactions
@@ -373,12 +378,18 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 
 		fileField, fileHeader, err := findTransactionUploadFile(r)
 		if err != nil {
+
 			respondWithErrorTransactionV2(w, http.StatusBadRequest, err.Error())
 			return
 		}
+
 		service := NewTransactionUploadService(pool)
 		result, err := service.UploadTransactionBatch(ctx, fileHeader, fileField, userName)
 		if err != nil {
+			if errors.Is(err, ErrFileAlreadyUploaded) {
+				respondWithErrorTransactionV2(w, http.StatusBadRequest, "This transaction file was already uploaded earlier. Please upload a different file.")
+				return
+			}
 			respondWithErrorTransactionV2(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -394,10 +405,6 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 			"file_storage_key":     result.FileStorageKey,
 			"file_storage_url":     result.FileStorageURL,
 			"message":              fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", result.TotalRecords, result.ProcessedRecords),
-		}
-		if result.Duplicate {
-			response["duplicate"] = true
-			response["message"] = "Duplicate upload detected - returning existing batch"
 		}
 		json.NewEncoder(w).Encode(response)
 	}

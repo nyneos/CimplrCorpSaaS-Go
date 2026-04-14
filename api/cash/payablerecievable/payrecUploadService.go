@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -21,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shakinm/xlsReader/xls"
 )
+
+var ErrFileAlreadyUploaded = errors.New("transaction file already uploaded")
 
 type TransactionUploadResult struct {
 	BatchID          uuid.UUID
@@ -73,6 +76,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 
 	rawPayloads, err := processTransactionFileBytes(fileBytes, fileHeader.Filename, transactionType)
 	if err != nil {
+
 		return nil, err
 	}
 	if len(rawPayloads) == 0 {
@@ -113,19 +117,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 			return nil, fmt.Errorf("failed to finalize duplicate lookup: %w", commitErr)
 		}
 		committed = true
-		dupURL := ""
-		if existingUploadS3Key != nil && strings.TrimSpace(*existingUploadS3Key) != "" {
-			if dupURL, err = s3storage.GetDownloadPresignedURL(ctx, *existingUploadS3Key, 0); err != nil {
-				dupURL = ""
-			}
-		}
-		return &TransactionUploadResult{
-			BatchID:        duplicateBatchID,
-			ProcessedFiles: []string{fileHeader.Filename},
-			FileStorageURL: dupURL,
-			Duplicate:      true,
-			ProcessingTime: time.Since(startTime),
-		}, nil
+		return nil, ErrFileAlreadyUploaded
 	}
 	if err != nil && err != pgx.ErrNoRows {
 		return nil, fmt.Errorf("failed to check for duplicate transaction upload: %w", err)
@@ -147,7 +139,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
 	contentType := s3storage.DetectContentType(fileBytes)
 	folder := s3storage.GetStoragePrefix(fileField)
-	s3Key = s3storage.BuildS3Key(folder, fileField, fileHashHex, ext)
+	s3Key = s3storage.BuildS3Key(folder, "", fileHashHex, ext)
 	s3URL := ""
 	if s3storage.IsS3UploadEnabled() {
 		if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {

@@ -275,6 +275,91 @@ func parseDBValue(col string, val interface{}) interface{} {
 	return val
 }
 
+func resolveUploadMappingValue(staged map[string]interface{}, sourceCol, dataType, tableName string) (interface{}, bool) {
+	switch sourceCol {
+	case dataType:
+		return dataType, true
+	case tableName:
+		return staged, true
+	case "1":
+		return 1, true
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	case "Open", "Pending", "Approved", "Rejected", "Delete-Approval":
+		return sourceCol, true
+	}
+
+	val, ok := staged[sourceCol]
+	return val, ok
+}
+
+func hasNonEmptyUploadValue(v interface{}) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(t) != ""
+	case []byte:
+		return strings.TrimSpace(string(t)) != ""
+	default:
+		return true
+	}
+}
+
+func exposureHeadersHasUploadBatchID(ctx context.Context, db *sql.DB) bool {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.columns
+			WHERE table_name = 'exposure_headers' AND column_name = 'upload_batch_id'
+		)
+	`).Scan(&exists); err != nil {
+		log.Printf("[FX-DOWNLOAD] failed to detect exposure_headers.upload_batch_id: %v", err)
+		return false
+	}
+	return exists
+}
+
+
+func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string) (sql.NullString, error) {
+	var uploadS3Key sql.NullString
+	trimmedRecordID := strings.TrimSpace(recordID)
+	if trimmedRecordID == "" {
+		return sql.NullString{}, sql.ErrNoRows
+	}
+
+	err := db.QueryRowContext(ctx, `
+		SELECT upload_s3_key
+		FROM exposure_headers
+		WHERE exposure_header_id::text = $1
+		LIMIT 1
+	`, trimmedRecordID).Scan(&uploadS3Key)
+	if err == nil && strings.TrimSpace(uploadS3Key.String) != "" {
+		return uploadS3Key, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return sql.NullString{}, err
+	}
+	
+	err = db.QueryRowContext(ctx, `
+		SELECT upload_s3_key
+		FROM exposure_headers
+		WHERE document_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, trimmedRecordID).Scan(&uploadS3Key)
+	if err == nil && strings.TrimSpace(uploadS3Key.String) != "" {
+		return uploadS3Key, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{}, sql.ErrNoRows
+}
+
 // Handler
 func EditExposureHeadersLineItemsJoined(db *sql.DB) http.HandlerFunc {
 	// ...existing code...
@@ -1405,31 +1490,18 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			RecordID      string `json:"record_id"`
-			UploadBatchID string `json:"upload_batch_id"`
+			RecordID string `json:"record_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
-
-		uploadBatchID := strings.TrimSpace(req.UploadBatchID)
-		if uploadBatchID == "" {
-			uploadBatchID = strings.TrimSpace(req.RecordID)
-		}
-		if uploadBatchID == "" {
-			respondWithError(w, http.StatusBadRequest, "upload_batch_id is required")
+		recordID := strings.TrimSpace(req.RecordID)
+		if recordID == "" {
+			respondWithError(w, http.StatusBadRequest, "record_id is required")
 			return
 		}
-
-		var uploadS3Key sql.NullString
-		err := db.QueryRowContext(r.Context(), `
-			SELECT upload_s3_key
-			FROM exposure_headers
-			WHERE upload_batch_id = $1
-			ORDER BY created_at DESC
-			LIMIT 1
-		`, uploadBatchID).Scan(&uploadS3Key)
+		uploadS3Key, err := lookupExposureUploadS3Key(r.Context(), db, recordID)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				respondWithError(w, http.StatusNotFound, "record not found")
@@ -1438,19 +1510,16 @@ func GetExposureDownloadURL(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "failed to fetch record")
 			return
 		}
-
 		s3Key := strings.TrimSpace(uploadS3Key.String)
 		if !uploadS3Key.Valid || s3Key == "" {
 			respondWithError(w, http.StatusNotFound, "no file available for download")
 			return
 		}
-
 		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), s3Key, 15*time.Minute)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
 			return
 		}
-
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -1505,51 +1574,45 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UploadBatchIDs []string `json:"upload_batch_ids"`
+			RecordIDs      []string `json:"record_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
 			return
 		}
 
-		ids := normalizeBulkIDs(req.UploadBatchIDs)
-		if len(ids) == 0 {
-			respondWithError(w, http.StatusBadRequest, "upload_batch_ids is required")
+		recordIDs := normalizeBulkIDs(req.RecordIDs)
+		if len(recordIDs) == 0 {
+			respondWithError(w, http.StatusBadRequest, "record_ids is required")
 			return
 		}
 
 		ctx := r.Context()
-		files := make([]map[string]string, 0, len(ids))
+		files := make([]map[string]string, 0, len(recordIDs))
 		failedIDs := make([]string, 0)
 
-		for _, uploadBatchID := range ids {
-			var uploadS3Key sql.NullString
-			err := db.QueryRowContext(ctx, `
-				SELECT upload_s3_key
-				FROM exposure_headers
-				WHERE upload_batch_id = $1
-				ORDER BY created_at DESC
-				LIMIT 1
-			`, uploadBatchID).Scan(&uploadS3Key)
+		for _, recordID := range recordIDs {
+			uploadS3Key, err := lookupExposureUploadS3Key(ctx, db, recordID)
 			if err != nil {
-				failedIDs = append(failedIDs, uploadBatchID)
+				failedIDs = append(failedIDs, recordID)
 				continue
 			}
 
 			s3Key := strings.TrimSpace(uploadS3Key.String)
 			if !uploadS3Key.Valid || s3Key == "" {
-				failedIDs = append(failedIDs, uploadBatchID)
+				failedIDs = append(failedIDs, recordID)
 				continue
 			}
 
 			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
 			if err != nil {
-				failedIDs = append(failedIDs, uploadBatchID)
+				failedIDs = append(failedIDs, recordID)
 				continue
 			}
 
 			files = append(files, map[string]string{
-				"upload_batch_id": uploadBatchID,
-				"download_url":    downloadURL,
+				"record_id":    recordID,
+				"download_url": downloadURL,
 			})
 		}
 
@@ -1763,12 +1826,17 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					return
 				}
 				s3Key = s3storage.BuildS3Key("fx/exposures", exposureTypeFolder, fileHash, fileExt)
+				log.Printf("[FX-STAGING] UPLOAD START: filename=%s, field.DataType=%s, s3Key=%s, S3Enabled=%v",
+					filename, field.DataType, s3Key, s3storage.IsS3UploadEnabled())
 				if s3storage.IsS3UploadEnabled() {
 					if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, s3storage.DetectContentType(fileBytes)); err != nil {
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to upload file to S3: " + err.Error()})
 						return
 					}
 					uploadedNewObject = true
+					log.Printf("[FX-STAGING] S3 UPLOAD SUCCESS: s3Key=%s", s3Key)
+				} else {
+					log.Printf("[FX-STAGING] S3 DISABLED - file will not be uploaded to S3!")
 				}
 
 				tableColumnsRes, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = $1`, field.TableName)
@@ -1799,6 +1867,11 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 				`).Scan(&hasHeaderUploadBatchID); err != nil {
 					log.Printf("[FX-STAGING] failed to detect exposure_headers.upload_batch_id; proceeding without it: %v", err)
 					hasHeaderUploadBatchID = false
+				}
+
+				persistedS3Key := ""
+				if uploadedNewObject {
+					persistedS3Key = s3Key
 				}
 
 				uploadBatchId := uuid.New().String()
@@ -1851,7 +1924,12 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					insertedRows++
 				}
 
-				mappingRows, err := tx.QueryContext(ctx, `SELECT source_column_name, target_table_name, target_field_name FROM upload_mappings WHERE exposure_type = $1 ORDER BY target_table_name, target_field_name`, field.DataType)
+				mappingRows, err := tx.QueryContext(ctx, `
+					SELECT source_column_name, target_table_name, target_field_name
+					FROM upload_mappings
+					WHERE LOWER(TRIM(exposure_type)) = LOWER(TRIM($1))
+					ORDER BY target_table_name, target_field_name
+				`, field.DataType)
 				insertedFinalRows := 0
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to fetch mapping rows: " + err.Error()})
@@ -1881,6 +1959,38 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					return
 				}
 				mappingRows.Close()
+				if len(mappings) == 0 {
+					results = append(results, map[string]interface{}{
+						"filename":           filename,
+						constants.ValueError: fmt.Sprintf("No upload_mappings found for exposure type %q", field.DataType),
+					})
+					return
+				}
+
+				hasHeaderMapping := false
+				hasLineItemMapping := false
+				for _, m := range mappings {
+					if m.TargetTable == "exposure_headers" {
+						hasHeaderMapping = true
+					}
+					if m.TargetTable == "exposure_line_items" {
+						hasLineItemMapping = true
+					}
+				}
+				if !hasHeaderMapping || !hasLineItemMapping {
+					missingTables := []string{}
+					if !hasHeaderMapping {
+						missingTables = append(missingTables, "exposure_headers")
+					}
+					if !hasLineItemMapping {
+						missingTables = append(missingTables, "exposure_line_items")
+					}
+					results = append(results, map[string]interface{}{
+						"filename":           filename,
+						constants.ValueError: fmt.Sprintf("upload_mappings for exposure type %q are incomplete; missing target table mappings for %s", field.DataType, strings.Join(missingTables, ", ")),
+					})
+					return
+				}
 
 				stagedRows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT * FROM %s WHERE upload_batch_id = $1`, field.TableName), uploadBatchId)
 				if err != nil {
@@ -1912,6 +2022,13 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					return
 				}
 				stagedRows.Close()
+				if len(stagedData) == 0 {
+					results = append(results, map[string]interface{}{
+						"filename":           filename,
+						constants.ValueError: fmt.Sprintf("No staged rows were found in %s for upload_batch_id %s", field.TableName, uploadBatchId),
+					})
+					return
+				}
 
 				for _, staged := range stagedData {
 					header := map[string]interface{}{}
@@ -1962,18 +2079,9 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						if m.TargetTable != "exposure_headers" {
 							continue
 						}
-						var val interface{}
-						switch m.SourceCol {
-						case field.DataType:
-							val = field.DataType
-						case "Open":
-							val = "Open"
-						case "true":
-							val = true
-						case field.TableName:
-							val = staged
-						default:
-							val = staged[m.SourceCol]
+						val, ok := resolveUploadMappingValue(staged, m.SourceCol, field.DataType, field.TableName)
+						if !ok {
+							continue
 						}
 						if m.TargetField == "additional_header_details" {
 							headerDetails[m.SourceCol] = val
@@ -1990,6 +2098,21 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 							}
 							header[m.TargetField] = val
 						}
+					}
+					if !hasNonEmptyUploadValue(header["exposure_type"]) {
+						header["exposure_type"] = field.DataType
+					}
+					if !hasNonEmptyUploadValue(header["status"]) {
+						header["status"] = "Open"
+					}
+					if !hasNonEmptyUploadValue(header["approval_status"]) {
+						header["approval_status"] = "Pending"
+					}
+					if !hasNonEmptyUploadValue(header["exposure_creation_status"]) {
+						header["exposure_creation_status"] = "Approved"
+					}
+					if !hasNonEmptyUploadValue(header["is_active"]) {
+						header["is_active"] = true
 					}
 
 					amountVal, hasAmount := pickAmount(
@@ -2017,7 +2140,8 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 
 					header["additional_header_details"] = headerDetails
-					header["upload_s3_key"] = s3Key
+					header["upload_s3_key"] = persistedS3Key
+					log.Printf("[FX-STAGING] About to insert into exposure_headers with upload_s3_key=%s, upload_batch_id=%s", persistedS3Key, uploadBatchId)
 					if hasHeaderUploadBatchID {
 						header["upload_batch_id"] = uploadBatchId
 					}
@@ -2044,13 +2168,64 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 
 					headerInsert := fmt.Sprintf("INSERT INTO exposure_headers (%s) VALUES (%s) RETURNING exposure_header_id", strings.Join(headerKeys, ", "), strings.Join(headerPlaceholders, ", "))
+					log.Printf("[FX-STAGING] INSERT QUERY: %s", headerInsert)
+					log.Printf("[FX-STAGING] INSERT VALUES count=%d, first few: %v", len(headerVals), headerVals)
+					log.Printf("[FX-STAGING] Trying INSERT into exposure_headers now...")
 					var exposureHeaderId string
 					err := tx.QueryRowContext(ctx, headerInsert, headerVals...).Scan(&exposureHeaderId)
 					if err != nil {
 						absorptionErrors = append(absorptionErrors, fmt.Sprintf("header insert error for file %s: %v", filename, err))
+						log.Printf("[FX-STAGING] INSERT FAILED: %v", err)
 						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
 						return
 					}
+					headerMetaSetParts := []string{}
+					headerMetaVals := []interface{}{}
+					metaIdx := 1
+					if strings.TrimSpace(persistedS3Key) != "" {
+						headerMetaSetParts = append(headerMetaSetParts, fmt.Sprintf("upload_s3_key = $%d", metaIdx))
+						headerMetaVals = append(headerMetaVals, persistedS3Key)
+						metaIdx++
+					}
+					if hasHeaderUploadBatchID && strings.TrimSpace(uploadBatchId) != "" {
+						headerMetaSetParts = append(headerMetaSetParts, fmt.Sprintf("upload_batch_id = $%d", metaIdx))
+						headerMetaVals = append(headerMetaVals, uploadBatchId)
+						metaIdx++
+					}
+					if len(headerMetaSetParts) > 0 {
+						headerMetaVals = append(headerMetaVals, exposureHeaderId)
+						headerMetaUpdate := fmt.Sprintf(
+							"UPDATE exposure_headers SET %s WHERE exposure_header_id = $%d",
+							strings.Join(headerMetaSetParts, ", "),
+							metaIdx,
+						)
+						if _, err := tx.ExecContext(ctx, headerMetaUpdate, headerMetaVals...); err != nil {
+							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload metadata update error for file %s: %v", filename, err))
+							log.Printf("[FX-STAGING] upload metadata update failed: %v", err)
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
+							return
+						}
+					}
+					if strings.TrimSpace(persistedS3Key) != "" {
+						var storedUploadS3Key string
+						if err := tx.QueryRowContext(ctx, `
+							SELECT COALESCE(upload_s3_key, '')
+							FROM exposure_headers
+							WHERE exposure_header_id = $1
+						`, exposureHeaderId).Scan(&storedUploadS3Key); err != nil {
+							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload key verification error for file %s: %v", filename, err))
+							log.Printf("[FX-STAGING] upload key verification failed: %v", err)
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
+							return
+						}
+						if strings.TrimSpace(storedUploadS3Key) != strings.TrimSpace(persistedS3Key) {
+							absorptionErrors = append(absorptionErrors, fmt.Sprintf("header upload key verification failed for file %s: persisted key is empty or mismatched", filename))
+							log.Printf("[FX-STAGING] upload key verification mismatch: expected=%q actual=%q", persistedS3Key, storedUploadS3Key)
+							results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: absorptionErrors[len(absorptionErrors)-1]})
+							return
+						}
+					}
+					log.Printf("[FX-STAGING] INSERT SUCCESS: exposureHeaderId=%s, insertedFinalRows=%d", exposureHeaderId, insertedFinalRows+1)
 					insertedFinalRows++
 
 					line := map[string]interface{}{}
@@ -2059,16 +2234,9 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 						if m.TargetTable != "exposure_line_items" {
 							continue
 						}
-						var val interface{}
-						switch m.SourceCol {
-						case field.DataType:
-							val = field.DataType
-						case "1":
-							val = 1
-						case field.TableName:
-							val = staged
-						default:
-							val = staged[m.SourceCol]
+						val, ok := resolveUploadMappingValue(staged, m.SourceCol, field.DataType, field.TableName)
+						if !ok {
+							continue
 						}
 						if m.TargetField == "additional_line_details" {
 							lineDetails[m.SourceCol] = val
@@ -2127,15 +2295,23 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					}
 				}
 
-				success := insertedFinalRows > 0
-				msg := "Batch uploaded to staging table only"
+				log.Printf("[FX-STAGING] FINAL RESULT: filename=%s, insertedRows=%d, insertedFinalRows=%d, absorptionErrors=%v", filename, insertedRows, insertedFinalRows, absorptionErrors)
+				success := insertedFinalRows > 0 && len(absorptionErrors) == 0
+				msg := fmt.Sprintf("Batch uploaded to staging table only (staged: %d rows, absorbed: %d rows, errors: %d)", insertedRows, insertedFinalRows, len(absorptionErrors))
 				if success {
-					msg = "Batch absorbed into exposures"
+					msg = fmt.Sprintf("Batch absorbed into exposures (%d records created, upload_s3_key: %s)", insertedFinalRows, s3Key)
 				}
+				if len(absorptionErrors) > 0 {
+					msg = "Upload failed: " + absorptionErrors[0]
+					log.Printf("[FX-STAGING] ERROR DETAIL: %v", absorptionErrors)
+				}
+				log.Printf("[FX-STAGING] About to COMMIT transaction...")
 				if err := tx.Commit(); err != nil {
+					log.Printf("[FX-STAGING] COMMIT FAILED: %v", err)
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: "Failed to commit staged exposure upload: " + err.Error()})
 					return
 				}
+				log.Printf("[FX-STAGING] COMMIT SUCCESS for filename=%s", filename)
 				txCommitted = true
 				results = append(results, map[string]interface{}{
 					constants.ValueSuccess: success,

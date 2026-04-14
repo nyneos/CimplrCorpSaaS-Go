@@ -7,7 +7,6 @@ import (
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
-	"crypto/sha256"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -184,10 +183,8 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		log.Printf("Created V2 proposal %s", proposalID)
 
 		if s3storage.IsS3UploadEnabled() {
-			hash := sha256.Sum256(fileBytes)
-			fileHash := fmt.Sprintf("%x", hash[:])
 			folder := s3storage.GetStoragePrefix("projection")
-			s3Key = s3storage.BuildS3Key(folder, "cashflow-projection", fileHash, fileExt)
+			s3Key = s3storage.BuildS3Key(folder, proposalID, "", fileExt)
 			contentType := s3storage.DetectContentType(fileBytes)
 			if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to upload file to S3: "+uploadErr.Error())

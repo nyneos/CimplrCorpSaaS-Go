@@ -512,11 +512,13 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 
 	s3Key := s3storage.BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {
 		if err = s3storage.PutObjectToS3(ctx, s3Key, tmpFile, contentType); err != nil {
 			return nil, fmt.Errorf("failed to store original file to s3: %w", err)
 		}
+		uploadS3Key = sql.NullString{String: s3Key, Valid: true}
 		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
 			log.Printf("[BANK-UPLOAD-DEBUG] failed to presign upload response url for key=%q: %v", s3Key, err)
 			s3URL = ""
@@ -2074,14 +2076,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
 		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_s3_key
+		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		      ON CONFLICT ON CONSTRAINT uniq_stmt
 		      DO UPDATE SET
 			      file_hash = EXCLUDED.file_hash,
-			      closing_balance = EXCLUDED.closing_balance
+			      closing_balance = EXCLUDED.closing_balance,
+			      upload_s3_key = EXCLUDED.upload_s3_key
 		      RETURNING bank_statement_id
-		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
+		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
@@ -2285,7 +2288,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"ungrouped_transaction_count":     ungroupedTxns,
 		"grouped_transaction_percent":     groupedPct,
 		"ungrouped_transaction_percent":   ungroupedPct,
-		"file_storage_key":                s3Key,
+		"file_storage_key":                uploadS3Key.String,
 		"file_storage_url":                s3URL,
 	}
 	return result, nil

@@ -183,6 +183,9 @@ func BuildS3Key(folder, subject, fileHash, fileExt string) string {
 		ext = "." + ext
 	}
 	subjectSafe := sanitizePathSegment(subject)
+	if subjectSafe == "unknown" {
+		return fmt.Sprintf("%s%s%s", folder, fileHash, ext)
+	}
 	return fmt.Sprintf("%s%s/%s%s", folder, subjectSafe, fileHash, ext)
 }
 
