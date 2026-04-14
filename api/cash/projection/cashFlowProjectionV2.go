@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -906,6 +907,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				p.proposal_name,
 				p.base_currency_code,
 				p.effective_date,
+				p.upload_s3_key,
 				COALESCE(a.processing_status, 'N/A') AS processing_status,
 				COUNT(DISTINCT i.item_id) AS item_count
 			FROM cimplrcorpsaas.cashflow_proposal p
@@ -917,7 +919,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				ORDER BY requested_at DESC
 				LIMIT 1
 			) a ON TRUE
-			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, a.processing_status
+			GROUP BY p.proposal_id, p.proposal_name, p.base_currency_code, p.effective_date, p.upload_s3_key, a.processing_status
 			ORDER BY COALESCE((SELECT GREATEST(COALESCE(requested_at, '1970-01-01'::timestamp), COALESCE(checker_at, '1970-01-01'::timestamp)) FROM cimplrcorpsaas.audit_action_cashflow_proposal WHERE proposal_id = p.proposal_id ORDER BY requested_at DESC LIMIT 1), '1970-01-01'::timestamp) DESC
 		`
 
@@ -931,9 +933,10 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		proposals := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var proposalID, proposalName, baseCurrency, status string
+			var uploadS3Key interface{}
 			var effectiveDate time.Time
 			var itemCount int
-			if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &status, &itemCount); err != nil {
+			if err := rows.Scan(&proposalID, &proposalName, &baseCurrency, &effectiveDate, &uploadS3Key, &status, &itemCount); err != nil {
 				continue
 			}
 			proposals = append(proposals, map[string]interface{}{
@@ -941,6 +944,7 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"proposal_name":      proposalName,
 				"base_currency_code": baseCurrency,
 				"effective_date":     effectiveDate.Format(constants.DateFormat),
+				"upload_s3_key":      strings.TrimSpace(ifaceToString(uploadS3Key)),
 				"processing_status":  status,
 				"item_count":         itemCount,
 			})
@@ -950,6 +954,136 @@ func ListProposalsV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
 			"proposals": proposals,
+		})
+	}
+}
+
+// GetProjectionDownloadURLV2 returns a presigned S3 URL for a single V2 proposal upload.
+func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string `json:"user_id"`
+			ProposalID string `json:"proposal_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+
+		if strings.TrimSpace(req.ProposalID) == "" {
+			api.RespondWithResult(w, false, "proposal_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key interface{}
+		if err := pgxPool.QueryRow(ctx, `
+			SELECT upload_s3_key
+			FROM cimplrcorpsaas.cashflow_proposal
+			WHERE proposal_id = $1
+		`, req.ProposalID).Scan(&uploadS3Key); err != nil {
+			api.RespondWithResult(w, false, "Proposal not found or query error: "+err.Error())
+			return
+		}
+
+		key := strings.TrimSpace(ifaceToString(uploadS3Key))
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate download url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+// GetProjectionBulkDownloadURLV2 returns presigned S3 URLs for multiple V2 proposal uploads.
+func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID      string   `json:"user_id"`
+			ProposalIDs []string `json:"proposal_ids"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithResult(w, false, constants.ErrInvalidJSONPrefix+err.Error())
+			return
+		}
+
+		if len(req.ProposalIDs) == 0 {
+			api.RespondWithResult(w, false, "proposal_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.ProposalIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.ProposalIDs {
+			proposalID := strings.TrimSpace(rawID)
+			if proposalID == "" {
+				continue
+			}
+
+			var uploadS3Key interface{}
+			if err := pgxPool.QueryRow(ctx, `
+				SELECT upload_s3_key
+				FROM cimplrcorpsaas.cashflow_proposal
+				WHERE proposal_id = $1
+			`, proposalID).Scan(&uploadS3Key); err != nil {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+
+			key := strings.TrimSpace(ifaceToString(uploadS3Key))
+			if key == "" {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, proposalID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"proposal_id":  proposalID,
+				"download_url": downloadURL,
+			})
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
 		})
 	}
 }

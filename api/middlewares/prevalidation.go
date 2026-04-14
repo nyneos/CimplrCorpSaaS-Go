@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 
@@ -136,7 +137,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
 					}
 					// audit log
-					log.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
+					fmt.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
 					adminOverrideApplied = true
 				}
 			}

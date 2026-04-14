@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
 	"encoding/json"
 	"errors"
@@ -147,6 +148,8 @@ func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
 		return false
 	}
 	v := ctx.Value("ApprovedBankAccounts")
+	fmt.Printf("CHECK ACCOUNT: %q\n", accountNumber)
+	fmt.Printf("CTX ApprovedBankAccounts: %v\n", v)
 	if v == nil {
 		return true
 	}
@@ -168,6 +171,7 @@ func ctxHasApprovedBankName(ctx context.Context, bankName string) bool {
 		return false
 	}
 	v := ctx.Value("BankInfo")
+	fmt.Println("CTX BANK INFO:", v)
 	if v == nil {
 		return true
 	}
@@ -206,6 +210,125 @@ func ctxEntityIDs(ctx context.Context) []string {
 		}
 	}
 	return out
+}
+
+func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID    string `json:"user_id"`
+			BalanceID string `json:"balance_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.BalanceID) == "" {
+			api.RespondWithResult(w, false, "balance_id required")
+			return
+		}
+
+		ctx := r.Context()
+		var uploadS3Key sqlNullString
+		err := pgxPool.QueryRow(ctx, `
+			SELECT b.upload_s3_key
+			FROM bank_balances_manual b
+			WHERE b.balance_id = $1
+		`, req.BalanceID).Scan(&uploadS3Key)
+		if err != nil {
+			api.RespondWithResult(w, false, "balance_id not found")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.ValueOrZero().(string))
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+		if err != nil {
+			api.RespondWithResult(w, false, "failed to generate download url")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string   `json:"user_id"`
+			BalanceIDs []string `json:"balance_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.BalanceIDs) == 0 {
+			api.RespondWithResult(w, false, "balance_ids required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(req.BalanceIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.BalanceIDs {
+			balanceID := strings.TrimSpace(rawID)
+			if balanceID == "" {
+				continue
+			}
+
+			var uploadS3Key sqlNullString
+			err := pgxPool.QueryRow(ctx, `
+				SELECT b.upload_s3_key
+				FROM bank_balances_manual b
+				WHERE b.balance_id = $1
+			`, balanceID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, balanceID)
+				continue
+			}
+
+			key := strings.TrimSpace(uploadS3Key.ValueOrZero().(string))
+			if key == "" {
+				failedIDs = append(failedIDs, balanceID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, balanceID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"balance_id":   balanceID,
+				"download_url": downloadURL,
+			})
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
 }
 
 func ensureBalanceIDsAccessible(ctx context.Context, pgxPool *pgxpool.Pool, balanceIDs []string) (int, string) {
@@ -616,6 +739,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		baseSelect := `
 			SELECT b.balance_id, b.bank_name, b.account_no, b.iban, b.currency_code, b.nickname, b.country,
 				   b.as_of_date, b.as_of_time, b.balance_type, b.balance_amount, b.statement_type, b.source_channel,
+				   b.upload_s3_key,
 				   b.opening_balance, b.total_credits, b.total_debits, b.closing_balance,
 				   b.old_bank_name, b.old_account_no, b.old_iban, b.old_currency_code, b.old_nickname,
 				   b.old_as_of_date, b.old_as_of_time, b.old_balance_type, b.old_balance_amount, b.old_statement_type, b.old_source_channel,
@@ -721,7 +845,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					asOfTime                                                          sqlNullString
 					balanceType                                                       sqlNullString
 					balanceAmount                                                     sqlNullFloat
-					statementType, sourceChannel                                      sqlNullString
+					statementType, sourceChannel, uploadS3Key                         sqlNullString
 					opening, credits, debits, closing                                 sqlNullFloat
 					oldBankName, oldAccountNo, oldIban, oldCurrency, oldNickname      sqlNullString
 					oldAsOfDate                                                       sqlNullTime
@@ -734,7 +858,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				// use Scan with many nullable types
 				err := rows.Scan(&balanceID, &bankName, &accountNo, &iban, &currency, &nickname, &country,
 					&asOfDate, &asOfTime, &balanceType, &balanceAmount, &statementType, &sourceChannel,
-					&opening, &credits, &debits, &closing,
+					&uploadS3Key, &opening, &credits, &debits, &closing,
 					&oldBankName, &oldAccountNo, &oldIban, &oldCurrency, &oldNickname,
 					&oldAsOfDate, &oldAsOfTime, &oldBalanceType, &oldBalanceAmount, &oldStatementType, &oldSourceChannel,
 					&oldOpening, &oldCredits, &oldDebits, &oldClosing, &entityName)
@@ -759,6 +883,7 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					"balance_amount":      balanceAmount.ValueOrZero(),
 					"statement_type":      statementType.ValueOrZero(),
 					"source_channel":      sourceChannel.ValueOrZero(),
+					"upload_s3_key":       uploadS3Key.ValueOrZero(),
 					"opening_balance":     opening.ValueOrZero(),
 					"total_credits":       credits.ValueOrZero(),
 					"total_debits":        debits.ValueOrZero(),

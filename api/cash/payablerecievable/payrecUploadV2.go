@@ -343,8 +343,7 @@ func (bp *TransactionBatchProcessor) BatchInsertReceivables(ctx context.Context,
 
 func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		startTime := time.Now()
-		ctx := r.Context() // Use request context for cancellation support
+		ctx := r.Context()
 
 		// Parse multipart form (32MB max)
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -372,146 +371,49 @@ func BatchUploadTransactionsV2(pool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		batchProcessor := NewTransactionBatchProcessor(pool)
-
-		// Start database transaction for atomic operations
-		tx, err := pool.Begin(ctx)
+		fileField, fileHeader, err := findTransactionUploadFile(r)
 		if err != nil {
-			respondWithErrorTransactionV2(w, http.StatusInternalServerError, fmt.Sprintf("Failed to start transaction: %v", err))
+			respondWithErrorTransactionV2(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		defer func() {
-			if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-				log.Printf("Error rolling back transaction: %v", err)
-			}
-		}()
-
-		// IDEMPOTENCY CHECK: Prevent duplicate uploads by checking file content hash
-		fileHashes, err := calculateTransactionFileHashes(r)
+		service := NewTransactionUploadService(pool)
+		result, err := service.UploadTransactionBatch(ctx, fileHeader, fileField, userName)
 		if err != nil {
-			respondWithErrorTransactionV2(w, http.StatusBadRequest, fmt.Sprintf("Failed to calculate file hashes: %v", err))
+			respondWithErrorTransactionV2(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		// Check for existing batches with same file hashes (idempotency)
-		for _, hash := range fileHashes {
-			var existingBatchID uuid.UUID
-			err := tx.QueryRow(ctx, `
-				SELECT batch_id FROM public.staging_batches_transactions 
-				WHERE file_hash = $1 AND status IN ('completed', 'processing')
-				ORDER BY ingestion_timestamp DESC LIMIT 1`, hash).Scan(&existingBatchID)
-			if err == nil {
-				// Duplicate upload detected - return existing batch info (no need to commit as we're only reading)
-				w.Header().Set(ContentTypeJSON, ApplicationJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: true,
-					"batch_id":             existingBatchID,
-					"duplicate":            true,
-					"message":              "Duplicate upload detected - returning existing batch",
-				})
-				return
-			}
-		}
-
-		// Create staging batch
-		batch := StagingBatchTransaction{
-			BatchID:            uuid.New(),
-			IngestionSource:    "UPLOAD",
-			IngestionTimestamp: time.Now(),
-			Status:             "pending",
-			TotalRecords:       0,
-			ProcessedRecords:   0,
-			FailedRecords:      0,
-		}
-
-		// Get filename for tracking (support either payables or receivables)
-		var fileName string
-		for _, field := range []string{"payables", "receivables"} {
-			if file, header, err := r.FormFile(field); err == nil {
-				fileName = header.Filename
-				file.Close()
-				break
-			}
-		}
-		batch.FileName = &fileName
-
-		// Insert batch record with file hash for idempotency
-		fileHash := ""
-		if len(fileHashes) > 0 {
-			fileHash = fileHashes[0] // Use first file hash as primary identifier
-		}
-		batch.FileHash = &fileHash
-
-		_, err = tx.Exec(ctx, `
-			INSERT INTO public.staging_batches_transactions 
-			(batch_id, ingestion_source, status, total_records, file_hash, file_name) 
-			VALUES ($1, $2, $3, $4, $5, $6)`,
-			batch.BatchID, batch.IngestionSource, batch.Status, batch.TotalRecords, batch.FileHash, batch.FileName)
-		if err != nil {
-			respondWithErrorTransactionV2(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create batch: %v", err))
-			return
-		}
-
-		// Process files and create staging transactions
-		allStagingTransactions, processedFiles, totalRecords := processUploadedTransactionFiles(r, batch.BatchID)
-
-		if len(allStagingTransactions) == 0 {
-			respondWithErrorTransactionV2(w, http.StatusBadRequest, "No valid files provided")
-			return
-		}
-
-		// Batch insert staging transactions with detailed error reporting
-		err = batchProcessor.BatchInsertStagingTransactionsWithTx(ctx, tx, allStagingTransactions)
-		if err != nil {
-			respondWithErrorTransactionV2(w, http.StatusInternalServerError, fmt.Sprintf("Failed to insert staging data: %v", err))
-			return
-		}
-
-		// Auto-process staging data to canonical tables using transaction
-		processedRecords := 0
-		if err := ProcessStagingTransactionsToCanonicalV2WithTx(ctx, tx, batch.BatchID, userName); err != nil {
-			// Mark batch as failed and return detailed error
-			_, updateErr := tx.Exec(ctx, `UPDATE public.staging_batches_transactions SET status = 'failed', error_message = $1 WHERE batch_id = $2`, err.Error(), batch.BatchID)
-			if updateErr != nil {
-				log.Printf("Failed to update batch status to failed: %v", updateErr)
-			}
-			respondWithErrorTransactionV2(w, http.StatusInternalServerError, fmt.Sprintf("Failed to process staging data to canonical tables: %v", err))
-			return
-		} else {
-			processedRecords = len(allStagingTransactions) // All records processed successfully
-		}
-
-		// Update batch with totals
-		_, err = tx.Exec(ctx, `
-			UPDATE public.staging_batches_transactions 
-			SET total_records = $1, processed_records = $2, status = 'completed' 
-			WHERE batch_id = $3`,
-			totalRecords, processedRecords, batch.BatchID)
-		if err != nil {
-			respondWithErrorTransactionV2(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update batch totals: %v", err))
-			return
-		}
-
-		// Commit the entire transaction
-		if err := tx.Commit(ctx); err != nil {
-			respondWithErrorTransactionV2(w, http.StatusInternalServerError, fmt.Sprintf("Failed to commit transaction: %v", err))
-			return
-		}
-
-		processingTime := time.Since(startTime)
-		log.Printf("Transaction batch upload completed: %d records in %v, %d processed to canonical", totalRecords, processingTime, processedRecords)
 
 		w.Header().Set(ContentTypeJSON, ApplicationJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			constants.ValueSuccess: true,
-			"batch_id":             batch.BatchID,
-			"total_records":        totalRecords,
-			"processed_records":    processedRecords,
-			"processed_files":      processedFiles,
-			"processing_time":      processingTime.String(),
-			"message":              fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", totalRecords, processedRecords),
-		})
+			"batch_id":             result.BatchID,
+			"total_records":        result.TotalRecords,
+			"processed_records":    result.ProcessedRecords,
+			"processed_files":      result.ProcessedFiles,
+			"processing_time":      result.ProcessingTime.String(),
+			"file_storage_key":     result.FileStorageKey,
+			"file_storage_url":     result.FileStorageURL,
+			"message":              fmt.Sprintf("Successfully uploaded %d transaction records, %d processed to canonical tables", result.TotalRecords, result.ProcessedRecords),
+		}
+		if result.Duplicate {
+			response["duplicate"] = true
+			response["message"] = "Duplicate upload detected - returning existing batch"
+		}
+		json.NewEncoder(w).Encode(response)
 	}
+}
+
+func findTransactionUploadFile(r *http.Request) (string, *multipart.FileHeader, error) {
+	for _, fileField := range []string{"payables", "receivables"} {
+		if r.MultipartForm == nil || r.MultipartForm.File == nil {
+			break
+		}
+		files := r.MultipartForm.File[fileField]
+		if len(files) > 0 {
+			return fileField, files[0], nil
+		}
+	}
+	return "", nil, fmt.Errorf("no valid files provided")
 }
 
 // Helper function to process uploaded transaction files
@@ -580,7 +482,7 @@ func processTransactionFileData(file multipart.File, filename, transactionType s
 	return rawPayloads
 }
 
-func processTransactionCSVFile(file multipart.File, transactionType string) ([]json.RawMessage, error) {
+func processTransactionCSVFile(file io.Reader, transactionType string) ([]json.RawMessage, error) {
 	reader := csv.NewReader(file)
 	records, err := reader.ReadAll() // MEMORY RISK: Loads entire file into memory
 	if err != nil {
@@ -617,7 +519,7 @@ func processTransactionCSVFile(file multipart.File, transactionType string) ([]j
 }
 
 // Process Excel files for transactions
-func processTransactionExcelFile(file multipart.File, transactionType string) ([]json.RawMessage, error) {
+func processTransactionExcelFile(file io.Reader, transactionType string) ([]json.RawMessage, error) {
 	tmpFile, err := excelize.OpenReader(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open Excel file: %w", err)

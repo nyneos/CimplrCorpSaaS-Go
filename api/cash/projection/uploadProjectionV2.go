@@ -5,11 +5,14 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"CimplrCorpSaas/api/notification/catalog"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -90,7 +93,8 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Validate session or fallback
-		userEmail := "admin@example.com"
+		// userEmail := "admin@example.com"
+		userEmail := ""
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == userID {
 				userEmail = s.Email
@@ -107,9 +111,23 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		fh := files[0]
 		fileExt := strings.ToLower(filepath.Ext(fh.Filename))
-		file, err := fh.Open()
+		fileForHash, err := fh.Open()
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Failed to open uploaded file: "+err.Error())
+			return
+		}
+		fileBytes, err := io.ReadAll(fileForHash)
+		if closeErr := fileForHash.Close(); closeErr != nil {
+			log.Printf("[UploadCashflowProposalV2] failed to close upload stream: %v", closeErr)
+		}
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
+			return
+		}
+
+		file, err := fh.Open()
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to reopen uploaded file: "+err.Error())
 			return
 		}
 		defer file.Close()
@@ -138,7 +156,19 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrTxBeginFailed+err.Error())
 			return
 		}
-		defer tx.Rollback(ctx)
+		committed := false
+		s3Key := ""
+		s3Uploaded := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback(ctx)
+				if s3Uploaded && s3Key != "" {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+						log.Printf("[UploadCashflowProposalV2] cleanup failed for key=%s: %v", s3Key, cleanupErr)
+					}
+				}
+			}
+		}()
 
 		// Insert proposal (V2 schema: base_currency_code, effective_date)
 		var proposalID string
@@ -152,6 +182,28 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		log.Printf("Created V2 proposal %s", proposalID)
+
+		if s3storage.IsS3UploadEnabled() {
+			hash := sha256.Sum256(fileBytes)
+			fileHash := fmt.Sprintf("%x", hash[:])
+			folder := s3storage.GetStoragePrefix("projection")
+			s3Key = s3storage.BuildS3Key(folder, "cashflow-projection", fileHash, fileExt)
+			contentType := s3storage.DetectContentType(fileBytes)
+			if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to upload file to S3: "+uploadErr.Error())
+				return
+			}
+			s3Uploaded = true
+
+			if _, err := tx.Exec(ctx, `
+				UPDATE cimplrcorpsaas.cashflow_proposal
+				SET upload_s3_key = $1
+				WHERE proposal_id = $2
+			`, s3Key, proposalID); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "Failed to update proposal upload key: "+err.Error())
+				return
+			}
+		}
 
 		// Build item rows + metadata for projections
 		dataRows := records[1:]
@@ -339,6 +391,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
 			return
 		}
+		committed = true
 
 		resp := map[string]interface{}{
 			constants.ValueSuccess: true,
