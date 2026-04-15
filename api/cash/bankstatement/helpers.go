@@ -217,6 +217,16 @@ func userFriendlyUploadError(err error) string {
 	if strings.Contains(msg, "could not parse date") {
 		return "One or more transaction dates in the statement could not be understood. Please verify the dates in the statement and try again."
 	}
+	// Also catch pq uniq_stmt wrapped inside fmt.Errorf chains
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		switch pqErr.Constraint {
+		case "uniq_stmt":
+			return "A statement for this account and period is already uploaded. Use force_override=true to re-upload."
+		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
+			return "This bank statement file was already uploaded earlier. Please upload a different file."
+		}
+	}
 	log.Println("Debug raw mesage", msg)
 	if strings.Contains(msg, "failed to begin db transaction") ||
 		strings.Contains(msg, "failed to insert bank statement") ||

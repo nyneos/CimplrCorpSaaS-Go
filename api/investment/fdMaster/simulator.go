@@ -594,6 +594,8 @@ type SimulatedCashflowRow struct {
 	PeriodNumber      int     `json:"period_number"`
 	EventType         string  `json:"event_type"`
 	EventDate         string  `json:"event_date"`
+	ValueDate         string  `json:"value_date,omitempty"`         // settlement/processed date (next working day for cash events)
+	CashflowType      string  `json:"cashflow_type,omitempty"`      // OUTFLOW|INFLOW|CAP|NA
 	PeriodStartDate   string  `json:"period_start_date"`
 	PeriodEndDate     string  `json:"period_end_date"`
 	PeriodDays        int     `json:"period_days"`
@@ -603,6 +605,10 @@ type SimulatedCashflowRow struct {
 	ClosingPrincipal  float64 `json:"closing_principal"`
 	TDSAmount         float64 `json:"tds_amount"`
 	NetCashFlow       float64 `json:"net_cash_flow"`
+	DueNotAccrued     float64 `json:"due_not_accrued"`             // last month's accrual folded into payout (suppressed as standalone row)
+	AccrRevK          float64 `json:"accr_rev_k"`                  // cumulative prior accruals reversed into payout
+	TDSRevL           float64 `json:"tds_rev_l"`                   // TDS on AccrRevK
+	ProvisionalTDS    float64 `json:"provisional_tds"`             // indicative TDS on this period's accrual (= InterestAccrued × TDSRate/100)
 	DayCountCode      string  `json:"day_count_code,omitempty"`
 	Divisor           int     `json:"divisor,omitempty"`
 	FormulaUsed       string  `json:"formula_used,omitempty"`
@@ -997,6 +1003,8 @@ func applyGracePeriod(fd *FDRecord, cfg *BankConfig, rows []CashflowRow, dcInfo 
 		PeriodNumber:     len(rows) + 1,
 		EventType:        "GRACE_PERIOD",
 		EventDate:        graceEnd,
+		ValueDate:        resolveValueDate("GRACE_PERIOD", graceEnd, cfg, cal),
+		CashflowType:     "NA",
 		PeriodStartDate:  graceStart,
 		PeriodEndDate:    graceEnd,
 		PeriodDays:       days,
@@ -1027,6 +1035,8 @@ func cashflowRowToSim(row CashflowRow) SimulatedCashflowRow {
 		PeriodNumber:      row.PeriodNumber,
 		EventType:         row.EventType,
 		EventDate:         formatDate(row.EventDate),
+		ValueDate:         formatDate(row.ValueDate),
+		CashflowType:      row.CashflowType,
 		PeriodStartDate:   formatDate(row.PeriodStartDate),
 		PeriodEndDate:     formatDate(row.PeriodEndDate),
 		PeriodDays:        row.PeriodDays,
@@ -1036,6 +1046,10 @@ func cashflowRowToSim(row CashflowRow) SimulatedCashflowRow {
 		ClosingPrincipal:  row.ClosingPrincipal,
 		TDSAmount:         row.TDSAmount,
 		NetCashFlow:       row.NetCashFlow,
+		DueNotAccrued:     row.DueNotAccrued,
+		AccrRevK:          row.AccrRevK,
+		TDSRevL:           row.TDSRevL,
+		ProvisionalTDS:    row.ProvisionalTDS,
 		DayCountCode:      row.DayCountCode,
 		Divisor:           row.Divisor,
 		FormulaUsed:       row.FormulaUsed,

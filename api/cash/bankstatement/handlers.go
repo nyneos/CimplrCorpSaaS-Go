@@ -1230,7 +1230,36 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		fileReader := bytes.NewReader(fileBytes)
 		mf := &bytesFile{Reader: fileReader}
 
-		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings, "")
+		// Parse account number overrides from form-data.
+		// force_override=true → use the single provided account unconditionally (no matching).
+		// force_override=false (default) → run weighted scoring; single account is a fallback only.
+		accountNumbers := parseAccountNumbers(r.MultipartForm.Value)
+		forceOverride := r.FormValue("force_override") == "true"
+		accountOverride := ""
+		if forceOverride && len(accountNumbers) == 1 {
+			accountOverride = accountNumbers[0]
+			log.Printf("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
+		} else if len(accountNumbers) >= 1 {
+			// Always run weighted scoring: filename patterns + masked numbers in file content.
+			var fileContent [][]string
+			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
+				fileContent = parsedRows
+			}
+			matched := matchAccountNumberToFile(r.Context(), db, uploadFileName, "", accountNumbers, fileContent)
+			if matched != "" {
+				accountOverride = matched
+				log.Printf("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
+			} else if len(accountNumbers) == 1 {
+				// Single account, no strong match — use as fallback.
+				accountOverride = accountNumbers[0]
+				log.Printf("[BANK-UPLOAD-DEBUG] Single account fallback: %s", accountOverride)
+			} else {
+				// Multiple accounts provided but no match — let UploadBankStatementV2 try content extraction.
+				log.Printf("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
+			}
+		}
+
+		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings, accountOverride, uploadFileName)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1315,6 +1344,18 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			}
 		}
 
+		// Parse account number overrides from form-data
+		accountNumbers := parseAccountNumbers(r.MultipartForm.Value)
+		// force_override semantics:
+		//   force=true + 0 accounts  → trust each file's own filename digits as the account number (no DB check during routing)
+		//   force=true + 1 account   → assign ALL zip files to that one account
+		//   force=true + N accounts  → 1:1 positional mapping: file[0]→account[0], file[1]→account[1], ...
+		//                               if len(accounts) != len(files) → error
+		//   force=false + N accounts → match each file to one account via weighted scoring (filename+content); unmatched → error
+		//   force=false + 0 accounts → auto-detect account per file from filename/content against DB
+		forceOverride := r.FormValue("force_override") == "true"
+		log.Printf("[ZIP-UPLOAD] Received %d account number(s) from form-data, force_override=%v", len(accountNumbers), forceOverride)
+
 		zipData, err := io.ReadAll(zipFile)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to read zip file: %v", err), http.StatusInternalServerError)
@@ -1338,63 +1379,160 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		successCount := 0
 		failureCount := 0
 
+		// --- Collect all processable file entries first so we can validate counts ---
+		type zipEntry struct {
+			name     string
+			data     []byte
+			fileHash string
+		}
+		var fileEntries []zipEntry
 		for _, zipFileEntry := range zipReader.File {
 			if zipFileEntry.FileInfo().IsDir() {
 				continue
 			}
-
 			base := filepath.Base(zipFileEntry.Name)
 			dir := filepath.Dir(zipFileEntry.Name)
 			if strings.HasPrefix(base, ".") || strings.HasPrefix(base, "._") ||
 				strings.Contains(dir, "__MACOSX") || base == ".DS_Store" {
 				continue
 			}
-
 			ext := strings.ToLower(filepath.Ext(zipFileEntry.Name))
-			if ext != ".xlsx" && ext != ".xls" && ext != ".csv" {
+			if ext != ".xlsx" && ext != ".xls" && ext != ".csv" && ext != ".numbers" {
 				results = append(results, FileResult{
 					FileName: zipFileEntry.Name,
 					Success:  false,
-					Error:    fmt.Sprintf("Unsupported file type: %s (only .xlsx, .xls, .csv allowed)", ext),
+					Error:    fmt.Sprintf("Unsupported file type: %s (only .xlsx, .xls, .csv, .numbers allowed)", ext),
 				})
 				failureCount++
 				continue
 			}
-
-			fileReader, err := zipFileEntry.Open()
-			if err != nil {
-				results = append(results, FileResult{
-					FileName: zipFileEntry.Name,
-					Success:  false,
-					Error:    fmt.Sprintf("Failed to open file from zip: %v", err),
-				})
+			fr, oErr := zipFileEntry.Open()
+			if oErr != nil {
+				results = append(results, FileResult{FileName: zipFileEntry.Name, Success: false, Error: fmt.Sprintf("Failed to open file from zip: %v", oErr)})
 				failureCount++
 				continue
 			}
-
-			fileData, err := io.ReadAll(fileReader)
-			fileReader.Close()
-			if err != nil {
-				results = append(results, FileResult{
-					FileName: zipFileEntry.Name,
-					Success:  false,
-					Error:    fmt.Sprintf("Failed to read file contents: %v", err),
-				})
+			fd, rErr := io.ReadAll(fr)
+			fr.Close()
+			if rErr != nil {
+				results = append(results, FileResult{FileName: zipFileEntry.Name, Success: false, Error: fmt.Sprintf("Failed to read file contents: %v", rErr)})
 				failureCount++
 				continue
 			}
+			h := sha256.New()
+			h.Write(fd)
+			fileEntries = append(fileEntries, zipEntry{name: zipFileEntry.Name, data: fd, fileHash: fmt.Sprintf("%x", h.Sum(nil))})
+		}
 
-			hash := sha256.New()
-			hash.Write(fileData)
-			fileHash := fmt.Sprintf("%x", hash.Sum(nil))
+		// Validate force + N-accounts case: must be 1:1
+		if forceOverride && len(accountNumbers) > 1 && len(accountNumbers) != len(fileEntries) {
+			http.Error(w, fmt.Sprintf(
+				"force_override=true with %d account numbers but zip contains %d processable files — counts must match for 1:1 mapping",
+				len(accountNumbers), len(fileEntries),
+			), http.StatusBadRequest)
+			return
+		}
 
-			bytesReader := bytes.NewReader(fileData)
+		for fileIdx, ze := range fileEntries {
+			base := filepath.Base(ze.name)
+
+			// Determine account override for this specific file.
+			accountOverride := ""
+
+			switch {
+			case forceOverride && len(accountNumbers) > 1:
+				// 1:1 positional mapping — already validated counts above
+				accountOverride = accountNumbers[fileIdx]
+				log.Printf("[ZIP-UPLOAD] force+N: file[%d] %s → account %s", fileIdx, ze.name, accountOverride)
+
+			case forceOverride && len(accountNumbers) == 1:
+				// All files → single account
+				accountOverride = accountNumbers[0]
+				log.Printf("[ZIP-UPLOAD] force+1: assigning file %s → account %s", ze.name, accountOverride)
+
+			case forceOverride && len(accountNumbers) == 0:
+				// Trust filename: extract a purely-numeric segment >=7 digits from the filename.
+				// e.g. "95201994179_GXLSM_0036013656_PUN_28022026_M.xls" → "0036013656"
+				isDigits := func(s string) bool {
+					if len(s) == 0 {
+						return false
+					}
+					for _, c := range s {
+						if c < '0' || c > '9' {
+							return false
+						}
+					}
+					return true
+				}
+				for _, part := range strings.FieldsFunc(base, func(r rune) bool {
+					return r == '_' || r == '-' || r == '.' || r == ' '
+				}) {
+					if len(part) >= 7 && isDigits(part) {
+						accountOverride = part
+						break
+					}
+				}
+				if accountOverride == "" {
+					// fallback: scan character-by-character for a 7+ digit run
+					start := -1
+					for i, c := range base {
+						if c >= '0' && c <= '9' {
+							if start < 0 {
+								start = i
+							}
+						} else {
+							if start >= 0 && i-start >= 7 {
+								accountOverride = base[start:i]
+								break
+							}
+							start = -1
+						}
+					}
+				}
+				if accountOverride == "" {
+					results = append(results, FileResult{
+						FileName: ze.name, Success: false,
+						Error: fmt.Sprintf("force_override=true but no account number digits found in filename '%s'", base),
+					})
+					failureCount++
+					continue
+				}
+				log.Printf("[ZIP-UPLOAD] force+filename: file %s → account %s (from filename)", ze.name, accountOverride)
+
+			case !forceOverride && len(accountNumbers) > 0:
+				// Match each file to one of the provided accounts via weighted scoring
+				var fileContent [][]string
+				if parsedRows, parseErr := parseFileToRows(ze.data); parseErr == nil {
+					fileContent = parsedRows
+				}
+				matched := matchAccountNumberToFile(ctx, db, ze.name, "", accountNumbers, fileContent)
+				if matched != "" {
+					accountOverride = matched
+					log.Printf("[ZIP-UPLOAD] matched: file %s → account %s", ze.name, matched)
+				} else if len(accountNumbers) == 1 {
+					accountOverride = accountNumbers[0]
+					log.Printf("[ZIP-UPLOAD] single-account fallback: file %s → account %s", ze.name, accountOverride)
+				} else {
+					results = append(results, FileResult{
+						FileName: ze.name, Success: false,
+						Error: fmt.Sprintf("Could not match file '%s' to any of the provided account numbers. Add the account number to the filename or use force_override=true.", base),
+					})
+					failureCount++
+					continue
+				}
+
+			default: // !forceOverride && len(accountNumbers) == 0
+				// Auto-detect: UploadBankStatementV2 resolves account from filename+content against DB
+				log.Printf("[ZIP-UPLOAD] auto-detect: file %s — no account hint, resolving from filename/content", ze.name)
+			}
+
+			bytesReader := bytes.NewReader(ze.data)
 			file := &bytesFile{Reader: bytesReader}
 
-			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, fileHash, useMapping, mappings, "")
+			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, ze.fileHash, useMapping, mappings, accountOverride, ze.name)
 			if err != nil {
 				results = append(results, FileResult{
-					FileName: zipFileEntry.Name,
+					FileName: ze.name,
 					Success:  false,
 					Error:    userFriendlyUploadError(err),
 				})
@@ -1403,12 +1541,13 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			}
 
 			results = append(results, FileResult{
-				FileName: zipFileEntry.Name,
+				FileName: ze.name,
 				Success:  true,
 				Result:   result,
 			})
 			successCount++
 		}
+
 
 		response := map[string]interface{}{
 			"message":       fmt.Sprintf("Processed %d files from zip", len(results)),
