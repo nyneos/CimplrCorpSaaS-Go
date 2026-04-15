@@ -28,11 +28,11 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-const bankStatementModule = "bankstatement"
+const bankStatementUploadFolder = "cash/bankstatements"
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string, uploadFileName string, uploadedBy string) (map[string]interface{}, error) {
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
@@ -52,7 +52,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	var rows [][]string
 	var isCSV bool
-	fileExt := ".xlsx"
 
 	//var isXLS bool Try Excel first
 	xl, xlErr := excelize.OpenReader(bytes.NewReader(tmpFile))
@@ -87,7 +86,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 
 		isCSV = false
-		fileExt = ".xlsx"
 
 	} else {
 		// Try XLS (legacy Excel) using shakinm/xlsReader which properly handles formulas and formatting
@@ -117,7 +115,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 							return nil, errors.New("xls must have at least one data row")
 						}
 						isCSV = false
-						fileExt = ".xls"
 					} else {
 						xlsErr = errors.New("failed to get xls sheet")
 					}
@@ -141,7 +138,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, errors.New("csv must have at least one data row")
 			}
 			isCSV = true
-			fileExt = ".csv"
 		}
 	}
 
@@ -462,7 +458,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
 					break
 				}
-				if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
+				if !errors.Is(qErr, sql.ErrNoRows) {
 					log.Printf("[BANK-UPLOAD-DEBUG] DB error while trying candidate %q: %v", cand, qErr)
 					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
 				}
@@ -511,7 +507,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	s3Key := s3storage.BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
+	s3Key := s3storage.BuildNamedS3Key(bankStatementUploadFolder, "", storedFileName)
 	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {

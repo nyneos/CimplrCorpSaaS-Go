@@ -490,7 +490,13 @@ func UploadBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			for _, fileHeader := range files {
 				batchID, err := UploadBankBalancesProcess(ctx, pgxPool, fileHeader, userName, entityIDs)
 				if err != nil {
-					api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+					statusCode := http.StatusInternalServerError
+					message := err.Error()
+					if errors.Is(err, ErrFileAlreadyUploaded) {
+						statusCode = http.StatusBadRequest
+						message = duplicateBankBalanceUploadMessage
+					}
+					api.RespondWithError(w, statusCode, message)
 					return
 				}
 				batchIDs = append(batchIDs, batchID)

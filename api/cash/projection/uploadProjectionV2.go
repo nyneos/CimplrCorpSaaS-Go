@@ -100,6 +100,10 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				break
 			}
 		}
+		requestedBy := strings.TrimSpace(userEmail)
+		if requestedBy == "" {
+			requestedBy = userID
+		}
 
 		// Get uploaded file
 		files := r.MultipartForm.File["file"]
@@ -122,6 +126,16 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, "Invalid or empty file: "+fh.Filename)
 			return
+		}
+		if s3storage.IsS3UploadEnabled() {
+			if err := ensureUniqueProjectionUpload(ctx, pgxPool, fileBytes); err != nil {
+				if errors.Is(err, ErrProjectionFileAlreadyUploaded) {
+					api.RespondWithError(w, http.StatusBadRequest, duplicateProjectionUploadMessage)
+					return
+				}
+				api.RespondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 
 		file, err := fh.Open()
@@ -184,7 +198,8 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		if s3storage.IsS3UploadEnabled() {
 			folder := s3storage.GetStoragePrefix("projection")
-			s3Key = s3storage.BuildS3Key(folder, proposalID, "", fileExt)
+			storedFileName := s3storage.BuildUploadedFilename(fh.Filename, requestedBy, time.Now().UTC())
+			s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 			contentType := s3storage.DetectContentType(fileBytes)
 			if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Failed to upload file to S3: "+uploadErr.Error())
@@ -379,7 +394,7 @@ func UploadCashflowProposalV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal
 			(proposal_id, action_type, processing_status, reason, requested_by, requested_at)
 			VALUES ($1,'CREATE','PENDING_APPROVAL','Imported via V2 uploader',$2,now())
-		`, proposalID, userEmail); err != nil {
+		`, proposalID, requestedBy); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, parseConstraintError(err))
 			return
 		}

@@ -30,6 +30,47 @@ type itemInfo struct {
 	Pattern   string
 }
 
+var ErrProjectionFileAlreadyUploaded = errors.New("projection file already uploaded")
+
+const duplicateProjectionUploadMessage = "This projection file was already uploaded earlier. Please upload a different file."
+
+func existingProjectionUploadKeys(ctx context.Context, pgxPool *pgxpool.Pool) ([]string, error) {
+	rows, err := pgxPool.Query(ctx, `
+		SELECT DISTINCT upload_s3_key
+		FROM cimplrcorpsaas.cashflow_proposal
+		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueProjectionUpload(ctx context.Context, pgxPool *pgxpool.Pool, fileBytes []byte) error {
+	keys, err := existingProjectionUploadKeys(ctx, pgxPool)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate projection upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare projection upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrProjectionFileAlreadyUploaded
+	}
+	return nil
+}
+
 func uploadCashflowProposalService(
 	ctx context.Context,
 	pgxPool *pgxpool.Pool,
@@ -46,6 +87,14 @@ func uploadCashflowProposalService(
 	fileBytes, err := io.ReadAll(file)
 	if err != nil {
 		return "", 0, http.StatusBadRequest, fmt.Errorf("Invalid or empty file: %s", fh.Filename)
+	}
+	if s3storage.IsS3UploadEnabled() {
+		if err := ensureUniqueProjectionUpload(ctx, pgxPool, fileBytes); err != nil {
+			if errors.Is(err, ErrProjectionFileAlreadyUploaded) {
+				return "", 0, http.StatusBadRequest, errors.New(duplicateProjectionUploadMessage)
+			}
+			return "", 0, http.StatusInternalServerError, err
+		}
 	}
 
 	records, err := parseUploadFile(bytes.NewReader(fileBytes), fileExt)
@@ -96,7 +145,8 @@ func uploadCashflowProposalService(
 
 	if s3storage.IsS3UploadEnabled() {
 		folder := s3storage.GetStoragePrefix("projection")
-		s3Key = s3storage.BuildS3Key(folder, proposalID, "", fileExt)
+		storedFileName := s3storage.BuildUploadedFilename(fh.Filename, userEmail, time.Now().UTC())
+		s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 		contentType := s3storage.DetectContentType(fileBytes)
 		if uploadErr := s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); uploadErr != nil {
 			return "", 0, http.StatusInternalServerError, fmt.Errorf("Failed to upload file to S3: %s", uploadErr.Error())

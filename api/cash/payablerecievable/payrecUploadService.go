@@ -73,6 +73,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	if err != nil {
 		return nil, err
 	}
+	storedFileName := s3storage.BuildUploadedFilename(fileHeader.Filename, userName, startTime.UTC())
 
 	rawPayloads, err := processTransactionFileBytes(fileBytes, fileHeader.Filename, transactionType)
 	if err != nil {
@@ -119,7 +120,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		committed = true
 		return nil, ErrFileAlreadyUploaded
 	}
-	if err != nil && err != pgx.ErrNoRows {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("failed to check for duplicate transaction upload: %w", err)
 	}
 
@@ -133,13 +134,12 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		ProcessedRecords:   0,
 		FailedRecords:      0,
 		FileHash:           stringPtr(fileHashHex),
-		FileName:           stringPtr(fileHeader.Filename),
+		FileName:           stringPtr(storedFileName),
 	}
 
-	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
 	contentType := s3storage.DetectContentType(fileBytes)
 	folder := s3storage.GetStoragePrefix(fileField)
-	s3Key = s3storage.BuildS3Key(folder, "", fileHashHex, ext)
+	s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 	s3URL := ""
 	if s3storage.IsS3UploadEnabled() {
 		if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
@@ -205,7 +205,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		BatchID:          batchID,
 		TotalRecords:     totalRecords,
 		ProcessedRecords: processedRecords,
-		ProcessedFiles:   []string{fileHeader.Filename},
+		ProcessedFiles:   []string{storedFileName},
 		ProcessingTime:   time.Since(startTime),
 		FileStorageKey:   s3Key,
 		FileStorageURL:   s3URL,

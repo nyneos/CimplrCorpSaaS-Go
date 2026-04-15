@@ -1151,7 +1151,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				return
 			}
 
-			if mappings != nil && strings.TrimSpace(mappings.AccountNumber) == "" {
+			if strings.TrimSpace(mappings.AccountNumber) == "" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
 					"message": "Column-Mappings must include 'Account Number' when mapping is enabled",
@@ -1230,7 +1230,17 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		fileReader := bytes.NewReader(fileBytes)
 		mf := &bytesFile{Reader: fileReader}
 
-		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings, "")
+		result, err := UploadBankStatementV2WithCategorization(
+			r.Context(),
+			db,
+			mf,
+			fileHash,
+			useMapping,
+			mappings,
+			"",
+			uploadFileName,
+			requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+		)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
@@ -1391,7 +1401,17 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			bytesReader := bytes.NewReader(fileData)
 			file := &bytesFile{Reader: bytesReader}
 
-			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, fileHash, useMapping, mappings, "")
+			result, err := UploadBankStatementV2WithCategorization(
+				ctx,
+				db,
+				file,
+				fileHash,
+				useMapping,
+				mappings,
+				"",
+				zipFileEntry.Name,
+				requestedByFromCtx(ctx, r.FormValue("user_id")),
+			)
 			if err != nil {
 				results = append(results, FileResult{
 					FileName: zipFileEntry.Name,

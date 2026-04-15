@@ -5,10 +5,10 @@ import (
 	"CimplrCorpSaas/api/auth"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +28,47 @@ import (
 
 	"github.com/lib/pq"
 )
+
+var ErrExposureFileAlreadyUploaded = errors.New("exposure file already uploaded")
+
+const duplicateExposureUploadMessage = "This exposure file was already uploaded earlier. Please upload a different file."
+
+func existingExposureUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT upload_s3_key
+		FROM exposure_headers
+		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueExposureUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
+	keys, err := existingExposureUploadKeys(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate exposure upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare exposure upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrExposureFileAlreadyUploaded
+	}
+	return nil
+}
 
 func UploadExposure(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -323,7 +364,6 @@ func exposureHeadersHasUploadBatchID(ctx context.Context, db *sql.DB) bool {
 	return exists
 }
 
-
 func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string) (sql.NullString, error) {
 	var uploadS3Key sql.NullString
 	trimmedRecordID := strings.TrimSpace(recordID)
@@ -343,7 +383,7 @@ func lookupExposureUploadS3Key(ctx context.Context, db *sql.DB, recordID string)
 	if err != nil && err != sql.ErrNoRows {
 		return sql.NullString{}, err
 	}
-	
+
 	err = db.QueryRowContext(ctx, `
 		SELECT upload_s3_key
 		FROM exposure_headers
@@ -1621,7 +1661,13 @@ func GetExposureBulkDownloadURL(db *sql.DB) http.HandlerFunc {
 }
 
 func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Request, buNames []string, session *auth.UserSession) ([]map[string]interface{}, []string, error) {
-	_ = session
+	uploadedBy := "user"
+	if session != nil {
+		uploadedBy = strings.TrimSpace(session.Name)
+		if uploadedBy == "" {
+			uploadedBy = strings.TrimSpace(session.UserID)
+		}
+	}
 
 	fileFields := []struct {
 		Field     string
@@ -1817,15 +1863,23 @@ func processBatchUploadStagingData(ctx context.Context, db *sql.DB, r *http.Requ
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: constants.ErrFailedToOpenFile})
 					return
 				}
+				if s3storage.IsS3UploadEnabled() {
+					if err := ensureUniqueExposureUpload(ctx, db, fileBytes); err != nil {
+						message := err.Error()
+						if errors.Is(err, ErrExposureFileAlreadyUploaded) {
+							message = duplicateExposureUploadMessage
+						}
+						results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: message})
+						return
+					}
+				}
 
-				fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
-				fileExt := strings.ToLower(filepath.Ext(filename))
 				exposureTypeFolder, err := batchStagingExposureTypeFolder(field.DataType)
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": filename, constants.ValueError: err.Error()})
 					return
 				}
-				s3Key = s3storage.BuildS3Key("fx/exposures", exposureTypeFolder, fileHash, fileExt)
+				s3Key = s3storage.BuildUploadedS3Key("fx/exposures", exposureTypeFolder, filename, uploadedBy, time.Now().UTC())
 				log.Printf("[FX-STAGING] UPLOAD START: filename=%s, field.DataType=%s, s3Key=%s, S3Enabled=%v",
 					filename, field.DataType, s3Key, s3storage.IsS3UploadEnabled())
 				if s3storage.IsS3UploadEnabled() {

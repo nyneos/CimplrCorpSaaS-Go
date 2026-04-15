@@ -3,7 +3,11 @@ package s3storage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,13 +18,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 )
 
 const (
-	storageDefaultBucket  = "cimplr"
-	storageDefaultPrefix  = "bankstatements/"
-	storageDefaultRegion  = "ap-south-1"
-	storageDefaultBaseURL = "https://cimplr.s3.ap-south-1.amazonaws.com/"
+	storageDefaultBucket   = "cimplr"
+	storageDefaultPrefix   = "bankstatements/"
+	storageDefaultRegion   = "ap-south-1"
+	storageDefaultBaseURL  = "https://cimplr.s3.ap-south-1.amazonaws.com/"
+	contentHashMetadataKey = "content-sha256"
 )
 
 func storageBucket() string {
@@ -101,6 +107,81 @@ func sanitizePathSegment(s string) string {
 	}
 	replacer := strings.NewReplacer(" ", "_", "/", "_", "\\", "_")
 	return replacer.Replace(s)
+}
+
+func sanitizeFilenameComponent(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "file"
+	}
+	var builder strings.Builder
+	builder.Grow(len(s))
+	lastUnderscore := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			builder.WriteRune(r)
+			lastUnderscore = false
+		case r == '-' || r == '_':
+			builder.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore {
+				builder.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	cleaned := strings.Trim(builder.String(), "-_")
+	if cleaned == "" {
+		return "file"
+	}
+	return cleaned
+}
+
+func safeObjectName(name string) string {
+	name = strings.TrimSpace(filepath.Base(name))
+	if name == "" || name == "." || name == "/" {
+		return "download.bin"
+	}
+	return name
+}
+
+// BuildUploadedFilename returns a file name in the format
+// originalname-uploader-timestamp.ext using a filesystem-safe basename.
+func BuildUploadedFilename(originalFilename, uploadedBy string, uploadedAt time.Time) string {
+	baseName := strings.TrimSpace(filepath.Base(originalFilename))
+	ext := strings.TrimSpace(strings.ToLower(filepath.Ext(baseName)))
+	nameOnly := strings.TrimSpace(strings.TrimSuffix(baseName, filepath.Ext(baseName)))
+	if nameOnly == "" {
+		nameOnly = "file"
+	}
+	if ext == "" {
+		ext = ".bin"
+	}
+	if uploadedAt.IsZero() {
+		uploadedAt = time.Now().UTC()
+	}
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+	timestamp := uploadedAt.In(loc).Format("02 Jan 2006, 03:04 PM MST")
+	return fmt.Sprintf("%s-%s-%s%s",
+		sanitizeFilenameComponent(nameOnly),
+		sanitizeFilenameComponent(uploadedBy),
+		timestamp,
+		ext,
+	)
+}
+
+// BuildUploadedS3Key preserves the existing folder structure while using the
+// standard uploaded filename format for the final object name.
+func BuildUploadedS3Key(folder, subject, originalFilename, uploadedBy string, uploadedAt time.Time) string {
+	storedFileName := BuildUploadedFilename(originalFilename, uploadedBy, uploadedAt)
+	return BuildNamedS3Key(folder, subject, storedFileName)
+}
+
+func ContentHashHex(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
 }
 
 func storagePrefixEnvVar(module string) string {
@@ -189,6 +270,21 @@ func BuildS3Key(folder, subject, fileHash, fileExt string) string {
 	return fmt.Sprintf("%s%s/%s%s", folder, subjectSafe, fileHash, ext)
 }
 
+// BuildNamedS3Key builds an S3 key using the provided object name while
+// preserving the existing folder and subject structure.
+func BuildNamedS3Key(folder, subject, objectName string) string {
+	folder = strings.Trim(strings.TrimSpace(folder), "/")
+	if folder != "" {
+		folder = folder + "/"
+	}
+	name := safeObjectName(objectName)
+	subjectSafe := sanitizePathSegment(subject)
+	if subjectSafe == "unknown" {
+		return folder + name
+	}
+	return fmt.Sprintf("%s%s/%s", folder, subjectSafe, name)
+}
+
 // BuildModuleS3Key builds an S3 object key under the module's folder.
 func BuildModuleS3Key(module, subject, fileHash, fileExt string) string {
 	prefix := GetStoragePrefix(module)
@@ -247,10 +343,7 @@ func contentTypeFromExtension(key string, detected string) string {
 }
 
 func contentDispositionForKey(key string) string {
-	name := strings.TrimSpace(filepath.Base(key))
-	if name == "" || name == "." || name == "/" {
-		name = "download.bin"
-	}
+	name := safeObjectName(key)
 	return fmt.Sprintf("attachment; filename=%q", name)
 }
 
@@ -288,17 +381,91 @@ func PutObjectToS3(ctx context.Context, key string, body []byte, contentType str
 	}
 	contentType = contentTypeFromExtension(key, contentType)
 	contentDisposition := contentDispositionForKey(key)
+	metadata := map[string]string{
+		contentHashMetadataKey: ContentHashHex(body),
+	}
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:             aws.String(bucket),
 		Key:                aws.String(key),
 		Body:               bytes.NewReader(body),
 		ContentType:        aws.String(contentType),
 		ContentDisposition: aws.String(contentDisposition),
+		Metadata:           metadata,
 	})
 	if err != nil {
 		return fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
 	}
 	return nil
+}
+
+func isMissingObjectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := strings.TrimSpace(apiErr.ErrorCode())
+		return code == "NotFound" || code == "NoSuchKey"
+	}
+	return false
+}
+
+func objectContentHash(ctx context.Context, key string) (string, error) {
+	client, bucket, err := newS3Client(ctx)
+	if err != nil {
+		return "", err
+	}
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return "", err
+	}
+	if head.Metadata != nil {
+		if hash := strings.TrimSpace(head.Metadata[contentHashMetadataKey]); hash != "" {
+			return hash, nil
+		}
+	}
+	obj, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return "", err
+	}
+	defer obj.Body.Close()
+	body, err := io.ReadAll(obj.Body)
+	if err != nil {
+		return "", fmt.Errorf("read s3 object %s from bucket %s: %w", key, bucket, err)
+	}
+	return ContentHashHex(body), nil
+}
+
+func FindDuplicateObjectKey(ctx context.Context, body []byte, keys []string) (string, error) {
+	expectedHash := ContentHashHex(body)
+	seen := make(map[string]struct{}, len(keys))
+	for _, rawKey := range keys {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		hash, err := objectContentHash(ctx, key)
+		if err != nil {
+			if isMissingObjectError(err) {
+				continue
+			}
+			return "", err
+		}
+		if hash == expectedHash {
+			return key, nil
+		}
+	}
+	return "", nil
 }
 
 func GetDownloadPresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
