@@ -853,28 +853,36 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					totalCredits,
 					totalDebits,
 					closingBalance,
-					"BANK_STATEMENT_V2",
-					"UPLOAD_V2",
+					"BANK_STATEMENT_MANUAL_UPLOAD",
+					"MANUAL UPLOAD",
 				)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
 						"success":           false,
-						"error":             err.Error(),
 					})
 					continue
 				}
 
+				// Insert bank balance audit as APPROVED immediately — the bank statement was
+				// already reviewed and approved by the approver, so the derived balance
+				// does not need a separate approval cycle.
+				// Use WHERE NOT EXISTS to prevent duplicate audit rows if approval is called twice.
 				_, err = tx.Exec(`
 				       INSERT INTO auditactionbankbalances (
 					       balance_id, actiontype, processing_status, requested_by, requested_at
-				       ) VALUES ($1, $2, $3, $4, $5)
-			       `,
+				       )
+				       SELECT $1, $2, $3, $4, $5
+				       WHERE NOT EXISTS (
+				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $6
+				       )
+				       `,
 					bsid,
 					"CREATE",
-					"PENDING_APPROVAL",
+					"APPROVED",
 					body.UserID,
 					time.Now(),
+					bsid,
 				)
 				if err != nil {
 					results = append(results, map[string]interface{}{
