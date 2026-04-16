@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -18,17 +19,49 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
 
-const bankStatementUploadFolder = "cash/bankstatements"
+const bankStatementUploadFolder = "bankstatement"
+
+// tryExtractNumbersAsXLSX attempts to extract the embedded XLSX from an Apple Numbers (.numbers) file.
+// Apple Numbers files are ZIP archives containing Sheets/Sheet.xlsx (or similar).
+// Returns the XLSX bytes if successful, otherwise returns nil.
+func tryExtractNumbersAsXLSX(data []byte) []byte {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil
+	}
+	// Apple Numbers embeds the spreadsheet data in a few possible paths
+	prefixes := []string{"Sheets/Sheet", "preview-micro.jpg", "buildVersionHistory.plist"}
+	_ = prefixes
+	for _, f := range zr.File {
+		name := strings.ToLower(f.Name)
+		// Look for any xlsx inside the zip (Numbers puts it under Sheets/)
+		if strings.HasSuffix(name, ".xlsx") {
+			rc, openErr := f.Open()
+			if openErr != nil {
+				continue
+			}
+			xlsxBytes, readErr := io.ReadAll(rc)
+			rc.Close()
+			if readErr == nil && len(xlsxBytes) > 0 {
+				log.Printf("[BANK-PARSE] extracted embedded xlsx '%s' from .numbers file (%d bytes)", f.Name, len(xlsxBytes))
+				return xlsxBytes
+			}
+		}
+	}
+	return nil
+}
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
@@ -49,6 +82,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 	contentType := s3storage.DetectContentType(tmpFile)
+
+	// If this is an Apple Numbers file, extract the embedded XLSX first
+	if extracted := tryExtractNumbersAsXLSX(tmpFile); extracted != nil {
+		log.Printf("[BANK-PARSE] .numbers file detected — using embedded XLSX (%d bytes)", len(extracted))
+		tmpFile = extracted
+	}
 
 	var rows [][]string
 	var isCSV bool
@@ -98,7 +137,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			_, writeErr := tmpXlsFile.Write(tmpFile)
 			if writeErr == nil {
 				tmpXlsFile.Close() // Close before reading
-				xlsBook, xlsErr := xls.OpenFile(tmpXlsFile.Name())
+				var xlsBook xls.Workbook
+				xlsBook, xlsErr = xls.OpenFile(tmpXlsFile.Name())
 				if xlsErr == nil {
 					sheet, sheetErr := xlsBook.GetSheet(0)
 					if sheetErr == nil && sheet != nil {
@@ -183,47 +223,49 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// If account number wasn't found via mapping or override, proceed with the regular extraction logic.
 	if accountNumber == "" {
 		// Use default extraction logic when not using custom mapping or when mapping failed
-		if isCSV {
-			// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for j, cell := range rows[i] {
-					if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
-						accountNumber = rows[i][j+1]
-					}
-					if (cell == "Name:" || strings.EqualFold(cell, "Account Name")) && j+1 < len(rows[i]) {
-						accountName = rows[i][j+1]
-					}
-				}
-			}
-		} else {
-			// For Excel/XLS files — match same label variants as CSV branch
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for j, cell := range rows[i] {
-					nc := normalizeCell(cell)
-					isAcctLabel := nc == acNoHeader ||
-						strings.EqualFold(nc, "Account Number") ||
-						strings.EqualFold(nc, "Account No.") ||
-						strings.EqualFold(nc, "Account No") ||
-						strings.EqualFold(nc, "Acc No") ||
-						strings.EqualFold(nc, "Acc No.") ||
-						strings.EqualFold(nc, "A/C Number") ||
-						strings.EqualFold(nc, "A/C No") ||
-						strings.EqualFold(nc, "Account:")
-					if isAcctLabel && j+1 < len(rows[i]) {
+		// Unified label scan for both CSV and XLS/XLSX — same variants, same adjacent-cell logic.
+		for i := 0; i < 20 && i < len(rows); i++ {
+			for j, cell := range rows[i] {
+				nc := normalizeCell(cell)
+				isAcctLabel := nc == acNoHeader ||
+					strings.EqualFold(nc, "Account Number") ||
+					strings.EqualFold(nc, "Account No.") ||
+					strings.EqualFold(nc, "Account No") ||
+					strings.EqualFold(nc, "Acc No") ||
+					strings.EqualFold(nc, "Acc No.") ||
+					strings.EqualFold(nc, "A/C Number") ||
+					strings.EqualFold(nc, "A/C No") ||
+					strings.EqualFold(nc, "A/C No.") ||
+					strings.EqualFold(nc, "Account:") ||
+					strings.EqualFold(nc, "Account #") ||
+					strings.EqualFold(nc, "Acct Number") ||
+					strings.EqualFold(nc, "Acct No") ||
+					strings.EqualFold(nc, "Acct No.")
+				if isAcctLabel {
+					// Try right-neighbor first (label | value on same row)
+					if j+1 < len(rows[i]) {
 						if v := extractAccountFromCell(rows[i][j+1]); v != "" {
+							accountNumber = v
+						} else {
+							accountNumber = normalizeCell(rows[i][j+1])
+						}
+					}
+					// Try below (label on one row, value on next row same column)
+					if accountNumber == "" && i+1 < len(rows) && j < len(rows[i+1]) {
+						if v := extractAccountFromCell(rows[i+1][j]); v != "" {
 							accountNumber = v
 						}
 					}
-					if isAcctLabel && j+1 < len(rows[i]) && accountNumber == "" {
-						accountNumber = normalizeCell(rows[i][j+1])
-					}
-					if (nc == "Name:" || strings.EqualFold(nc, "Account Name") || strings.EqualFold(nc, "Name")) && j+1 < len(rows[i]) {
-						accountName = normalizeCell(rows[i][j+1])
-					}
 				}
-				if accountNumber != "" {
-					break
+				isNameLabel := cell == "Name:" ||
+					strings.EqualFold(nc, "Account Name") ||
+					strings.EqualFold(nc, "Name")
+				if isNameLabel && j+1 < len(rows[i]) {
+					accountName = normalizeCell(rows[i][j+1])
 				}
+			}
+			if accountNumber != "" {
+				break
 			}
 		}
 	}
@@ -400,69 +442,155 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	`, accountNumber).Scan(&entityID, &bankName, &accountName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// Primary candidate not found. Try scanning header rows for other
-			// long digit runs and attempt DB verification for each candidate
-			// in order. This prevents accidentally picking transaction refs
-			// or postal codes that appear earlier in the header.
-			log.Printf("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning header for verified candidates", accountNumber)
+			// Primary candidate not found.
+			//
+			// Strategy (in priority order):
+			//  1. Digit runs (>=7) extracted from the original filename — most reliable for
+			//     Citibank-style filenames like "95201994179_GXLSM_0036013656_PUN_28022026_M.xls"
+			//     where the real account number is embedded directly in the name.
+			//  2. Digit runs from true header rows only (rows BEFORE the data header row, i.e.
+			//     rows that do NOT look like a column-header line). This prevents picking up
+			//     counterparty account numbers that appear inside transaction description cells.
+			//  3. Alphanumeric runs from header rows (for BG/NEFT reference-style accounts).
+			//
+			// All matching is done with a SINGLE batch DB query (WHERE account_number = ANY($1))
+			// to avoid N serial round-trips. We then pick the match whose candidate appeared
+			// earliest in the priority-ordered list.
+			log.Printf("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning filename+header for verified candidates", accountNumber)
+
 			candidates := []string{}
 			seen := map[string]bool{}
-			alphaNumCandRe := regexp.MustCompile(`[A-Za-z0-9]{7,}`) // include alphanumeric for BG/NEFT reference-style accounts
-			// Scan first 20 rows: collect all digit (>=7) and alphanumeric (>=7) candidates
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for _, cell := range rows[i] {
-					v := normalizeCell(cell)
-					// Pure digit candidates
-					for _, m := range acctNumberRe.FindAllString(v, -1) {
-						cand := strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
-						if cand == "" {
-							continue
-						}
-						if !seen[cand] {
-							seen[cand] = true
-							candidates = append(candidates, cand)
-						}
-					}
-					// Alphanumeric candidates (only if no digit run matched this cell)
-					for _, m := range alphaNumCandRe.FindAllString(v, -1) {
-						cand := strings.TrimSpace(m)
-						if cand == "" || seen[cand] {
-							continue
-						}
-						// Skip if already covered by digit-only pass
-						if acctNumberRe.MatchString(cand) {
-							continue
-						}
-						seen[cand] = true
-						candidates = append(candidates, cand)
-					}
+
+			// addCand keeps the original segment (with dashes, e.g. "0-456789-678") as priority candidate
+			// and also adds the dash/space-stripped version for banks that store without dashes.
+			addCand := func(s string) {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return
+				}
+				// Add original first (exact match wins)
+				if !seen[s] {
+					seen[s] = true
+					candidates = append(candidates, s)
+				}
+				// Also add dash/space-stripped version if different (e.g. "0-456789-678" → "0456789678")
+				stripped := strings.ReplaceAll(strings.ReplaceAll(s, " ", ""), "-", "")
+				if stripped != s && stripped != "" && !seen[stripped] {
+					seen[stripped] = true
+					candidates = append(candidates, stripped)
+				}
+				// Also add leading-zero-stripped version (e.g. "0714447177" → "714447177")
+				// Some banks store account numbers without leading zeros in their DB.
+				noLeadZero := strings.TrimLeft(stripped, "0")
+				if noLeadZero != stripped && noLeadZero != "" && !seen[noLeadZero] {
+					seen[noLeadZero] = true
+					candidates = append(candidates, noLeadZero)
 				}
 			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Candidate scan: %d candidates from first 20 rows", len(candidates))
-			matched := false
-			for _, cand := range candidates {
-				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", cand)
-				var eID, bName, aName string
-				qErr := db.QueryRowContext(ctx, `
-					SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-					FROM public.masterbankaccount mba
-					LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-					WHERE mba.account_number = $1 AND mba.is_deleted = false
-				`, cand).Scan(&eID, &bName, &aName)
-				if qErr == nil {
-					accountNumber = cand
-					entityID = eID
-					bankName = bName
-					accountName = aName
-					matched = true
-					log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
+
+			// --- Priority 1: filename digit/account runs ---
+			filenameDigitRe := regexp.MustCompile(`\d{7,}`)
+			baseName := filepath.Base(uploadFileName)
+			// 1a: Split on _ space dot (NOT dash) so "0-456789-678" is preserved as a single segment.
+			// Dash-containing segments are valid account numbers at some banks.
+			dashAcctSegRe := regexp.MustCompile(`^\d[\d\-]{5,}\d$`) // starts+ends with digit, interior has digits+dashes, >=7 chars total
+			for _, part := range regexp.MustCompile(`[_\s\.]+`).Split(baseName, -1) {
+				part = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(part, ".xls"), ".xlsx"))
+				if filenameDigitRe.MatchString(part) || (len(part) >= 7 && dashAcctSegRe.MatchString(part)) {
+					addCand(part) // adds original (with dashes) + stripped version
+				}
+			}
+			// 1b: Also split on all separators including dash (catches plain digit segments)
+			for _, part := range regexp.MustCompile(`[_\-\s\.]+`).Split(baseName, -1) {
+				part = strings.TrimSpace(part)
+				if filenameDigitRe.MatchString(part) {
+					addCand(part)
+				}
+			}
+			// 1c: raw digit runs anywhere in filename
+			for _, m := range filenameDigitRe.FindAllString(baseName, -1) {
+				addCand(m)
+			}
+
+			// --- Priority 2 & 3: header rows only (before the data header row) ---
+			// Detect where the data header row starts: first row containing >= 2 cells that look
+			// like column header words (DATE, DESCRIPTION, DEBIT, CREDIT, BALANCE, AMOUNT, etc.)
+			colHeaderRe := regexp.MustCompile(`(?i)^(date|value\s*date|description|narration|particulars|debit|credit|withdrawal|deposit|balance|amount|dr|cr|time)$`)
+			headerEnd := 20 // default: scan all first 20 rows
+			for i := 0; i < 20 && i < len(rows); i++ {
+				hits := 0
+				for _, cell := range rows[i] {
+					if colHeaderRe.MatchString(strings.TrimSpace(cell)) {
+						hits++
+					}
+				}
+				if hits >= 2 {
+					headerEnd = i // do NOT scan this row or beyond — transaction data follows
 					break
 				}
-				if !errors.Is(qErr, sql.ErrNoRows) {
-					log.Printf("[BANK-UPLOAD-DEBUG] DB error while trying candidate %q: %v", cand, qErr)
-					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
+			}
+
+			alphaNumCandRe := regexp.MustCompile(`[A-Za-z0-9]{7,}`)
+			for i := 0; i < headerEnd && i < len(rows); i++ {
+				for _, cell := range rows[i] {
+					v := normalizeCell(cell)
+					for _, m := range acctNumberRe.FindAllString(v, -1) {
+						addCand(m)
+					}
+					for _, m := range alphaNumCandRe.FindAllString(v, -1) {
+						cand := strings.TrimSpace(m)
+						if cand == "" || seen[cand] || acctNumberRe.MatchString(cand) {
+							continue
+						}
+						addCand(cand)
+					}
 				}
 			}
+
+			log.Printf("[BANK-UPLOAD-DEBUG] Candidate scan: %d candidates (filename+header rows 0..%d)", len(candidates), headerEnd-1)
+			for _, c := range candidates {
+				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", c)
+			}
+
+			// Single batch DB query instead of N serial round-trips
+			matched := false
+			if len(candidates) > 0 {
+			rows2, qErr := db.QueryContext(ctx, `
+    SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+    FROM public.masterbankaccount mba
+    LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+    WHERE mba.account_number = ANY($1) AND mba.is_deleted = false
+`, pq.Array(candidates))
+			if qErr != nil {
+    return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
+}
+				// Build a map of accountNumber → (entityID, bankName, accountName) for all DB matches
+				type acctRow struct{ eID, bName, aName string }
+				dbMatches := map[string]acctRow{}
+				if qErr == nil {
+					for rows2.Next() {
+						var acNum string
+						var ar acctRow
+						if sErr := rows2.Scan(&acNum, &ar.eID, &ar.bName, &ar.aName); sErr == nil {
+							dbMatches[acNum] = ar
+						}
+					}
+					_ = rows2.Close()
+				}
+				// Pick the first candidate (in priority order) that the DB confirmed
+				for _, cand := range candidates {
+					if ar, ok := dbMatches[cand]; ok {
+						accountNumber = cand
+						entityID = ar.eID
+						bankName = ar.bName
+						accountName = ar.aName
+						matched = true
+						log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
+						break
+					}
+				}
+			}
+
 			if !matched {
 				log.Printf("[BANK-UPLOAD-DEBUG] Account not found in masterbankaccount after candidate scan: %v", candidates)
 				log.Printf("[BANK-UPLOAD-DEBUG] Dumping first 20 rows for inspection:")
@@ -776,7 +904,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 			colIdx["Description"] = idx
 			log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
-		} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+		} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 			colIdx["Description"] = idx
 			log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
 		}
@@ -1081,7 +1209,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// Map standard names to flexible column indices
 		if _, exists := colIdx["Description"]; !exists {
 			// Prefer explicit description column when present
-			if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+			if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 				colIdx["Description"] = idx
 			} else if idx := findColContaining(constants.ErrDebitCreditReference2, constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx["Description"] = idx
@@ -1093,7 +1221,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if idx := findColContaining(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
 				log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
-			} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+			} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
 				log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Transaction Remarks", idx)
 			}
@@ -1313,11 +1441,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// Filter out non-transaction rows by checking for known non-transaction keywords in the first column
 		if len(row) > 0 {
 			firstCell := strings.ToLower(strings.TrimSpace(row[0]))
+			// Also check the description column for footer/summary rows in XLS files
+			descCell := firstCell
+			if !isCSV {
+				if descIdx, ok := colIdx[transactionRemarksHeader]; ok && descIdx >= 0 && descIdx < len(row) {
+					descCell = strings.ToLower(strings.TrimSpace(row[descIdx]))
+				}
+			}
 			if strings.Contains(firstCell, "call 1800") ||
 				strings.Contains(firstCell, "write to us") ||
 				strings.Contains(firstCell, constants.ClosingBalance) ||
 				strings.Contains(firstCell, "opening balance") ||
-				strings.Contains(firstCell, "toll free") {
+				strings.Contains(firstCell, "toll free") ||
+				descCell == "new balance" ||
+				strings.HasPrefix(descCell, "avl balance") ||
+				strings.HasPrefix(descCell, "available balance") {
 				skippedNonTxnRows++
 				continue
 			}
@@ -1404,14 +1542,56 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			description = sanitizeForPostgres(description)
 			withdrawalStr := cleanAmount(row[colIdx[withdrawalAmtHeader]])
 			depositStr := cleanAmount(row[colIdx[depositAmtHeader]])
-			if withdrawalStr != "" && depositStr == "" {
+			// Parse both amounts upfront so we can handle the case where one is "0.00" (non-empty but zero)
+			var rawWithdrawal, rawDeposit float64
+			var withdrawalParsed, depositParsed bool
+			if withdrawalStr != "" {
+				if n, err := fmt.Sscanf(withdrawalStr, "%f", &rawWithdrawal); n == 1 && err == nil {
+					withdrawalParsed = true
+				}
+			}
+			if depositStr != "" {
+				if n, err := fmt.Sscanf(depositStr, "%f", &rawDeposit); n == 1 && err == nil {
+					depositParsed = true
+				}
+			}
+			// When both columns are non-empty but one is zero (e.g. BOB: Debit=14516.57, Credit=0.00),
+			// treat the zero-value column as absent so the non-zero value is picked correctly.
+			if withdrawalParsed && depositParsed {
+				if rawWithdrawal == 0 && rawDeposit != 0 {
+					withdrawalParsed = false
+				} else if rawDeposit == 0 && rawWithdrawal != 0 {
+					depositParsed = false
+				}
+			}
+			if withdrawalParsed && !depositParsed {
 				withdrawal.Valid = true
-				fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
+				withdrawal.Float64 = rawWithdrawal
+				// Some banks (e.g. Citibank) store debits as negative values in the debit column
+				if withdrawal.Float64 < 0 {
+					withdrawal.Float64 = -withdrawal.Float64
+				}
 				deposit.Valid = false
-			} else if depositStr != "" && withdrawalStr == "" {
+			} else if depositParsed && !withdrawalParsed {
 				deposit.Valid = true
-				fmt.Sscanf(depositStr, "%f", &deposit.Float64)
+				deposit.Float64 = rawDeposit
+				// Some banks store credits as negative values in the credit column — take abs
+				if deposit.Float64 < 0 {
+					deposit.Float64 = -deposit.Float64
+				}
 				withdrawal.Valid = false
+			} else if withdrawalParsed && depositParsed {
+				// Both columns have non-zero values: set both
+				withdrawal.Valid = true
+				withdrawal.Float64 = rawWithdrawal
+				if withdrawal.Float64 < 0 {
+					withdrawal.Float64 = -withdrawal.Float64
+				}
+				deposit.Valid = true
+				deposit.Float64 = rawDeposit
+				if deposit.Float64 < 0 {
+					deposit.Float64 = -deposit.Float64
+				}
 			} else {
 				withdrawal.Valid = false
 				deposit.Valid = false
@@ -1810,14 +1990,55 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				if okD && idxD < len(row) {
 					depositStr = cleanAmount(row[idxD])
 				}
-				if withdrawalStr != "" && depositStr == "" {
+				// Parse both amounts upfront so we can handle the case where one is "0.00" (non-empty but zero)
+				var rawW, rawD float64
+				var wParsed, dParsed bool
+				if withdrawalStr != "" {
+					if n, err := fmt.Sscanf(withdrawalStr, "%f", &rawW); n == 1 && err == nil {
+						wParsed = true
+					}
+				}
+				if depositStr != "" {
+					if n, err := fmt.Sscanf(depositStr, "%f", &rawD); n == 1 && err == nil {
+						dParsed = true
+					}
+				}
+				// When both columns are non-empty but one is zero (e.g. BOB), treat zero column as absent
+				if wParsed && dParsed {
+					if rawW == 0 && rawD != 0 {
+						wParsed = false
+					} else if rawD == 0 && rawW != 0 {
+						dParsed = false
+					}
+				}
+				if wParsed && !dParsed {
 					withdrawal.Valid = true
-					fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
+					withdrawal.Float64 = rawW
+					// Some banks (e.g. Citibank) store debits as negative values in the debit column
+					if withdrawal.Float64 < 0 {
+						withdrawal.Float64 = -withdrawal.Float64
+					}
 					deposit.Valid = false
-				} else if depositStr != "" && withdrawalStr == "" {
+				} else if dParsed && !wParsed {
 					deposit.Valid = true
-					fmt.Sscanf(depositStr, "%f", &deposit.Float64)
+					deposit.Float64 = rawD
+					// Some banks store credits as negative values in the credit column — take abs
+					if deposit.Float64 < 0 {
+						deposit.Float64 = -deposit.Float64
+					}
 					withdrawal.Valid = false
+				} else if wParsed && dParsed {
+					// Both non-zero: set both
+					withdrawal.Valid = true
+					withdrawal.Float64 = rawW
+					if withdrawal.Float64 < 0 {
+						withdrawal.Float64 = -withdrawal.Float64
+					}
+					deposit.Valid = true
+					deposit.Float64 = rawD
+					if deposit.Float64 < 0 {
+						deposit.Float64 = -deposit.Float64
+					}
 				} else {
 					withdrawal.Valid = false
 					deposit.Valid = false
@@ -1881,30 +2102,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			debugCount++
 		}
 
-		// --- CATEGORY MATCHING ---
-		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
-		if matchedCategoryID.Valid {
-			categoryCount[matchedCategoryID.String]++
-			if withdrawal.Valid {
-				debitSum[matchedCategoryID.String] += withdrawal.Float64
-			}
-			if deposit.Valid {
-				creditSum[matchedCategoryID.String] += deposit.Float64
-			}
-		} else {
-			uncategorized = append(uncategorized, map[string]interface{}{
-				"index":            rowNum,
-				"tran_id":          tranID.String,
-				"tran_date":        transactionDate,
-				"transaction_date": transactionDate,
-				"description":      description,
-				"value_date":       valueDate,
-				"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
-				"balance":          balance.Float64,
-			})
-		}
+		// --- COMPUTE RUNNING BALANCE (before category matching so balance is correct in uncategorized list) ---
 		// Recalculate balance using a running cumulative that starts from the first available balance.
-		// This prevents double-counting the first row amounts.
 		origBalance := balance
 
 		if firstValidRow {
@@ -1912,7 +2111,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if origBalance.Valid {
 				cumulative = origBalance.Float64
 				if openingBalance == 0 {
-					openingBalance = origBalance.Float64
+					// origBalance is the balance AFTER the first transaction.
+					// Back-calculate the true opening balance (balance BEFORE the first transaction):
+					//   opening = balance_after_first_txn + withdrawal - deposit
+					derivedOpening := origBalance.Float64
+					if withdrawal.Valid {
+						derivedOpening += withdrawal.Float64
+					}
+					if deposit.Valid {
+						derivedOpening -= deposit.Float64
+					}
+					openingBalance = derivedOpening
 				}
 			} else {
 				// No balance provided on the first row; seed cumulative from openingBalance if known.
@@ -1948,6 +2157,29 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			balance = origBalance
 		} else {
 			balance = sql.NullFloat64{Valid: true, Float64: cumulative}
+		}
+
+		// --- CATEGORY MATCHING ---
+		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
+		if matchedCategoryID.Valid {
+			categoryCount[matchedCategoryID.String]++
+			if withdrawal.Valid {
+				debitSum[matchedCategoryID.String] += withdrawal.Float64
+			}
+			if deposit.Valid {
+				creditSum[matchedCategoryID.String] += deposit.Float64
+			}
+		} else {
+			uncategorized = append(uncategorized, map[string]interface{}{
+				"index":            rowNum,
+				"tran_id":          tranID.String,
+				"tran_date":        transactionDate,
+				"transaction_date": transactionDate,
+				"description":      description,
+				"value_date":       valueDate,
+				"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"balance":          balance.Float64,
+			})
 		}
 		// Ensure a non-empty tran_id so downstream consumers see stable identifiers even when the file omits them.
 		if !tranID.Valid || strings.TrimSpace(tranID.String) == "" {
@@ -2072,18 +2304,33 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
-		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance, upload_s3_key
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		      ON CONFLICT ON CONSTRAINT uniq_stmt
-		      DO UPDATE SET
-			      file_hash = EXCLUDED.file_hash,
-			      closing_balance = EXCLUDED.closing_balance,
-			      upload_s3_key = EXCLUDED.upload_s3_key
-		      RETURNING bank_statement_id
+		     INSERT INTO cimplrcorpsaas.bank_statements (
+    entity_id,
+    account_number,
+    statement_period_start,
+    statement_period_end,
+    file_hash,
+    opening_balance,
+    closing_balance,
+    upload_s3_key
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+
+ON CONFLICT (file_hash)
+DO UPDATE SET
+    opening_balance = EXCLUDED.opening_balance,
+    closing_balance = EXCLUDED.closing_balance,
+    statement_period_start = EXCLUDED.statement_period_start,
+    statement_period_end = EXCLUDED.statement_period_end,
+    upload_s3_key = EXCLUDED.upload_s3_key
+
+RETURNING bank_statement_id
 		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
+		// Detect uniq_stmt (entity+account+period composite) constraint violation → clear user error
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" && pqErr.Constraint == "uniq_stmt" {
+			return nil, fmt.Errorf("%w: account %s already has a statement for this period", ErrStatementPeriodExists, accountNumber)
+		}
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
 
@@ -2296,6 +2543,12 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 // to know which format was uploaded. Returns an error when the content cannot be parsed
 // as any of the three supported types.
 func parseFileToRows(fileBytes []byte) ([][]string, error) {
+	// 0. If Apple Numbers file, extract embedded XLSX first
+	if extracted := tryExtractNumbersAsXLSX(fileBytes); extracted != nil {
+		log.Printf("[BANK-PARSE] parseFileToRows: .numbers detected — using embedded XLSX")
+		fileBytes = extracted
+	}
+
 	// 1. Try XLSX / modern Excel first (excelize handles .xlsx and some .xlsm)
 	if xl, xlErr := excelize.OpenReader(bytes.NewReader(fileBytes)); xlErr == nil {
 		defer xl.Close()
