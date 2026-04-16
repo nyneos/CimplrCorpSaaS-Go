@@ -5,7 +5,6 @@ import (
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -98,6 +97,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
 	skipDuplicates := strings.EqualFold(strings.TrimSpace(r.FormValue("skipDuplicates")), "true")
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
 	for _, fileHeader := range files {
 		file, err := fileHeader.Open()
 		if err != nil {
@@ -118,9 +118,8 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 			continue
 		}
 
-		fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 		ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-		s3Key := "fx/mtm/" + fileHash + ext
+		s3Key := s3storage.BuildUploadedS3Key("fx/mtm", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
 
 		var rowsData []map[string]interface{}
 		if ext == ".csv" {

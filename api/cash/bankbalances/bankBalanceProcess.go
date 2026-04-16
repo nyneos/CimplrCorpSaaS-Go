@@ -3,13 +3,14 @@ package bankbalances
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 
 	"mime/multipart"
 	"strconv"
 	"strings"
+	"time"
 
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 
@@ -18,11 +19,52 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var ErrFileAlreadyUploaded = errors.New("bank balance file already uploaded")
+
+const duplicateBankBalanceUploadMessage = "This bank balance file was already uploaded earlier. Please upload a different file."
+
 func nullableString(s string) *string {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
 	return &s
+}
+
+func existingBankBalanceUploadKeys(ctx context.Context, pgxPool *pgxpool.Pool) ([]string, error) {
+	rows, err := pgxPool.Query(ctx, `
+		SELECT DISTINCT upload_s3_key
+		FROM bank_balances_manual
+		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueBankBalanceUpload(ctx context.Context, pgxPool *pgxpool.Pool, fileBytes []byte) error {
+	keys, err := existingBankBalanceUploadKeys(ctx, pgxPool)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate bank balance upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare bank balance upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrFileAlreadyUploaded
+	}
+	return nil
 }
 
 func UploadBankBalancesProcess(
@@ -47,8 +89,11 @@ func UploadBankBalancesProcess(
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
-	hash := sha256.Sum256(fileBytes)
-	fileHash := fmt.Sprintf("%x", hash[:])
+	if s3storage.IsS3UploadEnabled() {
+		if err := ensureUniqueBankBalanceUpload(ctx, pgxPool, fileBytes); err != nil {
+			return "", err
+		}
+	}
 	contentType := s3storage.DetectContentType(fileBytes)
 
 	// 3. Parse file
@@ -152,7 +197,8 @@ func UploadBankBalancesProcess(
 	// 7. S3 upload must succeed before any DB write is persisted for this batch.
 	var s3URL string
 	folder := s3storage.GetStoragePrefix("bankbalance")
-	s3Key = s3storage.BuildS3Key(folder, "bank-balance", fileHash, ext)
+	storedFileName := s3storage.BuildUploadedFilename(fileHeader.Filename, userName, time.Now().UTC())
+	s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 	if s3storage.IsS3UploadEnabled() {
 		if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
 			fmt.Printf("[BANK-BALANCE-UPLOAD] S3 upload failed: %v", err)

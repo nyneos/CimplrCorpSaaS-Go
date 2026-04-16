@@ -16,7 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest" // used for multi-fallback probe
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"time"
@@ -1164,7 +1164,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				return
 			}
 
-			if mappings != nil && strings.TrimSpace(mappings.AccountNumber) == "" {
+			if strings.TrimSpace(mappings.AccountNumber) == "" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"success": false,
 					"message": "Column-Mappings must include 'Account Number' when mapping is enabled",
@@ -1253,7 +1253,6 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			accountOverride = accountNumbers[0]
 			log.Printf("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
 		} else if len(accountNumbers) >= 1 {
-			// Always run weighted scoring: filename patterns + masked numbers in file content.
 			var fileContent [][]string
 			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
 				fileContent = parsedRows
@@ -1263,16 +1262,23 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				accountOverride = matched
 				log.Printf("[BANK-UPLOAD-DEBUG] Matched file to account %s via weighted scoring", matched)
 			} else if len(accountNumbers) == 1 {
-				// Single account, no strong match — use as fallback.
 				accountOverride = accountNumbers[0]
 				log.Printf("[BANK-UPLOAD-DEBUG] Single account fallback: %s", accountOverride)
 			} else {
-				// Multiple accounts provided but no match — let UploadBankStatementV2 try content extraction.
 				log.Printf("[BANK-UPLOAD-DEBUG] Multiple accounts, no weighted match found for %s — relying on file content extraction", uploadFileName)
 			}
 		}
-
-		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings, accountOverride, uploadFileName)
+		result, err := UploadBankStatementV2WithCategorization(
+			r.Context(),
+			db,
+			mf,
+			fileHash,
+			useMapping,
+			mappings,
+			accountOverride,
+			uploadFileName,
+			requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+		)
 		if err != nil {
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
@@ -1601,7 +1607,17 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			bytesReader := bytes.NewReader(ze.data)
 			file := &bytesFile{Reader: bytesReader}
 
-			result, err := UploadBankStatementV2WithCategorization(ctx, db, file, ze.fileHash, useMapping, mappings, accountOverride, ze.name)
+			result, err := UploadBankStatementV2WithCategorization(
+				ctx,
+				db,
+				file,
+				ze.fileHash,
+				useMapping,
+				mappings,
+				accountOverride,
+				ze.name,
+				requestedByFromCtx(ctx, r.FormValue("user_id")),
+			)
 			if err != nil {
 				results = append(results, FileResult{
 					FileName: ze.name,
@@ -1619,7 +1635,6 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 			})
 			successCount++
 		}
-
 
 		response := map[string]interface{}{
 			"message":       fmt.Sprintf("Processed %d files from zip", len(results)),

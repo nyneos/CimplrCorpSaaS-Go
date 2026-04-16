@@ -44,13 +44,17 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			effectiveDate = time.Now().Format(constants.DateFormat)
 		}
 
-		userEmail := "";
+		userEmail := ""
 		// userEmail := "admin@example.com"
 		for _, s := range auth.GetActiveSessions() {
 			if s.UserID == userID {
 				userEmail = s.Email
 				break
 			}
+		}
+		requestedBy := strings.TrimSpace(userEmail)
+		if requestedBy == "" {
+			requestedBy = userID
 		}
 
 		files := r.MultipartForm.File["file"]
@@ -63,7 +67,7 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			r.Context(),
 			pgxPool,
 			files[0],
-			userEmail,
+			requestedBy,
 			proposalName,
 			recurrenceType,
 			effectiveDate,

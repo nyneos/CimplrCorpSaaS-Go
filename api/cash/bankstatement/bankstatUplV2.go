@@ -31,7 +31,7 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-const bankStatementModule = "bankstatement"
+const bankStatementUploadFolder = "bankstatement"
 
 // tryExtractNumbersAsXLSX attempts to extract the embedded XLSX from an Apple Numbers (.numbers) file.
 // Apple Numbers files are ZIP archives containing Sheets/Sheet.xlsx (or similar).
@@ -65,7 +65,7 @@ func tryExtractNumbersAsXLSX(data []byte) []byte {
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string, originalFilename string) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string, uploadFileName string, uploadedBy string) (map[string]interface{}, error) {
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
@@ -91,7 +91,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	var rows [][]string
 	var isCSV bool
-	fileExt := ".xlsx"
 
 	//var isXLS bool Try Excel first
 	xl, xlErr := excelize.OpenReader(bytes.NewReader(tmpFile))
@@ -126,7 +125,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 
 		isCSV = false
-		fileExt = ".xlsx"
 
 	} else {
 		// Try XLS (legacy Excel) using shakinm/xlsReader which properly handles formulas and formatting
@@ -157,7 +155,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 							return nil, errors.New("xls must have at least one data row")
 						}
 						isCSV = false
-						fileExt = ".xls"
 					} else {
 						xlsErr = errors.New("failed to get xls sheet")
 					}
@@ -181,7 +178,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, errors.New("csv must have at least one data row")
 			}
 			isCSV = true
-			fileExt = ".csv"
 		}
 	}
 
@@ -494,7 +490,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 			// --- Priority 1: filename digit/account runs ---
 			filenameDigitRe := regexp.MustCompile(`\d{7,}`)
-			baseName := filepath.Base(originalFilename)
+			baseName := filepath.Base(uploadFileName)
 			// 1a: Split on _ space dot (NOT dash) so "0-456789-678" is preserved as a single segment.
 			// Dash-containing segments are valid account numbers at some banks.
 			dashAcctSegRe := regexp.MustCompile(`^\d[\d\-]{5,}\d$`) // starts+ends with digit, interior has digits+dashes, >=7 chars total
@@ -559,15 +555,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			// Single batch DB query instead of N serial round-trips
 			matched := false
 			if len(candidates) > 0 {
-				rows2, qErr := db.QueryContext(ctx, `
-					SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-					FROM public.masterbankaccount mba
-					LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-					WHERE mba.account_number = ANY($1) AND mba.is_deleted = false
-				`, pq.Array(candidates))
-				if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
-					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
-				}
+			rows2, qErr := db.QueryContext(ctx, `
+    SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+    FROM public.masterbankaccount mba
+    LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+    WHERE mba.account_number = ANY($1) AND mba.is_deleted = false
+`, pq.Array(candidates))
+			if qErr != nil {
+    return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
+}
 				// Build a map of accountNumber → (entityID, bankName, accountName) for all DB matches
 				type acctRow struct{ eID, bName, aName string }
 				dbMatches := map[string]acctRow{}
@@ -639,12 +635,15 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	s3Key := s3storage.BuildModuleS3Key(bankStatementModule, accountNumber, fileHash, fileExt)
+	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
+	s3Key := s3storage.BuildNamedS3Key(bankStatementUploadFolder, "", storedFileName)
+	var uploadS3Key sql.NullString
 	var s3URL string
 	if s3storage.IsS3UploadEnabled() {
 		if err = s3storage.PutObjectToS3(ctx, s3Key, tmpFile, contentType); err != nil {
 			return nil, fmt.Errorf("failed to store original file to s3: %w", err)
 		}
+		uploadS3Key = sql.NullString{String: s3Key, Valid: true}
 		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
 			log.Printf("[BANK-UPLOAD-DEBUG] failed to presign upload response url for key=%q: %v", s3Key, err)
 			s3URL = ""
@@ -2305,17 +2304,27 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
-		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-		      ON CONFLICT (file_hash)
-		      DO UPDATE SET
-			      opening_balance = EXCLUDED.opening_balance,
-			      closing_balance = EXCLUDED.closing_balance,
-			      statement_period_start = EXCLUDED.statement_period_start,
-			      statement_period_end = EXCLUDED.statement_period_end
-		      RETURNING bank_statement_id
-		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
+		     INSERT INTO cimplrcorpsaas.bank_statements (
+    entity_id,
+    account_number,
+    statement_period_start,
+    statement_period_end,
+    file_hash,
+    opening_balance,
+    closing_balance,
+    upload_s3_key
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+
+ON CONFLICT (file_hash)
+DO UPDATE SET
+    opening_balance = EXCLUDED.opening_balance,
+    closing_balance = EXCLUDED.closing_balance,
+    statement_period_start = EXCLUDED.statement_period_start,
+    statement_period_end = EXCLUDED.statement_period_end,
+    upload_s3_key = EXCLUDED.upload_s3_key
+
+RETURNING bank_statement_id
+		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
 		// Detect uniq_stmt (entity+account+period composite) constraint violation → clear user error
@@ -2523,7 +2532,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"ungrouped_transaction_count":     ungroupedTxns,
 		"grouped_transaction_percent":     groupedPct,
 		"ungrouped_transaction_percent":   ungroupedPct,
-		"file_storage_key":                s3Key,
+		"file_storage_key":                uploadS3Key.String,
 		"file_storage_url":                s3URL,
 	}
 	return result, nil
