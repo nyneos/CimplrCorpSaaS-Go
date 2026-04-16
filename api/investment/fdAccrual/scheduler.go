@@ -761,11 +761,23 @@ func fireScheduledRun(
 	// Derive period from scheduledAt (the config's next_run_at), not from now()
 	var periodStart, periodEnd time.Time
 	switch scheduleFreq {
+	case "DAILY":
+		periodStart = time.Date(scheduledAt.Year(), scheduledAt.Month(), scheduledAt.Day(), 0, 0, 0, 0, time.UTC)
+		periodEnd = periodStart
 	case "QUARTERLY":
 		// Quarter that contains scheduledAt
 		qMonth := ((int(scheduledAt.Month())-1)/3)*3 + 1
 		periodStart = time.Date(scheduledAt.Year(), time.Month(qMonth), 1, 0, 0, 0, 0, time.UTC)
 		periodEnd = periodStart.AddDate(0, 3, -1)
+	case "HALF_YEARLY":
+		// Half-year containing scheduledAt: H1 = Jan–Jun, H2 = Jul–Dec
+		if scheduledAt.Month() <= 6 {
+			periodStart = time.Date(scheduledAt.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
+			periodEnd = time.Date(scheduledAt.Year(), time.June, 30, 0, 0, 0, 0, time.UTC)
+		} else {
+			periodStart = time.Date(scheduledAt.Year(), time.July, 1, 0, 0, 0, 0, time.UTC)
+			periodEnd = time.Date(scheduledAt.Year(), time.December, 31, 0, 0, 0, 0, time.UTC)
+		}
 	case "YEARLY":
 		periodStart = time.Date(scheduledAt.Year(), 1, 1, 0, 0, 0, 0, time.UTC)
 		periodEnd = time.Date(scheduledAt.Year(), 12, 31, 0, 0, 0, 0, time.UTC)
@@ -775,14 +787,17 @@ func fireScheduledRun(
 	}
 	financialPeriod := buildAccrualPeriod(periodStart)
 
-	// run_type must match the DB check constraint: MONTHLY / QUARTERLY / SCHEDULED / AD_HOC / MANUAL
-	// Scheduler-fired runs always use the constraint-allowed values.
+	// run_type must match DB check constraint: DAILY|MONTHLY|QUARTERLY|HALF_YEARLY|YEARLY
 	runType := "MONTHLY"
 	switch scheduleFreq {
+	case "DAILY":
+		runType = "DAILY"
 	case "QUARTERLY":
 		runType = "QUARTERLY"
+	case "HALF_YEARLY":
+		runType = "HALF_YEARLY"
 	case "YEARLY":
-		runType = "SCHEDULED" // no YEARLY in constraint; SCHEDULED is the closest
+		runType = "YEARLY"
 	}
 
 	// ── Duplicate guard ─────────────────────────────────────────────────────
@@ -909,6 +924,26 @@ func computeNextRunForConfig(frequency string, runDay int, from time.Time) time.
 	from = from.UTC()
 
 	switch frequency {
+	case "DAILY":
+		// Next calendar day
+		return time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+
+	case "HALF_YEARLY":
+		// Next half-year start (Jan 1 or Jul 1)
+		var candidate time.Time
+		if from.Month() < 7 {
+			candidate = time.Date(from.Year(), time.July, 1, 0, 0, 0, 0, time.UTC)
+		} else {
+			candidate = time.Date(from.Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC)
+		}
+		// Adjust to run_day within that month (capped at 28)
+		maxDay := daysInMonth(candidate.Year(), candidate.Month())
+		day := runDay
+		if day > maxDay {
+			day = maxDay
+		}
+		return time.Date(candidate.Year(), candidate.Month(), day, 0, 0, 0, 0, time.UTC)
+
 	case "QUARTERLY":
 		// Find the start of the current quarter
 		currentQStartMonth := time.Month(((int(from.Month())-1)/3)*3 + 1)

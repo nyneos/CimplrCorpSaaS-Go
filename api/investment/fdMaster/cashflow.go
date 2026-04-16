@@ -39,9 +39,13 @@ type FDRecord struct {
 	DayCountConvention      string
 	Currency                string
 	TDSPlanID               string
-	BankFDReference         string
-	ReceiptDate             time.Time
-	ConfirmationStatus      string
+	BankFDReference           string
+	ReceiptDate               time.Time
+	ConfirmationStatus        string
+	// User-overridable payout / cap dates — if set, value_dates of the first (and
+	// subsequent by offset) INTEREST_RECEIPT / CAPITALIZATION rows are shifted.
+	FirstPayoutDate          time.Time
+	FirstCapitalizationDate  time.Time
 }
 
 // InterestType is an alias kept for backward compat inside cashflow calculations.
@@ -85,6 +89,12 @@ func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []
 		} else {
 			rows[i].ProvisionalTDS = 0
 		}
+		// AccrualFrequency: copy the FD-level payout/compounding frequency onto every row
+		rows[i].AccrualFrequency = firstNonEmpty(
+			fd.InterestPayoutFrequency,
+			fd.CompoundingFrequency,
+			fd.FrequencyID,
+		)
 		rows[i].FinancialYear = fy
 		rows[i].CumulativeInterestFY = math.Round(fyInterest*100) / 100
 		rows[i].CumulativeTDSFY = math.Round(fyTDS*100) / 100
@@ -183,6 +193,10 @@ type CashflowRow struct {
 	// For ACCRUAL rows it is the accrual TDS provision; for INTEREST_RECEIPT/CAPITALIZATION
 	// rows it reflects the period interest.  Actual deduction timing is governed by tds_deduction_timing.
 	ProvisionalTDS float64
+	// AccrualFrequency is the payout/compounding frequency label for this FD row
+	// (DAILY | MONTHLY | QUARTERLY | HALF_YEARLY | YEARLY | AT_MATURITY).
+	// Derived from FDRecord.InterestPayoutFrequency at stampCumulativeFields time.
+	AccrualFrequency string
 	DayCountCode      string
 	Divisor           int
 	FormulaUsed       string
@@ -337,6 +351,18 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 		return nil, err
 	}
 	rec.FDID = fdID
+	// Read first_payout_date + first_capitalization_date from fd_master when present.
+	if masterCols["first_payout_date"] {
+		var payoutDate, capDate *time.Time
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT first_payout_date, first_capitalization_date FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&payoutDate, &capDate)
+		if payoutDate != nil {
+			rec.FirstPayoutDate = *payoutDate
+		}
+		if capDate != nil {
+			rec.FirstCapitalizationDate = *capDate
+		}
+	}
 	// Prefer day_count_code stored on fd_master over booking if available.
 	if masterCols["day_count_code"] && rec.DayCountConvention == "" {
 		var dc string
@@ -2400,7 +2426,72 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 
 	rows := generateCashflowSchedule(CashflowScheduleParams{FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds, DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo})
 	log.Printf("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
+
+	// Mirror the simulator path: apply grace period and stamp cumulative fields
+	// so that CF, S1 (simulate), and S2 (diff) all carry identical rows.
+	rows = applyGracePeriod(fd, cfg, rows, dcInfo, calInfo)
+	tdsRate := 0.0
+	if tds != nil {
+		tdsRate = tds.TDSRate
+	}
+	rows = stampCumulativeFields(rows, fd, tdsRate)
+	rows = applyFirstPayoutDateOverride(rows, fd)
 	return rows, fd, nil
+}
+
+// applyFirstPayoutDateOverride shifts the value_date of every INTEREST_RECEIPT,
+// CAPITALIZATION, and MATURITY row by the same offset that exists between the
+// user-supplied first_payout_date / first_capitalization_date and the system-
+// computed first event of that type.
+//
+// Rule:
+//   event_date  — stays exactly as the system calculated (accrual boundary).
+//   value_date  — shifted by: userDate − systemEventDate (in whole days).
+//
+// Example:
+//   System says first INTEREST_RECEIPT event_date = 2026-03-31 (value_date = 2026-03-31).
+//   User says first_payout_date = 2026-04-05  →  offset = +5 days.
+//   All INTEREST_RECEIPT value_dates become event_date + 5 days.
+//   (Apr 30 receipt → value_date May 5; May 31 → Jun 5, etc.)
+func applyFirstPayoutDateOverride(rows []CashflowRow, fd *FDRecord) []CashflowRow {
+	// ── INTEREST_RECEIPT offset ───────────────────────────────────────────
+	if !fd.FirstPayoutDate.IsZero() {
+		// Find the system-computed first INTEREST_RECEIPT event_date.
+		var firstSystemEventDate time.Time
+		for _, r := range rows {
+			if r.EventType == "INTEREST_RECEIPT" {
+				firstSystemEventDate = r.EventDate
+				break
+			}
+		}
+		if !firstSystemEventDate.IsZero() && !fd.FirstPayoutDate.Equal(firstSystemEventDate) {
+			offsetDays := int(fd.FirstPayoutDate.Sub(firstSystemEventDate).Hours() / 24)
+			for i, r := range rows {
+				if r.EventType == "INTEREST_RECEIPT" || r.EventType == "MATURITY" {
+					rows[i].ValueDate = r.EventDate.AddDate(0, 0, offsetDays)
+				}
+			}
+		}
+	}
+	// ── CAPITALIZATION offset ─────────────────────────────────────────────
+	if !fd.FirstCapitalizationDate.IsZero() {
+		var firstSystemCapDate time.Time
+		for _, r := range rows {
+			if r.EventType == "CAPITALIZATION" {
+				firstSystemCapDate = r.EventDate
+				break
+			}
+		}
+		if !firstSystemCapDate.IsZero() && !fd.FirstCapitalizationDate.Equal(firstSystemCapDate) {
+			offsetDays := int(fd.FirstCapitalizationDate.Sub(firstSystemCapDate).Hours() / 24)
+			for i, r := range rows {
+				if r.EventType == "CAPITALIZATION" {
+					rows[i].ValueDate = r.EventDate.AddDate(0, 0, offsetDays)
+				}
+			}
+		}
+	}
+	return rows
 }
 
 func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow) error {
@@ -2559,6 +2650,7 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 		"accr_rev_k",
 		"tds_rev_l",
 		"provisional_tds",
+		"accrual_frequency",
 		"day_count_code", "divisor", "formula_used", "accrual_rate_per_day",
 		"holidays_in_period",
 		"dr_account_code", "dr_account_name",
@@ -2603,6 +2695,7 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 			"accr_rev_k":           row.AccrRevK,
 			"tds_rev_l":            row.TDSRevL,
 			"provisional_tds":      row.ProvisionalTDS,
+			"accrual_frequency":    nilIfEmpty(row.AccrualFrequency),
 			"day_count_code":       nilIfEmpty(row.DayCountCode),
 			"divisor":              nilIfZero(row.Divisor),
 			"formula_used":         nilIfEmpty(row.FormulaUsed),

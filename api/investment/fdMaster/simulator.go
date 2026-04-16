@@ -531,6 +531,11 @@ type SimulateCashflowRequest struct {
 	HolidayAccrual               *bool   `json:"holiday_accrual"`
 	TDSDeductionTiming           *string `json:"tds_deduction_timing"`
 	QuarterDefinition            *string `json:"quarter_definition"`
+	// User-overridable payout / cap dates (YYYY-MM-DD).
+	// If set, the value_date of the first matching event is shifted to this date
+	// and all subsequent value_dates of that event type are shifted by the same offset.
+	FirstPayoutDate         *string `json:"first_payout_date,omitempty"`
+	FirstCapitalizationDate *string `json:"first_capitalization_date,omitempty"`
 }
 
 // SimulateCashflowResponse is what the handler returns.
@@ -609,6 +614,7 @@ type SimulatedCashflowRow struct {
 	AccrRevK          float64 `json:"accr_rev_k"`                  // cumulative prior accruals reversed into payout
 	TDSRevL           float64 `json:"tds_rev_l"`                   // TDS on AccrRevK
 	ProvisionalTDS    float64 `json:"provisional_tds"`             // indicative TDS on this period's accrual (= InterestAccrued × TDSRate/100)
+	AccrualFrequency  string  `json:"accrual_frequency,omitempty"`  // interest_payout_frequency / compounding_frequency
 	DayCountCode      string  `json:"day_count_code,omitempty"`
 	Divisor           int     `json:"divisor,omitempty"`
 	FormulaUsed       string  `json:"formula_used,omitempty"`
@@ -673,17 +679,11 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	// ── Resolve frequency ref (frequency_id OR frequency_code alias) ─────
 	freqRef := strings.TrimSpace(firstNonEmpty(req.FrequencyID, req.FrequencyCode))
 
-	// ── Resolve tenor → days ──────────────────────────────────────────────
-	tenorDays := req.TenorDays
-	if tenorDays <= 0 && req.TenorMonths > 0 {
-		tenorDays = req.TenorMonths * 30
-	}
-	if tenorDays <= 0 && req.TenorYears > 0 {
-		tenorDays = req.TenorYears * 365
-	}
-
-	// ── Resolve maturity date ─────────────────────────────────────────────
+	// ── Resolve tenor → maturity date ────────────────────────────────────
 	// Explicit maturity_date in request wins over tenor calculation.
+	tenorDays := req.TenorDays
+	tenorFromMonthsOrYears := false // tracks whether maturity needs holiday adjustment
+
 	var maturityDate time.Time
 	if d := strings.TrimSpace(req.MaturityDate); d != "" {
 		maturityDate, err = time.Parse(constants.DateFormat, d)
@@ -695,15 +695,29 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 			tenorDays = int(maturityDate.Sub(startDate).Hours() / 24)
 		}
 	} else {
-		if tenorDays <= 0 {
+		// No explicit maturity_date — derive from tenor.
+		// Use proper calendar math (AddDate) rather than the approximation
+		// tenor_months*30, so the computed maturity matches how the booking
+		// side stores it (booking also uses AddDate(0, months, 0)).
+		if tenorDays <= 0 && req.TenorMonths > 0 {
+			maturityDate = startDate.AddDate(0, req.TenorMonths, 0)
+			tenorDays = int(maturityDate.Sub(startDate).Hours() / 24)
+			tenorFromMonthsOrYears = true
+		} else if tenorDays <= 0 && req.TenorYears > 0 {
+			maturityDate = startDate.AddDate(req.TenorYears, 0, 0)
+			tenorDays = int(maturityDate.Sub(startDate).Hours() / 24)
+			tenorFromMonthsOrYears = true
+		} else if tenorDays > 0 {
+			maturityDate = startDate.AddDate(0, 0, tenorDays)
+		} else {
 			return nil, fmt.Errorf("provide one of tenor_days, tenor_months, tenor_years, or maturity_date (> 0)")
 		}
-		maturityDate = startDate.AddDate(0, 0, tenorDays)
 	}
 
 	if tenorDays <= 0 {
 		return nil, fmt.Errorf("cannot determine tenor: maturity_date must be after start_date")
 	}
+	_ = tenorFromMonthsOrYears // holiday adjustment applied below after cfg+cal are loaded
 
 	// ── Load bank config (if provided) ────────────────────────────────────
 	cfg, _ := loadBankConfig(ctx, exec, req.BankConfigID)
@@ -747,6 +761,18 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 	calCode := strings.TrimSpace(cfg.HolidayCalendarCode)
 	calInfo := loadHolidayCalendar(ctx, exec, calCode, startDate, maturityDate)
 
+	// ── Apply holiday adjustment to month/year-derived maturity ──────────
+	// When maturity was computed from tenor_months or tenor_years (not an explicit
+	// maturity_date or tenor_days), adjust for non-working days using the same
+	// CapitalizationDateAdjustment rule as the booking path.
+	if tenorFromMonthsOrYears && cfg.CapitalizationDateAdjustment != "" && cfg.CapitalizationDateAdjustment != "NO_ADJUST" {
+		adjusted := adjustToWorkingDay(maturityDate, cfg.CapitalizationDateAdjustment, cfg, calInfo)
+		if !adjusted.Equal(maturityDate) {
+			maturityDate = adjusted
+			tenorDays = int(maturityDate.Sub(startDate).Hours() / 24)
+		}
+	}
+
 	// ── Build FDRecord in memory (no DB) ──────────────────────────────────
 	fd := &FDRecord{
 		PrincipalAmount:         req.PrincipalAmount,
@@ -778,6 +804,19 @@ func runSimulationForRequest(ctx context.Context, exec queryExecutor, req Simula
 		simTDSRate = tds.TDSRate
 	}
 	rawRows = stampCumulativeFields(rawRows, fd, simTDSRate)
+
+	// ── Apply user-supplied first payout / capitalization date overrides ──
+	if req.FirstPayoutDate != nil && *req.FirstPayoutDate != "" {
+		if pd, perr := time.Parse(constants.DateFormat, *req.FirstPayoutDate); perr == nil {
+			fd.FirstPayoutDate = pd
+		}
+	}
+	if req.FirstCapitalizationDate != nil && *req.FirstCapitalizationDate != "" {
+		if cd, cerr := time.Parse(constants.DateFormat, *req.FirstCapitalizationDate); cerr == nil {
+			fd.FirstCapitalizationDate = cd
+		}
+	}
+	rawRows = applyFirstPayoutDateOverride(rawRows, fd)
 
 	// ── Convert to sim rows ───────────────────────────────────────────────
 	simRows := make([]SimulatedCashflowRow, 0, len(rawRows))
@@ -1050,6 +1089,7 @@ func cashflowRowToSim(row CashflowRow) SimulatedCashflowRow {
 		AccrRevK:          row.AccrRevK,
 		TDSRevL:           row.TDSRevL,
 		ProvisionalTDS:    row.ProvisionalTDS,
+		AccrualFrequency:  row.AccrualFrequency,
 		DayCountCode:      row.DayCountCode,
 		Divisor:           row.Divisor,
 		FormulaUsed:       row.FormulaUsed,
@@ -1211,6 +1251,20 @@ type DiffCashflowRow struct {
 	OldDivisor           *int     `json:"old_divisor,omitempty"`
 	OldFormulaUsed       *string  `json:"old_formula_used,omitempty"`
 	OldAccrualRatePerDay *float64 `json:"old_accrual_rate_per_day,omitempty"`
+	OldDueNotAccrued     *float64 `json:"old_due_not_accrued,omitempty"`
+	OldAccrRevK          *float64 `json:"old_accr_rev_k,omitempty"`
+	OldTDSRevL           *float64 `json:"old_tds_rev_l,omitempty"`
+	OldProvisionalTDS    *float64 `json:"old_provisional_tds,omitempty"`
+	OldAccrualFrequency  *string  `json:"old_accrual_frequency,omitempty"`
+	OldValueDate         *string  `json:"old_value_date,omitempty"`
+	OldInterestRate      *float64 `json:"old_interest_rate,omitempty"`
+	OldTDSRate           *float64 `json:"old_tds_rate,omitempty"`
+	OldFinancialYear     *string  `json:"old_financial_year,omitempty"`
+	OldCumulativeInterestFY    *float64 `json:"old_cumulative_interest_fy,omitempty"`
+	OldCumulativeTDSFY         *float64 `json:"old_cumulative_tds_fy,omitempty"`
+	OldCumulativeInterestTotal *float64 `json:"old_cumulative_interest_total,omitempty"`
+	OldHolidaysInPeriod  *int     `json:"old_holidays_in_period,omitempty"`
+	OldCashflowType      *string  `json:"old_cashflow_type,omitempty"`
 
 	// ── New schedule values (from confirmation) — always present unless REMOVED ─
 	NewPeriodNumber      int     `json:"new_period_number"`
@@ -1225,6 +1279,20 @@ type DiffCashflowRow struct {
 	NewDivisor           int     `json:"new_divisor"`
 	NewFormulaUsed       string  `json:"new_formula_used"`
 	NewAccrualRatePerDay float64 `json:"new_accrual_rate_per_day"`
+	NewDueNotAccrued     float64 `json:"new_due_not_accrued"`
+	NewAccrRevK          float64 `json:"new_accr_rev_k"`
+	NewTDSRevL           float64 `json:"new_tds_rev_l"`
+	NewProvisionalTDS    float64 `json:"new_provisional_tds"`
+	NewAccrualFrequency  string  `json:"new_accrual_frequency,omitempty"`
+	NewValueDate         string  `json:"new_value_date,omitempty"`
+	NewInterestRate      float64 `json:"new_interest_rate"`
+	NewTDSRate           float64 `json:"new_tds_rate"`
+	NewFinancialYear     string  `json:"new_financial_year,omitempty"`
+	NewCumulativeInterestFY    float64 `json:"new_cumulative_interest_fy"`
+	NewCumulativeTDSFY         float64 `json:"new_cumulative_tds_fy"`
+	NewCumulativeInterestTotal float64 `json:"new_cumulative_interest_total"`
+	NewHolidaysInPeriod  int     `json:"new_holidays_in_period"`
+	NewCashflowType      string  `json:"new_cashflow_type,omitempty"`
 
 	// ── Diff metadata ─────────────────────────────────────────────────────
 	HasChange  bool           `json:"has_change"`
@@ -1353,6 +1421,20 @@ func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 			NewDivisor:           nr.Divisor,
 			NewFormulaUsed:       nr.FormulaUsed,
 			NewAccrualRatePerDay: nr.AccrualRatePerDay,
+			NewDueNotAccrued:     nr.DueNotAccrued,
+			NewAccrRevK:          nr.AccrRevK,
+			NewTDSRevL:           nr.TDSRevL,
+			NewProvisionalTDS:    nr.ProvisionalTDS,
+			NewAccrualFrequency:  nr.AccrualFrequency,
+			NewValueDate:         nr.ValueDate,
+			NewInterestRate:      nr.InterestRate,
+			NewTDSRate:           nr.TDSRate,
+			NewFinancialYear:     nr.FinancialYear,
+			NewCumulativeInterestFY:    nr.CumulativeInterestFY,
+			NewCumulativeTDSFY:         nr.CumulativeTDSFY,
+			NewCumulativeInterestTotal: nr.CumulativeInterestTotal,
+			NewHolidaysInPeriod:  nr.HolidaysInPeriod,
+			NewCashflowType:      nr.CashflowType,
 		}
 
 		if oldRow == nil {
@@ -1373,6 +1455,20 @@ func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 			dr.OldDivisor = intPtr(oldRow.Divisor)
 			dr.OldFormulaUsed = strPtr(oldRow.FormulaUsed)
 			dr.OldAccrualRatePerDay = numPtr(oldRow.AccrualRatePerDay)
+			dr.OldDueNotAccrued = numPtr(oldRow.DueNotAccrued)
+			dr.OldAccrRevK = numPtr(oldRow.AccrRevK)
+			dr.OldTDSRevL = numPtr(oldRow.TDSRevL)
+			dr.OldProvisionalTDS = numPtr(oldRow.ProvisionalTDS)
+			dr.OldAccrualFrequency = strPtr(oldRow.AccrualFrequency)
+			dr.OldValueDate = strPtr(oldRow.ValueDate)
+			dr.OldInterestRate = numPtr(oldRow.InterestRate)
+			dr.OldTDSRate = numPtr(oldRow.TDSRate)
+			dr.OldFinancialYear = strPtr(oldRow.FinancialYear)
+			dr.OldCumulativeInterestFY = numPtr(oldRow.CumulativeInterestFY)
+			dr.OldCumulativeTDSFY = numPtr(oldRow.CumulativeTDSFY)
+			dr.OldCumulativeInterestTotal = numPtr(oldRow.CumulativeInterestTotal)
+			dr.OldHolidaysInPeriod = intPtr(oldRow.HolidaysInPeriod)
+			dr.OldCashflowType = strPtr(oldRow.CashflowType)
 
 			// Detect if anything changed.
 			changed := diffFloat64(oldRow.OpeningPrincipal, nr.OpeningPrincipal) ||
@@ -1382,8 +1478,13 @@ func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 				diffFloat64(oldRow.TDSAmount, nr.TDSAmount) ||
 				diffFloat64(oldRow.NetCashFlow, nr.NetCashFlow) ||
 				diffFloat64(oldRow.AccrualRatePerDay, nr.AccrualRatePerDay) ||
+				diffFloat64(oldRow.DueNotAccrued, nr.DueNotAccrued) ||
+				diffFloat64(oldRow.AccrRevK, nr.AccrRevK) ||
+				diffFloat64(oldRow.TDSRevL, nr.TDSRevL) ||
+				diffFloat64(oldRow.ProvisionalTDS, nr.ProvisionalTDS) ||
 				oldRow.PeriodDays != nr.PeriodDays ||
-				oldRow.DayCountCode != nr.DayCountCode
+				oldRow.DayCountCode != nr.DayCountCode ||
+				oldRow.AccrualFrequency != nr.AccrualFrequency
 
 			if changed {
 				dr.ChangeType = DiffChanged
@@ -1421,6 +1522,20 @@ func diffSchedules(oldRows, newRows []SimulatedCashflowRow) []DiffCashflowRow {
 			OldDivisor:           intPtr(or.Divisor),
 			OldFormulaUsed:       strPtr(or.FormulaUsed),
 			OldAccrualRatePerDay: numPtr(or.AccrualRatePerDay),
+			OldDueNotAccrued:     numPtr(or.DueNotAccrued),
+			OldAccrRevK:          numPtr(or.AccrRevK),
+			OldTDSRevL:           numPtr(or.TDSRevL),
+			OldProvisionalTDS:    numPtr(or.ProvisionalTDS),
+			OldAccrualFrequency:  strPtr(or.AccrualFrequency),
+			OldValueDate:         strPtr(or.ValueDate),
+			OldInterestRate:      numPtr(or.InterestRate),
+			OldTDSRate:           numPtr(or.TDSRate),
+			OldFinancialYear:     strPtr(or.FinancialYear),
+			OldCumulativeInterestFY:    numPtr(or.CumulativeInterestFY),
+			OldCumulativeTDSFY:         numPtr(or.CumulativeTDSFY),
+			OldCumulativeInterestTotal: numPtr(or.CumulativeInterestTotal),
+			OldHolidaysInPeriod:  intPtr(or.HolidaysInPeriod),
+			OldCashflowType:      strPtr(or.CashflowType),
 			// New values are zero / empty (row was removed).
 			ChangeType: DiffRemoved,
 			HasChange:  true,

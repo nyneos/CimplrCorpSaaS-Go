@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest" // used for multi-fallback probe
 	"path/filepath"
 	"strings"
 	"time"
@@ -1129,10 +1130,14 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			return
 		}
 
-		if r.FormValue("multi") == "true" {
+		multiFlag := r.FormValue("multi") == "true"
+		if multiFlag {
+			// explicit multi=true: only try multi approach, surface error if it fails
 			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
 			return
 		}
+		// No explicit multi flag: run normal single-account V2 first.
+		// Multi is only attempted as a last-resort fallback if V2 fails.
 
 		useMappingFlag := strings.ToLower(strings.TrimSpace(r.FormValue("mapping")))
 		useMapping := useMappingFlag == "true" || useMappingFlag == "1"
@@ -1269,6 +1274,39 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 
 		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings, accountOverride, uploadFileName)
 		if err != nil {
+			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
+			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
+			multiRec := httptest.NewRecorder()
+			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
+			// Multi handler returns outer "success":true even when ALL individual accounts fail.
+			// We must check that at least one account in data{} actually succeeded.
+			var multiResp struct {
+				Success bool                       `json:"success"`
+				Data    map[string]json.RawMessage `json:"data"`
+			}
+			multiActuallySucceeded := false
+			if multiRec.Code == http.StatusOK && json.Unmarshal(multiRec.Body.Bytes(), &multiResp) == nil && multiResp.Success {
+				for _, raw := range multiResp.Data {
+					var acct struct {
+						Success bool `json:"success"`
+					}
+					if json.Unmarshal(raw, &acct) == nil && acct.Success {
+						multiActuallySucceeded = true
+						break
+					}
+				}
+			}
+			if multiActuallySucceeded {
+				log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
+				for k, v := range multiRec.Header() {
+					w.Header()[k] = v
+				}
+				w.WriteHeader(multiRec.Code)
+				w.Write(multiRec.Body.Bytes())
+				return
+			}
+			// Both V2 and multi failed — always surface the original V2 error (never multi's)
+			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning original V2 error")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"message": userFriendlyUploadError(err),
@@ -1459,8 +1497,8 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 				log.Printf("[ZIP-UPLOAD] force+1: assigning file %s → account %s", ze.name, accountOverride)
 
 			case forceOverride && len(accountNumbers) == 0:
-				// Trust filename: extract a purely-numeric segment >=7 digits from the filename.
-				// e.g. "95201994179_GXLSM_0036013656_PUN_28022026_M.xls" → "0036013656"
+				// Trust filename: extract account number segment from the filename.
+				// Supports both pure-digit accounts ("0036013656") and dash-containing accounts ("0-456789-678").
 				isDigits := func(s string) bool {
 					if len(s) == 0 {
 						return false
@@ -1472,12 +1510,38 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 					}
 					return true
 				}
+				isDashAccount := func(s string) bool {
+					// digits-and-dashes, starts+ends with digit, length >= 7
+					if len(s) < 7 || s[0] < '0' || s[0] > '9' || s[len(s)-1] < '0' || s[len(s)-1] > '9' {
+						return false
+					}
+					for _, c := range s {
+						if (c < '0' || c > '9') && c != '-' {
+							return false
+						}
+					}
+					return true
+				}
+				// Pass 1: split on _ . space only (preserves dashes) — catches "0-456789-678"
 				for _, part := range strings.FieldsFunc(base, func(r rune) bool {
-					return r == '_' || r == '-' || r == '.' || r == ' '
+					return r == '_' || r == '.' || r == ' '
 				}) {
-					if len(part) >= 7 && isDigits(part) {
+					// strip extension suffix just in case
+					part = strings.TrimSuffix(strings.TrimSuffix(part, ".xls"), ".xlsx")
+					if len(part) >= 7 && (isDigits(part) || isDashAccount(part)) {
 						accountOverride = part
 						break
+					}
+				}
+				// Pass 2: also split on dashes for plain digit accounts
+				if accountOverride == "" {
+					for _, part := range strings.FieldsFunc(base, func(r rune) bool {
+						return r == '_' || r == '-' || r == '.' || r == ' '
+					}) {
+						if len(part) >= 7 && isDigits(part) {
+							accountOverride = part
+							break
+						}
 					}
 				}
 				if accountOverride == "" {

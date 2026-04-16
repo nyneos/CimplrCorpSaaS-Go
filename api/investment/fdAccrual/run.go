@@ -75,7 +75,7 @@ func CreateAccrualRun(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			req.RunMode = "SIMULATION"
 		}
 		if req.RunType == "" {
-			req.RunType = "MANUAL"
+			req.RunType = "MONTHLY" // default; caller can pass DAILY|QUARTERLY|HALF_YEARLY|YEARLY
 		}
 		if req.DayCountConvention == "" {
 			req.DayCountConvention = "ACT_365"
@@ -3774,7 +3774,7 @@ func BulkGenerateMonthlyAccruals(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 			// Step 1: Create run
 			input := CreateAccrualRunInput{
-				RunType:            "SCHEDULED",
+				RunType:            "MONTHLY", // bulk monthly generate always produces MONTHLY runs
 				RunMode:            req.RunMode,
 				EntityID:           req.EntityID,
 				EntityName:         req.EntityName,

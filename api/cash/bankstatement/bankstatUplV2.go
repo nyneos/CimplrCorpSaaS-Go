@@ -139,7 +139,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			_, writeErr := tmpXlsFile.Write(tmpFile)
 			if writeErr == nil {
 				tmpXlsFile.Close() // Close before reading
-				xlsBook, xlsErr := xls.OpenFile(tmpXlsFile.Name())
+				var xlsBook xls.Workbook
+				xlsBook, xlsErr = xls.OpenFile(tmpXlsFile.Name())
 				if xlsErr == nil {
 					sheet, sheetErr := xlsBook.GetSheet(0)
 					if sheetErr == nil && sheet != nil {
@@ -226,47 +227,49 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// If account number wasn't found via mapping or override, proceed with the regular extraction logic.
 	if accountNumber == "" {
 		// Use default extraction logic when not using custom mapping or when mapping failed
-		if isCSV {
-			// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for j, cell := range rows[i] {
-					if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
-						accountNumber = rows[i][j+1]
-					}
-					if (cell == "Name:" || strings.EqualFold(cell, "Account Name")) && j+1 < len(rows[i]) {
-						accountName = rows[i][j+1]
-					}
-				}
-			}
-		} else {
-			// For Excel/XLS files — match same label variants as CSV branch
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for j, cell := range rows[i] {
-					nc := normalizeCell(cell)
-					isAcctLabel := nc == acNoHeader ||
-						strings.EqualFold(nc, "Account Number") ||
-						strings.EqualFold(nc, "Account No.") ||
-						strings.EqualFold(nc, "Account No") ||
-						strings.EqualFold(nc, "Acc No") ||
-						strings.EqualFold(nc, "Acc No.") ||
-						strings.EqualFold(nc, "A/C Number") ||
-						strings.EqualFold(nc, "A/C No") ||
-						strings.EqualFold(nc, "Account:")
-					if isAcctLabel && j+1 < len(rows[i]) {
+		// Unified label scan for both CSV and XLS/XLSX — same variants, same adjacent-cell logic.
+		for i := 0; i < 20 && i < len(rows); i++ {
+			for j, cell := range rows[i] {
+				nc := normalizeCell(cell)
+				isAcctLabel := nc == acNoHeader ||
+					strings.EqualFold(nc, "Account Number") ||
+					strings.EqualFold(nc, "Account No.") ||
+					strings.EqualFold(nc, "Account No") ||
+					strings.EqualFold(nc, "Acc No") ||
+					strings.EqualFold(nc, "Acc No.") ||
+					strings.EqualFold(nc, "A/C Number") ||
+					strings.EqualFold(nc, "A/C No") ||
+					strings.EqualFold(nc, "A/C No.") ||
+					strings.EqualFold(nc, "Account:") ||
+					strings.EqualFold(nc, "Account #") ||
+					strings.EqualFold(nc, "Acct Number") ||
+					strings.EqualFold(nc, "Acct No") ||
+					strings.EqualFold(nc, "Acct No.")
+				if isAcctLabel {
+					// Try right-neighbor first (label | value on same row)
+					if j+1 < len(rows[i]) {
 						if v := extractAccountFromCell(rows[i][j+1]); v != "" {
+							accountNumber = v
+						} else {
+							accountNumber = normalizeCell(rows[i][j+1])
+						}
+					}
+					// Try below (label on one row, value on next row same column)
+					if accountNumber == "" && i+1 < len(rows) && j < len(rows[i+1]) {
+						if v := extractAccountFromCell(rows[i+1][j]); v != "" {
 							accountNumber = v
 						}
 					}
-					if isAcctLabel && j+1 < len(rows[i]) && accountNumber == "" {
-						accountNumber = normalizeCell(rows[i][j+1])
-					}
-					if (nc == "Name:" || strings.EqualFold(nc, "Account Name") || strings.EqualFold(nc, "Name")) && j+1 < len(rows[i]) {
-						accountName = normalizeCell(rows[i][j+1])
-					}
 				}
-				if accountNumber != "" {
-					break
+				isNameLabel := cell == "Name:" ||
+					strings.EqualFold(nc, "Account Name") ||
+					strings.EqualFold(nc, "Name")
+				if isNameLabel && j+1 < len(rows[i]) {
+					accountName = normalizeCell(rows[i][j+1])
 				}
+			}
+			if accountNumber != "" {
+				break
 			}
 		}
 	}
@@ -462,25 +465,53 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			candidates := []string{}
 			seen := map[string]bool{}
 
+			// addCand keeps the original segment (with dashes, e.g. "0-456789-678") as priority candidate
+			// and also adds the dash/space-stripped version for banks that store without dashes.
 			addCand := func(s string) {
-				s = strings.ReplaceAll(strings.ReplaceAll(s, " ", ""), "-", "")
-				if s != "" && !seen[s] {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return
+				}
+				// Add original first (exact match wins)
+				if !seen[s] {
 					seen[s] = true
 					candidates = append(candidates, s)
 				}
+				// Also add dash/space-stripped version if different (e.g. "0-456789-678" → "0456789678")
+				stripped := strings.ReplaceAll(strings.ReplaceAll(s, " ", ""), "-", "")
+				if stripped != s && stripped != "" && !seen[stripped] {
+					seen[stripped] = true
+					candidates = append(candidates, stripped)
+				}
+				// Also add leading-zero-stripped version (e.g. "0714447177" → "714447177")
+				// Some banks store account numbers without leading zeros in their DB.
+				noLeadZero := strings.TrimLeft(stripped, "0")
+				if noLeadZero != stripped && noLeadZero != "" && !seen[noLeadZero] {
+					seen[noLeadZero] = true
+					candidates = append(candidates, noLeadZero)
+				}
 			}
 
-			// --- Priority 1: filename digit runs ---
+			// --- Priority 1: filename digit/account runs ---
 			filenameDigitRe := regexp.MustCompile(`\d{7,}`)
 			baseName := filepath.Base(originalFilename)
-			// Split filename on common separators so "0036013656" in "GXLSM_0036013656_PUN" is found cleanly
+			// 1a: Split on _ space dot (NOT dash) so "0-456789-678" is preserved as a single segment.
+			// Dash-containing segments are valid account numbers at some banks.
+			dashAcctSegRe := regexp.MustCompile(`^\d[\d\-]{5,}\d$`) // starts+ends with digit, interior has digits+dashes, >=7 chars total
+			for _, part := range regexp.MustCompile(`[_\s\.]+`).Split(baseName, -1) {
+				part = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(part, ".xls"), ".xlsx"))
+				if filenameDigitRe.MatchString(part) || (len(part) >= 7 && dashAcctSegRe.MatchString(part)) {
+					addCand(part) // adds original (with dashes) + stripped version
+				}
+			}
+			// 1b: Also split on all separators including dash (catches plain digit segments)
 			for _, part := range regexp.MustCompile(`[_\-\s\.]+`).Split(baseName, -1) {
 				part = strings.TrimSpace(part)
 				if filenameDigitRe.MatchString(part) {
 					addCand(part)
 				}
 			}
-			// Also try whole-filename digit runs as a fallback
+			// 1c: raw digit runs anywhere in filename
 			for _, m := range filenameDigitRe.FindAllString(baseName, -1) {
 				addCand(m)
 			}
