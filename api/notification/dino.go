@@ -11,11 +11,13 @@ import (
 	middlewares "CimplrCorpSaas/api/middlewares"
 	catalog "CimplrCorpSaas/api/notification/catalog"
 	push "CimplrCorpSaas/api/notification/push"
+	"CimplrCorpSaas/internal/observability"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
+	const serviceName = "notification"
 	mux := http.NewServeMux()
 
 	if pool == nil {
@@ -82,9 +84,10 @@ func StartNotificationService(pool *pgxpool.Pool, db *sql.DB, port string) {
 
 	// Register browser push subscription routes (VAPID public key, register, unregister)
 	push.RegisterSubscriptionRoutes(mux, pool)
+	mux.Handle("/notification/metrics", observability.MetricsHandler(serviceName))
 
 	log.Printf("Notification Service started on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux)); err != nil {
 		log.Fatalf("Notification Service failed: %v", err)
 	}
 }

@@ -10,3 +10,5 @@ SSO_MFA_INTEGRATION_CONTEXT.md
 # Salesforce DX generated files
 .sfdx/
 *.bak
+
+graphify-out/*

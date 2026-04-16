@@ -4,6 +4,7 @@ import (
 	allMaster "CimplrCorpSaas/api/master/allMasters"
 	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 )
 
 func StartMasterService(db *sql.DB, port string) {
+	const serviceName = "master"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
@@ -32,6 +34,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.HandleFunc("/master/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Masters Service is healthy"))
 	})
+	mux.Handle("/master/metrics", observability.MetricsHandler(serviceName))
 
 	// Cost / Profit Center Master routes
 	mux.Handle("/master/v2/costprofit-center/bulk-create-sync", middlewares.PreValidationMiddleware(pgxPool)(allMaster.CreateAndSyncCostProfitCenters(pgxPool)))
@@ -343,7 +346,7 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
 
 	log.Printf("Master Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
+	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		log.Fatalf("Master Service failed: %v", err)
 	}

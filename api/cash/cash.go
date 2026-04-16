@@ -12,27 +12,41 @@ import (
 	sweepconfig "CimplrCorpSaas/api/cash/sweepConfig"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/travel"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func StartCashService(db *sql.DB, port string) {
+	const serviceName = "cash"
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
 	host := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
+	sslMode := strings.TrimSpace(os.Getenv("DB_SSLMODE"))
+	if sslMode == "" {
+		sslMode = "require"
+	}
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 	pgxPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to pgxpool DB: %v", err)
+	}
+
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pgxPool.Ping(pingCtx); err != nil {
+		log.Fatalf("failed to verify pgxpool DB connectivity at startup: %v", err)
 	}
 	mux.Handle("/cash/upload-bank-statement", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadBankStatementV2Handler(db, pgxPool)))
 	mux.Handle("/cash/upload-bank-statement-zip", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.UploadZippedBankStatementsHandler(db, pgxPool)))
@@ -211,8 +225,9 @@ func StartCashService(db *sql.DB, port string) {
 	mux.HandleFunc("/cash/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Cash Service is active"))
 	})
+	mux.Handle("/cash/metrics", observability.MetricsHandler(serviceName))
 	log.Printf("Cash Service started on :%s", port)
-	err = http.ListenAndServe(":"+port, mux)
+	err = http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		log.Fatalf("Cash Service failed: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,8 +78,7 @@ func (a *AuthService) Stop() error {
 }
 
 // Login authenticates a user by email and password, returning the session and
-// an mfaPending flag. Passwords are compared using bcrypt; if the stored hash
-// is a legacy plaintext value that matches, it is automatically upgraded to bcrypt.
+// an mfaPending flag. Passwords are verified strictly using bcrypt.
 func (a *AuthService) Login(username, password string, clientIP string) (*UserSession, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -98,6 +98,12 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		return nil, false, errors.New("internal error")
 	}
 
+	status := strings.TrimSpace(dbStatus.String)
+	if !strings.EqualFold(status, "approved") {
+		LogSecurityEvent(a.db, dbUserID, "login_blocked", "account status: "+status, clientIP)
+		return nil, false, errors.New("Account is not approved for login")
+	}
+
 	// Account lock check
 	if a.MaxLoginAttempts > 0 {
 		if fa, ok := a.failedAttempts[dbUserID]; ok {
@@ -112,19 +118,10 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		}
 	}
 
-	// Password verification: bcrypt first, then plaintext fallback with auto-upgrade
+	// Password verification: bcrypt only
 	passwordValid := false
 	if dbPassword.Valid && dbPassword.String != "" {
-		if bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil {
-			passwordValid = true
-		} else if dbPassword.String == password {
-			// Legacy plaintext match — upgrade to bcrypt
-			passwordValid = true
-			if hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
-				_, _ = a.db.Exec(`UPDATE users SET password = $1 WHERE id = $2`, string(hashed), dbUserID)
-				LogSecurityEvent(a.db, dbUserID, "password_upgraded", "plaintext→bcrypt", clientIP)
-			}
-		}
+		passwordValid = bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil
 	}
 
 	if !passwordValid {

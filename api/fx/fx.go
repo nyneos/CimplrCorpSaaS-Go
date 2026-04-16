@@ -6,6 +6,7 @@ import (
 	"CimplrCorpSaas/api/fx/forwards"
 	v91 "CimplrCorpSaas/api/fx/v91"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
@@ -17,10 +18,12 @@ import (
 )
 
 func StartFXService(db *sql.DB, port string) {
+	const serviceName = "fx"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fx/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("FX Service is active"))
 	})
+	mux.Handle("/fx/metrics", observability.MetricsHandler(serviceName))
 	// mux.HandleFunc("/fx/forward-booking", ForwardBooking)
 
 	user := os.Getenv("DB_USER")
@@ -284,7 +287,7 @@ func StartFXService(db *sql.DB, port string) {
 	// mux.Handle("/fx/forwards/upload-bank-multi",  middlewares.PreValidationMiddleware(pgxPool)(forwards.UploadBankForwardBookingsMulti(db)))
 
 	log.Printf("FX Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		log.Fatalf("FX Service failed: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
+	"CimplrCorpSaas/internal/observability"
 	"context"
 	"database/sql"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 )
 
 func StartUAMService(db *sql.DB, port string) {
+	const serviceName = "uam"
 	mux := http.NewServeMux()
 
 	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
@@ -39,6 +41,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
+	mux.Handle("/uam/metrics", observability.MetricsHandler(serviceName))
 
 	/*Approval Matrix*/
 	mux.Handle("/uam/approval-matrix/create", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.CreateApprovalMatrix(pgxPool)))
@@ -89,7 +92,7 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
 	log.Printf("UAM Service started on :%s", port)
-	err := http.ListenAndServe(":"+port, mux)
+	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {
 		log.Fatalf("UAM Service failed: %v", err)
 	}

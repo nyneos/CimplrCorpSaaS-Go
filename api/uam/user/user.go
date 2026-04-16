@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -91,8 +92,13 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			// if genErr != nil {
 			// 	respondWithError(w, http.StatusInternalServerError, "Failed to generate password")
 			// 	return
-			// }
-			cimplr = "changeme"
+			// }cimplr = "changeme"
+			envDefaultPassword := strings.TrimSpace(os.Getenv("UAM_DEFAULT_PASSWORD"))
+			if envDefaultPassword != "" {
+				cimplr = envDefaultPassword
+			} else {
+				cimplr = "changeme"
+			}
 		}
 		hashedPassword, hashErr := bcrypt.GenerateFromPassword([]byte(cimplr), bcrypt.DefaultCost)
 		if hashErr != nil {
