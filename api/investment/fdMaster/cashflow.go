@@ -39,9 +39,13 @@ type FDRecord struct {
 	DayCountConvention      string
 	Currency                string
 	TDSPlanID               string
-	BankFDReference         string
-	ReceiptDate             time.Time
-	ConfirmationStatus      string
+	BankFDReference           string
+	ReceiptDate               time.Time
+	ConfirmationStatus        string
+	// User-overridable payout / cap dates — if set, value_dates of the first (and
+	// subsequent by offset) INTEREST_RECEIPT / CAPITALIZATION rows are shifted.
+	FirstPayoutDate          time.Time
+	FirstCapitalizationDate  time.Time
 }
 
 // InterestType is an alias kept for backward compat inside cashflow calculations.
@@ -79,6 +83,18 @@ func stampCumulativeFields(rows []CashflowRow, fd *FDRecord, tdsRate float64) []
 		}
 		rows[i].InterestRate = fd.InterestRate
 		rows[i].TDSRate = tdsRate
+		// ProvisionalTDS: indicative period-level TDS provision (interest × rate)
+		if tdsRate > 0 && rows[i].InterestAccrued > 0 {
+			rows[i].ProvisionalTDS = math.Round(rows[i].InterestAccrued*tdsRate/100*100) / 100
+		} else {
+			rows[i].ProvisionalTDS = 0
+		}
+		// AccrualFrequency: copy the FD-level payout/compounding frequency onto every row
+		rows[i].AccrualFrequency = firstNonEmpty(
+			fd.InterestPayoutFrequency,
+			fd.CompoundingFrequency,
+			fd.FrequencyID,
+		)
 		rows[i].FinancialYear = fy
 		rows[i].CumulativeInterestFY = math.Round(fyInterest*100) / 100
 		rows[i].CumulativeTDSFY = math.Round(fyTDS*100) / 100
@@ -136,6 +152,12 @@ type CashflowRow struct {
 	PeriodNumber int
 	EventType    string
 	EventDate    time.Time
+	// ValueDate is the settlement / processed date — adjusted for holidays,
+	// weekends, TDS applicable dates, and first-payout-date overrides.
+	// For ACCRUAL rows ValueDate == EventDate (accruals are internal entries).
+	// For INTEREST_RECEIPT / CAPITALIZATION / MATURITY rows ValueDate is the
+	// next working day on or after EventDate per the bank holiday calendar.
+	ValueDate time.Time
 	// period window
 	PeriodStartDate time.Time
 	PeriodEndDate   time.Time
@@ -147,7 +169,34 @@ type CashflowRow struct {
 	ClosingPrincipal  float64
 	TDSAmount         float64
 	NetCashFlow       float64
-	// calculation metadata
+	// CashflowType classifies the direction of cash movement:
+	//   OUTFLOW  — cash leaves entity (Initial Investment, TDS deduction)
+	//   INFLOW   — cash enters entity (Interest Payout, Maturity, Principal Return)
+	//   CAP      — capitalisation (no cash, increases principal)
+	//   NA       — non-cash accounting entry (Accrual, Grace Period)
+	CashflowType string
+	// DueNotAccrued is populated on INTEREST_RECEIPT rows.
+	// It holds the last monthly accrual's interest amount that falls exactly on
+	// the payout date — per GAAP this is NOT accrued (it is due-not-accrued)
+	// because the cash is received on that same day.  The corresponding ACCRUAL
+	// row for that period is suppressed (not emitted separately).
+	DueNotAccrued float64
+	// AccrRevK is the cumulative accrual amount that is reversed into the
+	// INTEREST_RECEIPT row (sum of prior-month accruals within the payout window,
+	// i.e. all accruals EXCEPT the due-not-accrued last month).
+	AccrRevK float64
+	// TDSRevL is the TDS corresponding to AccrRevK reversals.
+	TDSRevL float64
+	// ProvisionalTDS is the indicative/tentative TDS on this period's interest accrual.
+	// It is always populated (= InterestAccrued × TDSRate / 100) and shows how much TDS
+	// would be deductible for this period, regardless of when actual deduction happens.
+	// For ACCRUAL rows it is the accrual TDS provision; for INTEREST_RECEIPT/CAPITALIZATION
+	// rows it reflects the period interest.  Actual deduction timing is governed by tds_deduction_timing.
+	ProvisionalTDS float64
+	// AccrualFrequency is the payout/compounding frequency label for this FD row
+	// (DAILY | MONTHLY | QUARTERLY | HALF_YEARLY | YEARLY | AT_MATURITY).
+	// Derived from FDRecord.InterestPayoutFrequency at stampCumulativeFields time.
+	AccrualFrequency string
 	DayCountCode      string
 	Divisor           int
 	FormulaUsed       string
@@ -302,6 +351,18 @@ func loadFDRecordByFDID(ctx context.Context, exec queryExecutor, fdID string) (*
 		return nil, err
 	}
 	rec.FDID = fdID
+	// Read first_payout_date + first_capitalization_date from fd_master when present.
+	if masterCols["first_payout_date"] {
+		var payoutDate, capDate *time.Time
+		_ = exec.QueryRow(ctx, fmt.Sprintf(
+			"SELECT first_payout_date, first_capitalization_date FROM investment.fd_master WHERE %s=$1", keyCol), fdID).Scan(&payoutDate, &capDate)
+		if payoutDate != nil {
+			rec.FirstPayoutDate = *payoutDate
+		}
+		if capDate != nil {
+			rec.FirstCapitalizationDate = *capDate
+		}
+	}
 	// Prefer day_count_code stored on fd_master over booking if available.
 	if masterCols["day_count_code"] && rec.DayCountConvention == "" {
 		var dc string
@@ -910,6 +971,53 @@ func loadHolidayCalendar(ctx context.Context, exec queryExecutor, calCode string
 	return info
 }
 
+// resolveValueDate returns the value/settlement date for a cashflow event.
+//
+// Rules (matching the CSV spec):
+//   - ACCRUAL / TDS_DEDUCTION (internal bookkeeping)  → ValueDate = EventDate (no settlement)
+//   - INTEREST_RECEIPT / CAPITALIZATION / MATURITY / PRINCIPAL_RETURN / GRACE_PERIOD
+//       → next working day on or after EventDate per the bank holiday calendar.
+//   - If the event date itself is a working day, ValueDate == EventDate.
+//   - INITIAL_INVESTMENT → ValueDate = EventDate (investment date, already chosen by user)
+//
+// When the BankConfig is nil or the calendar is empty the raw EventDate is returned.
+func resolveValueDate(eventType string, eventDate time.Time, cfg *BankConfig, cal HolidayCalendarInfo) time.Time {
+	if eventDate.IsZero() {
+		return eventDate
+	}
+	switch strings.ToUpper(eventType) {
+	case "ACCRUAL", "TDS_DEDUCTION", "INITIAL_INVESTMENT":
+		// Internal non-cash entries — value date equals event date.
+		return eventDate
+	}
+	// For all cash / settlement events find the next working day.
+	if cfg == nil || (cal.WeekendPattern == "" && len(cal.HolidayDates) == 0) {
+		return eventDate
+	}
+	return NextWorkingDay(eventDate, cal)
+}
+
+// cashflowTypeFor returns the cashflow direction string for an event type:
+//
+//	OUTFLOW — cash leaves entity (initial investment, TDS deduction)
+//	INFLOW  — cash enters entity (interest payout, maturity, principal return)
+//	CAP     — capitalisation event (no cash; increases principal balance)
+//	NA      — non-cash accounting/accrual entry
+func cashflowTypeFor(eventType string) string {
+	switch strings.ToUpper(eventType) {
+	case "INITIAL_INVESTMENT":
+		return "OUTFLOW"
+	case "TDS_DEDUCTION":
+		return "OUTFLOW"
+	case "INTEREST_RECEIPT", "MATURITY", "PRINCIPAL_RETURN":
+		return "INFLOW"
+	case "CAPITALIZATION":
+		return "CAP"
+	default: // ACCRUAL, GRACE_PERIOD, etc.
+		return "NA"
+	}
+}
+
 // normTDSTiming normalises any casing/spacing/alias of a TDS deduction timing
 // value to one of the four canonical tokens: RECEIPT | ACCRUAL | ACCRUAL_ANNUAL | MATURITY.
 // Returns "" when the input is empty or unrecognised.
@@ -1444,11 +1552,52 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 
 	// If SIMPLE or AT_MATURITY — no capitalization. Build accrual rows + maturity + TDS.
 	if !isCompound {
-		// Append accrual rows
+		// Determine payout dates first so we know which accrual period-ends are
+		// "payout dates" — those get DueNotAccrued treatment, not a standalone ACCRUAL row.
+		freqType := strings.ToUpper(strings.TrimSpace(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, fd.InterestPayoutFrequency, fd.FrequencyID)))
+		payoutMonths := freqTypeToMonths(freqType)
+		isNonCumulative := payoutMonths > 0
+
+		// Build payout dates and, for each payout window, identify the LAST accrual
+		// period-end in that window. That last accrual becomes due_not_accrued on the
+		// INTEREST_RECEIPT row and must NOT be emitted as a standalone ACCRUAL row.
+		var payoutDates []time.Time
+		// suppressedAccrualEnd maps accrual PeriodEnd → true if it is the last accrual
+		// in its payout window (i.e. it will appear as due_not_accrued, not standalone).
+		suppressedAccrualEnd := map[string]bool{}
+		if isNonCumulative {
+			payoutDates = buildPayoutDates(fd, payoutMonths)
+			lastWindowStart := fd.ValueDate
+			for _, pd := range payoutDates {
+				// Find the chronologically last accrual whose PeriodEnd is in (lastWindowStart, pd]
+				var lastEndInWindow time.Time
+				for _, ae := range accrualRows {
+					if ae.PeriodEnd.After(lastWindowStart) && !ae.PeriodEnd.After(pd) {
+						if ae.PeriodEnd.After(lastEndInWindow) {
+							lastEndInWindow = ae.PeriodEnd
+						}
+					}
+				}
+				if !lastEndInWindow.IsZero() {
+					suppressedAccrualEnd[lastEndInWindow.Format(constants.DateFormat)] = true
+				}
+				lastWindowStart = pd
+			}
+		}
+
+		// Append accrual rows — skip the last accrual per payout window (it becomes
+		// due_not_accrued on the INTEREST_RECEIPT row, not a standalone ACCRUAL).
 		for _, ae := range accrualRows {
+			if suppressedAccrualEnd[ae.PeriodEnd.Format(constants.DateFormat)] {
+				// This is the last accrual in its payout window — it is due-not-accrued.
+				// Do NOT emit a standalone ACCRUAL row; it will appear on the payout row.
+				continue
+			}
 			rows = append(rows, CashflowRow{
 				EventType:         "ACCRUAL",
 				EventDate:         ae.PeriodEnd,
+				ValueDate:         ae.PeriodEnd, // accruals: value date = event date
+				CashflowType:      "NA",
 				PeriodStartDate:   ae.PeriodStart,
 				PeriodEndDate:     ae.PeriodEnd,
 				PeriodDays:        ae.PeriodDays,
@@ -1466,11 +1615,6 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 			})
 		}
 
-		// Determine payout frequency — if payouts are periodic, create INTEREST_RECEIPT events (non-cumulative)
-		freqType := strings.ToUpper(strings.TrimSpace(firstNonEmpty(freq.FrequencyType, freq.FrequencyCode, fd.InterestPayoutFrequency, fd.FrequencyID)))
-		payoutMonths := freqTypeToMonths(freqType)
-		isNonCumulative := payoutMonths > 0
-
 		if isNonCumulative {
 			// Build payout boundaries and emit INTEREST_RECEIPT + TDS rows.
 			// TDS timing modes (from tds_plan_master.deduction_timing only):
@@ -1478,7 +1622,6 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 			//   ACCRUAL       — TDS on each accrual period when cumulative interest >= threshold
 			//   ACCRUAL_ANNUAL— TDS on Mar 31 each FY when FY cumulative >= threshold
 			//   MATURITY      — Single TDS at maturity on total cumulative interest
-			payoutDates := buildPayoutDates(fd, payoutMonths)
 			lastPayout := fd.ValueDate
 
 			// For ACCRUAL_ANNUAL: track FY state
@@ -1487,7 +1630,7 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 				fyEndYear++
 			}
 			lastFYEnd := time.Date(fyEndYear, time.March, 31, 0, 0, 0, 0, time.UTC)
-			var fyAccumInterest float64 // accumulates within current FY for ACCRUAL_ANNUAL
+			var fyAccumInterest float64   // accumulates within current FY for ACCRUAL_ANNUAL
 			var totalAccumInterest float64 // accumulates over full life for MATURITY
 			// For ACCRUAL mode: TDS emitted per-accrual-period (monthly)
 			if hasTDS && (tdsDeductionTiming == "ACCRUAL" || tdsDeductionTiming == "ACCRUAL_ANNUAL") {
@@ -1502,6 +1645,8 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 							rows = append(rows, CashflowRow{
 								EventType:        "TDS_DEDUCTION",
 								EventDate:        ae.PeriodEnd,
+								ValueDate:        ae.PeriodEnd,
+								CashflowType:     "OUTFLOW",
 								PeriodStartDate:  ae.PeriodStart,
 								PeriodEndDate:    ae.PeriodEnd,
 								PeriodDays:       ae.PeriodDays,
@@ -1527,6 +1672,8 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 							rows = append(rows, CashflowRow{
 								EventType:        "TDS_DEDUCTION",
 								EventDate:        tdsDate,
+								ValueDate:        tdsDate,
+								CashflowType:     "OUTFLOW",
 								PeriodStartDate:  time.Date(lastFYEnd.Year()-1, time.April, 1, 0, 0, 0, 0, time.UTC),
 								PeriodEndDate:    tdsDate,
 								PeriodDays:       365,
@@ -1551,12 +1698,43 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 			}
 
 			for _, payoutDate := range payoutDates {
-				payoutInterest := 0.0
+				// ── Classify accruals within this payout window ───────────────
+				// "due_not_accrued" = the chronologically LAST accrual in (lastPayout, payoutDate].
+				//   This is the most-recent accrual period; it is "due" but not yet settled.
+				//   It does NOT get a standalone ACCRUAL row (suppressed via suppressedAccrualEnd).
+				// "accrual_reversal" (AccrRevK) = sum of all earlier accruals in the same window.
+				// TDSRevL = TDS rate × AccrRevK.
+				var dueNotAccruedInterest float64
+				var accrRevInterest float64
+				// First pass: find the last accrual PeriodEnd in this window.
+				var lastAccrualEndInWindow time.Time
 				for _, a := range accrualRows {
 					if a.PeriodEnd.After(lastPayout) && !a.PeriodEnd.After(payoutDate) {
-						payoutInterest += a.Interest
+						if a.PeriodEnd.After(lastAccrualEndInWindow) {
+							lastAccrualEndInWindow = a.PeriodEnd
+						}
 					}
 				}
+				// Second pass: classify each accrual in the window.
+				for _, a := range accrualRows {
+					if a.PeriodEnd.After(lastPayout) && !a.PeriodEnd.After(payoutDate) {
+						if a.PeriodEnd.Equal(lastAccrualEndInWindow) {
+							// Chronologically last accrual → due-not-accrued
+							dueNotAccruedInterest += a.Interest
+						} else {
+							// Earlier accruals in window → accrual reversal
+							accrRevInterest += a.Interest
+						}
+					}
+				}
+				payoutInterest := accrRevInterest + dueNotAccruedInterest
+
+				// AccrRevK and TDSRevL
+				tdsRevL := 0.0
+				if hasTDS && tdsCfg != nil && accrRevInterest > 0 {
+					tdsRevL = applyRounding(accrRevInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
+				}
+
 				if payoutInterest > 0 {
 					isLastPayout := payoutDate.Equal(fd.MaturityDate)
 					tdsAmt := 0.0
@@ -1568,9 +1746,12 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 					if hasTDS && tdsDeductionTiming == "MATURITY" && isLastPayout && totalAccumInterest >= tdsCfg.ThresholdAmount {
 						tdsAmt = applyRounding(totalAccumInterest*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
 					}
+					payoutVD := resolveValueDate("INTEREST_RECEIPT", payoutDate, cfg, calInfo)
 					rows = append(rows, CashflowRow{
 						EventType:         "INTEREST_RECEIPT",
 						EventDate:         payoutDate,
+						ValueDate:         payoutVD,
+						CashflowType:      "INFLOW",
 						PeriodStartDate:   lastPayout,
 						PeriodEndDate:     payoutDate,
 						PeriodDays:        int(payoutDate.Sub(lastPayout).Hours() / 24),
@@ -1580,6 +1761,9 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 						ClosingPrincipal:  fd.PrincipalAmount,
 						TDSAmount:         tdsAmt,
 						NetCashFlow:       applyRounding(payoutInterest-tdsAmt, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, isLastPayout),
+						DueNotAccrued:     applyRounding(dueNotAccruedInterest, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false),
+						AccrRevK:          applyRounding(accrRevInterest, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false),
+						TDSRevL:           tdsRevL,
 						DayCountCode:      effectiveDayCountCode,
 						HolidaysInPeriod:  countHolidaysInRange(lastPayout, payoutDate, cfg, calInfo),
 					})
@@ -1587,6 +1771,8 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 						rows = append(rows, CashflowRow{
 							EventType:        "TDS_DEDUCTION",
 							EventDate:        payoutDate,
+							ValueDate:        payoutVD,
+							CashflowType:     "OUTFLOW",
 							PeriodStartDate:  lastPayout,
 							PeriodEndDate:    payoutDate,
 							OpeningPrincipal: fd.PrincipalAmount,
@@ -1594,7 +1780,13 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 							NetCashFlow:      -tdsAmt,
 							ClosingPrincipal: fd.PrincipalAmount,
 							DayCountCode:     effectiveDayCountCode,
-							FormulaUsed:      fmt.Sprintf("TDS_%s = %.2f × %.4f%%", tdsDeductionTiming, payoutInterest, tdsCfg.TDSRate),
+							FormulaUsed: func() string {
+								base := payoutInterest
+								if tdsDeductionTiming == "MATURITY" {
+									base = totalAccumInterest
+								}
+								return fmt.Sprintf("TDS_%s = %.2f × %.4f%%", tdsDeductionTiming, base, tdsCfg.TDSRate)
+							}(),
 						})
 					}
 				}
@@ -1602,9 +1794,12 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 			}
 
 			// Maturity: return principal only (interest already paid out)
+			matVD := resolveValueDate("MATURITY", fd.MaturityDate, cfg, calInfo)
 			rows = append(rows, CashflowRow{
 				EventType:         "MATURITY",
 				EventDate:         fd.MaturityDate,
+				ValueDate:         matVD,
+				CashflowType:      "INFLOW",
 				PeriodStartDate:   lastPayout,
 				PeriodEndDate:     fd.MaturityDate,
 				PeriodDays:        int(fd.MaturityDate.Sub(lastPayout).Hours() / 24),
@@ -1681,28 +1876,30 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 							continue
 						}
 						tdsAmt := applyRounding(b.sum*tdsCfg.TDSRate/100, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, false)
-						// Use actual FY end date; cap at maturity if FD ends before Mar 31
-						eventDate := b.end
-						if fd.MaturityDate.Before(b.end) {
-							eventDate = fd.MaturityDate
-						}
-						rows = append(rows, CashflowRow{
-							EventType:        "TDS_DEDUCTION",
-							EventDate:        eventDate,
-							PeriodStartDate:  b.start,
-							PeriodEndDate:    b.end,
-							PeriodDays:       365,
-							OpeningPrincipal: fd.PrincipalAmount,
-							TDSAmount:        tdsAmt,
-							NetCashFlow:      -tdsAmt,
-							ClosingPrincipal: fd.PrincipalAmount,
-							DayCountCode:     effectiveDayCountCode,
-							FormulaUsed:      fmt.Sprintf("TDS_ANNUAL_FY%d: %.2f × %.4f%%", fy, b.sum, tdsCfg.TDSRate),
-						})
+					// Use actual FY end date; cap at maturity if FD ends before Mar 31
+					eventDate := b.end
+					if fd.MaturityDate.Before(b.end) {
+						eventDate = fd.MaturityDate
 					}
-				default: // MATURITY or RECEIPT (both cumulate to maturity for AT_MATURITY FDs)
-					// TDS is embedded in the maturity row below — no separate TDS_DEDUCTION rows here
+					rows = append(rows, CashflowRow{
+						EventType:        "TDS_DEDUCTION",
+						EventDate:        eventDate,
+						ValueDate:        eventDate, // TDS: value date = FY-end date (no working-day shift)
+						CashflowType:     "OUTFLOW",
+						PeriodStartDate:  b.start,
+						PeriodEndDate:    b.end,
+						PeriodDays:       365,
+						OpeningPrincipal: fd.PrincipalAmount,
+						TDSAmount:        tdsAmt,
+						NetCashFlow:      -tdsAmt,
+						ClosingPrincipal: fd.PrincipalAmount,
+						DayCountCode:     effectiveDayCountCode,
+						FormulaUsed:      fmt.Sprintf("TDS_ANNUAL_FY%d: %.2f × %.4f%%", fy, b.sum, tdsCfg.TDSRate),
+					})
 				}
+			default: // MATURITY or RECEIPT (both cumulate to maturity for AT_MATURITY FDs)
+				// TDS is embedded in the maturity row below — no separate TDS_DEDUCTION rows here
+			}
 			}
 
 			// Maturity row
@@ -1713,9 +1910,12 @@ func generateCashflowSchedule(p CashflowScheduleParams) []CashflowRow {
 				}
 			}
 			net := applyRounding(fd.PrincipalAmount+totalInterest-tdsAtMaturity, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
+			matVD := resolveValueDate("MATURITY", fd.MaturityDate, cfg, calInfo)
 			rows = append(rows, CashflowRow{
 				EventType:         "MATURITY",
 				EventDate:         fd.MaturityDate,
+				ValueDate:         matVD,
+				CashflowType:      "INFLOW",
 				PeriodStartDate:   accrualDates[len(accrualDates)-1],
 				PeriodEndDate:     fd.MaturityDate,
 				PeriodDays:        int(fd.MaturityDate.Sub(accrualDates[len(accrualDates)-1]).Hours() / 24),
@@ -1916,10 +2116,14 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		if isMaturity {
 			maturityNetCF = applyRounding(closingPrincipal, decimals, cfg.RoundingMethod, cfg.RoundingFrequency, true)
 		}
+		capVD := resolveValueDate(eventType, capEnd, cfg, calInfo)
+		capCFType := cashflowTypeFor(eventType)
 		rows = append(rows, CashflowRow{
 			PeriodNumber:      seq,
 			EventType:         eventType,
 			EventDate:         capEnd,
+			ValueDate:         capVD,
+			CashflowType:      capCFType,
 			PeriodStartDate:   lastCapDate,
 			PeriodEndDate:     capEnd,
 			PeriodDays:        capDays,
@@ -1965,6 +2169,8 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 				PeriodNumber:     seq,
 				EventType:        "TDS_DEDUCTION",
 				EventDate:        tdsRowEnd,
+				ValueDate:        tdsRowEnd, // TDS: value date = event date (no working-day shift)
+				CashflowType:     "OUTFLOW",
 				PeriodStartDate:  tdsRowStart,
 				PeriodEndDate:    tdsRowEnd,
 				PeriodDays:       tdsRowDays,
@@ -2057,9 +2263,12 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 						opPrincipal = capPrincipal[latestCap.Format(constants.DateFormat)]
 					}
 
+					payoutVD := resolveValueDate("INTEREST_RECEIPT", payoutDate, cfg, calInfo)
 					rows = append(rows, CashflowRow{
 						EventType:         "INTEREST_RECEIPT",
 						EventDate:         payoutDate,
+						ValueDate:         payoutVD,
+						CashflowType:      "INFLOW",
 						PeriodStartDate:   lastPayout,
 						PeriodEndDate:     payoutDate,
 						PeriodDays:        int(payoutDate.Sub(lastPayout).Hours() / 24),
@@ -2076,6 +2285,8 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 						rows = append(rows, CashflowRow{
 							EventType:        "TDS_DEDUCTION",
 							EventDate:        payoutDate,
+							ValueDate:        payoutVD, // TDS on payout: same value date as receipt
+							CashflowType:     "OUTFLOW",
 							PeriodStartDate:  lastPayout,
 							PeriodEndDate:    payoutDate,
 							PeriodDays:       int(payoutDate.Sub(lastPayout).Hours() / 24),
@@ -2123,6 +2334,8 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 			PeriodNumber:      seq,
 			EventType:         "ACCRUAL",
 			EventDate:         a.PeriodEnd,
+			ValueDate:         a.PeriodEnd, // ACCRUAL: value date = accrual date (EOD, no shift)
+			CashflowType:      "NA",
 			PeriodStartDate:   reportedStart,
 			PeriodEndDate:     a.PeriodEnd,
 			PeriodDays:        a.PeriodDays,
@@ -2139,10 +2352,13 @@ func generateCompoundSchedule(p CompoundScheduleParams) []CashflowRow {
 		})
 	}
 
-	// Final sort and renumber
+	// Final sort and renumber.
+	// BRD ordering for COMPOUND FDs on the same date:
+	//   CAPITALIZATION first (intra-day principal grows), then ACCRUAL (EOD bookkeeping),
+	//   then INTEREST_RECEIPT, TDS_DEDUCTION, MATURITY.
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].EventDate.Equal(rows[j].EventDate) {
-			order := map[string]int{"ACCRUAL": 1, "INTEREST_RECEIPT": 2, "CAPITALIZATION": 3, "TDS_DEDUCTION": 4, "MATURITY": 5}
+			order := map[string]int{"CAPITALIZATION": 1, "ACCRUAL": 2, "INTEREST_RECEIPT": 3, "TDS_DEDUCTION": 4, "MATURITY": 5}
 			return order[rows[i].EventType] < order[rows[j].EventType]
 		}
 		return rows[i].EventDate.Before(rows[j].EventDate)
@@ -2210,7 +2426,72 @@ func GenerateCashflowFromRecord(ctx context.Context, exec queryExecutor, fd *FDR
 
 	rows := generateCashflowSchedule(CashflowScheduleParams{FD: fd, Cfg: cfg, Freq: freq, TDSCfg: tds, DCInfo: dcInfo, ITInfo: itInfo, CalInfo: calInfo})
 	log.Printf("[CFGEN][%s] ✓ generateCashflowSchedule → %d rows TOTAL (+%s)", fd.ConfirmationID, len(rows), time.Since(tg).Round(time.Millisecond))
+
+	// Mirror the simulator path: apply grace period and stamp cumulative fields
+	// so that CF, S1 (simulate), and S2 (diff) all carry identical rows.
+	rows = applyGracePeriod(fd, cfg, rows, dcInfo, calInfo)
+	tdsRate := 0.0
+	if tds != nil {
+		tdsRate = tds.TDSRate
+	}
+	rows = stampCumulativeFields(rows, fd, tdsRate)
+	rows = applyFirstPayoutDateOverride(rows, fd)
 	return rows, fd, nil
+}
+
+// applyFirstPayoutDateOverride shifts the value_date of every INTEREST_RECEIPT,
+// CAPITALIZATION, and MATURITY row by the same offset that exists between the
+// user-supplied first_payout_date / first_capitalization_date and the system-
+// computed first event of that type.
+//
+// Rule:
+//   event_date  — stays exactly as the system calculated (accrual boundary).
+//   value_date  — shifted by: userDate − systemEventDate (in whole days).
+//
+// Example:
+//   System says first INTEREST_RECEIPT event_date = 2026-03-31 (value_date = 2026-03-31).
+//   User says first_payout_date = 2026-04-05  →  offset = +5 days.
+//   All INTEREST_RECEIPT value_dates become event_date + 5 days.
+//   (Apr 30 receipt → value_date May 5; May 31 → Jun 5, etc.)
+func applyFirstPayoutDateOverride(rows []CashflowRow, fd *FDRecord) []CashflowRow {
+	// ── INTEREST_RECEIPT offset ───────────────────────────────────────────
+	if !fd.FirstPayoutDate.IsZero() {
+		// Find the system-computed first INTEREST_RECEIPT event_date.
+		var firstSystemEventDate time.Time
+		for _, r := range rows {
+			if r.EventType == "INTEREST_RECEIPT" {
+				firstSystemEventDate = r.EventDate
+				break
+			}
+		}
+		if !firstSystemEventDate.IsZero() && !fd.FirstPayoutDate.Equal(firstSystemEventDate) {
+			offsetDays := int(fd.FirstPayoutDate.Sub(firstSystemEventDate).Hours() / 24)
+			for i, r := range rows {
+				if r.EventType == "INTEREST_RECEIPT" || r.EventType == "MATURITY" {
+					rows[i].ValueDate = r.EventDate.AddDate(0, 0, offsetDays)
+				}
+			}
+		}
+	}
+	// ── CAPITALIZATION offset ─────────────────────────────────────────────
+	if !fd.FirstCapitalizationDate.IsZero() {
+		var firstSystemCapDate time.Time
+		for _, r := range rows {
+			if r.EventType == "CAPITALIZATION" {
+				firstSystemCapDate = r.EventDate
+				break
+			}
+		}
+		if !firstSystemCapDate.IsZero() && !fd.FirstCapitalizationDate.Equal(firstSystemCapDate) {
+			offsetDays := int(fd.FirstCapitalizationDate.Sub(firstSystemCapDate).Hours() / 24)
+			for i, r := range rows {
+				if r.EventType == "CAPITALIZATION" {
+					rows[i].ValueDate = r.EventDate.AddDate(0, 0, offsetDays)
+				}
+			}
+		}
+	}
+	return rows
 }
 
 func SaveCashflowSchedule(ctx context.Context, exec queryExecutor, fdID string, rows []CashflowRow) error {
@@ -2357,12 +2638,19 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 		"sequence_number", "period_number",
 		"event_type",
 		"event_date", "cashflow_date",
+		"value_date",
+		"cashflow_type",
 		"period_start_date", "period_end_date", "period_days",
 		"opening_principal",
 		"interest_accrued", "interest_amount",
 		"capitalized_amount", "closing_principal",
 		"tds_amount",
 		"net_cash_flow", "net_cashflow", "net_amount",
+		"due_not_accrued",
+		"accr_rev_k",
+		"tds_rev_l",
+		"provisional_tds",
+		"accrual_frequency",
 		"day_count_code", "divisor", "formula_used", "accrual_rate_per_day",
 		"holidays_in_period",
 		"dr_account_code", "dr_account_name",
@@ -2389,6 +2677,8 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 			"event_type":           row.EventType,
 			"event_date":           row.EventDate,
 			"cashflow_date":        row.EventDate,
+			"value_date":           nilIfZero(row.ValueDate),
+			"cashflow_type":        nilIfEmpty(row.CashflowType),
 			"period_start_date":    nilIfZero(row.PeriodStartDate),
 			"period_end_date":      nilIfZero(row.PeriodEndDate),
 			"period_days":          nilIfZero(row.PeriodDays),
@@ -2401,6 +2691,11 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 			"net_cash_flow":        row.NetCashFlow,
 			"net_cashflow":         row.NetCashFlow,
 			"net_amount":           row.NetCashFlow,
+			"due_not_accrued":      row.DueNotAccrued,
+			"accr_rev_k":           row.AccrRevK,
+			"tds_rev_l":            row.TDSRevL,
+			"provisional_tds":      row.ProvisionalTDS,
+			"accrual_frequency":    nilIfEmpty(row.AccrualFrequency),
 			"day_count_code":       nilIfEmpty(row.DayCountCode),
 			"divisor":              nilIfZero(row.Divisor),
 			"formula_used":         nilIfEmpty(row.FormulaUsed),

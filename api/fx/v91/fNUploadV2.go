@@ -37,6 +37,8 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+const duplicateExposureUploadMessage = "This exposure file was already uploaded earlier. Please upload a different file."
+
 // ------------------------- Types -------------------------
 
 type CanonicalRow struct {
@@ -419,7 +421,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 
 		// start DB tx
 		batchID := uuid.New()
-		s3Key, err := fxExposureS3Key(fileHash, fh.Filename, src)
+		storedFileName, s3Key, err := fxExposureS3Key(fh.Filename, userName, src)
 		if err != nil {
 			return nil, 0, http.StatusBadRequest, err
 		}
@@ -428,6 +430,19 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 			fileBytes, err := os.ReadFile(tmpPath)
 			if err != nil {
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("read temp file for s3 upload: %w", err)
+			}
+			var duplicateExists bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM public.staging_batches_exposures
+					WHERE file_hash = $1 AND status IN ('processing', 'completed')
+				)
+			`, fileHash).Scan(&duplicateExists); err != nil {
+				return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to check duplicate exposure upload: %w", err)
+			}
+			if duplicateExists {
+				return nil, 0, http.StatusBadRequest, errors.New(duplicateExposureUploadMessage)
 			}
 			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, s3storage.DetectContentType(fileBytes)); err != nil {
 				return nil, 0, http.StatusInternalServerError, fmt.Errorf("failed to store original file to s3: %w", err)
@@ -479,7 +494,7 @@ func processBatchUploadStagingData(ctx context.Context, pool *pgxpool.Pool, r *h
 				INSERT INTO public.staging_batches_exposures
 				(batch_id, ingestion_source, status, total_records, file_hash, file_name, uploaded_by, mapping_json, upload_s3_key)
 				VALUES ($1,$2,'processing',$3,$4,$5,$6,$7,$8)
-			`, batchID, src, 0, fileHash, fh.Filename, userName, string(mappingRaw), s3Key); err != nil {
+			`, batchID, src, 0, fileHash, storedFileName, userName, string(mappingRaw), s3Key); err != nil {
 			return nil, 0, http.StatusInternalServerError, fmt.Errorf("insert batch: %w", err)
 		}
 
@@ -1443,13 +1458,13 @@ func fxExposureS3PresignExpiry() time.Duration {
 	return expiryDuration
 }
 
-func fxExposureS3Key(fileHash, filename, source string) (string, error) {
-	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(filename)))
+func fxExposureS3Key(filename, uploadedBy, source string) (string, string, error) {
 	folder, err := v91UploadSourceFolder(source)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return s3storage.BuildS3Key("fx/v91", folder, fileHash, ext), nil
+	storedFileName := s3storage.BuildUploadedFilename(filename, uploadedBy, time.Now().UTC())
+	return storedFileName, s3storage.BuildNamedS3Key("fx/v91", folder, storedFileName), nil
 }
 
 func v91UploadSourceFolder(source string) (string, error) {

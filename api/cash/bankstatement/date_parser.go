@@ -10,6 +10,23 @@ import (
 	"CimplrCorpSaas/api/constants"
 )
 
+// normalizeDateMonthAbbrev converts uppercase or lowercase 3-letter month abbreviations
+// to Go's expected title-case form (e.g. "FEB" → "Feb", "feb" → "Feb").
+// This lets time.Parse match formats like "01.FEB 2026" against the layout "02.Jan 2006".
+func normalizeDateMonthAbbrev(s string) string {
+	months := []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+	upper := strings.ToUpper(s)
+	for _, m := range months {
+		mu := strings.ToUpper(m)
+		if idx := strings.Index(upper, mu); idx != -1 {
+			// Replace the exact slice in the original string with title-case month
+			s = s[:idx] + m + s[idx+3:]
+			upper = strings.ToUpper(s) // recompute in case of multiple occurrences
+		}
+	}
+	return s
+}
+
 // parseDate tries multiple date formats for CSV
 func parseDate(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
@@ -27,6 +44,9 @@ func parseDate(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, errors.New("empty date string")
 	}
+	// Normalize uppercase/lowercase month abbreviations so Go's time.Parse (which is case-sensitive)
+	// can match formats like "01.FEB 2026", "01-FEB-2026", "01/FEB/2026" → "01.Feb 2026" etc.
+	s = normalizeDateMonthAbbrev(s)
 	// Critical: dd/mm/yyyy formats MUST come before mm/dd/yyyy to prevent misparsing Indian bank statements
 	layouts := []string{
 		// dd/mm/yyyy variants (Indian/European format) - MUST BE FIRST
@@ -44,9 +64,15 @@ func parseDate(s string) (time.Time, error) {
 		// Named month formats
 		constants.DateFormatSlash, constants.DateFormatDash, // for 29/Aug/2025 and 29-Aug-2025
 		"2-Jan-2006", "1/Feb/2006",
+		// dd-mm-yyyy with dash (Indian/European, e.g. BOB: "16-02-2026", "02-02-2026 19:40:13") - BEFORE mm-dd-yyyy!
+		"02-01-2006", "2-1-2006", "02-01-06", "2-1-06",
+		"02-01-2006 15:04:05", "2-1-2006 15:04:05", "02-01-2006 15:04", "2-1-2006 15:04",
+		"02-01-2006 3:04:05", "2-1-2006 3:04:05", "02-01-2006 3:04", "2-1-2006 3:04",
 		// ISO and other formats
 		constants.DateFormat, "2006/01/02", "2006.01.02", "01.02.2006", "1.2.2006", "01-02-2006", "1-2-2006",
 		"01-02-06", "1-2-06", "2006/1/2", "2006-1-2",
+		// dd.Mon yyyy variants (Citibank and similar: "01.FEB 2026", "02.Jan 2026")
+		"02.Jan 2006", "2.Jan 2006", "02.Jan 06", "2.Jan 06",
 		// dd-Mon-yy and dd/Mon/yy variants
 		"02-Jan-06", "02-Jan-2006", "02/Jan/06", "02/Jan/2006",
 		"02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",

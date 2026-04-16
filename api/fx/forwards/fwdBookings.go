@@ -2,12 +2,13 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -24,6 +25,88 @@ import (
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
+
+var ErrForwardBookingFileAlreadyUploaded = errors.New("forward booking file already uploaded")
+
+const duplicateForwardBookingUploadMessage = "This forward booking file was already uploaded earlier. Please upload a different file."
+
+var ErrForwardConfirmationFileAlreadyUploaded = errors.New("forward confirmation file already uploaded")
+
+const duplicateForwardConfirmationUploadMessage = "This forward confirmation file was already uploaded earlier. Please upload a different file."
+
+func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT upload_s3_key
+		FROM forward_bookings
+		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueForwardBookingUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
+	keys, err := existingForwardBookingUploadKeys(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate forward booking upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare forward booking upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrForwardBookingFileAlreadyUploaded
+	}
+	return nil
+}
+
+func existingForwardConfirmationUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT confirmation_upload_s3_key
+		FROM forward_bookings
+		WHERE COALESCE(TRIM(confirmation_upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueForwardConfirmationUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
+	keys, err := existingForwardConfirmationUploadKeys(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate forward confirmation upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare forward confirmation upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrForwardConfirmationFileAlreadyUploaded
+	}
+	return nil
+}
 
 func NormalizeDate(dateStr string) string {
 	dateStr = strings.TrimSpace(dateStr)
@@ -89,6 +172,22 @@ func normalizeOrderType(orderType string) string {
 	// Unknown type — keep original formatting
 	// You may want to return "" or "Invalid" instead if you want strict validation
 	return orderType
+}
+
+func forwardUploadUserName(userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "user"
+	}
+	for _, session := range auth.GetActiveSessions() {
+		if session.UserID == userID {
+			if name := strings.TrimSpace(session.Name); name != "" {
+				return name
+			}
+			break
+		}
+	}
+	return userID
 }
 
 // Handler: AddForwardBookingManualEntry
@@ -341,6 +440,7 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
 	for _, fileHeader := range files {
 		file, err := fileHeader.Open()
 		if err != nil {
@@ -350,9 +450,25 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 		// Read all file bytes for parsing, hashing, and deferred S3 upload.
 		fileBytes, _ := io.ReadAll(file)
 		file.Close()
-		fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
+		if s3storage.IsS3UploadEnabled() {
+			if err := ensureUniqueForwardBookingUpload(ctx, db, fileBytes); err != nil {
+				message := err.Error()
+				if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
+					message = duplicateForwardBookingUploadMessage
+				}
+				results = append(results, map[string]interface{}{
+					"filename":             fileHeader.Filename,
+					"inserted":             0,
+					"errors":               []map[string]interface{}{},
+					"invalidRows":          []map[string]interface{}{},
+					"message":              message,
+					constants.ValueSuccess: false,
+				})
+				continue
+			}
+		}
 		fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
-		s3Key := "fx/forwards/bookings/" + fileHash + fileExt
+		s3Key := s3storage.BuildUploadedS3Key("fx/forwards/bookings", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
 		ext := fileExt
 		var rows []map[string]interface{}
 		if ext == ".csv" {
@@ -559,11 +675,12 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 			continue
 		}
 		results = append(results, map[string]interface{}{
-			"filename":      fileHeader.Filename,
-			"upload_s3_key": uploadS3Key,
-			"inserted":      successCount,
-			"errors":        errorRows,
-			"invalidRows":   invalidRows,
+			"filename":             fileHeader.Filename,
+			"upload_s3_key":        uploadS3Key,
+			"inserted":             successCount,
+			"errors":               errorRows,
+			"invalidRows":          invalidRows,
+			constants.ValueSuccess: successCount > 0,
 		})
 	}
 	return results, nil
@@ -617,6 +734,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
 	files := r.MultipartForm.File["files"]
 	results := []map[string]interface{}{}
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
 	for _, fileHeader := range files {
 		file, err := fileHeader.Open()
 		if err != nil {
@@ -626,9 +744,25 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 		// Read all file bytes for parsing, hashing, and deferred S3 upload.
 		fileBytes, _ := io.ReadAll(file)
 		file.Close()
-		fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
+		if s3storage.IsS3UploadEnabled() {
+			if err := ensureUniqueForwardConfirmationUpload(ctx, db, fileBytes); err != nil {
+				message := err.Error()
+				if errors.Is(err, ErrForwardConfirmationFileAlreadyUploaded) {
+					message = duplicateForwardConfirmationUploadMessage
+				}
+				results = append(results, map[string]interface{}{
+					"filename":             fileHeader.Filename,
+					"updated":              0,
+					"errors":               []map[string]interface{}{},
+					"invalidRows":          []map[string]interface{}{},
+					"message":              message,
+					constants.ValueSuccess: false,
+				})
+				continue
+			}
+		}
 		fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
-		s3Key := "fx/forwards/confirmations/" + fileHash + fileExt
+		s3Key := s3storage.BuildUploadedS3Key("fx/forwards/confirmations", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
 		ext := fileExt
 		var rows []map[string]interface{}
 		if ext == ".csv" {
@@ -825,11 +959,12 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 			continue
 		}
 		results = append(results, map[string]interface{}{
-			"filename":      fileHeader.Filename,
-			"upload_s3_key": uploadS3Key,
-			"updated":       successCount,
-			"errors":        errorRows,
-			"invalidRows":   invalidRows,
+			"filename":             fileHeader.Filename,
+			"upload_s3_key":        uploadS3Key,
+			"updated":              successCount,
+			"errors":               errorRows,
+			"invalidRows":          invalidRows,
+			constants.ValueSuccess: successCount > 0,
 		})
 	}
 	return results, nil
@@ -1168,6 +1303,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 		}
 	}
 	results := []map[string]interface{}{}
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
 	// Loop over file arrays (e.g., forward_axis, forward_hdfc)
 	for arrayName, files := range r.MultipartForm.File {
 		bankIdentifier := strings.ToUpper(strings.Replace(arrayName, "forward_", "", 1))
@@ -1180,9 +1316,27 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 			// Read all file bytes for parsing, hashing, and deferred S3 upload.
 			fileBytes, _ := io.ReadAll(file)
 			file.Close()
-			fileHash := fmt.Sprintf("%x", sha256.Sum256(fileBytes))
+			if s3storage.IsS3UploadEnabled() {
+				if err := ensureUniqueForwardBookingUpload(ctx, db, fileBytes); err != nil {
+					message := err.Error()
+					if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
+						message = duplicateForwardBookingUploadMessage
+					}
+					results = append(results, map[string]interface{}{
+						"filename":             fileHeader.Filename,
+						"upload_s3_key":        "",
+						"staging_inserted":     0,
+						"staging_errors":       []map[string]interface{}{},
+						"bookings_inserted":    0,
+						"booking_errors":       []map[string]interface{}{},
+						"message":              message,
+						constants.ValueSuccess: false,
+					})
+					continue
+				}
+			}
 			fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
-			s3Key := "fx/forwards/bank/" + fileHash + fileExt
+			s3Key := s3storage.BuildUploadedS3Key("fx/forwards/bank", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
 			ext := fileExt
 			var rows []map[string]interface{}
 			if ext == ".csv" {

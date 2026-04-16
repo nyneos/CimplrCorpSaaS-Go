@@ -11,4 +11,6 @@ SSO_MFA_INTEGRATION_CONTEXT.md
 .sfdx/
 *.bak
 
+*.exe
+
 graphify-out/*

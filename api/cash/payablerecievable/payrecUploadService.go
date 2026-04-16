@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -21,6 +22,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shakinm/xlsReader/xls"
 )
+
+var ErrFileAlreadyUploaded = errors.New("transaction file already uploaded")
 
 type TransactionUploadResult struct {
 	BatchID          uuid.UUID
@@ -70,9 +73,11 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 	if err != nil {
 		return nil, err
 	}
+	storedFileName := s3storage.BuildUploadedFilename(fileHeader.Filename, userName, startTime.UTC())
 
 	rawPayloads, err := processTransactionFileBytes(fileBytes, fileHeader.Filename, transactionType)
 	if err != nil {
+
 		return nil, err
 	}
 	if len(rawPayloads) == 0 {
@@ -113,21 +118,9 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 			return nil, fmt.Errorf("failed to finalize duplicate lookup: %w", commitErr)
 		}
 		committed = true
-		dupURL := ""
-		if existingUploadS3Key != nil && strings.TrimSpace(*existingUploadS3Key) != "" {
-			if dupURL, err = s3storage.GetDownloadPresignedURL(ctx, *existingUploadS3Key, 0); err != nil {
-				dupURL = ""
-			}
-		}
-		return &TransactionUploadResult{
-			BatchID:        duplicateBatchID,
-			ProcessedFiles: []string{fileHeader.Filename},
-			FileStorageURL: dupURL,
-			Duplicate:      true,
-			ProcessingTime: time.Since(startTime),
-		}, nil
+		return nil, ErrFileAlreadyUploaded
 	}
-	if err != nil && err != pgx.ErrNoRows {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("failed to check for duplicate transaction upload: %w", err)
 	}
 
@@ -141,13 +134,12 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		ProcessedRecords:   0,
 		FailedRecords:      0,
 		FileHash:           stringPtr(fileHashHex),
-		FileName:           stringPtr(fileHeader.Filename),
+		FileName:           stringPtr(storedFileName),
 	}
 
-	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(fileHeader.Filename)))
 	contentType := s3storage.DetectContentType(fileBytes)
 	folder := s3storage.GetStoragePrefix(fileField)
-	s3Key = s3storage.BuildS3Key(folder, fileField, fileHashHex, ext)
+	s3Key = s3storage.BuildNamedS3Key(folder, "", storedFileName)
 	s3URL := ""
 	if s3storage.IsS3UploadEnabled() {
 		if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
@@ -213,7 +205,7 @@ func (s *TransactionUploadService) UploadTransactionBatch(
 		BatchID:          batchID,
 		TotalRecords:     totalRecords,
 		ProcessedRecords: processedRecords,
-		ProcessedFiles:   []string{fileHeader.Filename},
+		ProcessedFiles:   []string{storedFileName},
 		ProcessingTime:   time.Since(startTime),
 		FileStorageKey:   s3Key,
 		FileStorageURL:   s3URL,
