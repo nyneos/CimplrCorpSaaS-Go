@@ -49,6 +49,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			RenewalInstructions string  `json:"renewal_instructions"` // kept for compat, maps to auto_renewal
 			Notes               string  `json:"notes"`                // → booking_remarks
 			BookingRemarks      string  `json:"booking_remarks"`
+			OfferValidTill      string  `json:"offer_valid_till"`      // YYYY-MM-DD; bank offer validity date
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -165,6 +166,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"product_code":           nullIfEmpty(req.ProductCode),
 			"auto_renewal":           autoRenewal,
 			"booking_remarks":        nullIfEmpty(bookingRemarks),
+			"offer_valid_till":       nullIfEmpty(req.OfferValidTill),
 			"booking_status":         "DRAFT",
 			"created_by":             userEmail,
 		}
@@ -175,7 +177,7 @@ func CreateBookingSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			"tenor_type", "tenure_years",
 			"interest_type_code", "interest_type_id", "expected_start_date", "expected_maturity_date", "value_date",
 			"frequency_id", "day_count_code", "tds_plan_id", "product_code",
-			"auto_renewal", "booking_remarks", "booking_status", "created_by",
+			"auto_renewal", "booking_remarks", "offer_valid_till", "booking_status", "created_by",
 		}
 		insertQ, insertArgs, returningColumn, ok := buildFDDynamicInsert(
 			constants.QuerryBookingRequest,
@@ -1609,6 +1611,7 @@ func GetBookingsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.product_code,'')                                         AS product_code,
 				COALESCE(m.auto_renewal,false)                                      AS auto_renewal,
 				COALESCE(m.booking_remarks,'')                                      AS booking_remarks,
+				COALESCE(TO_CHAR(m.offer_valid_till,'YYYY-MM-DD'),'')              AS offer_valid_till,
 				COALESCE(m.booking_status,'')                                       AS booking_status,
 				COALESCE(m.is_deleted,false)                                        AS is_deleted,
 				COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')         AS record_created_at,
@@ -1753,6 +1756,7 @@ func GetBookingDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					COALESCE(product_code,'')                                      AS product_code,
 					COALESCE(auto_renewal,false)                                   AS auto_renewal,
 					COALESCE(booking_remarks,'')                                   AS booking_remarks,
+					COALESCE(TO_CHAR(offer_valid_till,'YYYY-MM-DD'),'')            AS offer_valid_till,
 					COALESCE(booking_status,'')                                    AS booking_status,
 					COALESCE(is_deleted,false)                                     AS is_deleted,
 					COALESCE(TO_CHAR(created_at,'YYYY-MM-DD HH24:MI:SS'),'')      AS record_created_at,
