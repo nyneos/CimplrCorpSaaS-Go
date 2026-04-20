@@ -1129,28 +1129,34 @@ func extractEventDates(rows []SimulatedCashflowRow, eventType string) *json.RawM
 //
 // Source-of-truth rules for TotalInterestAccrued:
 //
-//   SIMPLE FD  — only ACCRUAL rows carry InterestAccrued; MATURITY row has 0.
-//                Sum from ACCRUAL rows only.
+//   SIMPLE payout FD (INTEREST_RECEIPT rows present):
+//     The schedule emits 2 ACCRUAL sub-rows per quarter (e.g. Jan + Feb) and one
+//     INTEREST_RECEIPT row for the full quarter (Jan+Feb+Mar).  The ACCRUAL rows
+//     only cover the months that fall BEFORE the payout date; the final month's
+//     interest is embedded in INTEREST_RECEIPT.  Summing only ACCRUAL rows would
+//     therefore under-count by the "due_not_accrued" slice of every quarter.
+//     → Use INTEREST_RECEIPT rows as the canonical interest source.
 //
-//   COMPOUND FD — both ACCRUAL (monthly sub-accruals) and CAPITALIZATION rows
-//                 carry InterestAccrued.  The CAPITALIZATION row's InterestAccrued
-//                 is the *sum* of the ACCRUAL rows inside its window — so counting
-//                 both would double the total.
-//                 Strategy: if any CAPITALIZATION row is present (compound schedule),
-//                 use CAPITALIZATION rows as the sole source; ignore ACCRUAL row
-//                 interest.  If no CAPITALIZATION rows exist (simple schedule), use
-//                 ACCRUAL rows.
+//   SIMPLE AT_MATURITY FD (no INTEREST_RECEIPT, no CAPITALIZATION):
+//     All interest is in ACCRUAL rows.  Sum those.
+//
+//   COMPOUND FD (CAPITALIZATION rows present):
+//     Each CAPITALIZATION row's InterestAccrued = sum of its ACCRUAL sub-rows.
+//     → Use CAPITALIZATION rows; ignore ACCRUAL row interest to avoid double-count.
 //
 // TDS is always sourced exclusively from TDS_DEDUCTION rows.
 func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 	var s SimulateSummary
 
-	// Detect whether this is a compound schedule (has any CAPITALIZATION row).
+	// Detect schedule shape once.
 	isCompound := false
+	hasInterestReceipt := false
 	for _, row := range rows {
-		if row.EventType == "CAPITALIZATION" {
+		switch row.EventType {
+		case "CAPITALIZATION":
 			isCompound = true
-			break
+		case "INTEREST_RECEIPT":
+			hasInterestReceipt = true
 		}
 	}
 
@@ -1158,11 +1164,12 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 		switch row.EventType {
 		case "ACCRUAL":
 			s.AccrualPeriodCount++
-			if !isCompound {
-				// SIMPLE FD: ACCRUAL rows are the only source of interest.
+			if !isCompound && !hasInterestReceipt {
+				// AT_MATURITY simple FD: ACCRUAL rows are the only source of interest.
 				s.TotalInterestAccrued += row.InterestAccrued
 			}
-			// COMPOUND FD: interest is aggregated via CAPITALIZATION rows below.
+			// Payout FDs: interest is canonical in INTEREST_RECEIPT rows (below).
+			// Compound FDs: interest is canonical in CAPITALIZATION rows (below).
 		case "CAPITALIZATION":
 			s.TotalCapitalized += row.CapitalizedAmount
 			s.CapitalizationCount++
@@ -1173,7 +1180,11 @@ func buildSimulateSummary(rows []CashflowRow, fd *FDRecord) SimulateSummary {
 			}
 		case "INTEREST_RECEIPT":
 			s.InterestReceiptCount++
-			// Interest already counted in ACCRUAL / CAPITALIZATION rows.
+			if !isCompound && hasInterestReceipt {
+				// SIMPLE payout FD: INTEREST_RECEIPT is the canonical interest source.
+				// It covers the full quarter including the "due_not_accrued" slice.
+				s.TotalInterestAccrued += row.InterestAccrued
+			}
 		case "TDS_DEDUCTION":
 			s.TotalTDSDeducted += row.TDSAmount
 		case "MATURITY":
