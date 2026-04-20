@@ -264,11 +264,28 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Get user's business unit name
-			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, userID).Scan(&userBu)
-			if err != nil || userBu == "" {
-				log.Printf("[BUMiddleware] BLOCKED %s %s — no business unit for user_id=%s err=%v", r.Method, r.URL.Path, userID, err)
+			// Resolve entity scope.
+			// New model: query user_entity_mappings for all directly-assigned entities.
+			// Fallback: legacy users.business_unit_name → single root entity lookup.
+			var rootEntityIds []string
+			{
+				mRows, mErr := db.Query(
+					"SELECT entity_id::text FROM user_entity_mappings WHERE user_id = $1",
+					userID,
+				)
+				if mErr == nil {
+					defer mRows.Close()
+					for mRows.Next() {
+						var eid string
+						if mRows.Scan(&eid) == nil && eid != "" {
+							rootEntityIds = append(rootEntityIds, eid)
+						}
+					}
+				}
+			}
+
+			if len(rootEntityIds) == 0 {
+				log.Printf("[BUMiddleware] BLOCKED %s %s — no entity mapping for user_id=%s", r.Method, r.URL.Path, userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -278,136 +295,72 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Find root entity id - check both masterentitycash and masterentity
-			var rootEntityId string
-
-			// Try 1: Exact match in masterentitycash
-			query := `SELECT entity_id FROM masterentitycash 
-			WHERE entity_name = $1 
-			AND (is_deleted = false OR is_deleted IS NULL) 
-			AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')`
-			err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-
-			// Try 2: Case-insensitive match in masterentitycash
-			if err != nil {
-				query = `SELECT entity_id FROM masterentitycash 
-				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
-				AND (is_deleted = false OR is_deleted IS NULL) 
-				AND (is_top_level_entity = TRUE OR LOWER(active_status) = 'active')
-				LIMIT 1`
-				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-			}
-
-			// Try 3: Exact match in masterentity (fallback)
-			if err != nil {
-				query = `SELECT entity_id FROM masterEntity 
-				WHERE entity_name = $1 
-				AND (is_deleted = false OR is_deleted IS NULL) 
-				AND (is_top_level_entity = TRUE OR approval_status ILIKE 'approved')`
-				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-			}
-
-			// Try 4: Case-insensitive match in masterentity (final fallback)
-			if err != nil {
-				query = `SELECT entity_id FROM masterEntity 
-				WHERE UPPER(TRIM(entity_name)) = UPPER(TRIM($1))
-				AND (is_deleted = false OR is_deleted IS NULL) 
-				AND (is_top_level_entity = TRUE OR approval_status ILIKE 'approved')
-				LIMIT 1`
-				err = db.QueryRow(query, userBu).Scan(&rootEntityId)
-			}
-
-			if err != nil {
-				log.Printf("[ERROR] Business unit entity NOT FOUND in masterentitycash OR masterentity for userBu: '%s' (error: %v)", userBu, err)
-				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					constants.ValueSuccess: false,
-					constants.ValueError:   "Business unit '" + userBu + "' not found in system. Please contact administrator.",
-				})
-				return
-			}
-
-			// Try FIRST query: masterentitycash with cashentityrelationships
-			rows1, err1 := db.Query(`
-               WITH RECURSIVE descendants AS (
-                    SELECT entity_id, entity_name 
-                    FROM masterentitycash 
-                    WHERE entity_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
-                    
-                    UNION ALL
-                    
-                    SELECT me.entity_id, me.entity_name
-                    FROM masterentitycash me
-                    INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
-                    INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
-                    WHERE (me.is_deleted = false OR me.is_deleted IS NULL)
-                      AND (LOWER(er.status) = 'active' OR er.status IS NULL)
-                )
-                SELECT DISTINCT entity_id, entity_name FROM descendants
-            `, rootEntityId)
-
+			// For each root entity, recursively fetch all descendants. Deduplicate.
+			entitySeen := make(map[string]bool)
 			var buNames []string
 			var buEntityIDs []string
 
-			// Process first query results
-			if err1 == nil {
-				defer rows1.Close()
-				for rows1.Next() {
-					var entityID, entityName string
-					if err := rows1.Scan(&entityID, &entityName); err == nil {
-						buEntityIDs = append(buEntityIDs, entityID)
-						buNames = append(buNames, entityName)
-					}
-				}
-			} else {
-				log.Printf("[WARN] masterentitycash query failed: %v", err1)
-			}
-
-			// Try SECOND query: masterentity with entityRelationships
-			rows2, err2 := db.Query(`
-               WITH RECURSIVE descendants AS (
-                    SELECT entity_id, entity_name 
-                    FROM masterEntity 
-                    WHERE entity_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
-                    
-                    UNION ALL
-                    
-                    SELECT me.entity_id, me.entity_name
-                    FROM masterEntity me
-                    INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
-                    INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
-                    WHERE (me.is_deleted = false OR me.is_deleted IS NULL)
-                )
-                SELECT DISTINCT entity_id, entity_name FROM descendants
-            `, rootEntityId)
-
-			// Process second query results
-			if err2 == nil {
-				defer rows2.Close()
-				for rows2.Next() {
-					var entityID, entityName string
-					if err := rows2.Scan(&entityID, &entityName); err == nil {
-						// Avoid duplicates
-						exists := false
-						for _, id := range buEntityIDs {
-							if id == entityID {
-								exists = true
-								break
-							}
-						}
-						if !exists {
+			for _, rootEntityId := range rootEntityIds {
+				rows1, err1 := db.Query(`
+					WITH RECURSIVE descendants AS (
+						SELECT entity_id, entity_name
+						FROM masterentitycash
+						WHERE entity_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
+						UNION ALL
+						SELECT me.entity_id, me.entity_name
+						FROM masterentitycash me
+						INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
+						INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
+						WHERE (me.is_deleted = false OR me.is_deleted IS NULL)
+						  AND (LOWER(er.status) = 'active' OR er.status IS NULL)
+					)
+					SELECT DISTINCT entity_id, entity_name FROM descendants
+				`, rootEntityId)
+				if err1 == nil {
+					defer rows1.Close()
+					for rows1.Next() {
+						var entityID, entityName string
+						if rows1.Scan(&entityID, &entityName) == nil && !entitySeen[entityID] {
+							entitySeen[entityID] = true
 							buEntityIDs = append(buEntityIDs, entityID)
 							buNames = append(buNames, entityName)
 						}
 					}
+				} else {
+					log.Printf("[WARN] masterentitycash recursive query failed for root=%s: %v", rootEntityId, err1)
 				}
-			} else {
-				log.Printf("[WARN] masterentity query failed: %v", err2)
+
+				rows2, err2 := db.Query(`
+					WITH RECURSIVE descendants AS (
+						SELECT entity_id, entity_name
+						FROM masterEntity
+						WHERE entity_id = $1 AND (is_deleted = false OR is_deleted IS NULL)
+						UNION ALL
+						SELECT me.entity_id, me.entity_name
+						FROM masterEntity me
+						INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
+						INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
+						WHERE (me.is_deleted = false OR me.is_deleted IS NULL)
+					)
+					SELECT DISTINCT entity_id, entity_name FROM descendants
+				`, rootEntityId)
+				if err2 == nil {
+					defer rows2.Close()
+					for rows2.Next() {
+						var entityID, entityName string
+						if rows2.Scan(&entityID, &entityName) == nil && !entitySeen[entityID] {
+							entitySeen[entityID] = true
+							buEntityIDs = append(buEntityIDs, entityID)
+							buNames = append(buNames, entityName)
+						}
+					}
+				} else {
+					log.Printf("[WARN] masterentity recursive query failed for root=%s: %v", rootEntityId, err2)
+				}
 			}
 
-			// If BOTH queries failed or returned nothing, error out
 			if len(buNames) == 0 {
-				log.Printf("[ERROR] No accessible business units found in either table for rootEntityId: %s", rootEntityId)
+				log.Printf("[ERROR] No accessible business units found for user_id: %s", userID)
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					constants.ValueSuccess: false,
@@ -416,7 +369,6 @@ func BusinessUnitMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 			// Attach to context and call next
-
 			ctx := context.WithValue(r.Context(), BusinessUnitsKey, buNames)
 			ctx = context.WithValue(ctx, EntityIDsKey, buEntityIDs)
 			next.ServeHTTP(w, r.WithContext(ctx))

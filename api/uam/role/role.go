@@ -532,9 +532,9 @@ func GetJustRoles(db *sql.DB) http.HandlerFunc {
 				  AND EXISTS (
 					SELECT 1
 					FROM user_roles ur
-					JOIN users u ON u.id = ur.user_id
+					JOIN user_entity_mappings uem ON uem.user_id = ur.user_id
 					WHERE ur.role_id = r.id
-					  AND u.business_unit_name = $1
+					  AND uem.entity_name = $1
 				)
 			`, req.EntityName)
 		} else {

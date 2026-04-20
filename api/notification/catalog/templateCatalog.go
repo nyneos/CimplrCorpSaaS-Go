@@ -1955,30 +1955,47 @@ func BulkCreateRecipients(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 			if len(userIDs) > 0 {
-				type userEntity struct {
-					id     string
-					entity string
-				}
+				// Check that each recipient user has at least one entity_mapping
+				// that falls within the caller's accessible entity pool.
 				ueRows, ueErr := pgxPool.Query(ctx,
-					`SELECT id::text, COALESCE(business_unit_name,'') FROM users WHERE id::text = ANY($1::text[])`,
+					`SELECT user_id, entity_name FROM user_entity_mappings WHERE user_id = ANY($1::text[])`,
 					userIDs)
 				if ueErr != nil {
 					api.RespondWithPayload(w, false, "could not validate recipient entities: "+ueErr.Error(), nil)
 					return
 				}
 				defer ueRows.Close()
+				// Collect all entity names per user
+				userEntities := make(map[string][]string)
 				for ueRows.Next() {
 					var uid, uEntity string
 					if err := ueRows.Scan(&uid, &uEntity); err != nil {
 						continue
 					}
-					if !entityInPool(uEntity, buNames) {
+					userEntities[uid] = append(userEntities[uid], uEntity)
+				}
+				ueRows.Close()
+				// Each USER recipient must have at least one entity in the caller's pool
+				for _, uid := range userIDs {
+					entities := userEntities[uid]
+					if len(entities) == 0 {
 						api.RespondWithPayload(w, false,
-							fmt.Sprintf("recipient user %q belongs to entity %q which is not in your accessible org pool", uid, uEntity), nil)
+							fmt.Sprintf("recipient user %q has no entity mappings", uid), nil)
+						return
+					}
+					inPool := false
+					for _, e := range entities {
+						if entityInPool(e, buNames) {
+							inPool = true
+							break
+						}
+					}
+					if !inPool {
+						api.RespondWithPayload(w, false,
+							fmt.Sprintf("recipient user %q has no entity in your accessible org pool (entities: %v)", uid, entities), nil)
 						return
 					}
 				}
-				ueRows.Close()
 			}
 		}
 

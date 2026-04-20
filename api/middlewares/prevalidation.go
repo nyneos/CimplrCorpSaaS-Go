@@ -62,7 +62,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			entityIDs, entityNames, err := resolveEntityHierarchy(ctx, db, validationResult.RootEntityID)
+			entityIDs, entityNames, err := resolveEntityHierarchyMulti(ctx, db, validationResult.RootEntityIDs)
 			if err != nil {
 				if err == http.ErrMissingFile {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -159,7 +159,6 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
 				// log.Printf("User ID: %s\n", userID)
 				// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-				// log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
 				// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 				// for i, name := range entityNames {
 				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
@@ -218,7 +217,6 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
 			// log.Printf("User ID: %s\n", userID)
 			// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-			// log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
 			// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 			// for i, name := range entityNames {
 			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
@@ -266,9 +264,11 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			ctx = context.WithValue(ctx, "user_id", userID)
 			ctx = context.WithValue(ctx, "session", session)
-			ctx = context.WithValue(ctx, "business_unit", validationResult.BusinessUnit)
+			// backward-compat single values (first mapped entity)
 			ctx = context.WithValue(ctx, "root_entity_id", validationResult.RootEntityID)
 			ctx = context.WithValue(ctx, "root_entity_name", validationResult.RootEntityName)
+			// full multi-entity lists
+			ctx = context.WithValue(ctx, "root_entity_ids", validationResult.RootEntityIDs)
 			ctx = context.WithValue(ctx, api.BusinessUnitsKey, entityNames)
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
@@ -331,6 +331,33 @@ func GetRootEntityFromContext(ctx context.Context) (id string, name string) {
 		name = entityName
 	}
 	return id, name
+}
+
+// resolveEntityHierarchyMulti runs resolveEntityHierarchy for each root entity ID
+// and deduplicates results. It is the multi-entity replacement for single-root resolution.
+func resolveEntityHierarchyMulti(ctx context.Context, db *pgxpool.Pool, rootEntityIDs []string) ([]string, []string, error) {
+	entityMap := make(map[string]bool)
+	var buEntityIDs []string
+	var buNames []string
+
+	for _, rootID := range rootEntityIDs {
+		ids, names, err := resolveEntityHierarchy(ctx, db, rootID)
+		if err != nil {
+			continue
+		}
+		for i, id := range ids {
+			if !entityMap[id] {
+				entityMap[id] = true
+				buEntityIDs = append(buEntityIDs, id)
+				buNames = append(buNames, names[i])
+			}
+		}
+	}
+
+	if len(buNames) == 0 {
+		return nil, nil, http.ErrMissingFile
+	}
+	return buEntityIDs, buNames, nil
 }
 
 func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId string) ([]string, []string, error) {

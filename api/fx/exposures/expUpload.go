@@ -601,49 +601,8 @@ func GetExposureHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		buNames := api.GetEntityNamesFromCtx(ctx)
 		if len(buNames) == 0 {
-			// Fallback: Get user's business unit name from DB
-			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
-			if err != nil || userBu == "" {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
-
-			// Get approved root entity id via entity_helpers (uses masterentitycash + audit)
-			rootEntityId, err := api.LookupApprovedEntityIDSQLDB(r.Context(), db, userBu)
-			if err != nil {
-				respondWithError(w, http.StatusNotFound, "Business unit entity not found or not approved")
-				return
-			}
-
-			// Recursive CTE over masterentitycash/cashentityrelationships to get descendants
-			rows, err := db.Query(`
-				WITH RECURSIVE descendants AS (
-					SELECT entity_id, entity_name FROM masterentitycash WHERE entity_id = $1
-					UNION ALL
-					SELECT me.entity_id, me.entity_name
-					FROM masterentitycash me
-					INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
-					INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
-				)
-				SELECT DISTINCT entity_name FROM descendants
-			`, rootEntityId)
-			if err != nil {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
-			defer rows.Close()
-			buNames = []string{}
-			for rows.Next() {
-				var name string
-				if err := rows.Scan(&name); err == nil {
-					buNames = append(buNames, name)
-				}
-			}
-			if len(buNames) == 0 {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
 		}
 
 		// Join exposure_headers and exposure_line_items filtered by entity
@@ -824,50 +783,8 @@ func GetPendingApprovalHeadersLineItems(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		buNames := api.GetEntityNamesFromCtx(ctx)
 		if len(buNames) == 0 {
-			// Fallback: Get user's business unit name from DB
-			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, req.UserID).Scan(&userBu)
-			if err != nil || userBu == "" {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
-
-			// Get root entity id
-			var rootEntityId string
-			err = db.QueryRow(
-				"SELECT entity_id FROM masterEntity WHERE entity_name = $1 AND (approval_status = 'Approved' OR approval_status = 'approved') AND (is_deleted = false OR is_deleted IS NULL)",
-				userBu,
-			).Scan(&rootEntityId)
-			if err != nil {
-				respondWithError(w, http.StatusNotFound, "Business unit entity not found")
-				return
-			}
-
-			// Recursive CTE to get all descendant entity_names
-			rows, err := db.Query(`
-				WITH RECURSIVE descendants AS (
-					SELECT entity_id, entity_name FROM masterEntity WHERE entity_id = $1
-					UNION ALL
-					SELECT me.entity_id, me.entity_name
-					FROM masterEntity me
-					INNER JOIN entityRelationships er ON me.entity_id = er.child_entity_id
-					INNER JOIN descendants d ON er.parent_entity_id = d.entity_id
-					WHERE (me.approval_status = 'Approved' OR me.approval_status = 'approved') AND (me.is_deleted = false OR me.is_deleted IS NULL)
-				)
-				SELECT entity_name FROM descendants
-			`, rootEntityId)
-			if err != nil {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
-			defer rows.Close()
-			buNames = []string{}
-			for rows.Next() {
-				var name string
-				if err := rows.Scan(&name); err == nil {
-					buNames = append(buNames, name)
-				}
-			}
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
 		}
 		if len(buNames) == 0 {
 			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
@@ -1439,49 +1356,8 @@ func BatchUploadStagingData(db *sql.DB) http.HandlerFunc {
 		ctx := r.Context()
 		buNames := api.GetEntityNamesFromCtx(ctx)
 		if len(buNames) == 0 {
-			// Fallback: Get user's business unit name from DB
-			var userBu string
-			err := db.QueryRow(constants.QuerryBusinessUnitName, userID).Scan(&userBu)
-			if err != nil || userBu == "" {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
-
-			// Get approved root entity id via entity_helpers (uses masterentitycash + audit)
-			rootEntityId, err := api.LookupApprovedEntityIDSQLDB(ctx, db, userBu)
-			if err != nil {
-				respondWithError(w, http.StatusNotFound, "Business unit entity not found or not approved")
-				return
-			}
-
-			// Recursive CTE over masterentitycash/cashentityrelationships to get descendants
-			rows, err := db.Query(`
-				WITH RECURSIVE descendants AS (
-					SELECT entity_id, entity_name FROM masterentitycash WHERE entity_id = $1
-					UNION ALL
-					SELECT me.entity_id, me.entity_name
-					FROM masterentitycash me
-					INNER JOIN cashentityrelationships er ON me.entity_name = er.child_entity_name
-					INNER JOIN descendants d ON er.parent_entity_name = d.entity_name
-				)
-				SELECT DISTINCT entity_name FROM descendants
-			`, rootEntityId)
-			if err != nil {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
-			defer rows.Close()
-			buNames = []string{}
-			for rows.Next() {
-				var name string
-				if err := rows.Scan(&name); err == nil {
-					buNames = append(buNames, name)
-				}
-			}
-			if len(buNames) == 0 {
-				respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
-				return
-			}
+			respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
+			return
 		}
 		results, absorptionErrors, err := processBatchUploadStagingData(ctx, db, r, buNames, session)
 		if err != nil {
