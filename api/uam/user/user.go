@@ -38,6 +38,26 @@ func generateRandomPassword(length int) (string, error) {
 	return string(result), nil
 }
 
+// sensitiveUserCols lists columns that must never be sent to the client.
+var sensitiveUserCols = map[string]bool{
+	"password":    true,
+	"created_by":  true,
+	"updated_by":  true,
+	"approved_by": true,
+	"rejected_by": true,
+	"created_at":  true,
+	"updated_at":  true,
+	"approved_at": true,
+	"rejected_at": true,
+}
+
+func sanitizeUserMap(m map[string]interface{}) map[string]interface{} {
+	for col := range sensitiveUserCols {
+		delete(m, col)
+	}
+	return m
+}
+
 // Helper: send JSON error response
 func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -290,7 +310,7 @@ WHERE u.business_unit_name = ANY($1::text[])`
 			for i, col := range cols {
 				rowMap[col] = vals[i]
 			}
-			users = append(users, rowMap)
+			users = append(users, sanitizeUserMap(rowMap))
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -325,13 +345,17 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 		cols, _ := rows.Columns()
+		if !rows.Next() {
+			respondWithError(w, http.StatusNotFound, "User not found")
+			return
+		}
 		vals := make([]interface{}, len(cols))
 		valPtrs := make([]interface{}, len(cols))
 		for i := range vals {
 			valPtrs[i] = &vals[i]
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
-			respondWithError(w, http.StatusNotFound, "User not found")
+			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		userMap := map[string]interface{}{}
@@ -341,7 +365,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"user":    userMap,
+			"user":    sanitizeUserMap(userMap),
 		})
 	}
 }
@@ -414,7 +438,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 				userMap[col] = vals[i]
 			}
 
-			users = append(users, userMap)
+			users = append(users, sanitizeUserMap(userMap))
 		}
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -545,7 +569,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 			userMap[col] = vals[i]
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": userMap})
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "user": sanitizeUserMap(userMap)})
 	}
 }
 
@@ -620,7 +644,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			for i, col := range cols {
 				userMap[col] = vals[i]
 			}
-			updated = append(updated, userMap)
+			updated = append(updated, sanitizeUserMap(userMap))
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -702,7 +726,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 					for i, col := range cols {
 						userMap[col] = vals[i]
 					}
-					results["deleted"] = append(results["deleted"].([]map[string]interface{}), userMap)
+					results["deleted"] = append(results["deleted"].([]map[string]interface{}), sanitizeUserMap(userMap))
 				}
 			}
 		}
@@ -739,7 +763,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 					for i, col := range cols {
 						userMap[col] = vals[i]
 					}
-					results["approved"] = append(results["approved"].([]map[string]interface{}), userMap)
+					results["approved"] = append(results["approved"].([]map[string]interface{}), sanitizeUserMap(userMap))
 				}
 			}
 		}
@@ -801,7 +825,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			for i, col := range cols {
 				userMap[col] = vals[i]
 			}
-			updated = append(updated, userMap)
+			updated = append(updated, sanitizeUserMap(userMap))
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "updated": updated})

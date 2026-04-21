@@ -118,10 +118,20 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		}
 	}
 
-	// Password verification: bcrypt only
+	// Password verification: bcrypt preferred; migrate legacy plaintext on first successful login.
 	passwordValid := false
 	if dbPassword.Valid && dbPassword.String != "" {
-		passwordValid = bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil
+		if isBcryptHash(dbPassword.String) {
+			passwordValid = bcrypt.CompareHashAndPassword([]byte(dbPassword.String), []byte(password)) == nil
+		} else {
+			// Legacy plaintext password — compare directly and rehash in the background.
+			if dbPassword.String == password {
+				passwordValid = true
+				if hashed, herr := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); herr == nil {
+					go a.db.Exec(`UPDATE users SET password = $1 WHERE id = $2`, string(hashed), dbUserID)
+				}
+			}
+		}
 	}
 
 	if !passwordValid {
@@ -236,6 +246,11 @@ func (a *AuthService) forceLogoutUser(userID string) {
 			break
 		}
 	}
+}
+
+// isBcryptHash reports whether s looks like a bcrypt digest.
+func isBcryptHash(s string) bool {
+	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
 }
 
 // HashPassword hashes a plaintext password with bcrypt.
