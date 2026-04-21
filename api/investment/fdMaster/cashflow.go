@@ -311,6 +311,19 @@ func loadFDRecord(ctx context.Context, exec queryExecutor, confirmationID string
 	if err != nil {
 		return nil, fmt.Errorf(constants.ErrLoadFDRecord, err)
 	}
+	// Conditionally read first_payout_date / first_capitalization_date from fd_confirmation when present.
+	if confCols["first_payout_date"] {
+		var payoutDate, capDate *time.Time
+		_ = exec.QueryRow(ctx,
+			"SELECT first_payout_date, first_capitalization_date FROM investment.fd_confirmation WHERE confirmation_id=$1",
+			confirmationID).Scan(&payoutDate, &capDate)
+		if payoutDate != nil {
+			rec.FirstPayoutDate = *payoutDate
+		}
+		if capDate != nil {
+			rec.FirstCapitalizationDate = *capDate
+		}
+	}
 	return rec, nil
 }
 
@@ -2651,6 +2664,12 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 		"tds_rev_l",
 		"provisional_tds",
 		"accrual_frequency",
+		"interest_rate",
+		"tds_rate",
+		"financial_year",
+		"cumulative_interest_fy",
+		"cumulative_tds_fy",
+		"cumulative_interest_total",
 		"day_count_code", "divisor", "formula_used", "accrual_rate_per_day",
 		"holidays_in_period",
 		"dr_account_code", "dr_account_name",
@@ -2691,12 +2710,18 @@ func saveCashflowBatch(ctx context.Context, p SaveCashflowBatchParams) error {
 			"net_cash_flow":        row.NetCashFlow,
 			"net_cashflow":         row.NetCashFlow,
 			"net_amount":           row.NetCashFlow,
-			"due_not_accrued":      row.DueNotAccrued,
-			"accr_rev_k":           row.AccrRevK,
-			"tds_rev_l":            row.TDSRevL,
-			"provisional_tds":      row.ProvisionalTDS,
-			"accrual_frequency":    nilIfEmpty(row.AccrualFrequency),
-			"day_count_code":       nilIfEmpty(row.DayCountCode),
+			"due_not_accrued":           row.DueNotAccrued,
+			"accr_rev_k":                row.AccrRevK,
+			"tds_rev_l":                 row.TDSRevL,
+			"provisional_tds":           row.ProvisionalTDS,
+			"accrual_frequency":         nilIfEmpty(row.AccrualFrequency),
+			"interest_rate":             row.InterestRate,
+			"tds_rate":                  row.TDSRate,
+			"financial_year":            nilIfEmpty(row.FinancialYear),
+			"cumulative_interest_fy":    row.CumulativeInterestFY,
+			"cumulative_tds_fy":         row.CumulativeTDSFY,
+			"cumulative_interest_total": row.CumulativeInterestTotal,
+			"day_count_code":            nilIfEmpty(row.DayCountCode),
 			"divisor":              nilIfZero(row.Divisor),
 			"formula_used":         nilIfEmpty(row.FormulaUsed),
 			"accrual_rate_per_day": row.AccrualRatePerDay,

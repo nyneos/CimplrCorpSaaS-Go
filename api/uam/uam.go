@@ -91,6 +91,12 @@ func StartUAMService(db *sql.DB, port string) {
 	mux.Handle("/uam/permissions/get-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
+	mux.Handle("/uam/permissions/requests/all",
+		api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetAllPermissionRequests(db))))
+
+	mux.Handle("/uam/permissions/requests/role-summary",
+		api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
+
 	log.Printf("UAM Service started on :%s", port)
 	err := http.ListenAndServe(":"+port, observability.WrapHTTP(serviceName, mux))
 	if err != nil {

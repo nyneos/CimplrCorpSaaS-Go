@@ -309,7 +309,6 @@ const (
 	FormatMTMGain                  = "MTM gain - %s"
 	FormatMTMLoss                  = "MTM loss - %s"
 	FormatLogMore                  = "  ... (%d more) ...\n"
-	QuerryBusinessUnitName         = "SELECT business_unit_name FROM users WHERE id = $1"
 	StorageObjectURLFormat         = "%s/storage/v1/object/%s/%s"
 	QuerrySweepID                  = " AND l.sweep_id = $%d"
 	QuerryInitiationID             = " AND i.sweep_id = $%d"

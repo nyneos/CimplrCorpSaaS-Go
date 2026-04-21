@@ -169,7 +169,7 @@ type actorResolution struct {
 	UserID    string // public.users.id  (e.g. CIMPLR00D93E14F91E0B)
 	Email     string // public.users.email
 	Name      string // public.users.employee_name
-	Entity    string // public.users.business_unit_name  (empty = no restriction)
+	Entity    string // first entity_name from user_entity_mappings (empty = no restriction)
 	MatchedBy string // which identifier tier resolved this actor: "id","email","username","mobile","name"
 	Ambiguous bool   // true when name matched >1 row (entity still returned but flagged)
 }
@@ -219,28 +219,31 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 		return out, rows.Err()
 	}
 
-	const sel = `SELECT id::text, COALESCE(email,''), COALESCE(employee_name,''), COALESCE(business_unit_name,'') FROM public.users`
+	// sel returns first entity name from user_entity_mappings (or empty if none mapped)
+	const sel = `SELECT u.id::text, COALESCE(u.email,''), COALESCE(u.employee_name,''),
+		COALESCE((SELECT uem.entity_name FROM user_entity_mappings uem WHERE uem.user_id = u.id ORDER BY uem.entity_id LIMIT 1), '')
+	FROM public.users u`
 
 	// ── Tier 1: CIMPLR ID prefix or exact PK match ─────────────────────────
-	if rows, err := scan(sel+` WHERE id::text = $1`, actorValue); err == nil && len(rows) == 1 {
+	if rows, err := scan(sel+` WHERE u.id::text = $1`, actorValue); err == nil && len(rows) == 1 {
 		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by user_id → entity=%q", actorValue, rows[0].entity)
 		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "id"}
 	}
 
 	// ── Tier 2: email (case-insensitive, DB-unique) ─────────────────────────
-	if rows, err := scan(sel+` WHERE lower(email) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
+	if rows, err := scan(sel+` WHERE lower(u.email) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
 		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by email → entity=%q", actorValue, rows[0].entity)
 		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "email"}
 	}
 
 	// ── Tier 3: username_or_employee_id (case-insensitive, DB-unique) ───────
-	if rows, err := scan(sel+` WHERE lower(username_or_employee_id) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
+	if rows, err := scan(sel+` WHERE lower(u.username_or_employee_id) = lower($1)`, actorValue); err == nil && len(rows) == 1 {
 		api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by username_or_employee_id → entity=%q", actorValue, rows[0].entity)
 		return actorResolution{UserID: rows[0].userID, Email: rows[0].email, Name: rows[0].name, Entity: rows[0].entity, MatchedBy: "username"}
 	}
 
 	// ── Tier 4: mobile (NOT unique — reject if multiple rows match) ─────────
-	if rows, err := scan(sel+` WHERE mobile = $1`, actorValue); err == nil {
+	if rows, err := scan(sel+` WHERE u.mobile = $1`, actorValue); err == nil {
 		switch len(rows) {
 		case 1:
 			api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by mobile → entity=%q", actorValue, rows[0].entity)
@@ -253,7 +256,7 @@ func resolveActorEntity(ctx context.Context, pool *pgxpool.Pool, actorValue stri
 	}
 
 	// ── Tier 5: employee_name (NOT unique — reject if multiple rows match) ──
-	if rows, err := scan(sel+` WHERE lower(employee_name) = lower($1)`, actorValue); err == nil {
+	if rows, err := scan(sel+` WHERE lower(u.employee_name) = lower($1)`, actorValue); err == nil {
 		switch len(rows) {
 		case 1:
 			api.LogInfo("[NOTIF] resolveActorEntity: actor=%q matched by employee_name → entity=%q", actorValue, rows[0].entity)
@@ -914,24 +917,27 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 	}
 
 	// $2 = entityName (empty string = no restriction).
-	// Entity filter uses a recursive CTE on cashentityrelationships to expand
-	// the event's entity into itself + ALL descendant entities.
+	// Entity filter expands the event entity into itself + all descendants via
+	// cashentityrelationships, then checks each user's user_entity_mappings.
 	// Rules:
-	//   - ROLE/USER recipients: their business_unit_name must be IN the expanded set
+	//   - ROLE/USER recipients: they must have a user_entity_mappings row whose
+	//     entity_name is IN the expanded set (self + descendants)
 	//   - External emails (u.id IS NULL, raw @ in recipient_user_id): ALWAYS pass through
 	//   - $2 = '' means no restriction — all recipients pass
 	q := `
 		WITH RECURSIVE entity_tree AS (
-			-- Anchor: the event's own entity
-			SELECT entity_name
+			-- Anchor: the event's own entity (by name)
+			SELECT entity_id::text AS eid, entity_name
 			FROM masterentitycash
 			WHERE entity_name = $2
 			  AND (is_deleted = false OR is_deleted IS NULL)
 			UNION ALL
-			-- Recursive: all children of entities already in the set
-			SELECT r.child_entity_name
-			FROM cashentityrelationships r
+			-- Recursive: all children
+			SELECT mc.entity_id::text, mc.entity_name
+			FROM masterentitycash mc
+			INNER JOIN cashentityrelationships r ON mc.entity_name = r.child_entity_name
 			INNER JOIN entity_tree et ON et.entity_name = r.parent_entity_name
+			WHERE (mc.is_deleted = false OR mc.is_deleted IS NULL)
 		)
 		SELECT DISTINCT
 			COALESCE(u.id::text, '')                    AS user_id,
@@ -983,8 +989,12 @@ func lookupRecipients(ctx context.Context, pool *pgxpool.Pool, tpl *resolvedTemp
 			-- External email (no users row matched) — always include
 			u.id IS NULL
 			OR
-			-- User's entity must be the event entity OR any of its descendants
-			COALESCE(u.business_unit_name, '') IN (SELECT entity_name FROM entity_tree)
+			-- User must be mapped to the event entity or any of its descendants
+			EXISTS (
+				SELECT 1 FROM user_entity_mappings uem
+				JOIN entity_tree et ON et.eid = uem.entity_id OR et.entity_name = uem.entity_name
+				WHERE uem.user_id = u.id::text
+			)
 		  )
 	`
 	rows, err := pool.Query(ctx, q, templateID, entityName)

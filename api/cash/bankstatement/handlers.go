@@ -1244,15 +1244,37 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		mf := &bytesFile{Reader: fileReader}
 
 		// Parse account number overrides from form-data.
-		// force_override=true → use the single provided account unconditionally (no matching).
-		// force_override=false (default) → run weighted scoring; single account is a fallback only.
+		// account_numbers is always an array (JSON array, comma-separated, or repeated field).
+		//
+		// force_override=true  + 1 account  → assign that account to the file unconditionally
+		// force_override=true  + N>1        → error: single file can only belong to one account
+		// force_override=true  + 0 accounts → error: must provide account number
+		// force_override=false + N accounts → weighted scoring; single account used as fallback
+		// force_override=false + 0 accounts → auto-detect from file content against DB
 		accountNumbers := parseAccountNumbers(r.MultipartForm.Value)
 		forceOverride := r.FormValue("force_override") == "true"
 		accountOverride := ""
-		if forceOverride && len(accountNumbers) == 1 {
-			accountOverride = accountNumbers[0]
-			log.Printf("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
+
+		if forceOverride {
+			switch len(accountNumbers) {
+			case 0:
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": "force_override=true requires at least one account number in account_numbers",
+				})
+				return
+			case 1:
+				accountOverride = accountNumbers[0]
+				log.Printf("[BANK-UPLOAD-DEBUG] force_override=true — using account %s directly", accountOverride)
+			default:
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": fmt.Sprintf("force_override=true with a single file requires exactly 1 account number, got %d. Use the zip endpoint for multiple files.", len(accountNumbers)),
+				})
+				return
+			}
 		} else if len(accountNumbers) >= 1 {
+			// Weighted scoring: match filename patterns + masked numbers in file content.
 			var fileContent [][]string
 			if parsedRows, parseErr := parseFileToRows(fileBytes); parseErr == nil {
 				fileContent = parsedRows

@@ -3,6 +3,7 @@ package bankstatement
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -421,28 +422,48 @@ func parseAccountNumbers(formValues map[string][]string) []string {
 	accounts := make(map[string]bool)
 	var result []string
 
+	addIfNew := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" && !accounts[v] {
+			accounts[v] = true
+			result = append(result, v)
+		}
+	}
+
+	// tryParseJSON attempts to decode a JSON array string like ["acc1","acc2"] or ["acc1"]
+	tryParseJSON := func(v string) bool {
+		v = strings.TrimSpace(v)
+		if !strings.HasPrefix(v, "[") {
+			return false
+		}
+		var arr []string
+		if err := json.Unmarshal([]byte(v), &arr); err != nil {
+			return false
+		}
+		for _, s := range arr {
+			addIfNew(s)
+		}
+		return true
+	}
+
 	// Single account number
 	if vals, ok := formValues["account_number"]; ok && len(vals) > 0 {
 		for _, v := range vals {
-			v = strings.TrimSpace(v)
-			if v != "" && !accounts[v] {
-				accounts[v] = true
-				result = append(result, v)
+			if !tryParseJSON(v) {
+				addIfNew(v)
 			}
 		}
 	}
 
-	// Multiple accounts (comma-separated or array)
+	// Multiple accounts: JSON array, comma-separated, or repeated field
 	if vals, ok := formValues["account_numbers"]; ok && len(vals) > 0 {
 		for _, v := range vals {
+			if tryParseJSON(v) {
+				continue
+			}
 			// Handle comma-separated
-			parts := strings.Split(v, ",")
-			for _, part := range parts {
-				part = strings.TrimSpace(part)
-				if part != "" && !accounts[part] {
-					accounts[part] = true
-					result = append(result, part)
-				}
+			for _, part := range strings.Split(v, ",") {
+				addIfNew(part)
 			}
 		}
 	}
@@ -450,10 +471,8 @@ func parseAccountNumbers(formValues map[string][]string) []string {
 	// Also check for array syntax account_numbers[]
 	if vals, ok := formValues["account_numbers[]"]; ok && len(vals) > 0 {
 		for _, v := range vals {
-			v = strings.TrimSpace(v)
-			if v != "" && !accounts[v] {
-				accounts[v] = true
-				result = append(result, v)
+			if !tryParseJSON(v) {
+				addIfNew(v)
 			}
 		}
 	}

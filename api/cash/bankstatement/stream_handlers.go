@@ -355,17 +355,61 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 		".csv":  true,
 	}
 
-	formValues := map[string][]string{}
+	// Copy base form values (excluding account routing keys — we resolve per-file below)
+	baseFormValues := map[string][]string{}
 	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
 		for k, v := range r.MultipartForm.Value {
-			formValues[k] = append([]string{}, v...)
+			baseFormValues[k] = append([]string{}, v...)
 		}
+	}
+
+	// Resolve account routing params once
+	accountNumbers := parseAccountNumbers(baseFormValues)
+	forceOverride := r.FormValue("force_override") == "true"
+	log.Printf("[ZIP-PREVIEW] force_override=%v account_numbers=%v", forceOverride, accountNumbers)
+
+	// --- Collect processable entries first so we can validate 1:1 counts ---
+	type previewEntry struct {
+		filename string
+		data     []byte
+	}
+	var fileEntries []previewEntry
+
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		filename := filepath.Base(zf.Name)
+		ext := strings.ToLower(filepath.Ext(filename))
+		if !allowedExt[ext] {
+			continue // counted as skipped below in the main loop
+		}
+		rc, oErr := zf.Open()
+		if oErr != nil {
+			continue
+		}
+		fd, rErr := io.ReadAll(rc)
+		rc.Close()
+		if rErr != nil {
+			continue
+		}
+		fileEntries = append(fileEntries, previewEntry{filename: filename, data: fd})
+	}
+
+	// Validate force + N-accounts: must be 1 or match file count
+	if forceOverride && len(accountNumbers) > 1 && len(accountNumbers) != len(fileEntries) {
+		respondWithError(w, nil, fmt.Sprintf(
+			"force_override=true with %d account numbers but zip contains %d processable files — counts must match for 1:1 mapping",
+			len(accountNumbers), len(fileEntries),
+		), http.StatusBadRequest)
+		return
 	}
 
 	results := make([]map[string]interface{}, 0)
 	successCount := 0
 	failedCount := 0
 	skippedCount := 0
+	fileIdx := 0
 
 	for _, zf := range zr.File {
 		if zf.FileInfo().IsDir() {
@@ -392,6 +436,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 				"error":  err.Error(),
 			})
 			failedCount++
+			fileIdx++
 			continue
 		}
 		fileBytes, err := io.ReadAll(rc)
@@ -403,10 +448,43 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 				"error":  err.Error(),
 			})
 			failedCount++
+			fileIdx++
 			continue
 		}
 
-		resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, filename, fileBytes, formValues, r.URL.Query())
+		// Resolve per-file account override using same rules as the dedicated zip endpoint
+		perFileFormValues := map[string][]string{}
+		for k, v := range baseFormValues {
+			perFileFormValues[k] = append([]string{}, v...)
+		}
+
+		switch {
+		case forceOverride && len(accountNumbers) > 1:
+			// 1:1 positional mapping
+			perFileFormValues["account_numbers"] = []string{accountNumbers[fileIdx]}
+			perFileFormValues["force_override"] = []string{"true"}
+			log.Printf("[ZIP-PREVIEW] force+N: file[%d] %s → account %s", fileIdx, filename, accountNumbers[fileIdx])
+
+		case forceOverride && len(accountNumbers) == 1:
+			// All files → single account (already in baseFormValues, keep force_override=true)
+			log.Printf("[ZIP-PREVIEW] force+1: file %s → account %s", filename, accountNumbers[0])
+
+		case forceOverride && len(accountNumbers) == 0:
+			// force + no accounts = error already caught above for N>1, but also guard 0-account case
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  "force_override=true requires at least one account number in account_numbers",
+			})
+			failedCount++
+			fileIdx++
+			continue
+
+		default:
+			// !forceOverride: pass through; V2 handler does weighted scoring or auto-detect
+		}
+
+		resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, filename, fileBytes, perFileFormValues, r.URL.Query())
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"file":   filename,
@@ -414,6 +492,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 				"error":  err.Error(),
 			})
 			failedCount++
+			fileIdx++
 			continue
 		}
 
@@ -433,6 +512,7 @@ func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.Respons
 			"status":   status,
 			"response": resp,
 		})
+		fileIdx++
 	}
 
 	if successCount == 0 && failedCount == 0 && skippedCount == 0 {

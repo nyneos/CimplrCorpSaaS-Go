@@ -192,7 +192,8 @@ func ProcessTicker(req TickerRequest) (interface{}, int, error) {
 				result[b] = map[string]string{"error": "base or target not found"}
 				continue
 			}
-			rate := trInr / baseInr
+			// BASE/TARGET = units of TARGET per 1 BASE = INR_per_BASE / INR_per_TARGET
+			rate := baseInr / trInr
 			rate = math.Round(rate*10000) / 10000
 			if req.Spot {
 				result[b] = map[string]interface{}{"pair": fmt.Sprintf("%s/%s", b, target), "rate": rate}
@@ -229,7 +230,8 @@ func ProcessTicker(req TickerRequest) (interface{}, int, error) {
 			pairs := make([]PairRate, 0, len(codes))
 			for _, c := range codes {
 				r := inrRates[c]
-				rate := r / baseInr
+				// BASE/TARGET = INR_per_BASE / INR_per_TARGET
+				rate := baseInr / r
 				rate = math.Round(rate*10000) / 10000
 				pairs = append(pairs, PairRate{Pair: fmt.Sprintf("%s/%s", b, c), Rate: rate})
 			}
@@ -238,8 +240,8 @@ func ProcessTicker(req TickerRequest) (interface{}, int, error) {
 			out := make(map[string]float64, len(codes))
 			for _, c := range codes {
 				r := inrRates[c]
-				rate := r / baseInr
-				out[c] = math.Round(rate*10000) / 10000
+				// BASE/TARGET = INR_per_BASE / INR_per_TARGET
+				out[c] = math.Round(baseInr/r*10000) / 10000
 			}
 			baseResults[b] = out
 		}
@@ -298,7 +300,8 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 				result[b] = map[string]string{"error": "base or target not found"}
 				continue
 			}
-			rate := trInr / baseInr
+			// BASE/TARGET = units of TARGET per 1 BASE = INR_per_BASE / INR_per_TARGET
+			rate := baseInr / trInr
 			rate = math.Round(rate*10000) / 10000
 			if req.Spot {
 				result[b] = map[string]interface{}{"pair": fmt.Sprintf("%s/%s", b, target), "rate": rate}
@@ -338,7 +341,8 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 			pairs := make([]PairRate, 0, len(codes))
 			for _, c := range codes {
 				r := inrRates[c]
-				rate := r / baseInr
+				// BASE/TARGET = INR_per_BASE / INR_per_TARGET
+				rate := baseInr / r
 				rate = math.Round(rate*10000) / 10000
 				pairs = append(pairs, PairRate{Pair: fmt.Sprintf("%s/%s", b, c), Rate: rate})
 			}
@@ -347,8 +351,8 @@ func tickerHandler(w http.ResponseWriter, r *http.Request) {
 			out := make(map[string]float64, len(codes))
 			for _, c := range codes {
 				r := inrRates[c]
-				rate := r / baseInr
-				out[c] = math.Round(rate*10000) / 10000
+				// BASE/TARGET = INR_per_BASE / INR_per_TARGET
+				out[c] = math.Round(baseInr/r*10000) / 10000
 			}
 			baseResults[b] = out
 		}

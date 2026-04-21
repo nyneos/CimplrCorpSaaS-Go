@@ -1470,7 +1470,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  u.id                                          AS user_id,
 				  COALESCE(u.employee_name,'')                  AS employee_name,
 				  COALESCE(u.username_or_employee_id,'')        AS employee_code,
-				  COALESCE(u.business_unit_name,'')             AS business_unit_name,
+				  COALESCE(em.entity_names,'')                  AS entity_names,
 				  COALESCE(u.mobile,'')                         AS mobile,
 				  COALESCE(u.status,'')                         AS user_status,
 				  COALESCE(u.authentication_type,'')            AS authentication_type,
@@ -1481,6 +1481,10 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				  COALESCE(r.status,'')                         AS role_status
 				FROM participant_emails pe
 				JOIN public.users u ON u.email = pe.email
+				LEFT JOIN LATERAL (
+					SELECT string_agg(entity_name, ', ' ORDER BY entity_name) AS entity_names
+					FROM public.user_entity_mappings WHERE user_id = u.id
+				) em ON true
 				LEFT JOIN public.user_roles ur ON ur.user_id = u.id
 				LEFT JOIN public.roles r       ON r.id       = ur.role_id
 				ORDER BY u.email, r.name
@@ -1503,7 +1507,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 				Email              string      `json:"email"`
 				EmployeeName       string      `json:"employee_name"`
 				EmployeeCode       string      `json:"employee_code"`
-				BusinessUnitName   string      `json:"business_unit_name"`
+				EntityNames        string      `json:"entity_names"`
 				Mobile             string      `json:"mobile,omitempty"`
 				UserStatus         string      `json:"user_status"`
 				AuthenticationType string      `json:"authentication_type,omitempty"`
@@ -1516,11 +1520,11 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 
 			for rows.Next() {
 				var (
-					email, userID, empName, empCode, buName, mobile, uStatus, authType string
-					roleID, roleName, roleCode, roleDesc, roleStatus                   string
+					email, userID, empName, empCode, entityNames, mobile, uStatus, authType string
+					roleID, roleName, roleCode, roleDesc, roleStatus                        string
 				)
 				if err2 := rows.Scan(
-					&email, &userID, &empName, &empCode, &buName, &mobile, &uStatus, &authType,
+					&email, &userID, &empName, &empCode, &entityNames, &mobile, &uStatus, &authType,
 					&roleID, &roleName, &roleCode, &roleDesc, &roleStatus,
 				); err2 != nil {
 					api.LogError("[AuditDash] user_directory scan error: %v", err2)
@@ -1532,7 +1536,7 @@ func GetFDAuditDashboard(pool *pgxpool.Pool) http.HandlerFunc {
 						Email:              email,
 						EmployeeName:       empName,
 						EmployeeCode:       empCode,
-						BusinessUnitName:   buName,
+						EntityNames:        entityNames,
 						Mobile:             mobile,
 						UserStatus:         uStatus,
 						AuthenticationType: authType,

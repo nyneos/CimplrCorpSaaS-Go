@@ -186,18 +186,15 @@ func GetUserCurrency(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 			return
 		}
-		var buName string
-		if err := db.QueryRow("SELECT business_unit_name FROM users WHERE id = $1  AND (status = 'Approved' OR status = 'approved')", req.UserID).Scan(&buName); err != nil {
-			respondWithError(w, http.StatusNotFound, "User not found")
-			return
-		}
-		if buName == "" {
-			respondWithError(w, http.StatusNotFound, "User has no business unit assigned")
-			return
-		}
 		var defaultCurrency string
-		if err := db.QueryRow("SELECT base_operating_currency FROM masterentitycash WHERE entity_name = $1", buName).Scan(&defaultCurrency); err != nil {
-			respondWithError(w, http.StatusNotFound, "No entity found for given business unit")
+		err := db.QueryRow(`
+			SELECT ec.base_operating_currency
+			FROM user_entity_mappings uem
+			JOIN masterentitycash ec ON ec.entity_id::text = uem.entity_id
+			WHERE uem.user_id = $1
+			LIMIT 1`, req.UserID).Scan(&defaultCurrency)
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, "No entity mapping found for this user")
 			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)

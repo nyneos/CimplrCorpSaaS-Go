@@ -47,6 +47,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PenaltyID                string           `json:"penalty_id"`
 			PayoutDates              *json.RawMessage `json:"payout_dates"`
 			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
+			FirstPayoutDate          string           `json:"first_payout_date"`          // YYYY-MM-DD; actual first interest credit date
+			FirstCapitalizationDate  string           `json:"first_capitalization_date"`  // YYYY-MM-DD; actual first capitalization date
 			Notes                    string           `json:"notes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -236,6 +238,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					variance_resolved_at      = now(),
 					confirmation_status       = 'CONFIRMED',
 					penalty_id                = NULLIF($15,''),
+					first_payout_date         = $18,
+					first_capitalization_date = $19,
 					updated_by                = $16,
 					updated_at                = now()
 				WHERE confirmation_id = $17`,
@@ -249,6 +253,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				payoutJSON(req.PayoutDates), payoutJSON(req.CompoundingDates),
 				req.PenaltyID,
 				userEmail, confirmationID,
+				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
 			); err != nil {
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
 				api.RespondWithError(w, status, msg)
@@ -270,6 +275,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					variance_flag, variance_threshold_breached,
 					confirmation_status,
 					penalty_id,
+					first_payout_date,
+					first_capitalization_date,
 					created_by
 				) VALUES (
 					$1,
@@ -284,6 +291,8 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					false, false,
 					'CONFIRMED',
 					NULLIF($16,''),
+					$18,
+					$19,
 					$17
 				) RETURNING confirmation_id`,
 				req.BookingID,
@@ -297,6 +306,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				payoutJSON(req.PayoutDates), payoutJSON(req.CompoundingDates),
 				req.PenaltyID,
 				userEmail,
+				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
 			).Scan(&confirmationID)
 			if err != nil {
 				msg, status := getUserFriendlyFDError(err, "Insert confirmation failed")
@@ -405,6 +415,8 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			PenaltyID                string           `json:"penalty_id"`
 			PayoutDates              *json.RawMessage `json:"payout_dates"`
 			CompoundingDates         *json.RawMessage `json:"compounding_dates"`
+			FirstPayoutDate          string           `json:"first_payout_date"`         // YYYY-MM-DD; actual first interest credit date
+			FirstCapitalizationDate  string           `json:"first_capitalization_date"` // YYYY-MM-DD; actual first capitalization date
 			Notes                    string           `json:"notes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -593,6 +605,8 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					variance_action              = CASE WHEN $15 THEN 'PENDING' ELSE NULL END,
 					confirmation_status          = $17,
 					penalty_id                   = NULLIF($18,''),
+					first_payout_date            = $21,
+					first_capitalization_date    = $22,
 					updated_by                   = $19,
 					updated_at                   = now()
 				WHERE confirmation_id = $20`,
@@ -604,6 +618,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.ConfirmedTenorDays, req.ConfirmedTenorMonths, req.ConfirmedTenorYears,
 				payoutJSON(req.PayoutDates), payoutJSON(req.CompoundingDates),
 				hasVariance, varDetailsJSON, confStatus, req.PenaltyID, userEmail, confirmationID,
+				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
 			); err != nil {
 				api.LogError("[VarianceResolve] UPDATE fd_confirmation error: %v", err)
 				msg, status := getUserFriendlyFDError(err, constants.ErrUpdateConfirmationFailed)
@@ -645,6 +660,8 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					variance_details, variance_action,
 					confirmation_status,
 					penalty_id,
+					first_payout_date,
+					first_capitalization_date,
 					created_by
 				) VALUES (
 					$1,
@@ -659,6 +676,8 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					$17, CASE WHEN $16 THEN 'PENDING' ELSE NULL END,
 					$18,
 					NULLIF($19,''),
+					$21,
+					$22,
 					$20
 				) RETURNING confirmation_id`,
 				bookingID,
@@ -670,6 +689,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				req.ConfirmedTenorDays, req.ConfirmedTenorMonths, req.ConfirmedTenorYears,
 				payoutJSON(req.PayoutDates), payoutJSON(req.CompoundingDates),
 				hasVariance, varDetailsJSON, confStatus, req.PenaltyID, userEmail,
+				coerceDateValue(req.FirstPayoutDate), coerceDateValue(req.FirstCapitalizationDate),
 			).Scan(&confirmationID)
 			if err != nil {
 				msg, status := getUserFriendlyFDError(err, "Insert confirmation failed")
@@ -1750,6 +1770,8 @@ func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'') AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.penalty_id,'')                                              AS penalty_id,
+				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
+				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')           AS record_created_at,
 
@@ -1982,6 +2004,14 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		case bookingCols["currency_code"]:
 			currencyExpr = "COALESCE(b.currency_code, '')"
 		}
+		fpDateExpr := "''::text"
+		if confCols["first_payout_date"] {
+			fpDateExpr = "COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')"
+		}
+		fcDateExpr := "''::text"
+		if confCols["first_capitalization_date"] {
+			fcDateExpr = "COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')"
+		}
 
 		baseQ := fmt.Sprintf(`
 			SELECT
@@ -2004,6 +2034,8 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.confirmation_received_date,'YYYY-MM-DD'),'') AS receipt_date,
 				%s AS currency,
 				COALESCE(c.confirmation_status,'') AS confirmation_status,
+				%s AS first_payout_date,
+				%s AS first_capitalization_date,
 				EXISTS (
 					SELECT 1 FROM investment.fd_master fm
 					WHERE fm.confirmation_id = c.confirmation_id
@@ -2027,7 +2059,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			FROM investment.fd_confirmation c
 			JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
 			WHERE c.confirmation_status = 'CONFIRMED'
-			  AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, currencyExpr)
+			  AND COALESCE(c.is_deleted,false) = false`, bookingAccountExpr, currencyExpr, fpDateExpr, fcDateExpr)
 
 		var args []interface{}
 		if entityID != "" {
@@ -2117,6 +2149,8 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(TO_CHAR(c.variance_resolved_at,'YYYY-MM-DD HH24:MI:SS'),'')  AS variance_resolved_at,
 				COALESCE(c.confirmation_status,'')                                     AS confirmation_status,
 				COALESCE(c.is_deleted,false)                                           AS is_deleted,
+				COALESCE(TO_CHAR(c.first_payout_date,'YYYY-MM-DD'),'')                AS first_payout_date,
+				COALESCE(TO_CHAR(c.first_capitalization_date,'YYYY-MM-DD'),'')        AS first_capitalization_date,
 				COALESCE(TO_CHAR(c.created_at,'YYYY-MM-DD HH24:MI:SS'),'')            AS record_created_at
 			FROM investment.fd_confirmation c
 			LEFT JOIN investment.fd_booking_request b ON b.booking_id = c.booking_id
