@@ -1,6 +1,8 @@
 package counterpartyHub
 
 import (
+	"context"
+	"math/big"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 
 	"CimplrCorpSaas/api"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -24,17 +27,35 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 		api.LogError("PgError [%s] constraint=%s table=%s detail=%s", pgErr.Code, pgErr.ConstraintName, pgErr.TableName, pgErr.Detail)
 		switch pgErr.Code {
 		case "23505": // unique_violation
-			if strings.Contains(pgErr.ConstraintName, "uniq_cp_code_active") ||
-				strings.Contains(pgErr.ConstraintName, "counterparty_code") {
-				return "Counterparty code already exists. Each counterparty code must be unique.", http.StatusOK
+			switch {
+			case strings.Contains(pgErr.ConstraintName, "uniq_cp_code"):
+				return "Counterparty code already exists for this tenant.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_bank_code"):
+				return "Bank code already exists.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_exchange_code"):
+				return "Exchange code already exists.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_mic_code"):
+				return "MIC code already exists. MIC codes are globally unique (ISO 10383).", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_provider_code"):
+				return "Provider code already exists.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_ccp_entity_code"):
+				return "Entity code already exists for this CCP/CSD.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_ccp_lei"):
+				return "LEI already registered to another CCP/CSD record.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_network_code"):
+				return "Network code already exists.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "uniq_erp_system_code"):
+				return "ERP system code already exists.", http.StatusOK
+			case strings.Contains(pgErr.ConstraintName, "_cp_unique"):
+				return "A " + pgErr.TableName + " record already exists for this counterparty.", http.StatusOK
 			}
-			return "Duplicate entry detected. This record already exists in the system.", http.StatusOK
+			return "Duplicate entry — this record already exists.", http.StatusOK
 		case "23503": // foreign_key_violation
-			return "Referenced record not found or is invalid.", http.StatusOK
+			return "Referenced record not found or is not active.", http.StatusOK
 		case "23514": // check_violation
-			return fmt.Sprintf("Invalid value: check constraint '%s' failed", pgErr.ConstraintName), http.StatusBadRequest
+			return "Invalid value for field: " + pgErr.ConstraintName, http.StatusBadRequest
 		case "22P02": // invalid_text_representation (enum cast failure)
-			return "Invalid enum value provided for one of the fields", http.StatusBadRequest
+			return "Invalid option selected for one of the dropdown fields.", http.StatusBadRequest
 		case "42804": // datatype_mismatch
 			return fmt.Sprintf("Field type mismatch: %s", pgErr.Message), http.StatusBadRequest
 		}
@@ -43,14 +64,17 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 
 	errStr := strings.ToLower(err.Error())
 
+	if strings.Contains(errStr, "tx begin") || strings.Contains(errStr, "commit failed") || strings.Contains(errStr, "audit insert") {
+		return err.Error(), http.StatusOK
+	}
 	if strings.Contains(errStr, "duplicate key") || strings.Contains(errStr, "unique constraint") {
 		return "Duplicate entry detected. This record already exists in the system.", http.StatusOK
 	}
 	if strings.Contains(errStr, "foreign key constraint") || strings.Contains(errStr, "violates foreign key") {
-		return "Referenced record not found or is invalid.", http.StatusOK
+		return "Referenced record not found or is not active.", http.StatusOK
 	}
 	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "timeout") {
-		return "Database connection issue. Please try again later.", http.StatusServiceUnavailable
+		return "Database connection issue. Please retry.", http.StatusServiceUnavailable
 	}
 
 	return "Internal server error: " + context, http.StatusInternalServerError
@@ -61,12 +85,12 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 var kmsPathRegex = regexp.MustCompile(`^vault/cimplr/[^/\s]+/[^/\s]+/[^/\s]+$`)
 
 // validateKMSPath rejects raw credentials. Path must be vault/cimplr/{tenant}/{cp}/{type}.
-func validateKMSPath(path string) error {
-	if path == "" {
+func validateKMSPath(field, value string) error {
+	if value == "" {
 		return nil
 	}
-	if !kmsPathRegex.MatchString(path) {
-		return errors.New("KMS path must follow format vault/cimplr/{tenant}/{counterparty}/{type}. Raw credentials are not accepted.")
+	if !kmsPathRegex.MatchString(value) {
+		return fmt.Errorf("%s must be a KMS vault path (vault/cimplr/{tenant}/{counterparty}/{type}). Raw credentials are not accepted.", field)
 	}
 	return nil
 }
@@ -123,8 +147,8 @@ func validateLEI(lei string) error {
 	if !leiCharRegex.MatchString(lei) {
 		return errors.New("LEI must contain only uppercase letters and digits")
 	}
-	// ISO 17442: rearrange last 4 chars to front, convert letters A=10..Z=35, then mod 97 must = 1
-	rearranged := lei[4:] + lei[:4]
+	// ISO 17442: move last 4 chars to front, convert A-Z to 10-35, mod 97 must be 1.
+	rearranged := lei[18:] + lei[:18]
 	numStr := ""
 	for _, c := range rearranged {
 		if c >= 'A' && c <= 'Z' {
@@ -133,12 +157,201 @@ func validateLEI(lei string) error {
 			numStr += string(c)
 		}
 	}
-	remainder := 0
-	for _, ch := range numStr {
-		remainder = (remainder*10 + int(ch-'0')) % 97
-	}
-	if remainder != 1 {
-		return errors.New("LEI checksum is invalid (ISO 17442)")
+	n := new(big.Int)
+	n.SetString(numStr, 10)
+	mod := new(big.Int).Mod(n, big.NewInt(97))
+	if mod.Int64() != 1 {
+		return errors.New("LEI checksum is invalid. Please verify the LEI with GLEIF.")
 	}
 	return nil
 }
+
+// ── Type routing helpers (Hub 2.0) ────────────────────────────────────────────
+
+// hub2Schema is the PostgreSQL schema that owns all hub-v2 tables.
+const hub2Schema = "apibox_svc."
+
+func typedMasterTable(cpType string) string {
+	switch cpType {
+	case "BANK":
+		return hub2Schema + "bank_master"
+	case "EXCHANGE":
+		return hub2Schema + "exchange_master"
+	case "DATA_PROVIDER":
+		return hub2Schema + "data_provider_master"
+	case "CCP_CSD":
+		return hub2Schema + "ccp_csd_master"
+	case "PAYMENT_NETWORK":
+		return hub2Schema + "payment_network_master"
+	case "ERP_SYSTEM":
+		return hub2Schema + "erp_system_master"
+	default:
+		return ""
+	}
+}
+
+func typedAuditTable(cpType string) string {
+	switch cpType {
+	case "BANK":
+		return hub2Schema + "audit_bank_master"
+	case "EXCHANGE":
+		return hub2Schema + "audit_exchange_master"
+	case "DATA_PROVIDER":
+		return hub2Schema + "audit_data_provider_master"
+	case "CCP_CSD":
+		return hub2Schema + "audit_ccp_csd_master"
+	case "PAYMENT_NETWORK":
+		return hub2Schema + "audit_payment_network_master"
+	case "ERP_SYSTEM":
+		return hub2Schema + "audit_erp_system_master"
+	default:
+		return ""
+	}
+}
+
+func typedIDColumn(cpType string) string {
+	switch cpType {
+	case "BANK":
+		return "bank_id"
+	case "EXCHANGE":
+		return "exchange_id"
+	case "DATA_PROVIDER":
+		return "provider_id"
+	case "CCP_CSD":
+		return "ccp_csd_id"
+	case "PAYMENT_NETWORK":
+		return "network_id"
+	case "ERP_SYSTEM":
+		return "erp_id"
+	default:
+		return ""
+	}
+}
+
+func hasMultiSelectMapping(cpType string) bool {
+	return cpType == "EXCHANGE" || cpType == "DATA_PROVIDER"
+}
+
+func mappingTable(cpType string) (table, fkCol, valueCol string) {
+	switch cpType {
+	case "EXCHANGE":
+		return hub2Schema + "exchange_asset_classes", "exchange_id", "asset_class"
+	case "DATA_PROVIDER":
+		return hub2Schema + "dp_data_types", "provider_id", "data_type"
+	}
+	return "", "", ""
+}
+
+// ── Small coercion helpers (Hub 2.0) ──────────────────────────────────────────
+
+func nilIfEmpty(v interface{}) interface{} {
+	switch x := v.(type) {
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return nil
+		}
+		return x
+	default:
+		return v
+	}
+}
+
+func nilIfZero(v interface{}) interface{} {
+	switch x := v.(type) {
+	case int:
+		if x == 0 {
+			return nil
+		}
+		return x
+	case int32:
+		if x == 0 {
+			return nil
+		}
+		return x
+	case int64:
+		if x == 0 {
+			return nil
+		}
+		return x
+	case float64:
+		if x == 0 {
+			return nil
+		}
+		return x
+	default:
+		return v
+	}
+}
+
+func intOrDefault(v interface{}, def int) int {
+	switch x := v.(type) {
+	case int:
+		if x == 0 {
+			return def
+		}
+		return x
+	case float64:
+		if int(x) == 0 {
+			return def
+		}
+		return int(x)
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return def
+		}
+		var out int
+		_, _ = fmt.Sscanf(x, "%d", &out)
+		if out == 0 {
+			return def
+		}
+		return out
+	default:
+		return def
+	}
+}
+
+func toStringSlice(v interface{}) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []interface{}:
+		out := make([]string, 0, len(x))
+		for _, it := range x {
+			if it == nil {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%v", it))
+		}
+		return out
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return nil
+		}
+		return []string{x}
+	default:
+		return nil
+	}
+}
+
+// insertTypedDetail inserts one row into the correct typed master table.
+// tx must already be open. Returns the generated typed ID.
+// fields is the decoded request body as map[string]interface{}.
+func insertTypedDetail(ctx context.Context, tx pgx.Tx, cpID, cpType string, fields map[string]interface{}) (string, error) {
+	switch cpType {
+	case "BANK":
+		return insertBankDetail(ctx, tx, cpID, fields)
+	case "EXCHANGE":
+		return insertExchangeDetail(ctx, tx, cpID, fields)
+	case "DATA_PROVIDER":
+		return insertDataProviderDetail(ctx, tx, cpID, fields)
+	case "CCP_CSD":
+		return insertCcpCsdDetail(ctx, tx, cpID, fields)
+	case "PAYMENT_NETWORK":
+		return insertPaymentNetworkDetail(ctx, tx, cpID, fields)
+	case "ERP_SYSTEM":
+		return insertErpDetail(ctx, tx, cpID, fields)
+	default:
+		return "", fmt.Errorf("unsupported counterparty_type: %s", cpType)
+	}
+}
+

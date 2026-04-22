@@ -24,7 +24,7 @@ type BankInput struct {
 	BankCode       string `json:"bank_code"`
 	BankName       string `json:"bank_name"`
 	BankType       string `json:"bank_type"`
-	RoutingNumber  string `json:"routing_number"`
+	RoutingNumber  string `json:"routing_number,omitempty"`
 	EntityCode     string `json:"entity_code"`
 }
 

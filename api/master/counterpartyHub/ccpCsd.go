@@ -20,14 +20,14 @@ import (
 // ── Request types ─────────────────────────────────────────────────────────────
 
 type CcpCsdInput struct {
-	CounterpartyID       string `json:"counterparty_id"`
-	EntityCode           string `json:"entity_code"`
-	EntitySubType        string `json:"entity_sub_type"`
-	LEI                  string `json:"lei"`
-	RegulatoryBody       string `json:"regulatory_body"`
-	ParticipantID        string `json:"participant_id"`
-	ClearingAcctKMSRef   string `json:"clearing_acct_kms_ref"`
-	MarginCallFrequency  string `json:"margin_call_frequency"`
+	CounterpartyID      string `json:"counterparty_id"`
+	EntityCode          string `json:"entity_code"`
+	EntitySubType       string `json:"entity_sub_type"`
+	LEI                 string `json:"lei"`
+	RegulatoryBody      string `json:"regulatory_body,omitempty"`
+	ParticipantID       string `json:"participant_id,omitempty"`
+	ClearingAcctKMSRef  string `json:"clearing_acct_kms_ref"`
+	MarginCallFrequency string `json:"margin_call_frequency,omitempty"`
 }
 
 func validateCcpCsdInput(inp CcpCsdInput) error {
@@ -57,7 +57,7 @@ func validateCcpCsdInput(inp CcpCsdInput) error {
 	if strings.TrimSpace(inp.ClearingAcctKMSRef) == "" {
 		return errors.New("clearing_acct_kms_ref is required")
 	}
-	if err := validateKMSPath(inp.ClearingAcctKMSRef); err != nil {
+	if err := validateKMSPath("clearing_acct_kms_ref", inp.ClearingAcctKMSRef); err != nil {
 		return err
 	}
 	if inp.MarginCallFrequency != "" {
@@ -311,7 +311,7 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if k == "clearing_acct_kms_ref" {
 				if s, ok := v.(string); ok {
-					if err := validateKMSPath(s); err != nil {
+					if err := validateKMSPath("clearing_acct_kms_ref", s); err != nil {
 						api.RespondWithError(w, http.StatusBadRequest, err.Error())
 						return
 					}

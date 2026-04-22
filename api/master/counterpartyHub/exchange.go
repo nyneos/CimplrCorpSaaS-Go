@@ -24,24 +24,24 @@ type ExchangeInput struct {
 	MICCode             string   `json:"mic_code"`
 	ExchangeType        string   `json:"exchange_type"`
 	RegulatoryBody      string   `json:"regulatory_body"`
-	OperatingHoursOpen  string   `json:"operating_hours_open"`
-	OperatingHoursClose string   `json:"operating_hours_close"`
+	OperatingHoursOpen  string   `json:"operating_hours_open,omitempty"`
+	OperatingHoursClose string   `json:"operating_hours_close,omitempty"`
 	Timezone            string   `json:"timezone"`
-	SettlementCycle     string   `json:"settlement_cycle"`
-	HolidayCalendarRef  string   `json:"holiday_calendar_ref"`
-	AssetClasses        []string `json:"asset_classes"`
+	SettlementCycle     string   `json:"settlement_cycle,omitempty"`
+	HolidayCalendarRef  string   `json:"holiday_calendar_ref,omitempty"`
+	AssetClasses        []string `json:"asset_classes,omitempty"`
 	// FIX session fields
-	ConnectivityProtocol string `json:"connectivity_protocol"`
-	SessionRole          string `json:"session_role"`
-	SenderCompID         string `json:"sender_comp_id"`
-	TargetCompID         string `json:"target_comp_id"`
-	PrimaryHost          string `json:"primary_host"`
-	PrimaryPort          int    `json:"primary_port"`
-	FailoverHost         string `json:"failover_host"`
-	FailoverPort         int    `json:"failover_port"`
-	FIXCredsKMSRef       string `json:"fix_creds_kms_ref"`
-	HeartbeatInterval    int    `json:"heartbeat_interval"`
-	TLSVersion           string `json:"tls_version"`
+	ConnectivityProtocol string `json:"connectivity_protocol,omitempty"`
+	SessionRole          string `json:"session_role,omitempty"`
+	SenderCompID         string `json:"sender_comp_id,omitempty"`
+	TargetCompID         string `json:"target_comp_id,omitempty"`
+	PrimaryHost          string `json:"primary_host,omitempty"`
+	PrimaryPort          int    `json:"primary_port,omitempty"`
+	FailoverHost         string `json:"failover_host,omitempty"`
+	FailoverPort         int    `json:"failover_port,omitempty"`
+	FIXCredsKMSRef       string `json:"fix_creds_kms_ref,omitempty"`
+	HeartbeatInterval    int    `json:"heartbeat_interval,omitempty"`
+	TLSVersion           string `json:"tls_version,omitempty"`
 }
 
 func validateExchangeInput(inp ExchangeInput) error {
@@ -69,11 +69,11 @@ func validateExchangeInput(inp ExchangeInput) error {
 		if strings.TrimSpace(inp.FIXCredsKMSRef) == "" {
 			return errors.New("fix_creds_kms_ref is required when connectivity_protocol is FIX")
 		}
-		if err := validateKMSPath(inp.FIXCredsKMSRef); err != nil {
+		if err := validateKMSPath("fix_creds_kms_ref", inp.FIXCredsKMSRef); err != nil {
 			return err
 		}
 	} else if inp.FIXCredsKMSRef != "" {
-		if err := validateKMSPath(inp.FIXCredsKMSRef); err != nil {
+		if err := validateKMSPath("fix_creds_kms_ref", inp.FIXCredsKMSRef); err != nil {
 			return err
 		}
 	}

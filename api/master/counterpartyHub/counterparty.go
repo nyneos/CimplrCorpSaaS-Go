@@ -22,15 +22,15 @@ import (
 type CounterpartyInput struct {
 	CounterpartyCode string  `json:"counterparty_code"`
 	CounterpartyName string  `json:"counterparty_name"`
-	ShortName        string  `json:"short_name"`
+	ShortName        string  `json:"short_name,omitempty"`
 	CounterpartyType string  `json:"counterparty_type"`
 	Country          string  `json:"country"`
 	PrimaryCurrency  string  `json:"primary_currency"`
-	LEI              string  `json:"lei"`
-	RMEmail          string  `json:"rm_email"`
+	LEI              string  `json:"lei,omitempty"`
+	RMEmail          string  `json:"rm_email,omitempty"`
 	EffFrom          string  `json:"eff_from"`
-	EffTo            *string `json:"eff_to"`
-	Notes            string  `json:"notes"`
+	EffTo            *string `json:"eff_to,omitempty"`
+	Notes            string  `json:"notes,omitempty"`
 }
 
 type CreateCounterpartyRequest struct {
@@ -663,10 +663,12 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		defer tx.Rollback(ctx)
 
 		rows, err := tx.Query(ctx, `
-			SELECT audit_id, counterparty_id, action_type, processing_status, requested_by
-			FROM apibox.audit_counterparty_master
-			WHERE counterparty_id = ANY($1::text[]) AND processing_status LIKE 'PENDING%'
-			FOR UPDATE`, req.CounterpartyIDs)
+			SELECT a.audit_id, a.counterparty_id, a.action_type, a.processing_status, a.requested_by,
+			       COALESCE(m.counterparty_type,'') AS counterparty_type
+			FROM apibox.audit_counterparty_master a
+			LEFT JOIN apibox.counterparty_master m ON m.counterparty_id = a.counterparty_id
+			WHERE a.counterparty_id = ANY($1::text[]) AND a.processing_status LIKE 'PENDING%'
+			FOR UPDATE OF a`, req.CounterpartyIDs)
 		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, "Fetch audit rows failed")
 			api.RespondWithError(w, status, msg)
@@ -680,11 +682,12 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			ActionType  string
 			Status      string
 			RequestedBy string
+			CPType      string
 		}
 		var audits []auditRow
 		for rows.Next() {
 			var a auditRow
-			if err := rows.Scan(&a.AuditID, &a.CPID, &a.ActionType, &a.Status, &a.RequestedBy); err != nil {
+			if err := rows.Scan(&a.AuditID, &a.CPID, &a.ActionType, &a.Status, &a.RequestedBy, &a.CPType); err != nil {
 				api.RespondWithError(w, http.StatusInternalServerError, "Audit scan failed: "+err.Error())
 				return
 			}
@@ -728,6 +731,31 @@ func BulkApproveCounterpartyMaster(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						"counterparty_id": a.CPID, constants.ValueSuccess: false, constants.ValueError: err.Error(),
 					})
 					continue
+				}
+			}
+
+			// Cascade to linked child table
+			if strings.ToUpper(a.ActionType) == "DELETE" {
+				switch a.CPType {
+				case "BANK":
+					tx.Exec(ctx, `UPDATE apibox.bank_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+				case "EXCHANGE":
+					tx.Exec(ctx, `UPDATE apibox.exchange_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+				case "DATA_PROVIDER":
+					tx.Exec(ctx, `UPDATE apibox.data_provider_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+				case "CCP_CSD":
+					tx.Exec(ctx, `UPDATE apibox.ccp_csd_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+				case "PAYMENT_NETWORK":
+					tx.Exec(ctx, `UPDATE apibox.payment_network_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+				case "ERP_SYSTEM":
+					tx.Exec(ctx, `UPDATE apibox.erp_system_master SET is_deleted=true WHERE counterparty_id=$1`, a.CPID)
+				}
+			} else {
+				switch a.CPType {
+				case "PAYMENT_NETWORK":
+					tx.Exec(ctx, `UPDATE apibox.payment_network_master SET status='ACTIVE' WHERE counterparty_id=$1`, a.CPID)
+				case "ERP_SYSTEM":
+					tx.Exec(ctx, `UPDATE apibox.erp_system_master SET status='ACTIVE' WHERE counterparty_id=$1`, a.CPID)
 				}
 			}
 
@@ -1006,7 +1034,7 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.primary_currency,
 				COALESCE(m.lei,'') AS lei,
 				COALESCE(m.rm_email,'') AS rm_email,
-				m.platform_sync_status,
+				COALESCE(m.platform_sync_status,'') AS platform_sync_status,
 				COALESCE(m.cilink_platform_id,'') AS cilink_platform_id,
 				m.status,
 				COALESCE(m.notes,'') AS notes,
@@ -1029,10 +1057,41 @@ func GetCounterpartyMasterAll(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(h.created_by,'') AS created_by,
 				COALESCE(h.created_at,'') AS created_at,
 				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at
+				COALESCE(h.edited_at,'') AS edited_at,
+				-- child: BANK
+				COALESCE(b.bank_id::text,'') AS child_bank_id,
+				COALESCE(b.bank_code,'') AS child_bank_code,
+				COALESCE(b.bank_name,'') AS child_bank_name,
+				COALESCE(b.bank_type,'') AS child_bank_type,
+				-- child: EXCHANGE
+				COALESCE(e.exchange_id::text,'') AS child_exchange_id,
+				COALESCE(e.mic_code,'') AS child_mic_code,
+				COALESCE(e.exchange_type,'') AS child_exchange_type,
+				-- child: DATA_PROVIDER
+				COALESCE(dp.provider_id::text,'') AS child_provider_id,
+				COALESCE(dp.provider_code,'') AS child_provider_code,
+				COALESCE(dp.provider_type,'') AS child_provider_type,
+				-- child: CCP_CSD
+				COALESCE(ccs.ccp_csd_id::text,'') AS child_ccp_csd_id,
+				COALESCE(ccs.entity_code,'') AS child_ccp_entity_code,
+				COALESCE(ccs.entity_sub_type,'') AS child_ccp_entity_sub_type,
+				-- child: PAYMENT_NETWORK
+				COALESCE(pn.payment_network_id::text,'') AS child_payment_network_id,
+				COALESCE(pn.network_code,'') AS child_network_code,
+				COALESCE(pn.network_type,'') AS child_network_type,
+				-- child: ERP_SYSTEM
+				COALESCE(erp.erp_system_id::text,'') AS child_erp_system_id,
+				COALESCE(erp.erp_code,'') AS child_erp_code,
+				COALESCE(erp.erp_type,'') AS child_erp_type
 			FROM apibox.counterparty_master m
 			LEFT JOIN latest_audit l ON l.counterparty_id = m.counterparty_id
 			LEFT JOIN history h ON h.counterparty_id = m.counterparty_id
+			LEFT JOIN apibox.bank_master b ON b.counterparty_id = m.counterparty_id AND COALESCE(b.is_deleted,false)=false
+			LEFT JOIN apibox.exchange_master e ON e.counterparty_id = m.counterparty_id AND COALESCE(e.is_deleted,false)=false
+			LEFT JOIN apibox.data_provider_master dp ON dp.counterparty_id = m.counterparty_id AND COALESCE(dp.is_deleted,false)=false
+			LEFT JOIN apibox.ccp_csd_master ccs ON ccs.counterparty_id = m.counterparty_id AND COALESCE(ccs.is_deleted,false)=false
+			LEFT JOIN apibox.payment_network_master pn ON pn.counterparty_id = m.counterparty_id AND COALESCE(pn.is_deleted,false)=false
+			LEFT JOIN apibox.erp_system_master erp ON erp.counterparty_id = m.counterparty_id AND COALESCE(erp.is_deleted,false)=false
 			WHERE COALESCE(m.is_deleted,false) = false
 			ORDER BY GREATEST(
 				COALESCE(l.requested_at,'1970-01-01'::timestamp),
@@ -1190,12 +1249,14 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		q := `
+		// ── 1. Parent record ──────────────────────────────────────────────────
+		prows, err := pgxPool.Query(ctx, `
 			SELECT
 				m.counterparty_id, m.counterparty_code, m.counterparty_name,
 				COALESCE(m.short_name,'') AS short_name, m.counterparty_type,
 				m.country, m.primary_currency, COALESCE(m.lei,'') AS lei,
-				COALESCE(m.rm_email,'') AS rm_email, m.platform_sync_status,
+				COALESCE(m.rm_email,'') AS rm_email,
+				COALESCE(m.platform_sync_status,'') AS platform_sync_status,
 				COALESCE(m.cilink_platform_id,'') AS cilink_platform_id,
 				m.status, COALESCE(m.notes,'') AS notes,
 				TO_CHAR(m.eff_from,'YYYY-MM-DD') AS eff_from,
@@ -1207,63 +1268,160 @@ func GetCounterpartyMasterDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				COALESCE(m.updated_by,'') AS updated_by,
 				COALESCE(TO_CHAR(m.updated_at,'YYYY-MM-DD HH24:MI:SS'),'') AS updated_at
 			FROM apibox.counterparty_master m
-			WHERE m.counterparty_id=$1`
-
-		row := pgxPool.QueryRow(ctx, q, cpID)
-
-		var data [20]interface{}
-		if err := row.Scan(
-			&data[0], &data[1], &data[2], &data[3], &data[4],
-			&data[5], &data[6], &data[7], &data[8], &data[9],
-			&data[10], &data[11], &data[12], &data[13], &data[14],
-			&data[15], &data[16], &data[17], &data[18], &data[19],
-		); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				api.RespondWithError(w, http.StatusNotFound, "Counterparty not found")
-				return
-			}
+			WHERE m.counterparty_id=$1`, cpID)
+		if err != nil {
 			msg, status := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}
+		defer prows.Close()
 
-		cols := []string{
-			"counterparty_id", "counterparty_code", "counterparty_name", "short_name", "counterparty_type",
-			"country", "primary_currency", "lei", "rm_email", "platform_sync_status",
-			"cilink_platform_id", "status", "notes", "eff_from", "eff_to",
-			"is_active", "is_deleted", "created_by", "created_at", "updated_by",
+		if !prows.Next() {
+			api.RespondWithError(w, http.StatusNotFound, "Counterparty not found")
+			return
 		}
-		result := make(map[string]interface{}, len(cols)+1)
-		for i, col := range cols {
-			if data[i] == nil {
-				result[col] = ""
+		pFields := prows.FieldDescriptions()
+		pVals, _ := prows.Values()
+		result := make(map[string]interface{}, len(pFields)+10)
+		for i, f := range pFields {
+			if pVals[i] == nil {
+				result[string(f.Name)] = ""
 			} else {
-				result[col] = data[i]
+				result[string(f.Name)] = pVals[i]
 			}
 		}
-		result["updated_at"] = data[19]
+		prows.Close()
 
-		// Fetch latest audit for this record
-		auditRow := pgxPool.QueryRow(ctx, `
-			SELECT COALESCE(action_type,''), COALESCE(processing_status,''),
-			       COALESCE(requested_by,''), COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),''),
-			       COALESCE(checker_by,''), COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),''),
-			       COALESCE(checker_comment,'')
+		cpType := ""
+		if v, ok := result["counterparty_type"]; ok {
+			cpType, _ = v.(string)
+		}
+
+		// ── 2. Full audit history ─────────────────────────────────────────────
+		arows, err := pgxPool.Query(ctx, `
+			SELECT
+				audit_id::text, counterparty_id, action_type, processing_status,
+				COALESCE(reason,'') AS reason,
+				COALESCE(requested_by,'') AS requested_by,
+				COALESCE(TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+				COALESCE(checker_by,'') AS checker_by,
+				COALESCE(TO_CHAR(checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+				COALESCE(checker_comment,'') AS checker_comment,
+				COALESCE(old_counterparty_code,'') AS old_counterparty_code,
+				COALESCE(old_counterparty_name,'') AS old_counterparty_name,
+				COALESCE(old_status,'') AS old_status,
+				COALESCE(old_platform_sync_status,'') AS old_platform_sync_status,
+				COALESCE(TO_CHAR(old_eff_from,'YYYY-MM-DD'),'') AS old_eff_from,
+				COALESCE(TO_CHAR(old_eff_to,'YYYY-MM-DD'),'') AS old_eff_to
 			FROM apibox.audit_counterparty_master
 			WHERE counterparty_id=$1
-			ORDER BY GREATEST(COALESCE(requested_at,'1970-01-01'::timestamp),COALESCE(checker_at,'1970-01-01'::timestamp)) DESC
-			LIMIT 1`, cpID)
-		var aType, aStatus, reqBy, reqAt, chkBy, chkAt, chkComment string
-		auditRow.Scan(&aType, &aStatus, &reqBy, &reqAt, &chkBy, &chkAt, &chkComment)
-		result["latest_action_type"] = aType
-		result["latest_processing_status"] = aStatus
-		result["latest_requested_by"] = reqBy
-		result["latest_requested_at"] = reqAt
-		result["latest_checker_by"] = chkBy
-		result["latest_checker_at"] = chkAt
-		result["latest_checker_comment"] = chkComment
+			ORDER BY GREATEST(
+				COALESCE(requested_at,'1970-01-01'::timestamp),
+				COALESCE(checker_at,'1970-01-01'::timestamp)
+			) DESC`, cpID)
+		if err != nil {
+			msg, status := getUserFriendlyCounterpartyError(err, "Audit history query failed")
+			api.RespondWithError(w, status, msg)
+			return
+		}
+		defer arows.Close()
+
+		aFields := arows.FieldDescriptions()
+		var audits []map[string]interface{}
+		for arows.Next() {
+			aVals, _ := arows.Values()
+			ar := make(map[string]interface{}, len(aFields))
+			for i, f := range aFields {
+				if aVals[i] == nil {
+					ar[string(f.Name)] = ""
+				} else {
+					ar[string(f.Name)] = aVals[i]
+				}
+			}
+			audits = append(audits, ar)
+		}
+		arows.Close()
+		if audits == nil {
+			audits = []map[string]interface{}{}
+		}
+
+		// ── 3. Child entity details ───────────────────────────────────────────
+		childData, _ := fetchLinkedChildDetail(ctx, pgxPool, cpType, cpID)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "data": result})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data":                 result,
+			"audits":               audits,
+			"child":                childData,
+		})
 	}
+}
+
+// fetchLinkedChildDetail returns the type-specific child record for a counterparty.
+func fetchLinkedChildDetail(ctx context.Context, pool *pgxpool.Pool, cpType, cpID string) (map[string]interface{}, error) {
+	var q string
+	switch strings.ToUpper(cpType) {
+	case "BANK":
+		q = `SELECT bank_id::text, counterparty_id, bank_code, bank_name, bank_type,
+		            COALESCE(routing_number,'') AS routing_number, entity_code
+		     FROM apibox.bank_master
+		     WHERE counterparty_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`
+	case "EXCHANGE":
+		q = `SELECT exchange_id::text, counterparty_id, mic_code, exchange_type, regulatory_body,
+		            COALESCE(TO_CHAR(operating_hours_open,'HH24:MI'),'') AS operating_hours_open,
+		            COALESCE(TO_CHAR(operating_hours_close,'HH24:MI'),'') AS operating_hours_close,
+		            timezone, COALESCE(settlement_cycle,'') AS settlement_cycle,
+		            COALESCE(holiday_calendar_ref,'') AS holiday_calendar_ref
+		     FROM apibox.exchange_master
+		     WHERE counterparty_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`
+	case "DATA_PROVIDER":
+		q = `SELECT provider_id::text, counterparty_id, provider_code, provider_type, delivery_mechanism,
+		            api_creds_kms_ref, COALESCE(entitlement_codes,'') AS entitlement_codes,
+		            COALESCE(TO_CHAR(renewal_date,'YYYY-MM-DD'),'') AS renewal_date, refresh_interval_sec
+		     FROM apibox.data_provider_master
+		     WHERE counterparty_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`
+	case "CCP_CSD":
+		q = `SELECT ccp_csd_id::text, counterparty_id, entity_code, entity_sub_type, lei, regulatory_body,
+		            participant_id, clearing_acct_kms_ref,
+		            COALESCE(margin_call_frequency,'') AS margin_call_frequency
+		     FROM apibox.ccp_csd_master
+		     WHERE counterparty_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`
+	case "PAYMENT_NETWORK":
+		q = `SELECT payment_network_id::text, counterparty_id, network_code, network_type,
+		            COALESCE(bic_code,'') AS bic_code, COALESCE(routing_number,'') AS routing_number,
+		            iban_supported, settlement_currencies,
+		            COALESCE(TO_CHAR(cut_off_time,'HH24:MI'),'') AS cut_off_time,
+		            timezone, COALESCE(api_endpoint_kms_ref,'') AS api_endpoint_kms_ref
+		     FROM apibox.payment_network_master
+		     WHERE counterparty_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`
+	case "ERP_SYSTEM":
+		q = `SELECT erp_system_id::text, counterparty_id, erp_code, erp_type,
+		            COALESCE(version,'') AS version, base_url,
+		            COALESCE(timezone,'') AS timezone, default_currency
+		     FROM apibox.erp_system_master
+		     WHERE counterparty_id=$1 AND COALESCE(is_deleted,false)=false LIMIT 1`
+	default:
+		return nil, nil
+	}
+
+	crows, err := pool.Query(ctx, q, cpID)
+	if err != nil {
+		return nil, err
+	}
+	defer crows.Close()
+	if !crows.Next() {
+		return nil, nil
+	}
+	cFields := crows.FieldDescriptions()
+	cVals, _ := crows.Values()
+	out := make(map[string]interface{}, len(cFields))
+	for i, f := range cFields {
+		if cVals[i] == nil {
+			out[string(f.Name)] = ""
+		} else {
+			out[string(f.Name)] = cVals[i]
+		}
+	}
+	return out, nil
 }

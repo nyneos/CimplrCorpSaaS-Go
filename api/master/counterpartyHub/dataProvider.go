@@ -25,10 +25,10 @@ type DataProviderInput struct {
 	ProviderType       string   `json:"provider_type"`
 	DeliveryMechanism  string   `json:"delivery_mechanism"`
 	APICredsKMSRef     string   `json:"api_creds_kms_ref"`
-	EntitlementCodes   string   `json:"entitlement_codes"`
-	RenewalDate        string   `json:"renewal_date"`
+	EntitlementCodes   string   `json:"entitlement_codes,omitempty"`
+	RenewalDate        string   `json:"renewal_date,omitempty"`
 	RefreshIntervalSec int      `json:"refresh_interval_sec"`
-	DataTypes          []string `json:"data_types"`
+	DataTypes          []string `json:"data_types,omitempty"`
 }
 
 func validateDataProviderInput(inp DataProviderInput) error {
@@ -49,7 +49,7 @@ func validateDataProviderInput(inp DataProviderInput) error {
 	if strings.TrimSpace(inp.APICredsKMSRef) == "" {
 		return errors.New("api_creds_kms_ref is required")
 	}
-	if err := validateKMSPath(inp.APICredsKMSRef); err != nil {
+	if err := validateKMSPath("api_creds_kms_ref", inp.APICredsKMSRef); err != nil {
 		return err
 	}
 	if inp.RefreshIntervalSec < 1 || inp.RefreshIntervalSec > 86400 {
@@ -318,7 +318,7 @@ func UpdateDataProvider(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if k == "api_creds_kms_ref" {
 				if s, ok := v.(string); ok {
-					if err := validateKMSPath(s); err != nil {
+					if err := validateKMSPath("api_creds_kms_ref", s); err != nil {
 						api.RespondWithError(w, http.StatusBadRequest, err.Error())
 						return
 					}

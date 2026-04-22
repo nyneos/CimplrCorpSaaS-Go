@@ -20,16 +20,16 @@ import (
 // ── Request types ─────────────────────────────────────────────────────────────
 
 type PaymentNetworkInput struct {
-	CounterpartyID        string   `json:"counterparty_id"`
-	NetworkCode           string   `json:"network_code"`
-	NetworkType           string   `json:"network_type"`
-	BICCode               string   `json:"bic_code"`
-	RoutingNumber         string   `json:"routing_number"`
-	IBANSupported         bool     `json:"iban_supported"`
-	SettlementCurrencies  []string `json:"settlement_currencies"`
-	CutOffTime            string   `json:"cut_off_time"`
-	Timezone              string   `json:"timezone"`
-	APIEndpointKMSRef     string   `json:"api_endpoint_kms_ref"`
+	CounterpartyID       string   `json:"counterparty_id"`
+	NetworkCode          string   `json:"network_code"`
+	NetworkType          string   `json:"network_type"`
+	BICCode              string   `json:"bic_code,omitempty"`
+	RoutingNumber        string   `json:"routing_number,omitempty"`
+	IBANSupported        bool     `json:"iban_supported,omitempty"`
+	SettlementCurrencies []string `json:"settlement_currencies,omitempty"`
+	CutOffTime           string   `json:"cut_off_time,omitempty"`
+	Timezone             string   `json:"timezone,omitempty"`
+	APIEndpointKMSRef    string   `json:"api_endpoint_kms_ref,omitempty"`
 }
 
 var validNetworkTypes = map[string]bool{
@@ -56,7 +56,7 @@ func validatePaymentNetworkInput(inp PaymentNetworkInput) error {
 		}
 	}
 	if inp.APIEndpointKMSRef != "" {
-		if err := validateKMSPath(inp.APIEndpointKMSRef); err != nil {
+		if err := validateKMSPath("api_endpoint_kms_ref", inp.APIEndpointKMSRef); err != nil {
 			return err
 		}
 	}
@@ -311,7 +311,7 @@ func UpdatePaymentNetwork(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			if k == "api_endpoint_kms_ref" {
 				if s, ok := v.(string); ok {
-					if err := validateKMSPath(s); err != nil {
+					if err := validateKMSPath("api_endpoint_kms_ref", s); err != nil {
 						api.RespondWithError(w, http.StatusBadRequest, err.Error())
 						return
 					}

@@ -486,3 +486,330 @@ func GetUploadTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hub v2 Upload  (apibox_svc schema — unified flat payload)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── UploadCounterpartyHubV2 ───────────────────────────────────────────────────
+//
+// POST /master/v2/counterparty-hub/upload
+// Multipart form fields:
+//   user_id           – required
+//   counterparty_type – optional; if omitted every row must have a counterparty_type column
+//   file              – required: CSV or XLSX
+//
+// Column headers must match the JSON tag names in HubCreateRequest
+// (e.g. counterparty_code, bank_code, exchange_code, mic_code, asset_classes, …).
+// asset_classes and data_types cells may use semicolons or pipes as separators.
+func UploadCounterpartyHubV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse multipart form")
+			return
+		}
+
+		userID := strings.TrimSpace(r.FormValue("user_id"))
+		formType := strings.ToUpper(strings.TrimSpace(r.FormValue("counterparty_type")))
+
+		if userID == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "user_id is required")
+			return
+		}
+
+		userEmail := ""
+		for _, s := range auth.GetActiveSessions() {
+			if s.UserID == userID {
+				userEmail = s.Email
+				break
+			}
+		}
+		if userEmail == "" {
+			api.RespondWithError(w, http.StatusUnauthorized, constants.ErrInvalidSessionShort)
+			return
+		}
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "file is required")
+			return
+		}
+		defer file.Close()
+
+		filename := strings.ToLower(header.Filename)
+		var rows []map[string]string
+		switch {
+		case strings.HasSuffix(filename, ".csv"):
+			rows, err = parseCSV(file)
+		case strings.HasSuffix(filename, ".xlsx"):
+			rows, err = parseXLSX(file)
+		default:
+			api.RespondWithError(w, http.StatusBadRequest, "Only .csv and .xlsx files are supported")
+			return
+		}
+		if err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Failed to parse file: "+err.Error())
+			return
+		}
+		if len(rows) == 0 {
+			api.RespondWithError(w, http.StatusBadRequest, "File contains no data rows")
+			return
+		}
+
+		ctx := r.Context()
+		var inserted, errList []map[string]interface{}
+
+		for i, row := range rows {
+			req := hubV2RequestFromRow(row, formType, userID)
+
+			if err := validateHubCreateRequest(req); err != nil {
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": err.Error(),
+					"counterparty_code": req.CounterpartyCode,
+				})
+				continue
+			}
+
+			tx, err := pgxPool.Begin(ctx)
+			if err != nil {
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": constants.ErrTransactionFailed,
+				})
+				continue
+			}
+
+			var cpID string
+			err = tx.QueryRow(ctx, `
+				INSERT INTO apibox_svc.counterparty (
+					counterparty_code, counterparty_name, short_name, counterparty_type,
+					country, primary_currency, lei, effective_from, rm_email, notes,
+					status, created_by
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'DRAFT',$11)
+				RETURNING counterparty_id`,
+				strings.ToUpper(req.CounterpartyCode), req.CounterpartyName, nilIfEmpty(req.ShortName),
+				req.CounterpartyType, strings.ToUpper(req.Country), strings.ToUpper(req.PrimaryCurrency),
+				nilIfEmpty(req.LEI), req.EffectiveFrom, nilIfEmpty(req.RMEmail), nilIfEmpty(req.Notes),
+				userEmail,
+			).Scan(&cpID)
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				msg, _ := getUserFriendlyCounterpartyError(err, "counterparty insert failed")
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": msg,
+					"counterparty_code": req.CounterpartyCode,
+				})
+				continue
+			}
+
+			typedID, err := insertTypedDetail(ctx, tx, cpID, req.CounterpartyType, reqToFieldsMap(req))
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				msg, _ := getUserFriendlyCounterpartyError(err, "typed insert failed")
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": msg,
+					"counterparty_code": req.CounterpartyCode,
+				})
+				continue
+			}
+
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO apibox_svc.audit_counterparty
+					(counterparty_id, action_type, processing_status, requested_by, requested_at)
+				VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now())`, cpID, userEmail); err != nil {
+				_ = tx.Rollback(ctx)
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
+				})
+				continue
+			}
+
+			if err := insertTypedAudit(ctx, tx, req.CounterpartyType, typedID, cpID, userEmail); err != nil {
+				_ = tx.Rollback(ctx)
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": constants.ErrAuditInsertFailed,
+				})
+				continue
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				errList = append(errList, map[string]interface{}{
+					"row_index": i, "success": false, "error": constants.ErrCommitFailed + err.Error(),
+				})
+				continue
+			}
+
+			inserted = append(inserted, map[string]interface{}{
+				"success": true, "row_index": i,
+				"counterparty_id":   cpID,
+				"counterparty_code": strings.ToUpper(req.CounterpartyCode),
+				"counterparty_type": req.CounterpartyType,
+			})
+		}
+
+		api.RespondWithPayload(w, len(inserted) > 0, "", map[string]interface{}{
+			"inserted_count": len(inserted),
+			"error_count":    len(errList),
+			"results":        append(inserted, errList...),
+		})
+		api.LogInfo("UploadV2: %d inserted, %d errors by %s", len(inserted), len(errList), userEmail)
+	}
+}
+
+// hubV2RequestFromRow maps one CSV/XLSX row (header→value) to HubCreateRequest.
+// formType overrides the row's counterparty_type column when provided.
+func hubV2RequestFromRow(row map[string]string, formType, userID string) HubCreateRequest {
+	cpType := formType
+	if cpType == "" {
+		cpType = strings.ToUpper(strings.TrimSpace(row["counterparty_type"]))
+	}
+	return HubCreateRequest{
+		UserID: userID,
+
+		// Common
+		CounterpartyCode: row["counterparty_code"],
+		CounterpartyName: row["counterparty_name"],
+		ShortName:        row["short_name"],
+		CounterpartyType: cpType,
+		Country:          row["country"],
+		PrimaryCurrency:  row["primary_currency"],
+		LEI:              row["lei"],
+		EffectiveFrom:    row["effective_from"],
+		RMEmail:          row["rm_email"],
+		Notes:            row["notes"],
+
+		// BANK
+		BankCode:      row["bank_code"],
+		BankName:      row["bank_name"],
+		BankType:      row["bank_type"],
+		RoutingNumber: row["routing_number"],
+		EntityCode:    row["entity_code"],
+
+		// EXCHANGE
+		ExchangeCode:         row["exchange_code"],
+		MICCode:              row["mic_code"],
+		AssetClasses:         splitCSVField(row["asset_classes"]),
+		ConnectivityProtocol: row["connectivity_protocol"],
+		FIXSessionRole:       row["fix_session_role"],
+		FIXSenderCompID:      row["fix_sender_comp_id"],
+		FIXTargetCompID:      row["fix_target_comp_id"],
+		FIXPrimaryHost:       row["fix_primary_host"],
+		FIXPrimaryPort:       parseInt(row["fix_primary_port"]),
+		FIXFailoverHost:      row["fix_failover_host"],
+		FIXFailoverPort:      parseInt(row["fix_failover_port"]),
+		FIXCredsKMSRef:       row["fix_creds_kms_ref"],
+		FIXHeartbeatSec:      parseInt(row["fix_heartbeat_sec"]),
+
+		// DATA_PROVIDER
+		ProviderCode:       row["provider_code"],
+		DataTypes:          splitCSVField(row["data_types"]),
+		APICredsKMSRef:     row["api_creds_kms_ref"],
+		RefreshIntervalSec: parseInt(row["refresh_interval_sec"]),
+		EntitlementCodes:   row["entitlement_codes"],
+		RenewalDate:        row["renewal_date"],
+
+		// CCP_CSD
+		EntityCodeCCP:      row["entity_code_ccp"],
+		EntitySubType:      row["entity_sub_type"],
+		ClearingAcctKMSRef: row["clearing_acct_kms_ref"],
+
+		// PAYMENT_NETWORK
+		NetworkCode:  row["network_code"],
+		NetworkType:  row["network_type"],
+		MaxTxnAmount: parseFloat(row["max_txn_amount"]),
+
+		// ERP_SYSTEM
+		SystemCode:          row["system_code"],
+		ERPType:             row["erp_type"],
+		Version:             row["version"],
+		HostedBy:            row["hosted_by"],
+		SystemURL:           row["system_url"],
+		AuthType:            row["auth_type"],
+		TokenEndpointKMSRef: row["token_endpoint_kms_ref"],
+		ClientIDKMSRef:      row["client_id_kms_ref"],
+		ClientSecretKMSRef:  row["client_secret_kms_ref"],
+	}
+}
+
+func parseFloat(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	var f float64
+	fmt.Sscanf(s, "%f", &f)
+	return f
+}
+
+// ── GetUploadTemplateV2 ───────────────────────────────────────────────────────
+//
+// GET /master/v2/counterparty-hub/upload/template?type=BANK
+// Returns the v2 column headers matching HubCreateRequest JSON tags.
+func GetUploadTemplateV2(_ *pgxpool.Pool) http.HandlerFunc {
+	// Common columns present in every row regardless of type
+	common := []string{
+		"counterparty_code", "counterparty_name", "short_name", "counterparty_type",
+		"country", "primary_currency", "lei", "effective_from", "rm_email", "notes",
+	}
+
+	typed := map[string][]string{
+		"BANK": {
+			"bank_code", "bank_name", "bank_type", "routing_number", "entity_code",
+		},
+		"EXCHANGE": {
+			"exchange_code", "mic_code", "asset_classes",
+			"connectivity_protocol",
+			"fix_session_role", "fix_sender_comp_id", "fix_target_comp_id",
+			"fix_primary_host", "fix_primary_port", "fix_failover_host", "fix_failover_port",
+			"fix_creds_kms_ref", "fix_heartbeat_sec",
+		},
+		"DATA_PROVIDER": {
+			"provider_code", "data_types", "connectivity_protocol",
+			"api_creds_kms_ref", "refresh_interval_sec", "entitlement_codes", "renewal_date",
+		},
+		"CCP_CSD": {
+			"entity_code_ccp", "entity_sub_type", "clearing_acct_kms_ref",
+		},
+		"PAYMENT_NETWORK": {
+			"network_code", "network_type", "max_txn_amount",
+		},
+		"ERP_SYSTEM": {
+			"system_code", "erp_type", "version", "hosted_by", "system_url",
+			"auth_type", "token_endpoint_kms_ref", "client_id_kms_ref", "client_secret_kms_ref",
+		},
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		cpType := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
+
+		if cpType == "" {
+			// Return all types so the frontend can build a combined template
+			all := make(map[string][]string)
+			for t, extra := range typed {
+				all[t] = append(common, extra...)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"templates": all})
+			return
+		}
+
+		extra, ok := typed[cpType]
+		if !ok {
+			api.RespondWithError(w, http.StatusBadRequest,
+				"type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
+			return
+		}
+
+		cols := append(common, extra...)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"counterparty_type": cpType,
+			"columns":           cols,
+			"notes": map[string]string{
+				"asset_classes": "semicolon-separated, e.g. EQUITY;DERIVATIVES",
+				"data_types":    "semicolon-separated, e.g. PRICE;CORPORATE_ACTION",
+				"effective_from": "YYYY-MM-DD",
+				"renewal_date":   "YYYY-MM-DD (DATA_PROVIDER only)",
+			},
+		})
+	}
+}

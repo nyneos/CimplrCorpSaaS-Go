@@ -20,24 +20,24 @@ import (
 // ── Request types ─────────────────────────────────────────────────────────────
 
 type ERPAuthConfigInput struct {
-	AuthType             string `json:"auth_type"`             // OAUTH2 | BASIC_AUTH | API_KEY | CERT
-	TokenEndpointKMSRef  string `json:"token_endpoint_kms_ref"` // required for OAUTH2
-	ClientIDKMSRef       string `json:"client_id_kms_ref"`      // required for OAUTH2
-	ClientSecretKMSRef   string `json:"client_secret_kms_ref"`  // required for OAUTH2 and BASIC_AUTH
-	APIKeyKMSRef         string `json:"api_key_kms_ref"`        // required for API_KEY
-	CertKMSRef           string `json:"cert_kms_ref"`           // required for CERT
-	Scopes               string `json:"scopes"`
+	AuthType            string `json:"auth_type"`                        // OAUTH2 | BASIC_AUTH | API_KEY | CERT
+	TokenEndpointKMSRef string `json:"token_endpoint_kms_ref,omitempty"` // required for OAUTH2
+	ClientIDKMSRef      string `json:"client_id_kms_ref,omitempty"`      // required for OAUTH2
+	ClientSecretKMSRef  string `json:"client_secret_kms_ref,omitempty"`  // required for OAUTH2 and BASIC_AUTH
+	APIKeyKMSRef        string `json:"api_key_kms_ref,omitempty"`        // required for API_KEY
+	CertKMSRef          string `json:"cert_kms_ref,omitempty"`           // required for CERT
+	Scopes              string `json:"scopes,omitempty"`
 }
 
 type ERPSystemInput struct {
-	CounterpartyID   string             `json:"counterparty_id"`
-	ERPCode          string             `json:"erp_code"`
-	ERPType          string             `json:"erp_type"`
-	Version          string             `json:"version"`
-	BaseURL          string             `json:"base_url"`
-	Timezone         string             `json:"timezone"`
-	DefaultCurrency  string             `json:"default_currency"`
-	AuthConfig       ERPAuthConfigInput `json:"auth_config"`
+	CounterpartyID  string             `json:"counterparty_id"`
+	ERPCode         string             `json:"erp_code"`
+	ERPType         string             `json:"erp_type"`
+	Version         string             `json:"version,omitempty"`
+	BaseURL         string             `json:"base_url"`
+	Timezone        string             `json:"timezone,omitempty"`
+	DefaultCurrency string             `json:"default_currency"`
+	AuthConfig      ERPAuthConfigInput `json:"auth_config"`
 }
 
 var validERPTypes = map[string]bool{
@@ -75,19 +75,19 @@ func validateERPSystemInput(inp ERPSystemInput) error {
 		if strings.TrimSpace(inp.AuthConfig.TokenEndpointKMSRef) == "" {
 			return errors.New("auth_config.token_endpoint_kms_ref is required for OAUTH2")
 		}
-		if err := validateKMSPath(inp.AuthConfig.TokenEndpointKMSRef); err != nil {
+		if err := validateKMSPath("token_endpoint_kms_ref", inp.AuthConfig.TokenEndpointKMSRef); err != nil {
 			return fmt.Errorf("auth_config.token_endpoint_kms_ref: %w", err)
 		}
 		if strings.TrimSpace(inp.AuthConfig.ClientIDKMSRef) == "" {
 			return errors.New("auth_config.client_id_kms_ref is required for OAUTH2")
 		}
-		if err := validateKMSPath(inp.AuthConfig.ClientIDKMSRef); err != nil {
+		if err := validateKMSPath("client_id_kms_ref", inp.AuthConfig.ClientIDKMSRef); err != nil {
 			return fmt.Errorf("auth_config.client_id_kms_ref: %w", err)
 		}
 		if strings.TrimSpace(inp.AuthConfig.ClientSecretKMSRef) == "" {
 			return errors.New("auth_config.client_secret_kms_ref is required for OAUTH2")
 		}
-		if err := validateKMSPath(inp.AuthConfig.ClientSecretKMSRef); err != nil {
+		if err := validateKMSPath("client_secret_kms_ref", inp.AuthConfig.ClientSecretKMSRef); err != nil {
 			return fmt.Errorf("auth_config.client_secret_kms_ref: %w", err)
 		}
 	}
@@ -95,7 +95,7 @@ func validateERPSystemInput(inp ERPSystemInput) error {
 		if strings.TrimSpace(inp.AuthConfig.ClientSecretKMSRef) == "" {
 			return errors.New("auth_config.client_secret_kms_ref is required for BASIC_AUTH")
 		}
-		if err := validateKMSPath(inp.AuthConfig.ClientSecretKMSRef); err != nil {
+		if err := validateKMSPath("client_secret_kms_ref", inp.AuthConfig.ClientSecretKMSRef); err != nil {
 			return fmt.Errorf("auth_config.client_secret_kms_ref: %w", err)
 		}
 	}
@@ -103,7 +103,7 @@ func validateERPSystemInput(inp ERPSystemInput) error {
 		if strings.TrimSpace(inp.AuthConfig.APIKeyKMSRef) == "" {
 			return errors.New("auth_config.api_key_kms_ref is required for API_KEY")
 		}
-		if err := validateKMSPath(inp.AuthConfig.APIKeyKMSRef); err != nil {
+		if err := validateKMSPath("api_key_kms_ref", inp.AuthConfig.APIKeyKMSRef); err != nil {
 			return fmt.Errorf("auth_config.api_key_kms_ref: %w", err)
 		}
 	}
@@ -111,7 +111,7 @@ func validateERPSystemInput(inp ERPSystemInput) error {
 		if strings.TrimSpace(inp.AuthConfig.CertKMSRef) == "" {
 			return errors.New("auth_config.cert_kms_ref is required for CERT")
 		}
-		if err := validateKMSPath(inp.AuthConfig.CertKMSRef); err != nil {
+		if err := validateKMSPath("cert_kms_ref", inp.AuthConfig.CertKMSRef); err != nil {
 			return fmt.Errorf("auth_config.cert_kms_ref: %w", err)
 		}
 	}
@@ -422,38 +422,38 @@ func UpdateERPSystem(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			// Validate KMS refs for the new auth config
 			if authType == "OAUTH2" {
 				if req.AuthConfig.TokenEndpointKMSRef != "" {
-					if err := validateKMSPath(req.AuthConfig.TokenEndpointKMSRef); err != nil {
+					if err := validateKMSPath("token_endpoint_kms_ref", req.AuthConfig.TokenEndpointKMSRef); err != nil {
 						api.RespondWithError(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
 				if req.AuthConfig.ClientIDKMSRef != "" {
-					if err := validateKMSPath(req.AuthConfig.ClientIDKMSRef); err != nil {
+					if err := validateKMSPath("client_id_kms_ref", req.AuthConfig.ClientIDKMSRef); err != nil {
 						api.RespondWithError(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
 				if req.AuthConfig.ClientSecretKMSRef != "" {
-					if err := validateKMSPath(req.AuthConfig.ClientSecretKMSRef); err != nil {
+					if err := validateKMSPath("client_secret_kms_ref", req.AuthConfig.ClientSecretKMSRef); err != nil {
 						api.RespondWithError(w, http.StatusBadRequest, err.Error())
 						return
 					}
 				}
 			}
 			if authType == "BASIC_AUTH" && req.AuthConfig.ClientSecretKMSRef != "" {
-				if err := validateKMSPath(req.AuthConfig.ClientSecretKMSRef); err != nil {
+				if err := validateKMSPath("client_secret_kms_ref", req.AuthConfig.ClientSecretKMSRef); err != nil {
 					api.RespondWithError(w, http.StatusBadRequest, err.Error())
 					return
 				}
 			}
 			if authType == "API_KEY" && req.AuthConfig.APIKeyKMSRef != "" {
-				if err := validateKMSPath(req.AuthConfig.APIKeyKMSRef); err != nil {
+				if err := validateKMSPath("api_key_kms_ref", req.AuthConfig.APIKeyKMSRef); err != nil {
 					api.RespondWithError(w, http.StatusBadRequest, err.Error())
 					return
 				}
 			}
 			if authType == "CERT" && req.AuthConfig.CertKMSRef != "" {
-				if err := validateKMSPath(req.AuthConfig.CertKMSRef); err != nil {
+				if err := validateKMSPath("cert_kms_ref", req.AuthConfig.CertKMSRef); err != nil {
 					api.RespondWithError(w, http.StatusBadRequest, err.Error())
 					return
 				}
