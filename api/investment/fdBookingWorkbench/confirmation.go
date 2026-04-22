@@ -111,16 +111,16 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			{
 				FieldName:     "interest_rate",
 				VarianceType:  varianceengine.TypeRate,
-				ExpectedValue: fmt.Sprintf("%g", bookedRate),
-				ActualValue:   fmt.Sprintf("%g", req.ConfirmedInterestRate),
+				ExpectedValue: formatNumber(bookedRate),
+				ActualValue:   formatNumber(req.ConfirmedInterestRate),
 				Priority:      varianceengine.PriorityHigh,
 				Tolerance:     0,
 			},
 			{
 				FieldName:     "principal_amount",
 				VarianceType:  varianceengine.TypeAmount,
-				ExpectedValue: fmt.Sprintf("%g", bookedPrincipal),
-				ActualValue:   fmt.Sprintf("%g", req.ConfirmedPrincipalAmount),
+				ExpectedValue: formatNumber(bookedPrincipal),
+				ActualValue:   formatNumber(req.ConfirmedPrincipalAmount),
 				Priority:      varianceengine.PriorityHigh,
 				Tolerance:     0,
 			},
@@ -236,7 +236,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					variance_action           = NULL,
 					variance_resolved_by      = $15,
 					variance_resolved_at      = now(),
-					confirmation_status       = 'CONFIRMED',
+					confirmation_status       = 'PENDING_APPROVAL',
 					penalty_id                = NULLIF($15,''),
 					first_payout_date         = $18,
 					first_capitalization_date = $19,
@@ -289,7 +289,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					$10, NULLIF($11,0), NULLIF($12,0), NULLIF($13,0),
 					$14, $15,
 					false, false,
-					'CONFIRMED',
+					'PENDING_APPROVAL',
 					NULLIF($16,''),
 					$18,
 					$19,
@@ -324,24 +324,13 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				old_actual_start_date, old_actual_maturity_date,
 				old_confirmation_status,
 				old_tenor_type, old_tenor_days, old_tenor_months, old_tenor_years
-			) VALUES ($1,'CREATE','APPROVED',$2,now(),$3,$4,$5,$6,$7,$8,NULLIF($9,0),NULLIF($10,0),NULLIF($11,0))`,
+			) VALUES ($1,'CREATE','PENDING_APPROVAL',$2,now(),$3,$4,$5,$6,$7,$8,NULLIF($9,0),NULLIF($10,0),NULLIF($11,0))`,
 			confirmationID, userEmail,
 			bookedPrincipal, bookedRate,
 			coerceDateValue(bookedValueDate), coerceDateValue(bookedMaturityDate), bookingStatus,
 			tenorType, req.ConfirmedTenorDays, req.ConfirmedTenorMonths, req.ConfirmedTenorYears,
 		); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrAuditInsertFailed)
-			api.RespondWithError(w, status, msg)
-			return
-		}
-
-		// Update booking status to CONFIRMED
-		if _, err = tx.Exec(ctx, `
-			UPDATE investment.fd_booking_request
-			SET booking_status = 'CONFIRMED'
-			WHERE booking_id = $1`, req.BookingID,
-		); err != nil {
-			msg, status := getUserFriendlyFDError(err, "Booking status update failed")
 			api.RespondWithError(w, status, msg)
 			return
 		}
@@ -376,7 +365,7 @@ func CaptureConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation_id":     confirmationID,
 			"booking_id":          req.BookingID,
-			"confirmation_status": "CONFIRMED",
+			"confirmation_status": "PENDING_APPROVAL",
 			"has_variance":        false,
 			"captured_by":         userEmail,
 		})
@@ -498,10 +487,10 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		runID := varianceengine.NewRunID()
 		varRules := []varianceengine.Rule{
 			{FieldName: "interest_rate", VarianceType: varianceengine.TypeRate,
-				ExpectedValue: fmt.Sprintf("%g", bookedRate), ActualValue: fmt.Sprintf("%g", req.ConfirmedInterestRate),
+				ExpectedValue: formatNumber(bookedRate), ActualValue: formatNumber(req.ConfirmedInterestRate),
 				Priority: varianceengine.PriorityHigh},
 			{FieldName: "principal_amount", VarianceType: varianceengine.TypeAmount,
-				ExpectedValue: fmt.Sprintf("%g", bookedPrincipal), ActualValue: fmt.Sprintf("%g", req.ConfirmedPrincipalAmount),
+				ExpectedValue: formatNumber(bookedPrincipal), ActualValue: formatNumber(req.ConfirmedPrincipalAmount),
 				Priority: varianceengine.PriorityHigh},
 			{FieldName: "tenor_days", VarianceType: varianceengine.TypeDays,
 				ExpectedValue: fmt.Sprintf("%d", bookedTenorDays), ActualValue: fmt.Sprintf("%d", req.ConfirmedTenorDays),
@@ -548,7 +537,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		confStatus := "VARIANCE_PENDING"
 		if !hasVariance {
-			confStatus = "CONFIRMED"
+			confStatus = "PENDING_APPROVAL"
 		}
 
 		// Build variance_details JSON from items
@@ -718,14 +707,7 @@ func VarianceResolve(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
-		// If all variances resolved, update booking to CONFIRMED
-		if !hasVariance {
-			if _, err = tx.Exec(ctx, `
-				UPDATE investment.fd_booking_request SET booking_status='CONFIRMED' WHERE booking_id=$1`, bookingID,
-			); err != nil {
-				api.LogError("[FDBooking] VarianceResolve booking status update: %v", err)
-			}
-		}
+
 
 		if err = tx.Commit(ctx); err != nil {
 			msg, status := getUserFriendlyFDError(err, constants.ErrCommitFailedCapitalized)
@@ -929,15 +911,15 @@ func EditConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				{
 					FieldName:     "interest_rate",
 					VarianceType:  varianceengine.TypeRate,
-					ExpectedValue: fmt.Sprintf("%g", bookedRate),
-					ActualValue:   fmt.Sprintf("%g", effRate),
+					ExpectedValue: formatNumber(bookedRate),
+					ActualValue:   formatNumber(effRate),
 					Priority:      varianceengine.PriorityHigh,
 				},
 				{
 					FieldName:     "principal_amount",
 					VarianceType:  varianceengine.TypeAmount,
-					ExpectedValue: fmt.Sprintf("%g", bookedPrincipal),
-					ActualValue:   fmt.Sprintf("%g", effPrincipal),
+					ExpectedValue: formatNumber(bookedPrincipal),
+					ActualValue:   formatNumber(effPrincipal),
 					Priority:      varianceengine.PriorityHigh,
 				},
 				{
@@ -2041,7 +2023,7 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					WHERE fm.confirmation_id = c.confirmation_id
 					  AND COALESCE(fm.is_deleted,false) = false
 				) AS fd_activated,
-				-- latest approval timestamp: greatest of checker_at and requested_at from APPROVED audit row
+				-- latest audit timestamp: greatest of checker_at and requested_at from any audit row
 				COALESCE((
 					SELECT GREATEST(
 						COALESCE(a.checker_at, '1970-01-01'::timestamptz),
@@ -2049,7 +2031,6 @@ func GetConfirmedConfirmations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					)
 					FROM investment.fd_audit_confirmation a
 					WHERE a.confirmation_id = c.confirmation_id
-					  AND a.processing_status = 'APPROVED'
 					ORDER BY GREATEST(
 						COALESCE(a.checker_at, '1970-01-01'::timestamptz),
 						COALESCE(a.requested_at, '1970-01-01'::timestamptz)
@@ -2188,6 +2169,78 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 		}
 
+		// ── Booking data — full booked values for the linked booking ──────────
+		bookingID, _ := conf["booking_id"].(string)
+		var booking map[string]interface{}
+		if bookingID != "" {
+			bookingAccountExprBk, _ := resolveFDBookingAccountExpression(ctx, pgxPool, "m")
+			bkRows, bkErr := pgxPool.Query(ctx, fmt.Sprintf(`
+				SELECT
+					m.booking_id,
+					COALESCE(m.entity_id,'')                                       AS entity_id,
+					COALESCE(m.entity_name,'')                                     AS entity_name,
+					COALESCE(m.bank_id,'')                                         AS bank_id,
+					COALESCE(m.bank_name,'')                                       AS bank_name,
+					%s                                                             AS bank_account_id,
+					COALESCE(m.source_account_number,'')                           AS bank_account_number,
+					COALESCE(m.bank_config_id,'')                                  AS bank_config_id,
+					COALESCE(m.principal_amount,0)                                 AS principal_amount,
+					COALESCE(m.interest_rate,0)                                    AS interest_rate,
+					COALESCE(m.interest_type_code,'')                              AS interest_type,
+					COALESCE(m.interest_type_id,'')                                AS interest_type_id,
+					COALESCE(m.tenure_days,0)                                      AS tenor_days,
+					COALESCE(m.tenure_months,0)                                    AS tenor_months,
+					COALESCE(m.tenure_years,0)                                     AS tenor_years,
+					COALESCE(m.tenor_type,'')                                      AS tenor_type,
+					COALESCE(TO_CHAR(m.expected_start_date,'YYYY-MM-DD'),'')       AS expected_start_date,
+					COALESCE(TO_CHAR(m.value_date,'YYYY-MM-DD'),'')                AS value_date,
+					COALESCE(TO_CHAR(m.expected_maturity_date,'YYYY-MM-DD'),'')    AS maturity_date,
+					COALESCE(m.frequency_id,'')                                    AS frequency_id,
+					COALESCE(m.day_count_code,'')                                  AS day_count_code,
+					COALESCE(m.tds_plan_id,'')                                     AS tds_plan_id,
+					COALESCE(m.product_code,'')                                    AS product_code,
+					COALESCE(m.auto_renewal,false)                                 AS auto_renewal,
+					COALESCE(m.booking_remarks,'')                                 AS booking_remarks,
+					COALESCE(m.booking_status,'')                                  AS booking_status,
+					COALESCE(TO_CHAR(m.created_at,'YYYY-MM-DD HH24:MI:SS'),'')    AS record_created_at,
+					COALESCE(m.created_by,'')                                      AS record_created_by
+				FROM investment.fd_booking_request m
+				WHERE m.booking_id = $1 AND COALESCE(m.is_deleted,false) = false`, bookingAccountExprBk),
+				bookingID)
+			if bkErr == nil {
+				defer bkRows.Close()
+				if bkRows.Next() {
+					bkFields := bkRows.FieldDescriptions()
+					bkVals, _ := bkRows.Values()
+					booking = make(map[string]interface{}, len(bkFields))
+					for i, f := range bkFields {
+						if bkVals[i] == nil {
+							booking[string(f.Name)] = ""
+						} else {
+							booking[string(f.Name)] = bkVals[i]
+						}
+					}
+				}
+				bkRows.Close()
+			} else {
+				api.LogError("[FDBooking] GetConfirmationDetail booking query: %v", bkErr)
+			}
+		}
+
+		// ── Variance log — all variance_log entries for the booking ──────────
+		var varianceLog []map[string]interface{}
+		if bookingID != "" {
+			vl, vlErr := varianceengine.GetVariances(ctx, pgxPool, bookingID)
+			if vlErr != nil {
+				api.LogError("[FDBooking] GetConfirmationDetail variance_log: %v", vlErr)
+			} else {
+				varianceLog = vl
+			}
+		}
+		if varianceLog == nil {
+			varianceLog = make([]map[string]interface{}, 0)
+		}
+
 		// ── Audit history ────────────────────────────────────────────────────
 		auditRows, err := pgxPool.Query(ctx, `
 			SELECT
@@ -2308,10 +2361,12 @@ func GetConfirmationDetail(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		api.RespondWithPayload(w, true, "", map[string]interface{}{
 			"confirmation":      conf,
+			"booking":           booking,
+			"variance_log":      varianceLog,
 			"audit_history":     auditHistory,
 			"approval_workflow": approvalWorkflow,
 		})
-		api.LogInfo("[FDBooking] GetConfirmationDetail: confirmation_id=%s", confirmationID)
+		api.LogInfo("[FDBooking] GetConfirmationDetail: confirmation_id=%s booking_id=%s", confirmationID, bookingID)
 	}
 }
 
