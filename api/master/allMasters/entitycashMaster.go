@@ -1882,21 +1882,26 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Additionally require that the latest audit processing_status for the entity is 'APPROVED',
 		// and if the entity has a parent, require the parent's latest audit processing_status is also 'APPROVED'.
 		query := `
-												SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
-												FROM masterentitycash m
-												LEFT JOIN LATERAL (
-													SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
-												) ma ON TRUE
-												LEFT JOIN masterentitycash p ON m.parent_entity_name = p.entity_name
-												LEFT JOIN LATERAL (
-													SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
-												) pa ON TRUE
-												WHERE m.entity_id = ANY($1)
-													AND m.active_status = 'Active'
-													AND (m.is_deleted = false OR m.is_deleted IS NULL)
-													AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
-													AND (p.entity_id IS NULL OR COALESCE(pa.processing_status, 'REJECTED') = 'APPROVED')
-												ORDER BY m.entity_name
+										SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
+										FROM masterentitycash m
+										LEFT JOIN LATERAL (
+											SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
+										) ma ON TRUE
+										LEFT JOIN LATERAL (
+											SELECT p.entity_id, a.processing_status
+											FROM masterentitycash p
+											JOIN LATERAL (
+												SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
+											) a ON TRUE
+											WHERE p.entity_name = m.parent_entity_name
+											LIMIT 1
+										) pa ON TRUE
+										WHERE m.entity_id = ANY($1)
+											AND m.active_status = 'Active'
+											AND (m.is_deleted = false OR m.is_deleted IS NULL)
+											AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+											AND (m.parent_entity_name IS NULL OR m.parent_entity_name = '' OR pa.entity_id IS NULL OR COALESCE(pa.processing_status, 'REJECTED') = 'APPROVED')
+										ORDER BY m.entity_name
 								`
 		rows, err := pgxPool.Query(ctx, query, accessibleEntityIDs)
 		if err != nil {

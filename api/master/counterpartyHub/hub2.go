@@ -57,20 +57,22 @@ type HubCreateRequest struct {
 	RoutingNumber string `json:"routing_number,omitempty"`
 	EntityCode    string `json:"entity_code,omitempty"`
 
+	// EXCHANGE + DATA_PROVIDER shared fields
+	ConnectivityProtocol string `json:"connectivity_protocol,omitempty"` // EXCHANGE: FIX_SESSION, etc. | DATA_PROVIDER: REST, WEBSOCKET, SFTP, FTP
+
 	// EXCHANGE fields
-	ExchangeCode         string   `json:"exchange_code,omitempty"`
-	MICCode              string   `json:"mic_code,omitempty"`
-	AssetClasses         []string `json:"asset_classes,omitempty"`
-	ConnectivityProtocol string   `json:"connectivity_protocol,omitempty"`
-	FIXSessionRole       string   `json:"fix_session_role,omitempty"`
-	FIXSenderCompID      string   `json:"fix_sender_comp_id,omitempty"`
-	FIXTargetCompID      string   `json:"fix_target_comp_id,omitempty"`
-	FIXPrimaryHost       string   `json:"fix_primary_host,omitempty"`
-	FIXPrimaryPort       int      `json:"fix_primary_port,omitempty"`
-	FIXFailoverHost      string   `json:"fix_failover_host,omitempty"`
-	FIXFailoverPort      int      `json:"fix_failover_port,omitempty"`
-	FIXCredsKMSRef       string   `json:"fix_creds_kms_ref,omitempty"`
-	FIXHeartbeatSec      int      `json:"fix_heartbeat_sec,omitempty"`
+	ExchangeCode    string   `json:"exchange_code,omitempty"`
+	MICCode         string   `json:"mic_code,omitempty"`
+	AssetClasses    []string `json:"asset_classes,omitempty"`
+	FIXSessionRole  string   `json:"fix_session_role,omitempty"`
+	FIXSenderCompID string   `json:"fix_sender_comp_id,omitempty"`
+	FIXTargetCompID string   `json:"fix_target_comp_id,omitempty"`
+	FIXPrimaryHost  string   `json:"fix_primary_host,omitempty"`
+	FIXPrimaryPort  int      `json:"fix_primary_port,omitempty"`
+	FIXFailoverHost string   `json:"fix_failover_host,omitempty"`
+	FIXFailoverPort int      `json:"fix_failover_port,omitempty"`
+	FIXCredsKMSRef  string   `json:"fix_creds_kms_ref,omitempty"`
+	FIXHeartbeatSec int      `json:"fix_heartbeat_sec,omitempty"`
 
 	// DATA_PROVIDER fields
 	ProviderCode       string   `json:"provider_code,omitempty"`
@@ -180,6 +182,12 @@ func validateHubCreateRequest(req HubCreateRequest) error {
 		}
 		if req.ConnectivityProtocol == "" {
 			return fmt.Errorf("connectivity_protocol is required for DATA_PROVIDER type")
+		}
+		switch req.ConnectivityProtocol {
+		case "REST", "WEBSOCKET", "SFTP", "FTP":
+			// valid
+		default:
+			return fmt.Errorf("connectivity_protocol must be one of REST, WEBSOCKET, SFTP, FTP for DATA_PROVIDER (got %q)", req.ConnectivityProtocol)
 		}
 		if err := validateKMSPath("api_creds_kms_ref", req.APICredsKMSRef); err != nil {
 			return err
