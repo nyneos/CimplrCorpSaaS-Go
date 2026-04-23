@@ -454,15 +454,16 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 
 	sessionID := generateSessionID()
 	session := &UserSession{
-		SessionID:     sessionID,
-		UserID:        dbUserID,
-		Name:          dbName,
-		Email:         dbEmail,
-		Role:          roleName.String,
-		RoleCode:      roleCode.String,
-		LastLoginTime: time.Now().Format(time.RFC3339),
-		ClientIP:      clientIP,
-		IsLoggedIn:    true,
+		SessionID:       sessionID,
+		UserID:          dbUserID,
+		Name:            dbName,
+		Email:           dbEmail,
+		Role:            roleName.String,
+		RoleCode:        roleCode.String,
+		LastLoginTime:   time.Now().Format(time.RFC3339),
+		ClientIP:        clientIP,
+		IsLoggedIn:      true,
+		CreatedEntities: a.loadCreatedEntities(dbName, dbEmail),
 	}
 
 	// Check MFA — only pending if BOTH enabled AND secret is configured

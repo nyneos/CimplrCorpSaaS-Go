@@ -3,12 +3,15 @@ package allMaster
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/utils/s3storage"
 	"compress/gzip"
 	"database/sql"
 
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -18,8 +21,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"CimplrCorpSaas/api/constants"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -131,6 +132,7 @@ type CashEntityMasterRequest struct {
 	AssociatedBusinessUnits   string `json:"associated_business_units"`
 	Comments                  string `json:"comments"`
 	UniqueIdentifier          string `json:"unique_identifier"`
+	UploadS3Key               string `json:"upload_s3_key"`
 }
 
 type CashEntityBulkRequest struct {
@@ -138,11 +140,180 @@ type CashEntityBulkRequest struct {
 	UserID   string                    `json:"user_id"`
 }
 
+type cashEntityCreateUpload struct {
+	Enabled  bool
+	FileName string
+	FileData []byte
+}
+
+type cashEntityUpdateEntity struct {
+	EntityID string                 `json:"entity_id"`
+	Fields   map[string]interface{} `json:"fields"`
+	Reason   string                 `json:"reason"`
+}
+
+type cashEntityUpdateRequest struct {
+	UserID   string                   `json:"user_id"`
+	Entities []cashEntityUpdateEntity `json:"entities"`
+}
+
+type cashEntityUpdateUpload struct {
+	Enabled  bool
+	FileName string
+	FileData []byte
+}
+
+func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkRequest, cashEntityCreateUpload, error) {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
+		}
+
+		userID := strings.TrimSpace(r.FormValue(constants.KeyUserID))
+		if userID == "" {
+			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("user_id required in form")
+		}
+
+		entityPayload := strings.TrimSpace(r.FormValue("entity_payload"))
+		if entityPayload == "" {
+			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("entity_payload required in form")
+		}
+
+		var entity CashEntityMasterRequest
+		if err := json.Unmarshal([]byte(entityPayload), &entity); err != nil {
+			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("invalid entity_payload: %w", err)
+		}
+
+		upload := cashEntityCreateUpload{}
+		file, fileHeader, err := r.FormFile("file")
+		if err == nil {
+			defer file.Close()
+			fileData, readErr := io.ReadAll(file)
+			if readErr != nil {
+				return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("failed to read uploaded file: %w", readErr)
+			}
+			if len(fileData) == 0 {
+				return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("uploaded file is empty")
+			}
+			upload = cashEntityCreateUpload{
+				Enabled:  true,
+				FileName: fileHeader.Filename,
+				FileData: fileData,
+			}
+		}
+
+		return CashEntityBulkRequest{
+			UserID:   userID,
+			Entities: []CashEntityMasterRequest{entity},
+		}, upload, nil
+	}
+
+	var req CashEntityBulkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return CashEntityBulkRequest{}, cashEntityCreateUpload{}, err
+	}
+
+	return req, cashEntityCreateUpload{}, nil
+}
+
+func parseUpdateCashEntityBulkRequest(r *http.Request) (cashEntityUpdateRequest, cashEntityUpdateUpload, error) {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
+		}
+
+		userID := strings.TrimSpace(r.FormValue(constants.KeyUserID))
+		if userID == "" {
+			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("user_id required in form")
+		}
+
+		entityID := strings.TrimSpace(r.FormValue("entity_id"))
+		if entityID == "" {
+			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("entity_id required in form")
+		}
+
+		fieldsPayload := strings.TrimSpace(r.FormValue("fields_payload"))
+		fields := map[string]interface{}{}
+		if fieldsPayload != "" {
+			if err := json.Unmarshal([]byte(fieldsPayload), &fields); err != nil {
+				return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("invalid fields_payload: %w", err)
+			}
+		}
+
+		upload := cashEntityUpdateUpload{}
+		file, fileHeader, err := r.FormFile("file")
+		if err == nil {
+			defer file.Close()
+			fileData, readErr := io.ReadAll(file)
+			if readErr != nil {
+				return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("failed to read uploaded file: %w", readErr)
+			}
+			if len(fileData) == 0 {
+				return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("uploaded file is empty")
+			}
+			upload = cashEntityUpdateUpload{
+				Enabled:  true,
+				FileName: fileHeader.Filename,
+				FileData: fileData,
+			}
+		}
+
+		return cashEntityUpdateRequest{
+			UserID: userID,
+			Entities: []cashEntityUpdateEntity{
+				{
+					EntityID: entityID,
+					Fields:   fields,
+					Reason:   strings.TrimSpace(r.FormValue("reason")),
+				},
+			},
+		}, upload, nil
+	}
+
+	var req cashEntityUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, err
+	}
+
+	return req, cashEntityUpdateUpload{}, nil
+}
+
+// helper for removing the previous logo from S3 after a replacement.
+
+//
+// func deletePreviousEntityLogoFromS3(ctx context.Context, tx pgx.Tx, entityID string) error {
+// 	var existingS3Key sql.NullString
+// 	if err := tx.QueryRow(ctx, `
+// 		SELECT upload_s3_key
+// 		FROM masterentitycash
+// 		WHERE entity_id = $1
+// 	`, entityID).Scan(&existingS3Key); err != nil {
+// 		if err == pgx.ErrNoRows {
+// 			return nil
+// 		}
+// 		return err
+// 	}
+//
+// 	key := strings.TrimSpace(existingS3Key.String)
+// 	if key == "" {
+// 		return nil
+// 	}
+//
+// 	return s3storage.DeleteFromS3(ctx, key)
+// }
+
 func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req CashEntityBulkRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+		req, upload, err := parseCreateAndSyncCashEntitiesRequest(r)
+		if err != nil {
+			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
+			if strings.HasPrefix(contentType, "multipart/form-data") {
+				api.RespondWithError(w, http.StatusBadRequest, err.Error())
+			} else {
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			}
 			return
 		}
 		// Get created_by from session
@@ -165,7 +336,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		entityIDs := make(map[string]string)
 		inserted := []map[string]interface{}{}
-		for _, entity := range req.Entities {
+		for index, entity := range req.Entities {
 			// Validate currency
 			if entity.BaseOperatingCurrency != "" && len(currCodes) > 0 && !api.IsCurrencyAllowed(ctx, entity.BaseOperatingCurrency) {
 				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "invalid or unauthorized base_operating_currency: " + entity.BaseOperatingCurrency, "entity_name": entity.EntityName})
@@ -193,11 +364,22 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				}
 			}
 
+			uploadedS3Key := strings.TrimSpace(entity.UploadS3Key)
+			if upload.Enabled && index == 0 {
+				folder := s3storage.GetStoragePrefix("entitylogo")
+				uploadedS3Key = s3storage.BuildUploadedS3Key(folder, entity.EntityName, upload.FileName, createdBy, time.Now().UTC())
+				if err := s3storage.PutObjectToS3(ctx, uploadedS3Key, upload.FileData, s3storage.DetectContentType(upload.FileData)); err != nil {
+					inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to upload entity logo: " + err.Error(), "entity_name": entity.EntityName})
+					continue
+				}
+				entity.UploadS3Key = uploadedS3Key
+			}
+
 			// Let DB generate entity_id (use default). Insert all columns including newly-added ones.
 			query := `INSERT INTO masterentitycash (
-	entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, pan_gst, legal_entity_identifier, legal_entity_type, reporting_currency, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, associated_business_units, comments, unique_identifier, is_top_level_entity, is_deleted
+	entity_name, entity_short_name, entity_level, parent_entity_name, entity_registration_number, country, base_operating_currency, tax_identification_number, address_line1, address_line2, city, state_province, postal_code, contact_person_name, contact_person_email, contact_person_phone, active_status, pan_gst, legal_entity_identifier, legal_entity_type, reporting_currency, fx_trading_authority, internal_fx_trading_limit, associated_treasury_contact, associated_business_units, comments, unique_identifier, is_top_level_entity, is_deleted, upload_s3_key
 ) VALUES (
-	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE(NULLIF($17, ''), 'Inactive'), $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+	$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, COALESCE(NULLIF($17, ''), 'Inactive'), $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30
 ) RETURNING entity_id`
 			var newEntityID string
 			err := pgxPool.QueryRow(ctx, query,
@@ -230,8 +412,14 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				entity.UniqueIdentifier,
 				entity.IsTopLevelEntity,
 				entity.IsDeleted,
+				entity.UploadS3Key,
 			).Scan(&newEntityID)
 			if err != nil {
+				if uploadedS3Key != "" {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, uploadedS3Key); cleanupErr != nil {
+						log.Printf("[CreateAndSyncCashEntities] failed to cleanup s3 key=%s after insert error: %v", uploadedS3Key, cleanupErr)
+					}
+				}
 				inserted = append(inserted, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error(), "entity_name": entity.EntityName})
 				continue
 			}
@@ -259,6 +447,9 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Sync relationships
 		relationshipsAdded := []map[string]interface{}{}
 		for _, entity := range req.Entities {
+			if _, insertedOK := entityIDs[entity.EntityName]; !insertedOK {
+				continue
+			}
 			// Skip if parent is empty (top-level entity)
 			if strings.TrimSpace(entity.ParentEntityName) == "" {
 				continue
@@ -370,7 +561,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				m.entity_registration_number, m.country, m.base_operating_currency, m.tax_identification_number,
 				m.address_line1, m.address_line2, m.city, m.state_province, m.postal_code,
 				m.contact_person_name, m.contact_person_email, m.contact_person_phone, m.active_status,
-				m.pan_gst, m.legal_entity_identifier, m.legal_entity_type, m.reporting_currency, m.fx_trading_authority, m.internal_fx_trading_limit, m.associated_treasury_contact, m.associated_business_units, m.comments, m.unique_identifier,
+				m.pan_gst, m.legal_entity_identifier, m.legal_entity_type, m.reporting_currency, m.fx_trading_authority, m.internal_fx_trading_limit, m.associated_treasury_contact, m.associated_business_units, m.comments, m.unique_identifier, m.upload_s3_key,
 				m.old_entity_name, m.old_entity_short_name, m.old_entity_level, m.old_parent_entity_name,
 				m.old_entity_registration_number, m.old_country, m.old_base_operating_currency,
 				m.old_tax_identification_number, m.old_address_line1, m.old_address_line2,
@@ -409,7 +600,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for rows.Next() {
 			var (
 				id, name, shortName, parentName, regNum, country, baseCur, taxID                                                                                                                                                            sql.NullString
-				panGST, legalEntityIdentifier, legalEntityType, reportingCurrency, fxTradingAuthority, internalFxTradingLimit, associatedTreasuryContact, associatedBusinessUnits, comments, uniqueIdentifier                               sql.NullString
+				panGST, legalEntityIdentifier, legalEntityType, reportingCurrency, fxTradingAuthority, internalFxTradingLimit, associatedTreasuryContact, associatedBusinessUnits, comments, uniqueIdentifier, uploadS3Key                  sql.NullString
 				addr1, addr2, city, state, postal, contactName, contactEmail, contactPhone                                                                                                                                                  sql.NullString
 				active                                                                                                                                                                                                                      sql.NullString
 				oldName, oldShort, oldParent, oldReg, oldCountry, oldBaseCur, oldTax, oldAddr1, oldAddr2, oldCity, oldState, oldPostal, oldContactName, oldContactEmail, oldContactPhone, oldActive                                         sql.NullString
@@ -424,7 +615,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				&id, &name, &shortName, &level, &parentName,
 				&regNum, &country, &baseCur, &taxID,
 				&addr1, &addr2, &city, &state, &postal, &contactName, &contactEmail, &contactPhone, &active,
-				&panGST, &legalEntityIdentifier, &legalEntityType, &reportingCurrency, &fxTradingAuthority, &internalFxTradingLimit, &associatedTreasuryContact, &associatedBusinessUnits, &comments, &uniqueIdentifier,
+				&panGST, &legalEntityIdentifier, &legalEntityType, &reportingCurrency, &fxTradingAuthority, &internalFxTradingLimit, &associatedTreasuryContact, &associatedBusinessUnits, &comments, &uniqueIdentifier, &uploadS3Key,
 				&oldName, &oldShort, &oldLevel, &oldParent, &oldReg, &oldCountry,
 				&oldBaseCur, &oldTax, &oldAddr1, &oldAddr2, &oldCity, &oldState,
 				&oldPostal, &oldContactName, &oldContactEmail, &oldContactPhone, &oldActive,
@@ -460,6 +651,7 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"associated_business_units":       associatedBusinessUnits.String,
 				"comments":                        comments.String,
 				"unique_identifier":               uniqueIdentifier.String,
+				"upload_s3_key":                   uploadS3Key.String,
 				"address_line1":                   addr1.String,
 				"address_line2":                   addr2.String,
 				"city":                            city.String,
@@ -728,20 +920,93 @@ func GetCashEntityHierarchy(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			EntityID string `json:"entity_id"`
+			UserID   string `json:"user_id"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			return
+		}
+
+		if strings.TrimSpace(req.EntityID) == "" || strings.TrimSpace(req.UserID) == "" {
+			api.RespondWithError(w, http.StatusBadRequest, "Missing entity_id or user_id in body")
+			return
+		}
+
+		validSession := false
+		for _, session := range auth.GetActiveSessions() {
+			if session.UserID == req.UserID {
+				validSession = true
+				break
+			}
+		}
+		if !validSession {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+
+		ctx := r.Context()
+		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
+		if len(accessibleEntityIDs) == 0 {
+			api.RespondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleEntitiesForRequest)
+			return
+		}
+
+		var uploadS3Key sql.NullString
+		err := pgxPool.QueryRow(ctx, `
+			SELECT upload_s3_key
+			FROM masterentitycash
+			WHERE entity_id = $1
+			  AND entity_id = ANY($2)
+			  AND is_deleted = false
+		`, req.EntityID, accessibleEntityIDs).Scan(&uploadS3Key)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				api.RespondWithError(w, http.StatusNotFound, "Entity logo not found")
+				return
+			}
+			api.RespondWithError(w, http.StatusInternalServerError, "Failed to fetch entity logo")
+			return
+		}
+
+		key := strings.TrimSpace(uploadS3Key.String)
+		if key == "" {
+			api.RespondWithResult(w, false, "no file available")
+			return
+		}
+
+		logoURL, err := s3storage.GetInlinePresignedURL(ctx, key, 24*time.Hour)
+		if err != nil {
+			api.RespondWithResult(w, false, "Failed to generate logo url: "+err.Error())
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": logoURL,
+			},
+		})
+	}
+}
+
 // Bulk update handler for entity cash master
 func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			UserID   string `json:"user_id"`
-			Entities []struct {
-				EntityID string                 `json:"entity_id"`
-				Fields   map[string]interface{} `json:"fields"`
-				Reason   string                 `json:"reason"`
-			} `json:"entities"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req, upload, err := parseUpdateCashEntityBulkRequest(r)
+		if err != nil {
+			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
+			if strings.HasPrefix(contentType, "multipart/form-data") {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			} else {
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
+			}
 			return
 		}
 		// Get updated_by from session
@@ -815,9 +1080,15 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			committed := false
 			func() {
+				uploadedS3Key := ""
 				defer func() {
 					if !committed {
 						tx.Rollback(ctx)
+						if uploadedS3Key != "" {
+							if cleanupErr := s3storage.DeleteFromS3(ctx, uploadedS3Key); cleanupErr != nil {
+								log.Printf("[UpdateCashEntityBulk] failed to cleanup s3 key=%s after update error: %v", uploadedS3Key, cleanupErr)
+							}
+						}
 					}
 					if p := recover(); p != nil {
 						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "panic: " + fmt.Sprint(p), "entity_id": entity.EntityID})
@@ -833,6 +1104,23 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				if err := tx.QueryRow(ctx, sel, entity.EntityID).Scan(&exEntityName, &exEntityShortName, &exEntityLevel, &exParentEntityName, &exEntityRegistrationNumber, &exCountry, &exBaseCurrency, &exTaxID, &exAddress1, &exAddress2, &exCity, &exState, &exPostal, &exContactName, &exContactEmail, &exContactPhone, &exActiveStatus, &exIsTopLevel, &exIsDeleted, &exPanGST, &exLegalEntityIdentifier, &exLegalEntityType, &exReportingCurrency, &exFxTradingAuthority, &exInternalFxTradingLimit, &exAssociatedTreasuryContact, &exAssociatedBusinessUnits, &exComments, &exUniqueIdentifier); err != nil {
 					results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "Failed to fetch existing entity: " + err.Error(), "entity_id": entity.EntityID})
 					return
+				}
+
+				if upload.Enabled {
+					currentEntityName := ""
+					if exEntityName != nil {
+						currentEntityName = *exEntityName
+					}
+					folder := s3storage.GetStoragePrefix("entitylogo")
+					uploadedS3Key = s3storage.BuildUploadedS3Key(folder, currentEntityName, upload.FileName, updatedBy, time.Now().UTC())
+					if err := s3storage.PutObjectToS3(ctx, uploadedS3Key, upload.FileData, s3storage.DetectContentType(upload.FileData)); err != nil {
+						results = append(results, map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: "failed to upload entity logo: " + err.Error(), "entity_id": entity.EntityID})
+						return
+					}
+					if entity.Fields == nil {
+						entity.Fields = map[string]interface{}{}
+					}
+					entity.Fields["upload_s3_key"] = uploadedS3Key
 				}
 
 				// build dynamic update
@@ -1100,6 +1388,10 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 							return ""
 						}())
 						pos += 2
+					case "upload_s3_key":
+						sets = append(sets, fmt.Sprintf("upload_s3_key=$%d", pos))
+						args = append(args, strings.TrimSpace(fmt.Sprint(v)))
+						pos++
 					case "is_top_level_entity":
 						var newBool bool
 						switch t := v.(type) {
@@ -1906,6 +2198,93 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		rows, err := pgxPool.Query(ctx, query, accessibleEntityIDs)
 		if err != nil {
 			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch entity names")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		defer rows.Close()
+
+		var results []map[string]interface{}
+		var anyError error
+		for rows.Next() {
+			var entityID, entityName string
+			var entityShortName sql.NullString
+			var uniqueIdentifier sql.NullString
+			if err := rows.Scan(&entityID, &entityName, &entityShortName, &uniqueIdentifier); err != nil {
+				anyError = err
+				break
+			}
+			shortName := ""
+			if entityShortName.Valid {
+				shortName = entityShortName.String
+			}
+			uid := ""
+			if uniqueIdentifier.Valid {
+				uid = uniqueIdentifier.String
+			}
+			results = append(results, map[string]interface{}{
+				"entity_id":         entityID,
+				"entity_name":       entityName,
+				"entity_short_name": shortName,
+				"unique_identifier": uid,
+			})
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		if anyError != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, anyError.Error())
+			return
+		}
+		if results == nil {
+			results = make([]map[string]interface{}, 0)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"results":              results,
+		})
+	}
+}
+
+func GetAssignedCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ctx := r.Context()
+		assignedEntityIDs, _ := ctx.Value("root_entity_ids").([]string)
+		if len(assignedEntityIDs) == 0 {
+			api.RespondWithPayload(w, true, "No entities directly assigned to your user", []map[string]interface{}{})
+			return
+		}
+
+		query := `
+			SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
+			FROM masterentitycash m
+			LEFT JOIN LATERAL (
+				SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
+			) ma ON TRUE
+			LEFT JOIN masterentitycash p ON m.parent_entity_name = p.entity_name
+			LEFT JOIN LATERAL (
+				SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
+			) pa ON TRUE
+			WHERE m.entity_id = ANY($1::text[])
+				AND m.active_status = 'Active'
+				AND (m.is_deleted = false OR m.is_deleted IS NULL)
+				AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+				AND (p.entity_id IS NULL OR COALESCE(pa.processing_status, 'REJECTED') = 'APPROVED')
+			ORDER BY array_position($1::text[], m.entity_id), m.entity_name
+		`
+		rows, err := pgxPool.Query(ctx, query, assignedEntityIDs)
+		if err != nil {
+			errMsg, statusCode := getUserFriendlyEntityCashError(err, "Failed to fetch assigned entity names")
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
