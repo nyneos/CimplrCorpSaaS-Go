@@ -950,20 +950,14 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
-		if len(accessibleEntityIDs) == 0 {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleEntitiesForRequest)
-			return
-		}
 
 		var uploadS3Key sql.NullString
 		err := pgxPool.QueryRow(ctx, `
 			SELECT upload_s3_key
 			FROM masterentitycash
 			WHERE entity_id = $1
-			  AND entity_id = ANY($2)
 			  AND is_deleted = false
-		`, req.EntityID, accessibleEntityIDs).Scan(&uploadS3Key)
+		`, req.EntityID).Scan(&uploadS3Key)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				api.RespondWithError(w, http.StatusNotFound, "Entity logo not found")

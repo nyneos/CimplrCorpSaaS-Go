@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -193,7 +194,7 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		LastLoginTime:   time.Now().Format(time.RFC3339),
 		ClientIP:        clientIP,
 		IsLoggedIn:      true,
-		CreatedEntities: a.loadCreatedEntities(dbName, dbEmail),
+		CreatedEntities: a.loadCreatedEntities(dbUserID, roleName.String, roleCode.String),
 	}
 
 	// Check MFA — only gate login if BOTH enabled AND secret is configured
@@ -255,13 +256,53 @@ func (a *AuthService) forceLogoutUser(userID string) {
 	}
 }
 
-func (a *AuthService) loadCreatedEntities(requestedBy string, fallbackRequestedBy string) []SessionEntity {
-	requestedBy = strings.TrimSpace(requestedBy)
-	fallbackRequestedBy = strings.TrimSpace(fallbackRequestedBy)
-	if requestedBy == "" && fallbackRequestedBy == "" || a.db == nil {
+func (a *AuthService) loadCreatedEntities(userID, roleName, roleCode string) []SessionEntity {
+	if a.db == nil {
 		return nil
 	}
 
+	// Check if user is admin (via ADMIN_USER_IDS or ADMIN_ROLES env vars)
+	isAdmin := a.isAdminForEntities(userID, roleName, roleCode)
+
+	if isAdmin {
+		// Admin: return ALL level 0 (top-level) entities
+		return a.loadAllLevel0Entities()
+	}
+
+	// Non-admin: find the level 0 root ancestor(s) of the entities assigned to this user
+	return a.loadUserRootEntities(userID)
+}
+
+// isAdminForEntities checks ADMIN_USER_IDS and ADMIN_ROLES env vars to determine
+// if the user should see all level 0 entities. Mirrors the middleware admin_override logic.
+func (a *AuthService) isAdminForEntities(userID, roleName, roleCode string) bool {
+	// 1. Check ADMIN_USER_IDS
+	if raw := strings.TrimSpace(os.Getenv("ADMIN_USER_IDS")); raw != "" {
+		for _, id := range strings.Split(raw, ",") {
+			if strings.TrimSpace(id) == userID {
+				return true
+			}
+		}
+	}
+
+	// 2. Check ADMIN_ROLES against the user's role name and code
+	if raw := strings.TrimSpace(os.Getenv("ADMIN_ROLES")); raw != "" {
+		for _, r := range strings.Split(raw, ",") {
+			rLower := strings.ToLower(strings.TrimSpace(r))
+			if rLower == "" {
+				continue
+			}
+			if strings.ToLower(strings.TrimSpace(roleName)) == rLower || strings.ToLower(strings.TrimSpace(roleCode)) == rLower {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// loadAllLevel0Entities returns all approved, active, level 0 entities from masterentitycash.
+func (a *AuthService) loadAllLevel0Entities() []SessionEntity {
 	rows, err := a.db.Query(`
 		SELECT
 			m.entity_id,
@@ -279,27 +320,76 @@ func (a *AuthService) loadCreatedEntities(requestedBy string, fallbackRequestedB
 			ORDER BY a.requested_at DESC
 			LIMIT 1
 		) ae ON TRUE
-		JOIN (
-			SELECT DISTINCT ON (a.entity_id)
-				a.entity_id,
-				a.requested_by
-			FROM auditactionentity a
-			WHERE a.actiontype = 'CREATE'
-			ORDER BY a.entity_id, a.requested_at ASC
-		) created_audit ON created_audit.entity_id = m.entity_id
-		WHERE (
-			LOWER(TRIM(created_audit.requested_by)) = LOWER(TRIM($1))
-			OR ($2 <> '' AND LOWER(TRIM(created_audit.requested_by)) = LOWER(TRIM($2)))
-		)
+		WHERE m.entity_level = 0
 		  AND (m.is_deleted = false OR m.is_deleted IS NULL)
 		ORDER BY m.entity_name
-	`, requestedBy, fallbackRequestedBy)
+	`)
 	if err != nil {
-		log.Printf("[auth] failed to load created entities for %s/%s: %v", requestedBy, fallbackRequestedBy, err)
+		log.Printf("[auth] failed to load all level 0 entities: %v", err)
 		return nil
 	}
 	defer rows.Close()
 
+	return a.scanSessionEntities(rows)
+}
+
+// loadUserRootEntities finds the level 0 root ancestor(s) for entities assigned to a user
+// via user_entity_mappings. It walks up the hierarchy via parent_entity_name.
+func (a *AuthService) loadUserRootEntities(userID string) []SessionEntity {
+	// Use a recursive CTE to walk UP from the user's assigned entities to the level 0 roots.
+	rows, err := a.db.Query(`
+		WITH RECURSIVE assigned AS (
+			SELECT entity_id, entity_name
+			FROM user_entity_mappings
+			WHERE user_id = $1
+		),
+		ancestors AS (
+			-- Start from the user's assigned entities
+			SELECT m.entity_id, m.entity_name, m.entity_level, m.parent_entity_name
+			FROM masterentitycash m
+			WHERE m.entity_id IN (SELECT entity_id FROM assigned)
+			  AND (m.is_deleted = false OR m.is_deleted IS NULL)
+
+			UNION
+
+			-- Walk up via parent_entity_name
+			SELECT p.entity_id, p.entity_name, p.entity_level, p.parent_entity_name
+			FROM masterentitycash p
+			INNER JOIN ancestors a ON p.entity_name = a.parent_entity_name
+			WHERE (p.is_deleted = false OR p.is_deleted IS NULL)
+		)
+		SELECT DISTINCT
+			a.entity_id,
+			a.entity_name,
+			COALESCE(m.entity_short_name, ''),
+			COALESCE(m.parent_entity_name, ''),
+			COALESCE(m.entity_level::text, ''),
+			COALESCE(m.active_status, ''),
+			COALESCE(ae.processing_status, '')
+		FROM ancestors a
+		JOIN masterentitycash m ON m.entity_id = a.entity_id
+		LEFT JOIN LATERAL (
+			SELECT x.processing_status
+			FROM auditactionentity x
+			WHERE x.entity_id = m.entity_id
+			ORDER BY x.requested_at DESC
+			LIMIT 1
+		) ae ON TRUE
+		WHERE a.entity_level = 0
+		  AND COALESCE(ae.processing_status, 'REJECTED') = 'APPROVED'
+		ORDER BY a.entity_name
+	`, userID)
+	if err != nil {
+		log.Printf("[auth] failed to load root entities for user %s: %v", userID, err)
+		return nil
+	}
+	defer rows.Close()
+
+	return a.scanSessionEntities(rows)
+}
+
+// scanSessionEntities reads rows into a []SessionEntity slice.
+func (a *AuthService) scanSessionEntities(rows *sql.Rows) []SessionEntity {
 	entities := make([]SessionEntity, 0)
 	for rows.Next() {
 		var entity SessionEntity
@@ -312,14 +402,14 @@ func (a *AuthService) loadCreatedEntities(requestedBy string, fallbackRequestedB
 			&entity.ActiveStatus,
 			&entity.ApprovalStatus,
 		); err != nil {
-			log.Printf("[auth] failed to scan created entity for %s/%s: %v", requestedBy, fallbackRequestedBy, err)
+			log.Printf("[auth] failed to scan session entity: %v", err)
 			return entities
 		}
 		entities = append(entities, entity)
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Printf("[auth] failed to iterate created entities for %s/%s: %v", requestedBy, fallbackRequestedBy, err)
+		log.Printf("[auth] failed to iterate session entities: %v", err)
 	}
 
 	return entities
