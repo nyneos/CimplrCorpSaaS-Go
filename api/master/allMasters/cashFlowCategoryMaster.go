@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -58,7 +59,7 @@ func getUserFriendlyCashFlowCategoryError(err error, context string) (string, in
 	}
 
 	// Check constraint violations - Known error, return 200
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "category_type_check") {
 			return "Invalid category type. Must be 'Inflow' or 'Outflow'.", http.StatusOK
 		}
@@ -1385,9 +1386,11 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				tx.Rollback(ctx)
 			}
 		}()
-		rows, err := tx.Query(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1) RETURNING category_id`, allToDelete)
-		if err != nil {
-			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to delete categories")
+		// Safety check: abort if any transactions currently reference these categories
+		var txnCount int64
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, allToDelete).Scan(&txnCount); err != nil {
+			tx.Rollback(ctx)
+			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, constants.ErrFailedToFetchCategoryRelationships)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
@@ -1396,32 +1399,29 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			}
 			return
 		}
-		defer rows.Close()
-		updated := []string{}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				updated = append(updated, id)
-			}
-		}
 
-		if len(updated) == 0 {
+		if txnCount > 0 {
 			tx.Rollback(ctx)
-			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoRowsUpdated)
+			api.RespondWithError(w, http.StatusBadRequest, "Cannot delete categories: some transactions currently reference these categories. Unassign transactions first or remove links before deleting.")
 			return
 		}
-		for _, cid := range updated {
-			if _, err := tx.Exec(ctx, `INSERT INTO auditactioncashflowcategory (category_id, actiontype, processing_status, reason, requested_by, requested_at) VALUES ($1, 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now())`, cid, req.Reason, requestedBy); err != nil {
-				tx.Rollback(ctx)
-				errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to create delete audit record")
-				if statusCode == http.StatusOK {
-					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-					json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
-				} else {
-					api.RespondWithError(w, statusCode, errMsg)
-				}
-				return
+
+		// No transactions reference these categories: create pending delete audit actions in bulk.
+		// Do NOT mark master rows as deleted here — deletion (soft-delete) will be performed on approval.
+		insertQuery := `
+			INSERT INTO auditactioncashflowcategory (category_id, actiontype, processing_status, reason, requested_by, requested_at)
+			SELECT unnest($1::text[]), 'DELETE', 'PENDING_DELETE_APPROVAL', $2, $3, now()
+		`
+		if _, err := tx.Exec(ctx, insertQuery, pq.Array(allToDelete), req.Reason, requestedBy); err != nil {
+			tx.Rollback(ctx)
+			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to create delete audit records")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
 			}
+			return
 		}
 
 		if err := tx.Commit(ctx); err != nil {
@@ -1430,6 +1430,7 @@ func DeleteCashFlowCategory(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 		committed = true
 
+		updated := allToDelete
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
@@ -1505,6 +1506,25 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "No categories found to reject")
 			return
 		}
+		// Check if any of the categories to reject are currently referenced by transactions.
+		// We'll include a warning in the response if so (reject still proceeds).
+		refRows, err := pgxPool.Query(ctx, `SELECT DISTINCT category_id FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(allToReject))
+		var referenced []string
+		if err == nil {
+			defer refRows.Close()
+			for refRows.Next() {
+				var cid string
+				if err := refRows.Scan(&cid); err == nil {
+					referenced = append(referenced, cid)
+				}
+			}
+		}
+		// If any of the categories are currently referenced by transactions, refuse to reject.
+		if len(referenced) > 0 {
+			api.RespondWithError(w, http.StatusBadRequest, fmt.Sprintf("Cannot reject actions: some categories are still referenced by transactions: %v. Unassign transactions first.", referenced))
+			return
+		}
+
 		query := `UPDATE auditactioncashflowcategory SET processing_status='REJECTED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id`
 		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToReject)
 		if err != nil {
@@ -1532,7 +1552,12 @@ func BulkRejectCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithPayload(w, false, constants.ErrNoRowsUpdated, map[string]interface{}{"updated": updated})
 			return
 		}
-		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
+		// Include warning when some rejected categories are still referenced
+		resp := map[string]interface{}{"updated": updated}
+		if len(referenced) > 0 {
+			resp["warning"] = fmt.Sprintf("Some categories are still referenced by transactions: %v. Rejecting the pending action does not unassign transactions.", referenced)
+		}
+		api.RespondWithPayload(w, true, "", resp)
 	}
 }
 
@@ -1610,9 +1635,29 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
-		query := `UPDATE auditactioncashflowcategory SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id, actiontype`
-		rows, err := pgxPool.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		// Approve actions and perform cascading deletes for DELETE actions.
+		tx, err := pgxPool.Begin(ctx)
 		if err != nil {
+			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to start transaction for approval")
+			if statusCode == http.StatusOK {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})
+			} else {
+				api.RespondWithError(w, statusCode, errMsg)
+			}
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback(ctx)
+			}
+		}()
+
+		query := `UPDATE auditactioncashflowcategory SET processing_status='APPROVED', checker_by=$1, checker_at=now(), checker_comment=$2 WHERE category_id = ANY($3) RETURNING action_id, category_id, actiontype`
+		rows, err := tx.Query(ctx, query, checkerBy, req.Comment, allToApprove)
+		if err != nil {
+			tx.Rollback(ctx)
 			errMsg, statusCode := getUserFriendlyCashFlowCategoryError(err, "Failed to approve category actions")
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -1625,12 +1670,86 @@ func BulkApproveCashFlowCategoryActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 		defer rows.Close()
 
 		var updated []map[string]interface{}
+		var deleteCategoryIDs []string
 		for rows.Next() {
 			var actionID, categoryID, actionType string
 			if err := rows.Scan(&actionID, &categoryID, &actionType); err == nil {
 				updated = append(updated, map[string]interface{}{"action_id": actionID, "category_id": categoryID, "action_type": actionType})
+				if strings.ToUpper(strings.TrimSpace(actionType)) == "DELETE" {
+					deleteCategoryIDs = append(deleteCategoryIDs, categoryID)
+				}
 			}
 		}
+
+		// Perform cascade for all DELETE actions in bulk to avoid N+1 queries.
+		if len(deleteCategoryIDs) > 0 {
+			// 1. Soft-delete master categories
+			if _, err := tx.Exec(ctx, `UPDATE mastercashflowcategory SET is_deleted = true WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+
+			// 2. Delete all rule components for rules of these categories
+			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.category_rule_components WHERE rule_id IN (SELECT rule_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1))`, pq.Array(deleteCategoryIDs)); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+
+			// 3. Delete all rules for these categories
+			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+
+			// 4. Delete orphaned scopes that belonged to these rules (only if no rules remain for those scopes)
+			if _, err := tx.Exec(ctx, `DELETE FROM cimplrcorpsaas.rule_scope rs WHERE rs.scope_id IN (SELECT DISTINCT scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)) AND NOT EXISTS (SELECT 1 FROM cimplrcorpsaas.category_rules r WHERE r.scope_id = rs.scope_id)`, pq.Array(deleteCategoryIDs)); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+
+			// 5. Collect affected bank_statement_ids (before we null categories)
+			bsRows, err := tx.Query(ctx, `SELECT DISTINCT bank_statement_id FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs))
+			if err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+			var bsIDs []string
+			for bsRows.Next() {
+				var bsid string
+				if err := bsRows.Scan(&bsid); err == nil {
+					bsIDs = append(bsIDs, bsid)
+				}
+			}
+			bsRows.Close()
+
+			// 6. Insert auditactionbankstatement rows for affected bank statements in bulk
+			if len(bsIDs) > 0 {
+				insertBSQuery := `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) SELECT unnest($1::text[]), 'RECAT', 'PENDING_EDIT_APPROVAL', $2, now(), $3`
+				if _, err := tx.Exec(ctx, insertBSQuery, pq.Array(bsIDs), checkerBy, req.Comment); err != nil {
+					tx.Rollback(ctx)
+					api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+					return
+				}
+			}
+
+			// 7. Unassign transactions referencing these categories
+			if _, err := tx.Exec(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = NULL WHERE category_id = ANY($1)`, pq.Array(deleteCategoryIDs)); err != nil {
+				tx.Rollback(ctx)
+				api.RespondWithError(w, http.StatusInternalServerError, constants.ErrDBPrefix+err.Error())
+				return
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailedCapitalized+err.Error())
+			return
+		}
+		committed = true
 
 		success := len(updated) > 0
 		if !success {

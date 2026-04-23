@@ -58,7 +58,7 @@ func getUserFriendlyCostProfitCenterError(err error, context string) (string, in
 	}
 
 	// Check constraint violations - Known error, return 200
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "centre_type_check") || strings.Contains(errStr, "mastercostprofitcenter_type_check") {
 			return "Invalid centre type. Must be 'Cost Centre' or 'Profit Centre'.", http.StatusOK
 		}

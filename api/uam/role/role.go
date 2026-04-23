@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
@@ -57,10 +58,31 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
 			return
 		}
-		// Insert role and return the inserted row
+
+		// Uniqueness checks: ensure role name and role code are unique
+		var existingID string
+		// check name uniqueness (case-insensitive)
+		if err := db.QueryRow("SELECT id FROM roles WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) LIMIT 1", req.Name).Scan(&existingID); err == nil {
+			respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role name '%s' already exists (id=%s)", req.Name, existingID))
+			return
+		} else if err != sql.ErrNoRows {
+			respondWithError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// check role code uniqueness if supplied
+		if strings.TrimSpace(req.RoleCode) != "" {
+			if err := db.QueryRow("SELECT id FROM roles WHERE rolecode = $1 OR role_code = $1 LIMIT 1", req.RoleCode).Scan(&existingID); err == nil {
+				respondWithError(w, http.StatusBadRequest, fmt.Sprintf("role code '%s' already exists (id=%s)", req.RoleCode, existingID))
+				return
+			} else if err != sql.ErrNoRows {
+				respondWithError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		// Insert role and return the inserted row (set created_at)
 		rows, err := db.Query(
-			`INSERT INTO roles (name, rolecode, description, office_start_time_ist, office_end_time_ist, status, created_by)
-			 VALUES ($1, $2, $3, $4, $5, 'pending', $6) RETURNING *`,
+			`INSERT INTO roles (name, rolecode, description, office_start_time_ist, office_end_time_ist, status, created_by, created_at)
+			 VALUES ($1, $2, $3, $4, $5, 'pending', $6, NOW()) RETURNING *`,
 			req.Name,
 			req.RoleCode,
 			req.Description,
@@ -91,6 +113,27 @@ func CreateRole(db *sql.DB) http.HandlerFunc {
 			}
 			for i, col := range cols {
 				roleMap[col] = vals[i]
+			}
+
+			// Normalize role code: prefer `rolecode` (legacy insert column) and
+			// fall back to `role_code`. Also expose camelCase `roleCode` for
+			// frontend convenience.
+			var roleCodeVal interface{}
+			if v, ok := roleMap["rolecode"]; ok && fmt.Sprint(v) != "" {
+				roleCodeVal = v
+			}
+			if roleCodeVal == nil || fmt.Sprint(roleCodeVal) == "" {
+				if v2, ok2 := roleMap["role_code"]; ok2 && fmt.Sprint(v2) != "" {
+					roleCodeVal = v2
+				}
+			}
+			if roleCodeVal != nil {
+				roleMap["role_code"] = roleCodeVal
+				roleMap["roleCode"] = fmt.Sprint(roleCodeVal)
+			} else {
+				// ensure keys exist (empty string) so frontend doesn't get undefined
+				roleMap["role_code"] = ""
+				roleMap["roleCode"] = ""
 			}
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -166,7 +209,18 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 		pagination.SetPaginationStats(total)
 
 		// Get roles with pagination
-		rows, err := db.Query("SELECT * FROM roles ORDER BY id LIMIT $1 OFFSET $2", pagination.Limit, pagination.Offset)
+		// Order by the latest of created_at, approved_at or edited_at (whichever is greatest)
+		// so the most recently created/approved/edited roles appear first.
+		rows, err := db.Query(
+			`SELECT * FROM roles
+								 ORDER BY GREATEST(
+									 COALESCE(created_at, '1970-01-01'::timestamp),
+									 COALESCE(approved_at, '1970-01-01'::timestamp),
+									 COALESCE(edited_at, '1970-01-01'::timestamp),
+									 COALESCE(rejected_at, '1970-01-01'::timestamp)
+								 ) DESC
+								 LIMIT $1 OFFSET $2`,
+			pagination.Limit, pagination.Offset)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -186,14 +240,29 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 				rMap[col] = vals[i]
 			}
 			// Map fields as needed
+			// Normalize role_code: prefer `rolecode` then `role_code`. Also add
+			// camelCase `roleCode` to match frontend expectations.
+			var roleCodeVal interface{}
+			if v, ok := rMap["rolecode"]; ok && fmt.Sprint(v) != "" {
+				roleCodeVal = v
+			}
+			if roleCodeVal == nil || fmt.Sprint(roleCodeVal) == "" {
+				if v2, ok2 := rMap["role_code"]; ok2 && fmt.Sprint(v2) != "" {
+					roleCodeVal = v2
+				}
+			}
+
 			role := map[string]interface{}{
 				"id":                      rMap["id"],
 				"name":                    rMap["name"],
-				"role_code":               rMap["role_code"],
+				"role_code":               roleCodeVal,
+				"roleCode":                fmt.Sprint(roleCodeVal),
 				"description":             rMap["description"],
 				"startTime":               rMap["office_start_time_ist"],
 				"endTime":                 rMap["office_end_time_ist"],
 				"createdAt":               rMap["created_at"],
+				"editedBy":                rMap["edited_by"],
+				"editedAt":                rMap["edited_at"],
 				"status":                  rMap["status"],
 				"createdBy":               rMap["created_by"],
 				"roles_permission_status": rMap["roles_permission_status"],
@@ -215,7 +284,7 @@ func GetRolesPageData(db *sql.DB) http.HandlerFunc {
 func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID  string `json:"user_id"`
+			UserID  string   `json:"user_id"`
 			RoleIds []string `json:"roleIds"`
 			// ApprovedBy      string `json:"approved_by"`
 			ApprovalComment string `json:"approval_comment,omitempty"`
@@ -291,7 +360,7 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 		}
 		// Approve roles
 		if len(toApprove) > 0 {
-			appRows, err := db.Query(`UPDATE roles SET status = 'approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
+			appRows, err := db.Query(`UPDATE roles SET status = 'Approved', approved_by = $1, approved_at = NOW(), approval_comment = $2 WHERE id = ANY($3) RETURNING *`, approvedBy, req.ApprovalComment, pq.Array(toApprove))
 			if err == nil {
 				defer appRows.Close()
 				cols, _ := appRows.Columns()
@@ -319,11 +388,12 @@ func ApproveMultipleRoles(db *sql.DB) http.HandlerFunc {
 func DeleteRole(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID string `json:"user_id"`
-			ID     string `json:"id"`
+			UserID string   `json:"user_id"`
+			ID     string   `json:"id"`
+			Ids    []string `json:"ids"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || strings.TrimSpace(req.ID) == "" {
-			respondWithError(w, http.StatusBadRequest, "user_id and id are required")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || (strings.TrimSpace(req.ID) == "" && len(req.Ids) == 0) {
+			respondWithError(w, http.StatusBadRequest, "user_id and id/ids are required")
 			return
 		}
 		// Middleware: check business units
@@ -332,9 +402,28 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 		//     respondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleBusinessUnit)
 		//     return
 		// }
+		// Find editor for auditing
+		editor := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == req.UserID {
+				editor = s.Email
+				break
+			}
+		}
+		if editor == "" {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidSessionCapitalized)
+			return
+		}
+		// determine target ids (single or bulk)
+		targetIds := req.Ids
+		if len(targetIds) == 0 && strings.TrimSpace(req.ID) != "" {
+			targetIds = []string{req.ID}
+		}
+
 		rows, err := db.Query(
-			"UPDATE roles SET status = 'Delete-Approval' WHERE id = $1 RETURNING *",
-			req.ID,
+			"UPDATE roles SET status = 'Delete-Approval', edited_by = $1, edited_at = NOW() WHERE id = ANY($2) RETURNING *",
+			editor, pq.Array(targetIds),
 		)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
@@ -342,22 +431,22 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 		}
 		defer rows.Close()
 		cols, _ := rows.Columns()
-		if !rows.Next() {
-			respondWithError(w, http.StatusNotFound, "Role not found")
-			return
-		}
-		vals := make([]interface{}, len(cols))
-		valPtrs := make([]interface{}, len(cols))
-		for i := range vals {
-			valPtrs[i] = &vals[i]
-		}
-		rows.Scan(valPtrs...)
-		roleMap := map[string]interface{}{}
-		for i, col := range cols {
-			roleMap[col] = vals[i]
+		deleted := []map[string]interface{}{}
+		for rows.Next() {
+			vals := make([]interface{}, len(cols))
+			valPtrs := make([]interface{}, len(cols))
+			for i := range vals {
+				valPtrs[i] = &vals[i]
+			}
+			rows.Scan(valPtrs...)
+			roleMap := map[string]interface{}{}
+			for i, col := range cols {
+				roleMap[col] = vals[i]
+			}
+			deleted = append(deleted, roleMap)
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": roleMap})
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": deleted})
 	}
 }
 
@@ -365,8 +454,8 @@ func DeleteRole(db *sql.DB) http.HandlerFunc {
 func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID  string `json:"user_id"`
-			RoleIds []string  `json:"roleIds"`
+			UserID  string   `json:"user_id"`
+			RoleIds []string `json:"roleIds"`
 			// RejectedBy       string `json:"rejected_by"`
 			RejectionComment string `json:"rejection_comment"`
 		}
@@ -425,13 +514,32 @@ func RejectMultipleRoles(db *sql.DB) http.HandlerFunc {
 // Handler: Get just role names
 func GetJustRoles(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Optionally, get user_id from body for middleware
 		var req struct {
-			UserID string `json:"user_id"`
+			UserID     string `json:"user_id"`
+			EntityName string `json:"entity_name"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req) // Not required for this query
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		rows, err := db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+		// If entity_name supplied: only return roles that have at least one member
+		// (via user_roles) whose users.business_unit_name matches that entity.
+		var rows *sql.Rows
+		var err error
+		if req.EntityName != "" {
+			rows, err = db.Query(`
+				SELECT DISTINCT r.name
+				FROM roles r
+				WHERE (r.status = 'approved' OR r.status = 'Approved')
+				  AND EXISTS (
+					SELECT 1
+					FROM user_roles ur
+					JOIN user_entity_mappings uem ON uem.user_id = ur.user_id
+					WHERE ur.role_id = r.id
+					  AND uem.entity_name = $1
+				)
+			`, req.EntityName)
+		} else {
+			rows, err = db.Query("SELECT DISTINCT name FROM roles WHERE status = 'approved' OR status = 'Approved'")
+		}
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -556,6 +664,8 @@ func GetPendingRoles(db *sql.DB) http.HandlerFunc {
 				"startTime":               rMap["office_start_time_ist"],
 				"endTime":                 rMap["office_end_time_ist"],
 				"createdAt":               rMap["created_at"],
+				"editedBy":                rMap["edited_by"],
+				"editedAt":                rMap["edited_at"],
 				"status":                  rMap["status"],
 				"createdBy":               rMap["created_by"],
 				"roles_permission_status": rMap["roles_permission_status"],
@@ -594,6 +704,19 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, "Invalid id or user_id")
 			return
 		}
+
+		// Find editor email from active sessions; fall back to userID if not found
+		editor := ""
+		sessions := auth.GetActiveSessions()
+		for _, s := range sessions {
+			if s.UserID == userID {
+				editor = s.Email
+				break
+			}
+		}
+		if editor == "" {
+			editor = userID
+		}
 		// Middleware: check business units (uncomment if needed)
 		// buNames, ok := r.Context().Value(api.BusinessUnitsKey).([]string)
 		// if !ok || len(buNames) == 0 {
@@ -601,17 +724,45 @@ func UpdateRole(db *sql.DB) http.HandlerFunc {
 		//     return
 		// }
 		// Prepare fields for update
+		// Map frontend keys to DB column names and ignore unknown keys to avoid SQL errors
+		allowedMap := map[string][]string{
+			"name":                    {"name"},
+			"description":             {"description"},
+			"startTime":               {"office_start_time_ist"},
+			"endTime":                 {"office_end_time_ist"},
+			"office_start_time_ist":   {"office_start_time_ist"},
+			"office_end_time_ist":     {"office_end_time_ist"},
+			"status":                  {"status"},
+			"roles_permission_status": {"roles_permission_status"},
+			// support multiple role code column names (keep both in sync)
+			"roleCode":  {"role_code", "rolecode"},
+			"role_code": {"role_code", "rolecode"},
+			"rolecode":  {"role_code", "rolecode"},
+		}
+
 		fields := map[string]interface{}{}
 		for k, v := range req {
 			if k == "id" || k == "user_id" {
 				continue
 			}
-			if v != nil && fmt.Sprint(v) != "" {
-				fields[k] = v
+			if v == nil || fmt.Sprint(v) == "" {
+				continue
+			}
+			if dbCols, ok := allowedMap[k]; ok {
+				for _, col := range dbCols {
+					fields[col] = v
+				}
 			}
 		}
-		// Always set status to Awaiting-Approval
-		fields["status"] = constants.StatusCodeAwaitingApproval
+
+		// Always set status to Awaiting-Approval unless caller explicitly set status
+		if _, ok := fields["status"]; ok {
+			fields["status"] = constants.StatusCodeAwaitingApproval
+		}
+
+		// Set edited_by and edited_at for auditing
+		fields["edited_by"] = editor
+		fields["edited_at"] = time.Now()
 		if len(fields) == 0 {
 			respondWithError(w, http.StatusBadRequest, "No fields to update")
 			return

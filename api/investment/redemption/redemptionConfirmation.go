@@ -4,6 +4,7 @@ import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -164,6 +165,11 @@ func CreateRedemptionConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 
+		go func() {
+			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{confirmID}, "CREATE", userEmail)
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create", confirmID, payload.ToMap())
+		}()
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"redemption_confirm_id": confirmID,
 			"redemption_id":         req.RedemptionID,
@@ -309,6 +315,20 @@ func CreateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
+		createdConfirmIDs := make([]string, 0, len(results))
+		for _, res := range results {
+			if ok, _ := res[constants.ValueSuccess].(bool); ok {
+				if id, _ := res["redemption_confirm_id"].(string); id != "" {
+					createdConfirmIDs = append(createdConfirmIDs, id)
+				}
+			}
+		}
+		if len(createdConfirmIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, createdConfirmIDs, "CREATE", userEmail)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/create-bulk", createdConfirmIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -426,6 +446,11 @@ func UpdateRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func() {
+			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, []string{req.RedemptionConfirmID}, "UPDATE", userEmail)
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/update", req.RedemptionConfirmID, payload.ToMap())
+		}()
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"redemption_confirm_id": req.RedemptionConfirmID,
@@ -554,6 +579,20 @@ func UpdateRedemptionConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "redemption_confirm_id": row.RedemptionConfirmID, "requested": userEmail})
 		}
 
+		updatedConfirmIDs := make([]string, 0, len(results))
+		for _, res := range results {
+			if ok, _ := res[constants.ValueSuccess].(bool); ok {
+				if id, _ := res["redemption_confirm_id"].(string); id != "" {
+					updatedConfirmIDs = append(updatedConfirmIDs, id)
+				}
+			}
+		}
+		if len(updatedConfirmIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, updatedConfirmIDs, "UPDATE", userEmail)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/update-bulk", updatedConfirmIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -612,6 +651,16 @@ func DeleteRedemptionConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func() {
+			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, "DELETE_REQUEST", requestedBy)
+			corID := ""
+			if len(req.RedemptionConfirmIDs) > 0 {
+				corID = req.RedemptionConfirmIDs[0]
+			}
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/delete", corID, payload.ToMap())
+		}()
+
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.RedemptionConfirmIDs})
 	}
 }
@@ -884,6 +933,18 @@ func BulkApproveRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handle
 			response["confirmation_processing"] = confirmResult
 		}
 
+		if len(toApproveConfirmIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, toApproveConfirmIDs, "APPROVE", checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/approve", toApproveConfirmIDs[0], payload.ToMap())
+			}()
+		}
+		if len(deleteMasterIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, deleteMasterIDs, "DELETE", checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/approve", deleteMasterIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, true, "", response)
 	}
 }
@@ -984,6 +1045,12 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 			return
 		}
 
+		if len(req.RedemptionConfirmIDs) > 0 {
+			go func() {
+				payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmIDs, "REJECT", checkerBy)
+				catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/reject", req.RedemptionConfirmIDs[0], payload.ToMap())
+			}()
+		}
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
 	}
 }
@@ -995,163 +1062,177 @@ func BulkRejectRedemptionConfirmationActions(pgxPool *pgxpool.Pool) http.Handler
 func GetRedemptionConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := `
-			WITH latest_audit AS (
-				SELECT DISTINCT ON (a.redemption_confirm_id)
-					a.redemption_confirm_id,
-					a.actiontype,
-					a.processing_status,
-					a.action_id,
-					a.requested_by,
-					a.requested_at,
-					a.checker_by,
-					a.checker_at,
-					a.checker_comment,
-					a.reason
-				FROM investment.auditactionredemptionconfirmation a
-				ORDER BY a.redemption_confirm_id, a.requested_at DESC
-			),
-			history AS (
-				SELECT 
-					redemption_confirm_id,
-					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
-					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-				FROM investment.auditactionredemptionconfirmation
-				GROUP BY redemption_confirm_id
-			),
-			resolved_folio AS (
-				SELECT DISTINCT ON (i.redemption_id)
-					i.redemption_id,
-					f.folio_number,
-					f.folio_id::text AS folio_id_text
-				FROM investment.redemption_initiation i
-				LEFT JOIN investment.masterfolio f ON (
-					(f.folio_id::text = i.folio_id) OR 
-					(i.folio_id IS NOT NULL AND f.folio_number = i.folio_id)
-				)
-				ORDER BY i.redemption_id, f.folio_id
-			),
-			resolved_demat AS (
-				SELECT DISTINCT ON (i.redemption_id)
-					i.redemption_id,
-					d.demat_account_number,
-					d.demat_id::text AS demat_id_text
-				FROM investment.redemption_initiation i
-				LEFT JOIN investment.masterdemataccount d ON (
-					(d.demat_id::text = i.demat_id) OR 
-					(i.demat_id IS NOT NULL AND d.default_settlement_account = i.demat_id) OR 
-					(i.demat_id IS NOT NULL AND d.demat_account_number = i.demat_id)
-				)
-				ORDER BY i.redemption_id, d.demat_id
-			)
-			SELECT
-				m.redemption_confirm_id,
-				m.redemption_id,
-				m.old_redemption_id,
-				m.actual_nav,
-				m.old_actual_nav,
-				m.actual_units,
-				m.old_actual_units,
-				m.gross_proceeds,
-				m.old_gross_proceeds,
-				m.exit_load,
-				m.old_exit_load,
-				m.tds,
-				m.old_tds,
-				m.net_credited,
-				m.old_net_credited,
-				m.stt_charges,
-				m.old_stt_charges,
-				COALESCE(m.resolution_variance,'') AS resolution_variance,
-				COALESCE(m.old_resolution_variance,'') AS old_resolution_variance,
-				COALESCE(m.resolution_comment,'') AS resolution_comment,
-				COALESCE(m.old_resolution_comment,'') AS old_resolution_comment,
-				m.variance_proceeds,
-				m.old_variance_proceeds,
-				m.final_realised_capital_gain_loss,
-				m.old_final_realised_capital_gain_loss,
-				m.status,
-				m.old_status,
-				m.confirmed_by,
-				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
-				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
-				
-				-- initiation fields
-				TO_CHAR(i.requested_date, 'YYYY-MM-DD') AS initiation_requested_date,
-				i.entity_name AS initiation_entity_name,
-				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
-				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
-				COALESCE(s.internal_scheme_code,'') AS initiation_scheme_code,
-				COALESCE(s.isin,'') AS initiation_isin,
-				COALESCE(s.amc_name,'') AS initiation_amc_name,
-				COALESCE(rf.folio_number,'') AS initiation_folio_number,
-				COALESCE(rf.folio_id_text,'') AS initiation_folio_id,
-				COALESCE(rd.demat_account_number,'') AS initiation_demat_number,
-				COALESCE(rd.demat_id_text,'') AS initiation_demat_id,
-				COALESCE(i.by_amount,0) AS initiation_by_amount,
-				COALESCE(i.by_units,0) AS initiation_by_units,
-				COALESCE(l.actiontype,'') AS action_type,
-				COALESCE(l.processing_status,'') AS processing_status,
-				COALESCE(l.action_id::text,'') AS action_id,
-				COALESCE(l.requested_by,'') AS audit_requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				COALESCE(l.checker_comment,'') AS checker_comment,
-				COALESCE(l.reason,'') AS reason,
-				
-				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at,
-				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at,
-				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
-			FROM investment.redemption_confirmation m
-			LEFT JOIN latest_audit l ON l.redemption_confirm_id = m.redemption_confirm_id
-			LEFT JOIN history h ON h.redemption_confirm_id = m.redemption_confirm_id
-			LEFT JOIN investment.redemption_initiation i ON i.redemption_id = m.redemption_id
-			LEFT JOIN investment.masterscheme s ON (
-			    s.scheme_id::text = i.scheme_id
-			 OR s.scheme_name = i.scheme_id
-			 OR s.internal_scheme_code = i.scheme_id
-			 OR s.isin = i.scheme_id
-			)
-			LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
-			LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
-			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC
-		`
-
-		rows, err := pgxPool.Query(ctx, q)
+		out, err := fetchRedemptionConfirmationRows(ctx, pgxPool, nil)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
-		for rows.Next() {
-			vals, _ := rows.Values()
-			rec := make(map[string]interface{}, len(fields))
-			for i, f := range fields {
-				rec[string(f.Name)] = vals[i]
-			}
-			out = append(out, rec)
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
-			return
-		}
-
 		api.RespondWithPayload(w, true, "", out)
 	}
+}
+
+// fetchRedemptionConfirmationRows is the single source-of-truth query for redemption confirmations.
+// ids=nil → all non-deleted rows (GET behaviour).
+// ids!=nil → WHERE m.redemption_confirm_id = ANY($1) (payload builder filter).
+func fetchRedemptionConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	const baseSQL = `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (a.redemption_confirm_id)
+				a.redemption_confirm_id,
+				a.actiontype,
+				a.processing_status,
+				a.action_id,
+				a.requested_by,
+				a.requested_at,
+				a.checker_by,
+				a.checker_at,
+				a.checker_comment,
+				a.reason
+			FROM investment.auditactionredemptionconfirmation a
+			ORDER BY a.redemption_confirm_id, a.requested_at DESC
+		),
+		history AS (
+			SELECT 
+				redemption_confirm_id,
+				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.auditactionredemptionconfirmation
+			GROUP BY redemption_confirm_id
+		),
+		resolved_folio AS (
+			SELECT DISTINCT ON (i.redemption_id)
+				i.redemption_id,
+				f.folio_number,
+				f.folio_id::text AS folio_id_text
+			FROM investment.redemption_initiation i
+			LEFT JOIN investment.masterfolio f ON (
+				(f.folio_id::text = i.folio_id) OR 
+				(i.folio_id IS NOT NULL AND f.folio_number = i.folio_id)
+			)
+			ORDER BY i.redemption_id, f.folio_id
+		),
+		resolved_demat AS (
+			SELECT DISTINCT ON (i.redemption_id)
+				i.redemption_id,
+				d.demat_account_number,
+				d.demat_id::text AS demat_id_text
+			FROM investment.redemption_initiation i
+			LEFT JOIN investment.masterdemataccount d ON (
+				(d.demat_id::text = i.demat_id) OR 
+				(i.demat_id IS NOT NULL AND d.default_settlement_account = i.demat_id) OR 
+				(i.demat_id IS NOT NULL AND d.demat_account_number = i.demat_id)
+			)
+			ORDER BY i.redemption_id, d.demat_id
+		)
+		SELECT
+			m.redemption_confirm_id,
+			m.redemption_id,
+			m.old_redemption_id,
+			m.actual_nav,
+			m.old_actual_nav,
+			m.actual_units,
+			m.old_actual_units,
+			m.gross_proceeds,
+			m.old_gross_proceeds,
+			m.exit_load,
+			m.old_exit_load,
+			m.tds,
+			m.old_tds,
+			m.net_credited,
+			m.old_net_credited,
+			m.stt_charges,
+			m.old_stt_charges,
+			COALESCE(m.resolution_variance,'') AS resolution_variance,
+			COALESCE(m.old_resolution_variance,'') AS old_resolution_variance,
+			COALESCE(m.resolution_comment,'') AS resolution_comment,
+			COALESCE(m.old_resolution_comment,'') AS old_resolution_comment,
+			m.variance_proceeds,
+			m.old_variance_proceeds,
+			m.final_realised_capital_gain_loss,
+			m.old_final_realised_capital_gain_loss,
+			m.status,
+			m.old_status,
+			m.confirmed_by,
+			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
+			m.is_deleted,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+			
+			-- initiation fields
+			TO_CHAR(i.requested_date, 'YYYY-MM-DD') AS initiation_requested_date,
+			i.entity_name AS initiation_entity_name,
+			COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+			COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+			COALESCE(s.internal_scheme_code,'') AS initiation_scheme_code,
+			COALESCE(s.isin,'') AS initiation_isin,
+			COALESCE(s.amc_name,'') AS initiation_amc_name,
+			COALESCE(rf.folio_number,'') AS initiation_folio_number,
+			COALESCE(rf.folio_id_text,'') AS initiation_folio_id,
+			COALESCE(rd.demat_account_number,'') AS initiation_demat_number,
+			COALESCE(rd.demat_id_text,'') AS initiation_demat_id,
+			COALESCE(i.by_amount,0) AS initiation_by_amount,
+			COALESCE(i.by_units,0) AS initiation_by_units,
+			COALESCE(l.actiontype,'') AS action_type,
+			COALESCE(l.processing_status,'') AS processing_status,
+			COALESCE(l.action_id::text,'') AS action_id,
+			COALESCE(l.requested_by,'') AS audit_requested_by,
+			TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			COALESCE(l.checker_by,'') AS checker_by,
+			TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			COALESCE(l.checker_comment,'') AS checker_comment,
+			COALESCE(l.reason,'') AS reason,
+			
+			COALESCE(h.created_by,'') AS created_by,
+			COALESCE(h.created_at,'') AS created_at,
+			COALESCE(h.edited_by,'') AS edited_by,
+			COALESCE(h.edited_at,'') AS edited_at,
+			COALESCE(h.deleted_by,'') AS deleted_by,
+			COALESCE(h.deleted_at,'') AS deleted_at
+		FROM investment.redemption_confirmation m
+		LEFT JOIN latest_audit l ON l.redemption_confirm_id = m.redemption_confirm_id
+		LEFT JOIN history h ON h.redemption_confirm_id = m.redemption_confirm_id
+		LEFT JOIN investment.redemption_initiation i ON i.redemption_id = m.redemption_id
+		LEFT JOIN investment.masterscheme s ON (
+		    s.scheme_id::text = i.scheme_id
+		 OR s.scheme_name = i.scheme_id
+		 OR s.internal_scheme_code = i.scheme_id
+		 OR s.isin = i.scheme_id
+		)
+		LEFT JOIN resolved_folio rf ON rf.redemption_id = i.redemption_id
+		LEFT JOIN resolved_demat rd ON rd.redemption_id = i.redemption_id
+	`
+
+	var (
+		q    string
+		args []interface{}
+	)
+	if len(ids) > 0 {
+		q = baseSQL + " WHERE m.redemption_confirm_id = ANY($1) ORDER BY m.redemption_confirm_id"
+		args = []interface{}{ids}
+	} else {
+		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+	}
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	out := make([]map[string]interface{}, 0, 1000)
+	for rows.Next() {
+		vals, _ := rows.Values()
+		rec := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			rec[string(f.Name)] = vals[i]
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------
@@ -1792,6 +1873,15 @@ func ConfirmRedemption(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+
+		go func() {
+			payload := BuildRedemptionConfirmationNotifPayload(ctx, pgxPool, req.RedemptionConfirmationIDs, "CONFIRM", confirmedBy)
+			corID := ""
+			if len(req.RedemptionConfirmationIDs) > 0 {
+				corID = req.RedemptionConfirmationIDs[0]
+			}
+			catalog.TriggerNotification(ctx, pgxPool, "/investment/redemption/confirmation/confirm", corID, payload.ToMap())
+		}()
 
 		api.RespondWithPayload(w, true, "", result)
 	}

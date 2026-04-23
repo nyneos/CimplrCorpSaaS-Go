@@ -3,6 +3,7 @@ package landingpage
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/dash/ticker"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -699,58 +700,57 @@ func formatAmount(val float64) string {
 	return fmt.Sprintf("₹%.0f", val)
 }
 
-// Helper: Convert currency amount to INR using simplified spot rates
+// Helper: Convert currency amount to INR using the ticker package (live rates loader).
 func convertToINR(amount float64, currency string) float64 {
-	rates := map[string]float64{
-		// INR-based spot rates (example/fallback values)
-		"INR": 1.0,
-		"USD": 90.0,
-		"EUR": 98.0,
-		"GBP": 118.0,
-		"JPY": 0.67,
-		"AUD": 56.0,
-		"CAD": 67.0,
-		"CHF": 98.0,
-		"SGD": 67.0,
-		"HKD": 11.5,
-		"NZD": 50.0,
-		"AED": 24.5,
-		"SAR": 24.0,
-		"CNY": 12.8,
-		"KRW": 0.067,
-		"SEK": 8.5,
-		"NOK": 8.3,
-		"DKK": 13.1,
-		"RUB": 1.1,
-		"ZAR": 4.8,
+	if amount == 0 {
+		return 0
 	}
-
-	if rate, exists := rates[strings.ToUpper(currency)]; exists {
-		return amount * rate
+	cur := strings.ToUpper(strings.TrimSpace(currency))
+	// Use ticker.RateBetween to get INR per 1 unit of currency (i.e., amount * rate -> INR)
+	rate, err := ticker.RateBetween(cur, "INR")
+	if err != nil || rate == 0 {
+		// fallback: assume amount is already INR
+		return amount
 	}
-	// Default: assume amount already in INR
-	return amount
+	return amount * rate
 }
 
-// Helper: Return top 20 currencies India commonly trades with example spot rates
+// Helper: Return top currencies (INR-based spot rates) using the ticker loader.
 func getTopTradeCurrencies() []NetPosition {
-	// fixed list - can be replaced with live rates later
-	top := []struct {
-		c string
-		r float64
-	}{
-		{"USD", 90.0}, {"EUR", 98.0}, {"GBP", 118.0}, {"JPY", 0.67}, {"AUD", 56.0},
-		{"CAD", 67.0}, {"CHF", 98.0}, {"SGD", 67.0}, {"HKD", 11.5}, {"NZD", 50.0},
-		{"AED", 24.5}, {"SAR", 24.0}, {"CNY", 12.8}, {"KRW", 0.067}, {"SEK", 8.5},
-		{"NOK", 8.3}, {"DKK", 13.1}, {"RUB", 1.1}, {"ZAR", 4.8}, {"INR", 1.0},
+	// Request full-rate map relative to INR
+	rates, err := ticker.RatesForBase("INR")
+	if err != nil || len(rates) == 0 {
+		// fallback to a small static list to avoid empty responses
+		fallback := []NetPosition{{Currency: "INR", Amount: "₹1.0000"}, {Currency: "USD", Amount: "₹83.1000"}, {Currency: "EUR", Amount: "₹90.2000"}}
+		return fallback
 	}
 
-	res := make([]NetPosition, 0, len(top))
-	for _, t := range top {
-		res = append(res, NetPosition{
-			Currency: t.c,
-			Amount:   fmt.Sprintf("₹%.4f", t.r),
-		})
+	// Pick a stable ordering (common trade currencies) if present, else use all
+	preferred := []string{"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "SGD", "HKD", "NZD", "AED", "SAR", "CNY", "KRW", "SEK", "INR"}
+	res := []NetPosition{}
+	for _, c := range preferred {
+		if r, ok := rates[c]; ok {
+			res = append(res, NetPosition{Currency: c, Amount: fmt.Sprintf("₹%.4f", r)})
+		}
+	}
+	// if we didn't find many preferred currencies, include remaining ones
+	if len(res) < 10 {
+		for c, r := range rates {
+			found := false
+			for _, ex := range res {
+				if ex.Currency == c {
+					found = true
+					break
+				}
+			}
+			if !found {
+				res = append(res, NetPosition{Currency: c, Amount: fmt.Sprintf("₹%.4f", r)})
+			}
+		}
+	}
+	// limit to 20
+	if len(res) > 20 {
+		res = res[:20]
 	}
 	return res
 }

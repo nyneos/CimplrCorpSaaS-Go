@@ -103,42 +103,38 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Query: fetch entity, bank, account number, currency, balance for status=Approved, filtered by allowed BUs
+		// Query: fetch latest approved bank balance per account from bank_balances_manual.
+		// This is the source of truth for balances — NOT bank_statements, which are raw uploads.
 		rows, err := pgxPool.Query(ctx, `
 			WITH latest_approved AS (
-			    SELECT s.account_number,
-			           MAX(s.statement_period_end) AS maxdate
-			    FROM cimplrcorpsaas.bank_statements s
-			    JOIN (
-			        SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status, requested_at
-			        FROM cimplrcorpsaas.auditactionbankstatement
-			        ORDER BY bankstatementid, requested_at DESC
-			    ) a ON a.bankstatementid = s.bank_statement_id
-			    WHERE a.processing_status = 'APPROVED'
-			    GROUP BY s.account_number
+				SELECT DISTINCT ON (bbm.account_no)
+					bbm.account_no,
+					bbm.opening_balance,
+					bbm.closing_balance,
+					bbm.currency_code,
+					bbm.as_of_date
+				FROM bank_balances_manual bbm
+				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				JOIN auditactionbankbalances a ON a.balance_id = bbm.balance_id
+				WHERE a.processing_status = 'APPROVED'
+					AND mba.is_deleted = false
+					AND mba.entity_id = ANY($1)
+					AND bbm.account_no = ANY($2)
+				ORDER BY bbm.account_no, bbm.as_of_date DESC, a.requested_at DESC
 			)
-			SELECT 
-			       e.entity_name, 
-			       b.bank_name, 
-			       mba.account_number, 
-			       mba.currencycode, 
-			       s.opening_balance,
-			       s.closing_balance
-			FROM cimplrcorpsaas.bank_statements s
-			JOIN masterbankaccount mba ON s.account_number = mba.account_number
+			SELECT
+				e.entity_name,
+				b.bank_name,
+				lab.account_no,
+				lab.currency_code,
+				lab.opening_balance,
+				lab.closing_balance
+			FROM latest_approved lab
+			JOIN masterbankaccount mba ON lab.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			JOIN masterbank b ON mba.bank_id = b.bank_id
-			JOIN (
-			    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-			    FROM cimplrcorpsaas.auditactionbankstatement
-			    ORDER BY bankstatementid, requested_at DESC
-			) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
-			JOIN latest_approved la ON la.account_number = s.account_number AND la.maxdate = s.statement_period_end
-			WHERE mba.is_deleted = false
-			  AND mba.entity_id = ANY($1)
-			  AND mba.account_number = ANY($2)
-			  AND lower(trim(b.bank_name)) = ANY($3)
-			  AND upper(trim(mba.currencycode)) = ANY($4)
+			WHERE lower(trim(b.bank_name)) = ANY($3)
+			  AND upper(trim(COALESCE(lab.currency_code, ''))) = ANY($4)
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -171,33 +167,45 @@ func GetCurrencyWiseDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
-		// Day-wise balances (per statement end date, per account)
+		// Day-wise balances: pull from bank_balances_manual (approved only) — NOT from bank_statements.
 		dayRows, err := pgxPool.Query(ctx, `
-			WITH approved AS (
-			    SELECT s.statement_period_end AS day,
-			           e.entity_name,
-			           b.bank_name,
-			           mba.account_number,
-			           mba.currencycode,
-			           s.closing_balance
-			    FROM cimplrcorpsaas.bank_statements s
-			    JOIN masterbankaccount mba ON s.account_number = mba.account_number
-			    JOIN masterentitycash e ON mba.entity_id = e.entity_id
-			    JOIN masterbank b ON mba.bank_id = b.bank_id
-			    JOIN (
-			        SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-			        FROM cimplrcorpsaas.auditactionbankstatement
-			        ORDER BY bankstatementid, requested_at DESC
-			    ) a ON a.bankstatementid = s.bank_statement_id AND a.processing_status = 'APPROVED'
-			    WHERE mba.is_deleted = false
-			      AND mba.entity_id = ANY($1)
-			      AND mba.account_number = ANY($2)
-			      AND lower(trim(b.bank_name)) = ANY($3)
-			      AND upper(trim(mba.currencycode)) = ANY($4)
+			WITH latest_approved_action AS (
+				SELECT DISTINCT ON (balance_id)
+					balance_id,
+					requested_at
+				FROM public.auditactionbankbalances
+				WHERE processing_status = 'APPROVED'
+				ORDER BY balance_id, requested_at DESC
+			),
+			rows_scoped AS (
+				SELECT
+					COALESCE(bbm.as_of_date, laa.requested_at::date) AS day,
+					e.entity_name,
+					b.bank_name,
+					bbm.account_no,
+					bbm.currency_code,
+					bbm.closing_balance,
+					bbm.balance_id
+				FROM public.bank_balances_manual bbm
+				JOIN latest_approved_action laa ON laa.balance_id = bbm.balance_id
+				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				JOIN masterentitycash e ON mba.entity_id = e.entity_id
+				JOIN masterbank b ON mba.bank_id = b.bank_id
+				WHERE mba.is_deleted = false
+					AND mba.entity_id = ANY($1)
+					AND bbm.account_no = ANY($2)
+					AND lower(trim(b.bank_name)) = ANY($3)
+					AND upper(trim(COALESCE(bbm.currency_code, ''))) = ANY($4)
 			)
-			SELECT day, entity_name, bank_name, account_number, currencycode, closing_balance
-			FROM approved
-			ORDER BY day DESC, entity_name, bank_name, account_number;
+			SELECT DISTINCT ON (account_no, day)
+				day,
+				entity_name,
+				bank_name,
+				account_no,
+				currency_code,
+				closing_balance
+			FROM rows_scoped
+			ORDER BY account_no, day DESC, balance_id DESC;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err == nil {
 			for dayRows.Next() {
@@ -280,32 +288,36 @@ func GetApprovedBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		----------------------------------------------------------*/
 
 		rows, err := pgxPool.Query(ctx, `
-			WITH latest_approved_balance AS (
-				SELECT DISTINCT ON (balance_id)
-					   balance_id,
-					   processing_status
-				FROM public.auditactionbankbalances
-				ORDER BY balance_id, requested_at DESC
+			WITH latest_approved_balances AS (
+				SELECT DISTINCT ON (bbm.account_no) 
+					bbm.balance_id,
+					bbm.account_no,
+					bbm.closing_balance,
+					bbm.currency_code,
+					bbm.as_of_date,
+					bbm.as_of_time
+				FROM bank_balances_manual bbm
+				JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				JOIN auditactionbankbalances a ON a.balance_id = bbm.balance_id
+				WHERE a.processing_status = 'APPROVED'
+					AND mba.is_deleted = false
+					AND mba.entity_id = ANY($1)
+					AND bbm.account_no = ANY($2)
+				ORDER BY bbm.account_no, bbm.as_of_date DESC, a.requested_at DESC
 			)
 			SELECT
 				e.entity_name,
 				b.bank_name,
-				bbm.account_no,
-				bbm.currency_code,
-				bbm.closing_balance
-			FROM public.bank_balances_manual bbm
-			JOIN latest_approved_balance lab
-			     ON lab.balance_id = bbm.balance_id
-			    AND lab.processing_status = 'APPROVED'
-			JOIN masterbankaccount mba ON bbm.account_no = mba.account_number
+				lab.account_no,
+				lab.currency_code,
+				lab.closing_balance
+			FROM latest_approved_balances lab
+			JOIN masterbankaccount mba ON lab.account_no = mba.account_number
 			JOIN masterentitycash e ON mba.entity_id = e.entity_id
 			JOIN masterbank b ON mba.bank_id = b.bank_id
-			WHERE mba.is_deleted = false
-			  AND mba.entity_id = ANY($1)
-			  AND bbm.account_no = ANY($2)
-			  AND lower(trim(b.bank_name)) = ANY($3)
-			  AND upper(trim(COALESCE(bbm.currency_code,''))) = ANY($4)
-			ORDER BY e.entity_name, b.bank_name, bbm.account_no;
+			WHERE lower(trim(b.bank_name)) = ANY($3)
+			  AND upper(trim(COALESCE(lab.currency_code,''))) = ANY($4)
+			ORDER BY e.entity_name, b.bank_name, lab.account_no;
 		`, allowedEntityIDs, allowedAccountNumbers, allowedBanksNorm, allowedCurrenciesNorm)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)

@@ -3,6 +3,7 @@ package investment
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,7 +25,20 @@ func (s *InvestmentService) Name() string {
 }
 
 func (s *InvestmentService) Start() error {
-	go StartInvestmentService(s.pool, s.db)
+	port := "7143"
+	if s.cfg != nil {
+		if v, ok := s.cfg["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartInvestmentService(s.pool, s.db, port)
 	return nil
 }
 

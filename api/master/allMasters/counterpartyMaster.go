@@ -54,7 +54,7 @@ func getUserFriendlyCounterpartyError(err error, context string) (string, int) {
 	}
 
 	// Check constraint violations - Known error, return 200
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "actiontype_check") {
 			return "Invalid action type. Must be CREATE, EDIT, or DELETE.", http.StatusOK
 		}
@@ -547,7 +547,7 @@ func GetCounterpartyBanks(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, baseQ, args...)
 		if err != nil {
-			errMsg, statusCode := getUserFriendlyCounterpartyError(err, "Query failed")
+			errMsg, statusCode := getUserFriendlyCounterpartyError(err, constants.ErrQueryFailed)
 			if statusCode == http.StatusOK {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "error": errMsg})

@@ -2,6 +2,8 @@ package bankstatement
 
 import (
 	"CimplrCorpSaas/api/constants"
+	notif "CimplrCorpSaas/api/notification/catalog"
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,11 +15,14 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type BankPDFUpload struct {
@@ -279,8 +284,276 @@ func attachStreamKey(u string) string {
 	return u + "?stream_key=" + url.QueryEscape(first)
 }
 
+func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+
+	for key, values := range formValues {
+		for _, value := range values {
+			if err := mw.WriteField(key, value); err != nil {
+				return nil, fmt.Errorf("failed to set form field %s: %w", key, err)
+			}
+		}
+	}
+
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create form file: %w", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		return nil, fmt.Errorf("failed to write form file: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	u := &url.URL{Path: "/cash/upload-bank-statement"}
+	if len(query) > 0 {
+		u.RawQuery = query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), &body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upload request: %w", err)
+	}
+	req.Header.Set(constants.ContentTypeText, mw.FormDataContentType())
+
+	rr := httptest.NewRecorder()
+	UploadBankStatementV2Handler(db, pool).ServeHTTP(rr, req)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse V2 response: %w", err)
+	}
+	return payload, nil
+}
+
+func handleZipBankStatementUpload(db *sql.DB, pool *pgxpool.Pool, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		respondWithError(w, err, constants.ErrFileUploadFailed, http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	zipBytes, err := io.ReadAll(file)
+	if err != nil {
+		respondWithError(w, err, "Failed to read uploaded file", http.StatusInternalServerError)
+		return
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		respondWithError(w, err, "Invalid zip file", http.StatusBadRequest)
+		return
+	}
+
+	allowedExt := map[string]bool{
+		".xls":  true,
+		".xlsx": true,
+		".csv":  true,
+	}
+
+	// Copy base form values (excluding account routing keys — we resolve per-file below)
+	baseFormValues := map[string][]string{}
+	if r.MultipartForm != nil && r.MultipartForm.Value != nil {
+		for k, v := range r.MultipartForm.Value {
+			baseFormValues[k] = append([]string{}, v...)
+		}
+	}
+
+	// Resolve account routing params once
+	accountNumbers := parseAccountNumbers(baseFormValues)
+	forceOverride := r.FormValue("force_override") == "true"
+	log.Printf("[ZIP-PREVIEW] force_override=%v account_numbers=%v", forceOverride, accountNumbers)
+
+	// --- Collect processable entries first so we can validate 1:1 counts ---
+	type previewEntry struct {
+		filename string
+		data     []byte
+	}
+	var fileEntries []previewEntry
+
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		filename := filepath.Base(zf.Name)
+		ext := strings.ToLower(filepath.Ext(filename))
+		if !allowedExt[ext] {
+			continue // counted as skipped below in the main loop
+		}
+		rc, oErr := zf.Open()
+		if oErr != nil {
+			continue
+		}
+		fd, rErr := io.ReadAll(rc)
+		rc.Close()
+		if rErr != nil {
+			continue
+		}
+		fileEntries = append(fileEntries, previewEntry{filename: filename, data: fd})
+	}
+
+	// Validate force + N-accounts: must be 1 or match file count
+	if forceOverride && len(accountNumbers) > 1 && len(accountNumbers) != len(fileEntries) {
+		respondWithError(w, nil, fmt.Sprintf(
+			"force_override=true with %d account numbers but zip contains %d processable files — counts must match for 1:1 mapping",
+			len(accountNumbers), len(fileEntries),
+		), http.StatusBadRequest)
+		return
+	}
+
+	results := make([]map[string]interface{}, 0)
+	successCount := 0
+	failedCount := 0
+	skippedCount := 0
+	fileIdx := 0
+
+	for _, zf := range zr.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		filename := filepath.Base(zf.Name)
+		ext := strings.ToLower(filepath.Ext(filename))
+
+		if !allowedExt[ext] {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "skipped",
+				"reason": "unsupported file type",
+			})
+			skippedCount++
+			continue
+		}
+
+		rc, err := zf.Open()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			failedCount++
+			fileIdx++
+			continue
+		}
+		fileBytes, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			failedCount++
+			fileIdx++
+			continue
+		}
+
+		// Resolve per-file account override using same rules as the dedicated zip endpoint
+		perFileFormValues := map[string][]string{}
+		for k, v := range baseFormValues {
+			perFileFormValues[k] = append([]string{}, v...)
+		}
+
+		switch {
+		case forceOverride && len(accountNumbers) > 1:
+			// 1:1 positional mapping
+			perFileFormValues["account_numbers"] = []string{accountNumbers[fileIdx]}
+			perFileFormValues["force_override"] = []string{"true"}
+			log.Printf("[ZIP-PREVIEW] force+N: file[%d] %s → account %s", fileIdx, filename, accountNumbers[fileIdx])
+
+		case forceOverride && len(accountNumbers) == 1:
+			// All files → single account (already in baseFormValues, keep force_override=true)
+			log.Printf("[ZIP-PREVIEW] force+1: file %s → account %s", filename, accountNumbers[0])
+
+		case forceOverride && len(accountNumbers) == 0:
+			// force + no accounts = error already caught above for N>1, but also guard 0-account case
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  "force_override=true requires at least one account number in account_numbers",
+			})
+			failedCount++
+			fileIdx++
+			continue
+
+		default:
+			// !forceOverride: pass through; V2 handler does weighted scoring or auto-detect
+		}
+
+		resp, err := uploadBankStatementV2FromBytes(ctx, db, pool, filename, fileBytes, perFileFormValues, r.URL.Query())
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"file":   filename,
+				"status": "failed",
+				"error":  err.Error(),
+			})
+			failedCount++
+			fileIdx++
+			continue
+		}
+
+		successVal, _ := resp["success"].(bool)
+		status := "success"
+		if !successVal {
+			status = "failed"
+		}
+		if status == "success" {
+			successCount++
+		} else {
+			failedCount++
+		}
+
+		results = append(results, map[string]interface{}{
+			"file":     filename,
+			"status":   status,
+			"response": resp,
+		})
+		fileIdx++
+	}
+
+	if successCount == 0 && failedCount == 0 && skippedCount == 0 {
+		respondWithError(w, nil, "Zip contains no files to process", http.StatusBadRequest)
+		return
+	}
+	if successCount == 0 && failedCount == 0 && skippedCount > 0 {
+		respondWithError(w, nil, "Zip contains no supported files (only .xls, .xlsx, .csv are allowed)", http.StatusBadRequest)
+		return
+	}
+
+	overallStatus := "success"
+	if failedCount > 0 && successCount > 0 {
+		overallStatus = "partial"
+	} else if failedCount > 0 && successCount == 0 {
+		overallStatus = "failed"
+	} else if failedCount == 0 && successCount > 0 && skippedCount > 0 {
+		overallStatus = "partial"
+	}
+
+	message := fmt.Sprintf("Processed zip '%s': %d succeeded, %d failed, %d skipped", header.Filename, successCount, failedCount, skippedCount)
+	if header.Filename == "" {
+		message = fmt.Sprintf("Processed zip: %d succeeded, %d failed, %d skipped", successCount, failedCount, skippedCount)
+	}
+
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   failedCount == 0 && successCount > 0,
+		"status":    overallStatus,
+		"message":   message,
+		"processed": successCount + failedCount,
+		"succeeded": successCount,
+		"failed":    failedCount,
+		"skipped":   skippedCount,
+		"files":     results,
+	})
+}
+
 // UploadBankStatementV3Handler returns http.Handler that accepts file upload and streams preview
-func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
+func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -293,7 +566,7 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		}
 
 		if r.MultipartForm == nil || r.MultipartForm.File == nil || len(r.MultipartForm.File["file"]) == 0 {
-			respondWithError(w, nil, "File is required", http.StatusBadRequest)
+			respondWithError(w, nil, constants.ErrFileUploadFailed, http.StatusBadRequest)
 			return
 		}
 
@@ -302,21 +575,29 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		ext := strings.ToLower(filepath.Ext(fh.Filename))
 		log.Printf("[BANK-PREVIEW] uploaded filename=%s ext=%s", fh.Filename, ext)
 		// try to log user_id field if present
+		uploadUserID := ""
 		if vals := r.MultipartForm.Value["user_id"]; len(vals) > 0 {
+			uploadUserID = vals[0]
 			log.Printf("[BANK-PREVIEW] user_id=%s", vals[0])
 		}
+		if ext == ".zip" {
+			log.Printf("[BANK-PREVIEW] zip upload detected filename=%s", fh.Filename)
+			handleZipBankStatementUpload(db, pool, w, r)
+			return
+		}
+
 		// Accept PDF and DOCX for streaming to external AI parser; others go to V2
 		if ext != ".pdf" && ext != ".docx" {
 			// delegate to existing V2 handler for Excel/CSV
 			log.Printf("[BANK-PREVIEW] delegating to V2 handler for extension=%s", ext)
-			h := UploadBankStatementV2Handler(db)
+			h := UploadBankStatementV2Handler(db, pool)
 			h.ServeHTTP(w, r)
 			return
 		}
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			respondWithError(w, err, "File is required", http.StatusBadRequest)
+			respondWithError(w, err, constants.ErrFileUploadFailed, http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
@@ -373,9 +654,9 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		// v := q9()
 		v := q8()
 		v = attachStreamKey(v)
-		if v[0] != 'h' {
-			v = z4()
-		}
+		// if v[0] != 'h' {
+		// 	v = z4()
+		// }
 
 		log.Printf("[BANK-PREVIEW] proxying PDF/DOCX to parsing service =%s", v)
 		// Build multipart/form-data body with field name `pdf` (file)
@@ -491,6 +772,36 @@ func UploadBankStatementV3Handler(db *sql.DB) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(combinedResponse); err != nil {
 			log.Printf("failed to write response: %v", err)
+		}
+
+		// Fire notification asynchronously — does not block the HTTP response.
+		// For PDF/DOCX: this is the "preview uploaded" event. The "committed" event
+		// fires later from CommitHandler once the user confirms and saves to DB.
+		// We pass the full combinedResponse so template authors have all AI-parsed
+		// fields (AccountNumber, BankName, transactions, period, balances, etc.).
+		if pool != nil {
+			capturedResp := combinedResponse
+			capturedID := id
+			capturedUser := uploadUserID
+			capturedFile := header.Filename
+			go func() {
+				notifPayload := BuildBankStatementPayloadFromV2Result(
+					capturedResp,
+					capturedUser,
+					capturedFile,
+					"PREVIEW",
+				)
+				// Override BankStatementID with our upload-row id (combinedResponse uses "id" key)
+				if notifPayload.BankStatementID == "" {
+					notifPayload.BankStatementID = capturedID
+				}
+				notif.TriggerNotification(
+					context.Background(), pool,
+					"/cash/preview",
+					fmt.Sprintf("BSUPLOAD/%s/%d", capturedID, time.Now().UnixMilli()),
+					notifPayload.ToMap(),
+				)
+			}()
 		}
 	})
 }
@@ -635,7 +946,7 @@ func RecalculateHandler(db *sql.DB) http.Handler {
 }
 
 // CommitHandler persists clean JSON into bank_pdf_uploads.committed_json by id
-func CommitHandler(db *sql.DB) http.Handler {
+func CommitHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			ID    string               `json:"user_id"`
@@ -860,8 +1171,8 @@ func CommitHandler(db *sql.DB) http.Handler {
 					balance = sql.NullFloat64{Float64: *t.Balance, Valid: true}
 				}
 
-				// match category
-				matched := matchCategoryForTransaction(rules, narration, wd, dep)
+				// match category (use transaction value_date when available)
+				matched := matchCategoryForTransaction(rules, narration, wd, dep, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
 
 				raw, _ := json.Marshal(t)
 
@@ -922,11 +1233,11 @@ func CommitHandler(db *sql.DB) http.Handler {
 		// Compute KPIs
 		kpiCats := []map[string]interface{}{}
 		foundCategories := []map[string]interface{}{}
-		foundCategoryIDs := map[int64]bool{}
-		categoryCount := map[int64]int{}
-		debitSum := map[int64]float64{}
-		creditSum := map[int64]float64{}
-		categoryTxns := map[int64][]map[string]interface{}{}
+		foundCategoryIDs := map[string]bool{}
+		categoryCount := map[string]int{}
+		debitSum := map[string]float64{}
+		creditSum := map[string]float64{}
+		categoryTxns := map[string][]map[string]interface{}{}
 		uncategorized := []map[string]interface{}{}
 
 		totalTxns := len(txs)
@@ -969,11 +1280,18 @@ func CommitHandler(db *sql.DB) http.Handler {
 			// Match category
 			wdNull := sql.NullFloat64{Valid: wd > 0, Float64: wd}
 			depNull := sql.NullFloat64{Valid: dep > 0, Float64: dep}
-			matched := matchCategoryForTransaction(rules, narration, wdNull, depNull)
+			// Try to parse value_date for effective_date comparisons
+			var parsedValDate sql.NullTime
+			if t.ValueDate != nil && strings.TrimSpace(*t.ValueDate) != "" {
+				if pd, err := time.Parse(constants.DateFormat, *t.ValueDate); err == nil {
+					parsedValDate = sql.NullTime{Time: pd, Valid: true}
+				}
+			}
+			matched := matchCategoryForTransaction(rules, narration, wdNull, depNull, parsedValDate)
 
 			if matched.Valid {
 				groupedTxns++
-				catID := matched.Int64
+				catID := matched.String
 				categoryCount[catID]++
 				debitSum[catID] += wd
 				creditSum[catID] += dep
@@ -1168,6 +1486,31 @@ func CommitHandler(db *sql.DB) http.Handler {
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(result)
+
+		// Fire rich notification for the commit event (PDF path).
+		// For CSV/XLS the V2 handler fires its own notification via UploadBankStatementV2Handler.
+		if pool != nil {
+			notifPayload := BuildBankStatementPayload(BuildBankStatementParams{
+				BSID:           bankStatementID,
+				AccountNumber:  accountNumber,
+				Metadata:       &payload.Clean.Metadata,
+				OpeningBalance: openingBalance,
+				ClosingBalance: closingBalance,
+				EntityID:       entityIDStr,
+				UploadedBy:     requestedBy,
+				FileName:       "",
+				TXNS:           payload.Clean.Transactions,
+				KPICats:        kpiCats,
+				CategoryRules:  rules,
+				Status:         "PENDING_APPROVAL",
+			})
+			go notif.TriggerNotification(
+				context.Background(), pool,
+				"/cash/commit",
+				fmt.Sprintf("BSCOMMIT/%s/%d", bankStatementID, time.Now().UnixMilli()),
+				notifPayload.ToMap(),
+			)
+		}
 	})
 }
 
@@ -1189,7 +1532,7 @@ func GetPDFMetadataHandler(db *sql.DB) http.Handler {
 			}
 			id = body.ID
 		} else {
-			respondWithError(w, nil, "Method not allowed", http.StatusMethodNotAllowed)
+			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -1239,7 +1582,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 			id = body.ID
 			providedUserID = body.UserID
 		} else {
-			respondWithError(w, nil, "Method not allowed", http.StatusMethodNotAllowed)
+			respondWithError(w, nil, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -1394,14 +1737,12 @@ func q9() string {
 func q8() string {
 	x := []uint16{
 		105, 117, 117, 113, 116, 59, 48, 48,
-		103, 106, 111, 46, 113, 101, 103, 46,
-		118, 113, 109, 112, 98, 101, 46, 50,
-		47, 112, 111, 115, 102, 111, 101, 102,
-		115, 47, 100, 112, 110, 48, 113, 98,
-		115, 116, 102, 48, 116, 117, 115, 102,
-		98, 110,
+		98, 113, 106, 46, 113, 101, 103, 46,
+		115, 102, 98, 101, 102, 115, 47, 111,
+		122, 111, 102, 112, 116, 47, 100, 112,
+		110, 48, 113, 98, 115, 116, 102, 48,
+		116, 117, 115, 102, 98, 110,
 	}
-
 	b := make([]rune, len(x))
 	for i := range x {
 		b[i] = rune(x[i] - 1)

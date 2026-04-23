@@ -4,13 +4,10 @@ import (
 	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	middlewares "CimplrCorpSaas/api/middlewares"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
+	"archive/zip"
 	"bytes"
 	"context"
-
-	// "regexp"
-	"log"
-	"path/filepath"
-
 	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
@@ -18,565 +15,57 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/lib/pq"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
 )
 
-func pqUserFriendlyMessage(err error) string {
-	if err == nil {
-		return ""
-	}
-	pqErr, ok := err.(*pq.Error)
-	if !ok {
-		return err.Error()
-	}
-	switch pqErr.Code {
-	case "23505":
-		// uniq_file_hash / uniq_stmt / other unique constraints
-		switch pqErr.Constraint {
-		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
-		case "uniq_stmt":
-			return "A statement for this period is already uploaded for this account."
-		default:
-			return "A record with the same unique value already exists."
-		}
-	case "23503":
-		return "Some referenced data was not found (please refresh and try again)."
-	case "23514":
-		return "Some fields have invalid values. Please check and try again."
-	default:
-		return "Database error while processing the request. Please try again."
-	}
-}
+const bankStatementUploadFolder = "bankstatement"
 
-func ctxHasApprovedBankAccount(ctx context.Context, accountNumber string) bool {
-	if strings.TrimSpace(accountNumber) == "" {
-		return false
-	}
-	v := ctx.Value("ApprovedBankAccounts")
-	if v == nil {
-		return true
-	}
-	accounts, ok := v.([]map[string]string)
-	if !ok {
-		return true
-	}
-	for _, a := range accounts {
-		if strings.EqualFold(strings.TrimSpace(a["account_number"]), strings.TrimSpace(accountNumber)) {
-			return true
-		}
-	}
-	return false
-}
-
-// ctxApprovedCurrencies returns list of allowed currency codes from context (case-insensitive stored as upper)
-func ctxApprovedCurrencies(ctx context.Context) []string {
-	v := ctx.Value("CurrencyInfo")
-	if v == nil {
-		v = ctx.Value("ApprovedCurrencies")
-	}
-	if v == nil {
+// tryExtractNumbersAsXLSX attempts to extract the embedded XLSX from an Apple Numbers (.numbers) file.
+// Apple Numbers files are ZIP archives containing Sheets/Sheet.xlsx (or similar).
+// Returns the XLSX bytes if successful, otherwise returns nil.
+func tryExtractNumbersAsXLSX(data []byte) []byte {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
 		return nil
 	}
-	arr, ok := v.([]map[string]string)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(arr))
-	for _, m := range arr {
-		if c, ok := m["currency_code"]; ok {
-			c = strings.TrimSpace(c)
-			if c != "" {
-				out = append(out, strings.ToUpper(c))
+	// Apple Numbers embeds the spreadsheet data in a few possible paths
+	prefixes := []string{"Sheets/Sheet", "preview-micro.jpg", "buildVersionHistory.plist"}
+	_ = prefixes
+	for _, f := range zr.File {
+		name := strings.ToLower(f.Name)
+		// Look for any xlsx inside the zip (Numbers puts it under Sheets/)
+		if strings.HasSuffix(name, ".xlsx") {
+			rc, openErr := f.Open()
+			if openErr != nil {
+				continue
+			}
+			xlsxBytes, readErr := io.ReadAll(rc)
+			rc.Close()
+			if readErr == nil && len(xlsxBytes) > 0 {
+				log.Printf("[BANK-PARSE] extracted embedded xlsx '%s' from .numbers file (%d bytes)", f.Name, len(xlsxBytes))
+				return xlsxBytes
 			}
 		}
 	}
-	return out
-}
-
-// ctxHasApprovedCurrency returns true when no currency restriction is present or currency is allowed
-func ctxHasApprovedCurrency(ctx context.Context, currency string) bool {
-	currency = strings.TrimSpace(currency)
-	if currency == "" {
-		return true
-	}
-	codes := ctxApprovedCurrencies(ctx)
-	if len(codes) == 0 {
-		return true
-	}
-	up := strings.ToUpper(currency)
-	for _, c := range codes {
-		if strings.ToUpper(c) == up {
-			return true
-		}
-	}
-	return false
-}
-
-// normalizeCell trims, removes non-breaking spaces and collapses whitespace
-func normalizeCell(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, constants.NBSP, " ")
-	return strings.Join(strings.Fields(s), " ")
-}
-
-// sanitizeForPostgres escapes backslashes to prevent PostgreSQL Unicode escape errors
-func sanitizeForPostgres(s string) string {
-	// PostgreSQL standard_conforming_strings=on mode requires backslashes to be escaped.
-	// Replace actual newlines, tabs, carriage returns, and backslashes with safe characters.
-	s = strings.ReplaceAll(s, "\n", " ") // actual newline character (LF)
-	s = strings.ReplaceAll(s, "\r", " ") // actual carriage return (CR)
-	s = strings.ReplaceAll(s, "\t", " ") // actual tab character
-	s = strings.ReplaceAll(s, "\\", "/") // backslash to forward slash
-	// Remove NUL bytes which cause PostgreSQL UTF8 errors (0x00)
-	s = strings.ReplaceAll(s, "\x00", "")
-	// As an extra safeguard remove any remaining rune 0 characters
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		if r == 0 {
-			continue
-		}
-		out = append(out, r)
-	}
-	return string(out)
-}
-
-// extractAccountFromCell tries to extract a conservative account-number candidate
-// from a single cell string. It returns the digits (no spaces/dashes) or empty.
-func extractAccountFromCell(s string) string {
-	v := normalizeCell(s)
-	// conservative digit run detector: at least 6 digits
-	acctNumberRe := regexp.MustCompile(`\d{6,}`)
-	if m := acctNumberRe.FindString(v); m != "" {
-		out := strings.ReplaceAll(m, " ", "")
-		out = strings.ReplaceAll(out, "-", "")
-		return out
-	}
-	return ""
-}
-
-// Sentinel errors used for mapping to user-friendly messages
-var (
-	ErrFileAlreadyUploaded      = errors.New("bank statement file already uploaded")
-	ErrAccountNotFound          = errors.New("bank account not found in master data")
-	ErrAccountNumberMissing     = errors.New("account number not found in file header")
-	ErrStatementPeriodExists    = errors.New("a statement for this period already exists for this account")
-	ErrAllTransactionsDuplicate = errors.New("all transactions in this statement already exist")
-)
-
-var (
-	// precompiled regexes for fallback extraction
-	acctLabelRe  = regexp.MustCompile(`(?i)\b(?:a[/\\]?c|acct|account)[\s\.:#-]*(?:no|number)?\b`)
-	acctNumberRe = regexp.MustCompile(`\d{7,}`) // prefer >=7 digits to avoid postal-code false positives
-)
-var (
-	acNoHeader                      = "A/C No:"
-	slNoHeader                      = "Sl. No."
-	tranIDHeader                    = "Tran. Id"
-	valueDateHeader                 = "Value Date"
-	transactionDateHeader           = "Transaction Date"
-	transactionRemarksHeader        = "Transaction Remarks"
-	withdrawalAmtHeader             = "Withdrawal Amt (INR)"
-	depositAmtHeader                = "Deposit Amt (INR)"
-	balanceHeader                   = "Balance (INR)"
-	missingUserIDOrBankStatementIDs = "Missing user_id or bank_statement_ids"
-)
-
-const (
-	bankStmtDefaultBucket  = "cimplr"
-	bankStmtPrefix         = "bankstatements/"
-	bankStmtDefaultRegion  = "ap-south-1"
-	bankStmtDefaultBaseURL = "https://cimplr.s3.ap-south-1.amazonaws.com/"
-)
-
-func bankStmtBucket() string {
-	if b := strings.TrimSpace(os.Getenv("BANK_STMT_S3_BUCKET")); b != "" {
-		return b
-	}
-	return bankStmtDefaultBucket
-}
-
-func bankStmtRegion() string {
-	if r := strings.TrimSpace(os.Getenv("BANK_STMT_S3_REGION")); r != "" {
-		return r
-	}
-	return bankStmtDefaultRegion
-}
-
-func bankStmtBaseURL() string {
-	if u := strings.TrimSpace(os.Getenv("BANK_STMT_S3_BASE_URL")); u != "" {
-		u = strings.TrimSuffix(u, "/")
-		return u + "/"
-	}
-	return bankStmtDefaultBaseURL
-}
-
-func sanitizePathSegment(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "unknown"
-	}
-	replacer := strings.NewReplacer(" ", "_", "/", "_", "\\", "_")
-	return replacer.Replace(s)
-}
-
-// allEmptyRow returns true when every cell in the row is empty or whitespace
-func allEmptyRow(row []string) bool {
-	for _, c := range row {
-		if strings.TrimSpace(c) != "" {
-			return false
-		}
-	}
-	return true
-}
-
-func buildBankStatementS3Key(accountNumber, fileHash, fileExt string) string {
-	ext := strings.TrimSpace(fileExt)
-	if ext == "" {
-		ext = ".bin"
-	}
-	if !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-	acct := sanitizePathSegment(accountNumber)
-	return fmt.Sprintf("%s%s/%s%s", bankStmtPrefix, acct, fileHash, ext)
-}
-
-// isS3Enabled reads env var BANK_STMT_S3_ENABLED to determine whether to
-// upload original bank-statement files to S3. Defaults to true when unset.
-func isS3Enabled() bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv("BANK_STMT_S3_ENABLED")))
-	if v == "" {
-		return true
-	}
-	return v == "1" || v == "true" || v == "yes"
-}
-
-func detectContentType(data []byte) string {
-	if len(data) == 0 {
-		return "application/octet-stream"
-	}
-	if len(data) > 512 {
-		return http.DetectContentType(data[:512])
-	}
-	return http.DetectContentType(data)
-}
-
-func uploadBankStatementToS3(ctx context.Context, key string, body []byte, contentType string) (string, error) {
-	bucket := bankStmtBucket()
-	region := bankStmtRegion()
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
-	if err != nil {
-		return "", fmt.Errorf("load AWS config: %w", err)
-	}
-	client := s3.NewFromConfig(cfg)
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(body),
-		ContentType: aws.String(contentType),
-	})
-	if err != nil {
-		return "", fmt.Errorf("upload to s3 (bucket %s, key %s): %w", bucket, key, err)
-	}
-	return bankStmtBaseURL() + key, nil
-}
-
-// categoryRuleComponent represents a single rule component used for
-// categorizing transactions. This is shared between the upload and recompute
-// flows so that both use identical matching logic.
-type categoryRuleComponent struct {
-	RuleID         int64
-	Priority       int
-	CategoryID     int64
-	CategoryName   string
-	CategoryType   string
-	ComponentType  string
-	MatchType      sql.NullString
-	MatchValue     sql.NullString
-	AmountOperator sql.NullString
-	AmountValue    sql.NullFloat64
-	TxnFlow        sql.NullString
-	CurrencyCode   sql.NullString
-}
-
-// loadCategoryRuleComponents fetches all active rule components for a given
-// account/entity/bank/currency/global scope, ordered by rule priority. This mirrors the
-// logic originally present in the upload handler so that recompute can reuse
-// the same rules.
-func loadCategoryRuleComponents(ctx context.Context, db *sql.DB, accountNumber, entityID, currencyCode string) ([]categoryRuleComponent, error) {
-	q := `
-	       SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	       FROM cimplrcorpsaas.category_rules r
-	       JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
-	       JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
-	       JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
-	       WHERE r.is_active = true
-		 AND (
-		       (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
-		       OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
-		       OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
-		       OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
-		       OR (s.scope_type = 'GLOBAL')
-		 )
-	       ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
-	   `
-
-	rowsRule, err := db.QueryContext(ctx, q, accountNumber, entityID, currencyCode)
-	if err != nil {
-		return nil, err
-	}
-	defer rowsRule.Close()
-
-	rules := []categoryRuleComponent{}
-	for rowsRule.Next() {
-		var rc categoryRuleComponent
-		if err := rowsRule.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode); err != nil {
-			return nil, err
-		}
-		rules = append(rules, rc)
-	}
-	if err := rowsRule.Err(); err != nil {
-		return nil, err
-	}
-	return rules, nil
-}
-
-// matchCategoryForTransaction applies the rule components to a single
-// transaction and returns the matched category_id, if any. The logic here is
-// exactly the same as what is used during upload so that recompute produces
-// consistent results when new rules are added.
-func matchCategoryForTransaction(rules []categoryRuleComponent, description string, withdrawal, deposit sql.NullFloat64) sql.NullInt64 {
-	matchedCategoryID := sql.NullInt64{Valid: false}
-	descLower := strings.ToLower(description)
-	for _, rule := range rules {
-		// NARRATION LOGIC
-		if rule.ComponentType == "NARRATION_LOGIC" && rule.MatchType.Valid && rule.MatchValue.Valid {
-			val := strings.ToLower(rule.MatchValue.String)
-			switch rule.MatchType.String {
-			case "CONTAINS", "ILIKE":
-				if strings.Contains(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
-			case "EQUALS":
-				if descLower == val {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
-			case "STARTS_WITH":
-				if strings.HasPrefix(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
-			case "ENDS_WITH":
-				if strings.HasSuffix(descLower, val) {
-					matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-				}
-
-			case "REGEX":
-				// Regex not implemented in original logic
-			}
-		}
-		// AMOUNT LOGIC (applies to both withdrawal and deposit)
-		if !matchedCategoryID.Valid && rule.ComponentType == "AMOUNT_LOGIC" && rule.AmountOperator.Valid && rule.AmountValue.Valid {
-			amounts := []float64{}
-			if withdrawal.Valid {
-				amounts = append(amounts, withdrawal.Float64)
-			}
-			if deposit.Valid {
-				amounts = append(amounts, deposit.Float64)
-			}
-			for _, amt := range amounts {
-				switch rule.AmountOperator.String {
-				case ">":
-					if amt > rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case ">=":
-					if amt >= rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "=":
-					if amt == rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "<=":
-					if amt <= rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				case "<":
-					if amt < rule.AmountValue.Float64 {
-						matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-					}
-				}
-			}
-		}
-		// TRANSACTION LOGIC (DEBIT/CREDIT)
-		if !matchedCategoryID.Valid && rule.ComponentType == "TRANSACTION_LOGIC" && rule.TxnFlow.Valid {
-			if rule.TxnFlow.String == "DEBIT" && withdrawal.Valid && withdrawal.Float64 > 0 {
-				matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-			}
-			if rule.TxnFlow.String == "CREDIT" && deposit.Valid && deposit.Float64 > 0 {
-				matchedCategoryID = sql.NullInt64{Int64: rule.CategoryID, Valid: true}
-			}
-		}
-		// CURRENCY_CONDITION and other component types are ignored here because
-		// the original upload logic didn't implement them either.
-		if matchedCategoryID.Valid {
-			break
-		}
-	}
-	return matchedCategoryID
-}
-
-// parseDate tries multiple date formats for CSV
-func parseDate(s string) (time.Time, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}, nil
-	}
-	// Prefer dd/mm/yyyy for bank statements before falling back to the broader parser set.
-	if t, err := time.Parse("02/01/2006", s); err == nil {
-		return t, nil
-	}
-	if t, err := time.Parse("2/1/2006", s); err == nil {
-		return t, nil
-	}
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}, errors.New("empty date string")
-	}
-	// Critical: dd/mm/yyyy formats MUST come before mm/dd/yyyy to prevent misparsing Indian bank statements
-	layouts := []string{
-		// dd/mm/yyyy variants (Indian/European format) - MUST BE FIRST
-		"02/01/2006", "02/01/06", "2/1/2006", "2/1/06",
-		"02/01/2006 03:04:05 PM", "02/01/06 03:04:05 PM", "2/1/2006 03:04:05 PM", "2/1/06 03:04:05 PM",
-		"02/01/2006 3:04:05 PM", "02/01/06 3:04:05 PM", "2/1/2006 3:04:05 PM", "2/1/06 3:04:05 PM",
-		"02/01/06 15:04", "02/01/06 3:04", "02/01/06 15:04:05", "02/01/06 3:04:05",
-		"2/1/06 15:04", "2/1/06 3:04", "2/1/06 15:04:05", "2/1/06 3:04:05",
-		// mm/dd/yyyy variants (American format) - AFTER dd/mm/yyyy
-		"01/02/2006", "01/02/06", "1/2/2006", "1/2/06",
-		"01/02/2006 03:04:05 PM", "01/02/2006 03:04 PM", "01/02/06 03:04:05 PM", "01/02/06 03:04 PM",
-		"1/2/2006 03:04:05 PM", "1/2/2006 03:04 PM", "1/2/06 03:04:05 PM", "1/2/06 03:04 PM",
-		"01/02/06 15:04", "01/02/06 3:04", "01/02/06 15:04:05", "01/02/06 3:04:05",
-		"1/2/06 15:04", "1/2/06 3:04", "1/2/06 15:04:05", "1/2/06 3:04:05",
-		// Named month formats
-		constants.DateFormatSlash, constants.DateFormatDash, // for 29/Aug/2025 and 29-Aug-2025
-		"2-Jan-2006", "1/Feb/2006",
-		// ISO and other formats
-		constants.DateFormat, "2006/01/02", "2006.01.02", "01.02.2006", "1.2.2006", "01-02-2006", "1-2-2006",
-		"01-02-06", "1-2-06", "2006/1/2", "2006-1-2",
-		// dd-Mon-yy and dd/Mon/yy variants
-		"02-Jan-06", "02-Jan-2006", "02/Jan/06", "02/Jan/2006",
-		"02-Jan-06 15:04", "02-Jan-2006 15:04", "02-Jan-06 3:04", "02-Jan-2006 3:04",
-		"02-Jan-06 15:04:05", "02-Jan-2006 15:04:05", "02-Jan-06 3:04:05", "02-Jan-2006 3:04:05",
-		"02/Jan/06 15:04", "02/Jan/2006 15:04", "02/Jan/06 3:04", "02/Jan/2006 3:04",
-		"02/Jan/06 15:04:05", "02/Jan/2006 15:04:05", "02/Jan/06 3:04:05", "02/Jan/2006 3:04:05",
-		"02-Jan-2006 03:04:05 PM", "02-Jan-06 03:04:05 PM", "02-Jan-2006 3:04:05 PM", "02-Jan-06 3:04:05 PM",
-		"02/Jan/2006 03:04:05 PM", "02/Jan/06 03:04:05 PM", "02/Jan/2006 3:04:05 PM", "02/Jan/06 3:04:05 PM",
-		// dd-Mon-yy variants (American style)
-		"01-Feb-06", "01-Feb-2006", "01/Feb/06", "01/Feb/2006",
-		"01-Feb-06 15:04", "01-Feb-2006 15:04", "01-Feb-06 3:04", "01-Feb-2006 3:04",
-		"01-Feb-06 15:04:05", "01-Feb-2006 15:04:05", "01-Feb-06 3:04:05", "01-Feb-2006 3:04:05",
-		"01/Feb/06 15:04", "01/Feb/2006 15:04", "01/Feb/06 3:04", "01/Feb/2006 3:04",
-		"01/Feb/06 15:04:05", "01/Feb/2006 15:04:05", "01/Feb/06 3:04:05", "01/Feb/2006 3:04:05",
-		// ISO-ish layouts to catch Excel exports that already render as 2026-01-15 or RFC3339 strings
-		constants.DateFormat, "2006-01-02 15:04:05", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04",
-	}
-	// Try all layouts
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
-		}
-	}
-	// Try to parse with 2-digit year fallback (e.g., 13-Dec-25 as 2025)
-	if len(s) == 9 && s[2] == '-' && s[6] == '-' { // e.g., 13-Dec-25
-		t, err := time.Parse("02-Jan-06", s)
-		if err == nil {
-			// If year < 100, add 2000
-			y := t.Year()
-			if y < 100 {
-				t = t.AddDate(2000, 0, 0)
-			}
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("could not parse date: %s", s)
-}
-
-// parseDateDDMMFirst is a convenience wrapper that simply delegates to parseDate,
-// which already prefers dd/mm/yyyy layouts.
-func parseDateDDMMFirst(s string) (time.Time, error) {
-	return parseDate(s)
-}
-
-// tryParseDateWithExcelSerial first attempts normal string parsing, then falls back to
-// Excel serial date numbers (days since 1899-12-30 with the Excel 1900 leap-year bug).
-func tryParseDateWithExcelSerial(s string) time.Time {
-	if t, err := parseDateDDMMFirst(s); err == nil && !t.IsZero() {
-		return t
-	}
-	if t, err := parseExcelSerialDate(s); err == nil {
-		return t
-	}
-	return time.Time{}
-}
-
-// parseExcelSerialDate converts an Excel serial date (possibly with fractional day time)
-// into a time.Time. Excel counts from 1899-12-30 and includes a fake 1900-02-29 day.
-func parseExcelSerialDate(s string) (time.Time, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}, errors.New("empty excel serial")
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return time.Time{}, err
-	}
-	days := int(f)
-	frac := f - float64(days)
-	if days > 59 { // Excel leap-year bug adjustment (skips nonexistent 1900-02-29)
-		days--
-	}
-	base := time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
-	d := base.AddDate(0, 0, days)
-	d = d.Add(time.Duration(frac * float64(24*time.Hour)))
-	return d, nil
-}
-
-// ColumnMappings holds custom column name mappings for flexible bank statement parsing
-type ColumnMappings struct {
-	AccountNumber    string `json:"account_number"`
-	TranID           string `json:"tran_id"`
-	ValueDate        string `json:"value_date"`
-	Description      string `json:"description"`
-	DepositAmount    string `json:"deposit_amount"`
-	WithdrawalAmount string `json:"withdrawal_amount"`
-	Balance          string `json:"balance"`
-	AccountName      string `json:"AccountName"`
-	BankName         string `json:"BankName"`
-	IFSC             string `json:"IFSC"`
-	MICR             string `json:"MICR"`
+	return nil
 }
 
 // UploadBankStatementV2WithCategorization wraps UploadBankStatementV2 and adds category intelligence and KPIs to the response.
 
-func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings) (map[string]interface{}, error) {
+func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, file multipart.File, fileHash string, useMapping bool, mappings *ColumnMappings, accountNumberOverride string, uploadFileName string, uploadedBy string) (map[string]interface{}, error) {
 	// 1. Idempotency: Check if file hash already exists
 	var exists bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
@@ -592,11 +81,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	contentType := detectContentType(tmpFile)
+	contentType := s3storage.DetectContentType(tmpFile)
+
+	// If this is an Apple Numbers file, extract the embedded XLSX first
+	if extracted := tryExtractNumbersAsXLSX(tmpFile); extracted != nil {
+		log.Printf("[BANK-PARSE] .numbers file detected — using embedded XLSX (%d bytes)", len(extracted))
+		tmpFile = extracted
+	}
 
 	var rows [][]string
 	var isCSV bool
-	fileExt := ".xlsx"
 
 	//var isXLS bool Try Excel first
 	xl, xlErr := excelize.OpenReader(bytes.NewReader(tmpFile))
@@ -631,7 +125,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 
 		isCSV = false
-		fileExt = ".xlsx"
 
 	} else {
 		// Try XLS (legacy Excel) using shakinm/xlsReader which properly handles formulas and formatting
@@ -644,7 +137,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			_, writeErr := tmpXlsFile.Write(tmpFile)
 			if writeErr == nil {
 				tmpXlsFile.Close() // Close before reading
-				xlsBook, xlsErr := xls.OpenFile(tmpXlsFile.Name())
+				var xlsBook xls.Workbook
+				xlsBook, xlsErr = xls.OpenFile(tmpXlsFile.Name())
 				if xlsErr == nil {
 					sheet, sheetErr := xlsBook.GetSheet(0)
 					if sheetErr == nil && sheet != nil {
@@ -661,7 +155,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 							return nil, errors.New("xls must have at least one data row")
 						}
 						isCSV = false
-						fileExt = ".xls"
 					} else {
 						xlsErr = errors.New("failed to get xls sheet")
 					}
@@ -685,15 +178,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				return nil, errors.New("csv must have at least one data row")
 			}
 			isCSV = true
-			fileExt = ".csv"
 		}
 	}
 
 	// 3. Extract account number, entity id, and name from header
 	var accountNumber, entityID, accountName string
 
+	// If caller supplied an explicit account number override, skip all file-based extraction.
+	if strings.TrimSpace(accountNumberOverride) != "" {
+		accountNumber = strings.TrimSpace(accountNumberOverride)
+		log.Printf("[BANK-UPLOAD-DEBUG] Using caller-supplied account_number override=%q", accountNumber)
+	}
+
 	// If custom mapping is provided, attempt to extract account number and name using the mapped header names.
-	if mappings != nil {
+	if accountNumber == "" && mappings != nil {
 		// Search for custom mapped headers in first 20 rows
 		for i := 0; i < len(rows) && i < 20; i++ {
 			for j, cell := range rows[i] {
@@ -722,32 +220,52 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	// If account number wasn't found via mapping (or no mapping provided), proceed with the regular extraction logic.
+	// If account number wasn't found via mapping or override, proceed with the regular extraction logic.
 	if accountNumber == "" {
 		// Use default extraction logic when not using custom mapping or when mapping failed
-		if isCSV {
-			// For CSV, try to find account number in the first 20 rows, look for acNoHeader or "Account Number"
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for j, cell := range rows[i] {
-					if (cell == acNoHeader || strings.EqualFold(cell, "Account Number") || strings.EqualFold(cell, "Account No.")) && j+1 < len(rows[i]) {
-						accountNumber = rows[i][j+1]
+		// Unified label scan for both CSV and XLS/XLSX — same variants, same adjacent-cell logic.
+		for i := 0; i < 20 && i < len(rows); i++ {
+			for j, cell := range rows[i] {
+				nc := normalizeCell(cell)
+				isAcctLabel := nc == acNoHeader ||
+					strings.EqualFold(nc, "Account Number") ||
+					strings.EqualFold(nc, "Account No.") ||
+					strings.EqualFold(nc, "Account No") ||
+					strings.EqualFold(nc, "Acc No") ||
+					strings.EqualFold(nc, "Acc No.") ||
+					strings.EqualFold(nc, "A/C Number") ||
+					strings.EqualFold(nc, "A/C No") ||
+					strings.EqualFold(nc, "A/C No.") ||
+					strings.EqualFold(nc, "Account:") ||
+					strings.EqualFold(nc, "Account #") ||
+					strings.EqualFold(nc, "Acct Number") ||
+					strings.EqualFold(nc, "Acct No") ||
+					strings.EqualFold(nc, "Acct No.")
+				if isAcctLabel {
+					// Try right-neighbor first (label | value on same row)
+					if j+1 < len(rows[i]) {
+						if v := extractAccountFromCell(rows[i][j+1]); v != "" {
+							accountNumber = v
+						} else {
+							accountNumber = normalizeCell(rows[i][j+1])
+						}
 					}
-					if (cell == "Name:" || strings.EqualFold(cell, "Account Name")) && j+1 < len(rows[i]) {
-						accountName = rows[i][j+1]
+					// Try below (label on one row, value on next row same column)
+					if accountNumber == "" && i+1 < len(rows) && j < len(rows[i+1]) {
+						if v := extractAccountFromCell(rows[i+1][j]); v != "" {
+							accountNumber = v
+						}
 					}
+				}
+				isNameLabel := cell == "Name:" ||
+					strings.EqualFold(nc, "Account Name") ||
+					strings.EqualFold(nc, "Name")
+				if isNameLabel && j+1 < len(rows[i]) {
+					accountName = normalizeCell(rows[i][j+1])
 				}
 			}
-		} else {
-			// For Excel/XLS files
-			for i := 0; i < 20 && i < len(rows); i++ {
-				for j, cell := range rows[i] {
-					if cell == acNoHeader && j+1 < len(rows[i]) {
-						accountNumber = rows[i][j+1]
-					}
-					if cell == "Name:" && j+1 < len(rows[i]) {
-						accountName = rows[i][j+1]
-					}
-				}
+			if accountNumber != "" {
+				break
 			}
 		}
 	}
@@ -759,28 +277,37 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// label in one cell and value in adjacent or next-row cell, or merged cells.
 		acctLabelRe := regexp.MustCompile(`(?i)\b(?:a[/\\]?c|acct|account)[\s\.:#-]*(?:no|number)?\b`)
 		acctNumberRe := regexp.MustCompile(`\d{6,}`)
+		acctAlphaNumRe := regexp.MustCompile(`[A-Za-z0-9]{6,}`) // for alphanumeric account numbers
+		extractCandFromCell := func(cell string) string {
+			v := normalizeCell(cell)
+			if m := acctNumberRe.FindString(v); m != "" {
+				return strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+			}
+			if m := acctAlphaNumRe.FindString(v); m != "" {
+				return strings.TrimSpace(m)
+			}
+			return ""
+		}
 		for i := 0; i < 20 && i < len(rows); i++ {
 			for j, cell := range rows[i] {
 				v := normalizeCell(cell)
 				// If cell contains a label, try to extract digits from same cell
 				if acctLabelRe.MatchString(v) {
-					if m := acctNumberRe.FindString(v); m != "" {
-						accountNumber = strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+					if m := extractCandFromCell(v); m != "" {
+						accountNumber = m
 						break
 					}
 					// try adjacent cell on same row
 					if j+1 < len(rows[i]) {
-						cand := normalizeCell(rows[i][j+1])
-						if m := acctNumberRe.FindString(cand); m != "" {
-							accountNumber = strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+						if m := extractCandFromCell(rows[i][j+1]); m != "" {
+							accountNumber = m
 							break
 						}
 					}
 					// try same column next row (merged/stacked label)
 					if i+1 < len(rows) && j < len(rows[i+1]) {
-						cand := normalizeCell(rows[i+1][j])
-						if m := acctNumberRe.FindString(cand); m != "" {
-							accountNumber = strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+						if m := extractCandFromCell(rows[i+1][j]); m != "" {
+							accountNumber = m
 							break
 						}
 					}
@@ -858,8 +385,14 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 
-			// Second pass: no label found — search any header cell for >=7-digit sequences
+			// Second pass: no label found — search any header cell for >=7-digit sequences.
+			// Only scan rows 0..19 (true header area); do NOT scan transaction data rows to
+			// avoid picking up reference numbers from narrative/cheque columns.
 			if found == "" {
+				log.Printf("[BANK-UPLOAD-DEBUG] Label scan found nothing; dumping first 20 rows for inspection")
+				for i := 0; i < 20 && i < len(rows); i++ {
+					log.Printf("[BANK-UPLOAD-DEBUG] header-row[%d]=%q", i, rows[i])
+				}
 				digitsRe := acctNumberRe
 				for i := 0; i < 20 && i < len(rows); i++ {
 					for _, cell := range rows[i] {
@@ -909,55 +442,161 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	`, accountNumber).Scan(&entityID, &bankName, &accountName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// Primary candidate not found. Try scanning header rows for other
-			// long digit runs and attempt DB verification for each candidate
-			// in order. This prevents accidentally picking transaction refs
-			// or postal codes that appear earlier in the header.
-			log.Printf("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning header for verified candidates", accountNumber)
+			// Primary candidate not found.
+			//
+			// Strategy (in priority order):
+			//  1. Digit runs (>=7) extracted from the original filename — most reliable for
+			//     Citibank-style filenames like "95201994179_GXLSM_0036013656_PUN_28022026_M.xls"
+			//     where the real account number is embedded directly in the name.
+			//  2. Digit runs from true header rows only (rows BEFORE the data header row, i.e.
+			//     rows that do NOT look like a column-header line). This prevents picking up
+			//     counterparty account numbers that appear inside transaction description cells.
+			//  3. Alphanumeric runs from header rows (for BG/NEFT reference-style accounts).
+			//
+			// All matching is done with a SINGLE batch DB query (WHERE account_number = ANY($1))
+			// to avoid N serial round-trips. We then pick the match whose candidate appeared
+			// earliest in the priority-ordered list.
+			log.Printf("[BANK-UPLOAD-DEBUG] Primary account %q not found; scanning filename+header for verified candidates", accountNumber)
+
 			candidates := []string{}
 			seen := map[string]bool{}
-			// use the stricter acctNumberRe (>=7 digits) to collect candidates
+
+			// addCand keeps the original segment (with dashes, e.g. "0-456789-678") as priority candidate
+			// and also adds the dash/space-stripped version for banks that store without dashes.
+			addCand := func(s string) {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return
+				}
+				// Add original first (exact match wins)
+				if !seen[s] {
+					seen[s] = true
+					candidates = append(candidates, s)
+				}
+				// Also add dash/space-stripped version if different (e.g. "0-456789-678" → "0456789678")
+				stripped := strings.ReplaceAll(strings.ReplaceAll(s, " ", ""), "-", "")
+				if stripped != s && stripped != "" && !seen[stripped] {
+					seen[stripped] = true
+					candidates = append(candidates, stripped)
+				}
+				// Also add leading-zero-stripped version (e.g. "0714447177" → "714447177")
+				// Some banks store account numbers without leading zeros in their DB.
+				noLeadZero := strings.TrimLeft(stripped, "0")
+				if noLeadZero != stripped && noLeadZero != "" && !seen[noLeadZero] {
+					seen[noLeadZero] = true
+					candidates = append(candidates, noLeadZero)
+				}
+			}
+
+			// --- Priority 1: filename digit/account runs ---
+			filenameDigitRe := regexp.MustCompile(`\d{7,}`)
+			baseName := filepath.Base(uploadFileName)
+			// 1a: Split on _ space dot (NOT dash) so "0-456789-678" is preserved as a single segment.
+			// Dash-containing segments are valid account numbers at some banks.
+			dashAcctSegRe := regexp.MustCompile(`^\d[\d\-]{5,}\d$`) // starts+ends with digit, interior has digits+dashes, >=7 chars total
+			for _, part := range regexp.MustCompile(`[_\s\.]+`).Split(baseName, -1) {
+				part = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(part, ".xls"), ".xlsx"))
+				if filenameDigitRe.MatchString(part) || (len(part) >= 7 && dashAcctSegRe.MatchString(part)) {
+					addCand(part) // adds original (with dashes) + stripped version
+				}
+			}
+			// 1b: Also split on all separators including dash (catches plain digit segments)
+			for _, part := range regexp.MustCompile(`[_\-\s\.]+`).Split(baseName, -1) {
+				part = strings.TrimSpace(part)
+				if filenameDigitRe.MatchString(part) {
+					addCand(part)
+				}
+			}
+			// 1c: raw digit runs anywhere in filename
+			for _, m := range filenameDigitRe.FindAllString(baseName, -1) {
+				addCand(m)
+			}
+
+			// --- Priority 2 & 3: header rows only (before the data header row) ---
+			// Detect where the data header row starts: first row containing >= 2 cells that look
+			// like column header words (DATE, DESCRIPTION, DEBIT, CREDIT, BALANCE, AMOUNT, etc.)
+			colHeaderRe := regexp.MustCompile(`(?i)^(date|value\s*date|description|narration|particulars|debit|credit|withdrawal|deposit|balance|amount|dr|cr|time)$`)
+			headerEnd := 20 // default: scan all first 20 rows
 			for i := 0; i < 20 && i < len(rows); i++ {
+				hits := 0
+				for _, cell := range rows[i] {
+					if colHeaderRe.MatchString(strings.TrimSpace(cell)) {
+						hits++
+					}
+				}
+				if hits >= 2 {
+					headerEnd = i // do NOT scan this row or beyond — transaction data follows
+					break
+				}
+			}
+
+			alphaNumCandRe := regexp.MustCompile(`[A-Za-z0-9]{7,}`)
+			for i := 0; i < headerEnd && i < len(rows); i++ {
 				for _, cell := range rows[i] {
 					v := normalizeCell(cell)
 					for _, m := range acctNumberRe.FindAllString(v, -1) {
-						cand := strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
-						if cand == "" {
+						addCand(m)
+					}
+					for _, m := range alphaNumCandRe.FindAllString(v, -1) {
+						cand := strings.TrimSpace(m)
+						if cand == "" || seen[cand] || acctNumberRe.MatchString(cand) {
 							continue
 						}
-						if !seen[cand] {
-							seen[cand] = true
-							candidates = append(candidates, cand)
-						}
+						addCand(cand)
 					}
 				}
 			}
+
+			log.Printf("[BANK-UPLOAD-DEBUG] Candidate scan: %d candidates (filename+header rows 0..%d)", len(candidates), headerEnd-1)
+			for _, c := range candidates {
+				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", c)
+			}
+
+			// Single batch DB query instead of N serial round-trips
 			matched := false
-			for _, cand := range candidates {
-				log.Printf("[BANK-UPLOAD-DEBUG] Trying candidate accountNumber=%q", cand)
-				var eID, bName, aName string
-				qErr := db.QueryRowContext(ctx, `
-					SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-					FROM public.masterbankaccount mba
-					LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-					WHERE mba.account_number = $1 AND mba.is_deleted = false
-				`, cand).Scan(&eID, &bName, &aName)
+			if len(candidates) > 0 {
+			rows2, qErr := db.QueryContext(ctx, `
+    SELECT mba.account_number, mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
+    FROM public.masterbankaccount mba
+    LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+    WHERE mba.account_number = ANY($1) AND mba.is_deleted = false
+`, pq.Array(candidates))
+			if qErr != nil {
+    return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
+}
+				// Build a map of accountNumber → (entityID, bankName, accountName) for all DB matches
+				type acctRow struct{ eID, bName, aName string }
+				dbMatches := map[string]acctRow{}
 				if qErr == nil {
-					accountNumber = cand
-					entityID = eID
-					bankName = bName
-					accountName = aName
-					matched = true
-					log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
-					break
+					for rows2.Next() {
+						var acNum string
+						var ar acctRow
+						if sErr := rows2.Scan(&acNum, &ar.eID, &ar.bName, &ar.aName); sErr == nil {
+							dbMatches[acNum] = ar
+						}
+					}
+					_ = rows2.Close()
 				}
-				if qErr != nil && !errors.Is(qErr, sql.ErrNoRows) {
-					log.Printf("[BANK-UPLOAD-DEBUG] DB error while trying candidate %q: %v", cand, qErr)
-					return nil, fmt.Errorf(constants.ErrDBMasterBankAccountLookup, qErr)
+				// Pick the first candidate (in priority order) that the DB confirmed
+				for _, cand := range candidates {
+					if ar, ok := dbMatches[cand]; ok {
+						accountNumber = cand
+						entityID = ar.eID
+						bankName = ar.bName
+						accountName = ar.aName
+						matched = true
+						log.Printf("[BANK-UPLOAD-DEBUG] Candidate matched accountNumber=%q", cand)
+						break
+					}
 				}
 			}
+
 			if !matched {
 				log.Printf("[BANK-UPLOAD-DEBUG] Account not found in masterbankaccount after candidate scan: %v", candidates)
+				log.Printf("[BANK-UPLOAD-DEBUG] Dumping first 20 rows for inspection:")
+				for i := 0; i < 20 && i < len(rows); i++ {
+					log.Printf("[BANK-UPLOAD-DEBUG] row[%d]=%q", i, rows[i])
+				}
 				return nil, ErrAccountNotFound
 			}
 		} else {
@@ -996,12 +635,18 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 
-	s3Key := buildBankStatementS3Key(accountNumber, fileHash, fileExt)
+	storedFileName := s3storage.BuildUploadedFilename(uploadFileName, uploadedBy, time.Now().UTC())
+	s3Key := s3storage.BuildNamedS3Key(bankStatementUploadFolder, "", storedFileName)
+	var uploadS3Key sql.NullString
 	var s3URL string
-	if isS3Enabled() {
-		s3URL, err = uploadBankStatementToS3(ctx, s3Key, tmpFile, contentType)
-		if err != nil {
+	if s3storage.IsS3UploadEnabled() {
+		if err = s3storage.PutObjectToS3(ctx, s3Key, tmpFile, contentType); err != nil {
 			return nil, fmt.Errorf("failed to store original file to s3: %w", err)
+		}
+		uploadS3Key = sql.NullString{String: s3Key, Valid: true}
+		if s3URL, err = s3storage.GetDownloadPresignedURL(ctx, s3Key, 0); err != nil {
+			log.Printf("[BANK-UPLOAD-DEBUG] failed to presign upload response url for key=%q: %v", s3Key, err)
+			s3URL = ""
 		}
 	} else {
 		log.Printf("[BANK-UPLOAD-DEBUG] S3 upload disabled by BANK_STMT_S3_ENABLED=false; skipping storage for account=%q key=%q", accountNumber, s3Key)
@@ -1054,7 +699,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				for _, cell := range row {
 					c := strings.TrimSpace(cell)
 					lc := strings.ToLower(c)
-					// Accept "Date", "Value Date", "Transaction Date", etc.
+					// Accept "Date", constants.ValueDateAlt, constants.TransactionDateAlt, etc.
 					if strings.EqualFold(c, "Date") || strings.Contains(lc, "date") {
 						hasDate = true
 					}
@@ -1259,7 +904,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		if idx := findDescriptionCol(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 			colIdx["Description"] = idx
 			log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Description", idx)
-		} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+		} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 			colIdx["Description"] = idx
 			log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Description", idx)
 		}
@@ -1404,7 +1049,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			return nil, errors.New("transaction header row not found in CSV file")
 		}
 	} else {
-		// For Excel/XLS, some statements don't include a "Tran. Id" column.
+		// For Excel/XLS, some statements don't include a constants.TranID column.
 		// Try the original Tran Id detection first, then fall back to a
 		// flexible detection similar to CSV: find a row that has Date and
 		// (Description-like column OR amount columns).
@@ -1427,7 +1072,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				for _, cell := range row {
 					c := strings.TrimSpace(cell)
 					lc := strings.ToLower(c)
-					// Accept "Date", "Value Date", "Transaction Date", "Txn Posted Date", etc.
+					// Accept "Date", constants.ValueDateAlt, constants.TransactionDateAlt, "Txn Posted Date", etc.
 					if strings.EqualFold(c, "Date") || strings.Contains(lc, "date") {
 						hasDate = true
 					}
@@ -1564,7 +1209,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// Map standard names to flexible column indices
 		if _, exists := colIdx["Description"]; !exists {
 			// Prefer explicit description column when present
-			if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+			if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 				colIdx["Description"] = idx
 			} else if idx := findColContaining(constants.ErrDebitCreditReference2, constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx["Description"] = idx
@@ -1576,7 +1221,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if idx := findColContaining(constants.ErrDebitCreditReference2, "debit / credit ref", constants.ErrDebitCreditReferenceShort, constants.ErrDebitCreditReferenceAlt, constants.ErrDebitCreditReference, "debitcreditref"); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
 				log.Printf("[BANK-UPLOAD-DEBUG] Using Debit/Credit Ref column %d for Transaction Remarks", idx)
-			} else if idx := findColContaining("description", "remarks", "narration", "particulars"); idx >= 0 {
+			} else if idx := findColContaining("description", "remarks", "narration", "narrative", "particulars"); idx >= 0 {
 				colIdx[transactionRemarksHeader] = idx
 				log.Printf("[BANK-UPLOAD-DEBUG] Using Description-like column %d for Transaction Remarks", idx)
 			}
@@ -1587,7 +1232,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if _, exists := colIdx[valueDateHeader]; !exists {
-			// Try "Value Date", "Txn Posted Date", or any date column
+			// Try constants.ValueDateAlt, "Txn Posted Date", or any date column
 			if idx := findColContaining(constants.ValueDate, constants.TransactionPostedDate); idx >= 0 {
 				colIdx[valueDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
@@ -1595,7 +1240,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 		if _, exists := colIdx[transactionDateHeader]; !exists {
-			// Try "Transaction Date", "Txn Posted Date", or fallback to "Date"
+			// Try constants.TransactionDateAlt, "Txn Posted Date", or fallback to "Date"
 			if idx := findColContaining(constants.TransactionDate, constants.TransactionPostedDate, constants.TransactionPostedDateAlt); idx >= 0 {
 				colIdx[transactionDateHeader] = idx
 			} else if idx := findColContaining("date"); idx >= 0 {
@@ -1637,30 +1282,32 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 		// First try to find separate withdrawal/deposit columns
 		if _, exists := colIdx[withdrawalAmtHeader]; !exists {
-			// Look for exact "Debit" or "Withdrawal" column (exclude "Debit/Credit Ref")
+			// Match "Debit", "Withdrawal", "Debit Amount(INR)", "Debit Amt" etc.
+			// Exclude columns that ALSO contain "credit" (e.g. "Debit/Credit Ref") and pure reference columns.
 			for colName, idx := range colIdx {
 				lcName := strings.ToLower(strings.TrimSpace(colName))
-				// Skip reference columns
+				// Skip reference columns and any combined debit/credit indicator columns
 				if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") {
 					continue
 				}
-				// Exact match for debit or withdrawal
-				if lcName == "debit" || lcName == "withdrawal" || lcName == constants.DebitAmount || lcName == "withdrawal amt" {
+				// Must contain "debit" or "withdrawal" but NOT "credit" (avoids combined Dr/Cr columns)
+				if (strings.Contains(lcName, "debit") || strings.Contains(lcName, "withdrawal")) && !strings.Contains(lcName, "credit") {
 					colIdx[withdrawalAmtHeader] = idx
 					break
 				}
 			}
 		}
 		if _, exists := colIdx[depositAmtHeader]; !exists {
-			// Look for exact "Credit" or "Deposit" column (exclude "Debit/Credit Ref")
+			// Match "Credit", "Deposit", "Credit Amount(INR)", "Credit Amt" etc.
+			// Exclude columns that ALSO contain "debit" and pure reference columns.
 			for colName, idx := range colIdx {
 				lcName := strings.ToLower(strings.TrimSpace(colName))
-				// Skip reference columns
+				// Skip reference columns and combined indicator columns
 				if strings.Contains(lcName, "ref") || strings.Contains(lcName, "reference") {
 					continue
 				}
-				// Exact match for credit or deposit
-				if lcName == "credit" || lcName == "deposit" || lcName == constants.CreditAmount || lcName == "deposit amt" {
+				// Must contain "credit" or "deposit" but NOT "debit" (avoids combined Dr/Cr columns)
+				if (strings.Contains(lcName, "credit") || strings.Contains(lcName, "deposit")) && !strings.Contains(lcName, "debit") {
 					colIdx[depositAmtHeader] = idx
 					break
 				}
@@ -1734,9 +1381,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	}
 
 	// KPI maps
-	categoryCount := map[int64]int{}
-	debitSum := map[int64]float64{}
-	creditSum := map[int64]float64{}
+	categoryCount := map[string]int{}
+	debitSum := map[string]float64{}
+	creditSum := map[string]float64{}
 	uncategorized := []map[string]interface{}{}
 	transactions := []BankStatementTransaction{}
 	// Will be filled later after DB insert to indicate which
@@ -1794,11 +1441,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		// Filter out non-transaction rows by checking for known non-transaction keywords in the first column
 		if len(row) > 0 {
 			firstCell := strings.ToLower(strings.TrimSpace(row[0]))
+			// Also check the description column for footer/summary rows in XLS files
+			descCell := firstCell
+			if !isCSV {
+				if descIdx, ok := colIdx[transactionRemarksHeader]; ok && descIdx >= 0 && descIdx < len(row) {
+					descCell = strings.ToLower(strings.TrimSpace(row[descIdx]))
+				}
+			}
 			if strings.Contains(firstCell, "call 1800") ||
 				strings.Contains(firstCell, "write to us") ||
 				strings.Contains(firstCell, constants.ClosingBalance) ||
 				strings.Contains(firstCell, "opening balance") ||
-				strings.Contains(firstCell, "toll free") {
+				strings.Contains(firstCell, "toll free") ||
+				descCell == "new balance" ||
+				strings.HasPrefix(descCell, "avl balance") ||
+				strings.HasPrefix(descCell, "available balance") {
 				skippedNonTxnRows++
 				continue
 			}
@@ -1885,14 +1542,56 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			description = sanitizeForPostgres(description)
 			withdrawalStr := cleanAmount(row[colIdx[withdrawalAmtHeader]])
 			depositStr := cleanAmount(row[colIdx[depositAmtHeader]])
-			if withdrawalStr != "" && depositStr == "" {
+			// Parse both amounts upfront so we can handle the case where one is "0.00" (non-empty but zero)
+			var rawWithdrawal, rawDeposit float64
+			var withdrawalParsed, depositParsed bool
+			if withdrawalStr != "" {
+				if n, err := fmt.Sscanf(withdrawalStr, "%f", &rawWithdrawal); n == 1 && err == nil {
+					withdrawalParsed = true
+				}
+			}
+			if depositStr != "" {
+				if n, err := fmt.Sscanf(depositStr, "%f", &rawDeposit); n == 1 && err == nil {
+					depositParsed = true
+				}
+			}
+			// When both columns are non-empty but one is zero (e.g. BOB: Debit=14516.57, Credit=0.00),
+			// treat the zero-value column as absent so the non-zero value is picked correctly.
+			if withdrawalParsed && depositParsed {
+				if rawWithdrawal == 0 && rawDeposit != 0 {
+					withdrawalParsed = false
+				} else if rawDeposit == 0 && rawWithdrawal != 0 {
+					depositParsed = false
+				}
+			}
+			if withdrawalParsed && !depositParsed {
 				withdrawal.Valid = true
-				fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
+				withdrawal.Float64 = rawWithdrawal
+				// Some banks (e.g. Citibank) store debits as negative values in the debit column
+				if withdrawal.Float64 < 0 {
+					withdrawal.Float64 = -withdrawal.Float64
+				}
 				deposit.Valid = false
-			} else if depositStr != "" && withdrawalStr == "" {
+			} else if depositParsed && !withdrawalParsed {
 				deposit.Valid = true
-				fmt.Sscanf(depositStr, "%f", &deposit.Float64)
+				deposit.Float64 = rawDeposit
+				// Some banks store credits as negative values in the credit column — take abs
+				if deposit.Float64 < 0 {
+					deposit.Float64 = -deposit.Float64
+				}
 				withdrawal.Valid = false
+			} else if withdrawalParsed && depositParsed {
+				// Both columns have non-zero values: set both
+				withdrawal.Valid = true
+				withdrawal.Float64 = rawWithdrawal
+				if withdrawal.Float64 < 0 {
+					withdrawal.Float64 = -withdrawal.Float64
+				}
+				deposit.Valid = true
+				deposit.Float64 = rawDeposit
+				if deposit.Float64 < 0 {
+					deposit.Float64 = -deposit.Float64
+				}
 			} else {
 				withdrawal.Valid = false
 				deposit.Valid = false
@@ -2291,14 +1990,55 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				if okD && idxD < len(row) {
 					depositStr = cleanAmount(row[idxD])
 				}
-				if withdrawalStr != "" && depositStr == "" {
+				// Parse both amounts upfront so we can handle the case where one is "0.00" (non-empty but zero)
+				var rawW, rawD float64
+				var wParsed, dParsed bool
+				if withdrawalStr != "" {
+					if n, err := fmt.Sscanf(withdrawalStr, "%f", &rawW); n == 1 && err == nil {
+						wParsed = true
+					}
+				}
+				if depositStr != "" {
+					if n, err := fmt.Sscanf(depositStr, "%f", &rawD); n == 1 && err == nil {
+						dParsed = true
+					}
+				}
+				// When both columns are non-empty but one is zero (e.g. BOB), treat zero column as absent
+				if wParsed && dParsed {
+					if rawW == 0 && rawD != 0 {
+						wParsed = false
+					} else if rawD == 0 && rawW != 0 {
+						dParsed = false
+					}
+				}
+				if wParsed && !dParsed {
 					withdrawal.Valid = true
-					fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
+					withdrawal.Float64 = rawW
+					// Some banks (e.g. Citibank) store debits as negative values in the debit column
+					if withdrawal.Float64 < 0 {
+						withdrawal.Float64 = -withdrawal.Float64
+					}
 					deposit.Valid = false
-				} else if depositStr != "" && withdrawalStr == "" {
+				} else if dParsed && !wParsed {
 					deposit.Valid = true
-					fmt.Sscanf(depositStr, "%f", &deposit.Float64)
+					deposit.Float64 = rawD
+					// Some banks store credits as negative values in the credit column — take abs
+					if deposit.Float64 < 0 {
+						deposit.Float64 = -deposit.Float64
+					}
 					withdrawal.Valid = false
+				} else if wParsed && dParsed {
+					// Both non-zero: set both
+					withdrawal.Valid = true
+					withdrawal.Float64 = rawW
+					if withdrawal.Float64 < 0 {
+						withdrawal.Float64 = -withdrawal.Float64
+					}
+					deposit.Valid = true
+					deposit.Float64 = rawD
+					if deposit.Float64 < 0 {
+						deposit.Float64 = -deposit.Float64
+					}
 				} else {
 					withdrawal.Valid = false
 					deposit.Valid = false
@@ -2362,30 +2102,8 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			debugCount++
 		}
 
-		// --- CATEGORY MATCHING ---
-		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
-		if matchedCategoryID.Valid {
-			categoryCount[matchedCategoryID.Int64]++
-			if withdrawal.Valid {
-				debitSum[matchedCategoryID.Int64] += withdrawal.Float64
-			}
-			if deposit.Valid {
-				creditSum[matchedCategoryID.Int64] += deposit.Float64
-			}
-		} else {
-			uncategorized = append(uncategorized, map[string]interface{}{
-				"index":            rowNum,
-				"tran_id":          tranID.String,
-				"tran_date":        transactionDate,
-				"transaction_date": transactionDate,
-				"description":      description,
-				"value_date":       valueDate,
-				"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
-				"balance":          balance.Float64,
-			})
-		}
+		// --- COMPUTE RUNNING BALANCE (before category matching so balance is correct in uncategorized list) ---
 		// Recalculate balance using a running cumulative that starts from the first available balance.
-		// This prevents double-counting the first row amounts.
 		origBalance := balance
 
 		if firstValidRow {
@@ -2393,7 +2111,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if origBalance.Valid {
 				cumulative = origBalance.Float64
 				if openingBalance == 0 {
-					openingBalance = origBalance.Float64
+					// origBalance is the balance AFTER the first transaction.
+					// Back-calculate the true opening balance (balance BEFORE the first transaction):
+					//   opening = balance_after_first_txn + withdrawal - deposit
+					derivedOpening := origBalance.Float64
+					if withdrawal.Valid {
+						derivedOpening += withdrawal.Float64
+					}
+					if deposit.Valid {
+						derivedOpening -= deposit.Float64
+					}
+					openingBalance = derivedOpening
 				}
 			} else {
 				// No balance provided on the first row; seed cumulative from openingBalance if known.
@@ -2429,6 +2157,29 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			balance = origBalance
 		} else {
 			balance = sql.NullFloat64{Valid: true, Float64: cumulative}
+		}
+
+		// --- CATEGORY MATCHING ---
+		matchedCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit, sql.NullTime{Time: valueDate, Valid: !valueDate.IsZero()})
+		if matchedCategoryID.Valid {
+			categoryCount[matchedCategoryID.String]++
+			if withdrawal.Valid {
+				debitSum[matchedCategoryID.String] += withdrawal.Float64
+			}
+			if deposit.Valid {
+				creditSum[matchedCategoryID.String] += deposit.Float64
+			}
+		} else {
+			uncategorized = append(uncategorized, map[string]interface{}{
+				"index":            rowNum,
+				"tran_id":          tranID.String,
+				"tran_date":        transactionDate,
+				"transaction_date": transactionDate,
+				"description":      description,
+				"value_date":       valueDate,
+				"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
+				"balance":          balance.Float64,
+			})
 		}
 		// Ensure a non-empty tran_id so downstream consumers see stable identifiers even when the file omits them.
 		if !tranID.Valid || strings.TrimSpace(tranID.String) == "" {
@@ -2553,17 +2304,33 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 
 	var bankStatementID string
 	err = tx.QueryRowContext(ctx, `
-		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-		      ON CONFLICT ON CONSTRAINT uniq_stmt
-		      DO UPDATE SET
-			      file_hash = EXCLUDED.file_hash,
-			      closing_balance = EXCLUDED.closing_balance
-		      RETURNING bank_statement_id
-		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
+		     INSERT INTO cimplrcorpsaas.bank_statements (
+    entity_id,
+    account_number,
+    statement_period_start,
+    statement_period_end,
+    file_hash,
+    opening_balance,
+    closing_balance,
+    upload_s3_key
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+
+ON CONFLICT (file_hash)
+DO UPDATE SET
+    opening_balance = EXCLUDED.opening_balance,
+    closing_balance = EXCLUDED.closing_balance,
+    statement_period_start = EXCLUDED.statement_period_start,
+    statement_period_end = EXCLUDED.statement_period_end,
+    upload_s3_key = EXCLUDED.upload_s3_key
+
+RETURNING bank_statement_id
+		  `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance, uploadS3Key).Scan(&bankStatementID)
 	if err != nil {
 		tx.Rollback()
+		// Detect uniq_stmt (entity+account+period composite) constraint violation → clear user error
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" && pqErr.Constraint == "uniq_stmt" {
+			return nil, fmt.Errorf("%w: account %s already has a statement for this period", ErrStatementPeriodExists, accountNumber)
+		}
 		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
 	}
 
@@ -2596,7 +2363,7 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					"withdrawal_amount": t.WithdrawalAmount.Float64,
 					"deposit_amount":    t.DepositAmount.Float64,
 					"balance":           t.Balance.Float64,
-					"category_id":       t.CategoryID.Int64,
+					"category_id":       t.CategoryID.String,
 				})
 				continue
 			}
@@ -2676,17 +2443,17 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 	// KPIs and category details
 	kpiCats := []map[string]interface{}{}
 	foundCategories := []map[string]interface{}{}
-	foundCategoryIDs := map[int64]bool{}
+	foundCategoryIDs := map[string]bool{}
 	totalTxns := len(transactions)
 	groupedTxns := 0
 	ungroupedTxns := 0
 
-	categoryTxns := map[int64][]map[string]interface{}{}
+	categoryTxns := map[string][]map[string]interface{}{}
 
 	for i, t := range transactions {
 		if t.CategoryID.Valid {
 			groupedTxns++
-			catID := t.CategoryID.Int64
+			catID := t.CategoryID.String
 			categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
 				"index":             i,
 				"tran_id":           t.TranID.String,
@@ -2765,10 +2532,87 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		"ungrouped_transaction_count":     ungroupedTxns,
 		"grouped_transaction_percent":     groupedPct,
 		"ungrouped_transaction_percent":   ungroupedPct,
-		"file_storage_key":                s3Key,
+		"file_storage_key":                uploadS3Key.String,
 		"file_storage_url":                s3URL,
 	}
 	return result, nil
+}
+
+// parseFileToRows converts raw file bytes (CSV, XLSX, or XLS) into a 2-D string slice.
+// All three formats are normalised to the same [][]string output so callers do not need
+// to know which format was uploaded. Returns an error when the content cannot be parsed
+// as any of the three supported types.
+func parseFileToRows(fileBytes []byte) ([][]string, error) {
+	// 0. If Apple Numbers file, extract embedded XLSX first
+	if extracted := tryExtractNumbersAsXLSX(fileBytes); extracted != nil {
+		log.Printf("[BANK-PARSE] parseFileToRows: .numbers detected — using embedded XLSX")
+		fileBytes = extracted
+	}
+
+	// 1. Try XLSX / modern Excel first (excelize handles .xlsx and some .xlsm)
+	if xl, xlErr := excelize.OpenReader(bytes.NewReader(fileBytes)); xlErr == nil {
+		defer xl.Close()
+		sheetName := xl.GetSheetName(0)
+		rawRows, err := xl.GetRows(sheetName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read xlsx sheet: %w", err)
+		}
+		if len(rawRows) == 0 {
+			return nil, errors.New("xlsx file contains no rows")
+		}
+		// Re-read via GetCellValue so formulas are evaluated
+		out := make([][]string, len(rawRows))
+		for i, rawRow := range rawRows {
+			out[i] = make([]string, len(rawRow))
+			for j := range rawRow {
+				colName, _ := excelize.ColumnNumberToName(j + 1)
+				cellRef := fmt.Sprintf("%s%d", colName, i+1)
+				if v, cErr := xl.GetCellValue(sheetName, cellRef); cErr == nil && v != "" {
+					out[i][j] = v
+				} else {
+					out[i][j] = rawRow[j]
+				}
+			}
+		}
+		return out, nil
+	}
+
+	// 2. Try legacy XLS (BIFF8 / Excel 97-2003) via shakinm/xlsReader
+	tmpXlsFile, tmpErr := os.CreateTemp("", "bankstmt-multi-*.xls")
+	if tmpErr == nil {
+		defer os.Remove(tmpXlsFile.Name())
+		defer tmpXlsFile.Close()
+		if _, wErr := tmpXlsFile.Write(fileBytes); wErr == nil {
+			tmpXlsFile.Close()
+			if xlsBook, xlsErr := xls.OpenFile(tmpXlsFile.Name()); xlsErr == nil {
+				if sheet, sheetErr := xlsBook.GetSheet(0); sheetErr == nil && sheet != nil {
+					var out [][]string
+					for _, xlsRow := range sheet.GetRows() {
+						var rowVals []string
+						for _, col := range xlsRow.GetCols() {
+							rowVals = append(rowVals, col.GetString())
+						}
+						out = append(out, rowVals)
+					}
+					if len(out) > 0 {
+						return out, nil
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Fall back to CSV
+	rdr := csv.NewReader(bytes.NewReader(fileBytes))
+	rdr.FieldsPerRecord = -1
+	out, err := rdr.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse file as xlsx, xls, or csv: %w", err)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("file contains no rows")
+	}
+	return out, nil
 }
 
 // UploadMultiAccountBankStatementHandler parses a single CSV file containing rows
@@ -2829,7 +2673,7 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			}
 		}
 		if err != nil || file == nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "File not found in request. Please attach a CSV file using the 'file' field in form-data."})
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "File not found in request. Please attach a CSV, XLSX, or XLS file using the 'file' field in form-data."})
 			return
 		}
 		defer file.Close()
@@ -2841,20 +2685,55 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// Parse CSV
-		rdr := csv.NewReader(bytes.NewReader(fileBytes))
-		rdr.FieldsPerRecord = -1
-		rows, err := rdr.ReadAll()
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to parse CSV file. Please ensure it is a valid CSV."})
+		// Parse CSV / XLSX / XLS → uniform [][]string
+		rows, parseErr := parseFileToRows(fileBytes)
+		if parseErr != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Unable to parse file. Please upload a valid CSV, XLSX, or XLS file."})
 			return
 		}
 		if len(rows) < 1 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "CSV contains no rows."})
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "File contains no rows."})
 			return
 		}
 
-		header := rows[0]
+		// Auto-detect the actual column-header row by scoring the first 30 rows.
+		// Banks like Axis Bank embed metadata (name, address, customer ID, etc.) above
+		// the real column header row. We pick the row with the most matches against
+		// a set of known column keywords; that row becomes `header` and only rows
+		// after it are treated as data.
+		headerRowIdx := 0
+		{
+			knownCols := []string{
+				"date", "debit", "credit", "balance", "particulars", "description",
+				"narrative", "narration", "withdrawal", "deposit", "amount", "cheque",
+				"account", "value", "remarks", "branch", "transaction",
+			}
+			bestScore := 0
+			limit := 30
+			if limit > len(rows) {
+				limit = len(rows)
+			}
+			for ri := 0; ri < limit; ri++ {
+				score := 0
+				for _, cell := range rows[ri] {
+					lc := strings.ToLower(strings.TrimSpace(cell))
+					for _, kw := range knownCols {
+						if strings.Contains(lc, kw) {
+							score++
+							break
+						}
+					}
+				}
+				if score > bestScore {
+					bestScore = score
+					headerRowIdx = ri
+				}
+			}
+		}
+		header := rows[headerRowIdx]
+		// Data rows are everything after the detected header row.
+		dataRows := rows[headerRowIdx+1:]
+
 		// helper to find header indices (case-insensitive, substring match)
 		findIdx := func(keywords ...string) int {
 			for i, h := range header {
@@ -2867,36 +2746,145 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			}
 			return -1
 		}
-
-		accIdx := findIdx("account number", "account_no", "account")
-		dateIdx := findIdx(constants.TransactionDate, "statement date", "date")
-		valDateIdx := findIdx(constants.ValueDate, "value-date", "value")
-		descIdx := findIdx("transaction description", "description", "remarks", "narration")
-		// prefer explicit Extra Information column when available
-		extraInfoIdx := findIdx("extra information", "extra", "extra-info", "extra_info")
-		debitIdx := findIdx("debit", "debit amount", "withdrawal")
-		creditIdx := findIdx("credit", "credit amount", "deposit")
-		openingIdx := findIdx("opening", "opening available", "opening available balance")
-		closingIdx := findIdx("closing", "closing available", "current / closing")
-
-		if accIdx == -1 {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "CSV must contain an account number column."})
-			return
+		// findIdxExclude finds the first header that contains one of the keywords
+		// but does NOT contain any of the excludeWords. Used to disambiguate columns
+		// like "Account number" vs "Account name" when searching for "account".
+		findIdxExclude := func(excludeWords []string, keywords ...string) int {
+			for i, h := range header {
+				lc := strings.ToLower(strings.TrimSpace(h))
+				excluded := false
+				for _, ex := range excludeWords {
+					if strings.Contains(lc, strings.ToLower(ex)) {
+						excluded = true
+						break
+					}
+				}
+				if excluded {
+					continue
+				}
+				for _, kw := range keywords {
+					if strings.Contains(lc, strings.ToLower(kw)) {
+						return i
+					}
+				}
+			}
+			return -1
 		}
 
-		// Group rows by account number
+		// Account number column: prefer explicit "account number" / "account_no" / "account no",
+		// but fall back to any "account" column that does NOT also contain "name".
+		accIdx := findIdx("account number", "account_no", "account no", "acct_no", "acct no")
+		if accIdx == -1 {
+			accIdx = findIdxExclude([]string{"name"}, "account")
+		}
+		// Account name column (optional — used for display / result key labeling)
+		accNameIdx := findIdxExclude([]string{"number", "no", "_no"}, "account name", "account_name", "accountname")
+		if accNameIdx == -1 {
+			accNameIdx = findIdx("account name", "account_name", "accountname")
+		}
+		// Bank name column (optional)
+		bankNameIdx := findIdx("bank name", "bank_name", "bankname")
+		dateIdx := findIdx(constants.TransactionDate, "statement date", "post date", "date")
+		valDateIdx := findIdx(constants.ValueDate, "value-date", "value date", "value")
+		// Description: also match "narrative" (HSBC) and "particulars"
+		descIdx := findIdx("transaction description", "description", "narrative", "narration", "particulars", "remarks")
+		// prefer explicit Extra Information column when available
+		extraInfoIdx := findIdx("extra information", "extra", "extra-info", "extra_info")
+		// Debug: log the detected header row and all column cells
+		log.Printf("[MULTI-UPLOAD] headerRowIdx=%d, header cells: %v", headerRowIdx, header)
+
+		// Debit / credit: search for explicit column names first to avoid matching
+		// "Closing ledger balance" etc. that happen to contain "credit"/"debit".
+		debitIdx := findIdx("debit amount", "debit_amount", "withdrawal amount", "withdrawal_amount", "debit")
+		creditIdx := findIdx("credit amount", "credit_amount", "deposit amount", "deposit_amount")
+		if creditIdx == -1 {
+			// Only fall back to "credit" / "deposit" when no explicit column found
+			creditIdx = findIdxExclude([]string{"ledger", "available", "brought", "closing", "opening", "current"}, "credit", "deposit")
+		}
+		log.Printf("[MULTI-UPLOAD] accIdx=%d dateIdx=%d descIdx=%d debitIdx=%d creditIdx=%d balanceIdx(pre)=%d", accIdx, dateIdx, descIdx, debitIdx, creditIdx, -1)
+		openingIdx := findIdx("opening balance", "opening available balance", "opening available", "opening")
+		// Per-row running balance column: prefer an exact "balance" column over "closing balance" etc.
+		// Strategy: first try to find a header whose trimmed lowercase is exactly "balance",
+		// then fall back to columns containing "balance" but not "closing" or "opening".
+		balanceIdx := -1
+		for i, h := range header {
+			if strings.ToLower(strings.TrimSpace(h)) == "balance" {
+				balanceIdx = i
+				break
+			}
+		}
+		if balanceIdx == -1 {
+			balanceIdx = findIdxExclude([]string{"closing", "opening", "ledger", "available", "brought", "current"}, "balance")
+		}
+		// closingIdx is used for the overall statement closing balance (header row value, not per-row)
+		closingIdx := findIdx("closing available balance", "closing ledger balance", "closing balance", "closing available", "closing")
+
+		// When there is no dedicated account-number column (single-account format like Axis Bank),
+		// scan all rows for a long digit run that looks like an account number.
+		// The file will be treated as one group under that number.
+		singleAccNum := ""
+		if accIdx == -1 {
+			for _, row := range rows {
+				for _, cell := range row {
+					if candidate := extractAccountFromCell(cell); candidate != "" {
+						singleAccNum = candidate
+						break
+					}
+					// Also try the regex directly on the raw cell (catches "Statement of Account No - 923030007788535")
+					if m := acctNumberRe.FindString(cell); m != "" && len(m) >= 9 {
+						singleAccNum = m
+						break
+					}
+				}
+				if singleAccNum != "" {
+					break
+				}
+			}
+		}
+
+		// Group rows by account number; also track account name and bank name per group for display.
 		groups := make(map[string][][]string)
-		for ri := 1; ri < len(rows); ri++ {
-			row := rows[ri]
-			// guard length
-			if accIdx >= len(row) {
+		groupAccName := make(map[string]string)  // accountNumber → account name (display label)
+		groupBankName := make(map[string]string) // accountNumber → bank name
+		for _, row := range dataRows {
+			var accNum string
+			if accIdx == -1 {
+				// Single-account format: use the number extracted from header rows.
+				// Only include rows that look like data rows (have a date or debit/credit value).
+				hasData := false
+				if dateIdx >= 0 && dateIdx < len(row) && strings.TrimSpace(row[dateIdx]) != "" {
+					hasData = true
+				}
+				if !hasData && debitIdx >= 0 && debitIdx < len(row) && strings.TrimSpace(row[debitIdx]) != "" {
+					hasData = true
+				}
+				if !hasData && creditIdx >= 0 && creditIdx < len(row) && strings.TrimSpace(row[creditIdx]) != "" {
+					hasData = true
+				}
+				if !hasData {
+					continue
+				}
+				accNum = singleAccNum
+			} else {
+				// guard length
+				if accIdx >= len(row) {
+					continue
+				}
+				accNum = strings.TrimSpace(row[accIdx])
+			}
+			if accNum == "" {
 				continue
 			}
-			acc := strings.TrimSpace(row[accIdx])
-			if acc == "" {
-				continue
+			groups[accNum] = append(groups[accNum], row)
+			// capture account name and bank name from first row of each group
+			if _, seen := groupAccName[accNum]; !seen {
+				if accNameIdx >= 0 && accNameIdx < len(row) {
+					groupAccName[accNum] = strings.TrimSpace(row[accNameIdx])
+				}
+				if bankNameIdx >= 0 && bankNameIdx < len(row) {
+					groupBankName[accNum] = strings.TrimSpace(row[bankNameIdx])
+				}
 			}
-			groups[acc] = append(groups[acc], row)
 		}
 
 		ctx := r.Context()
@@ -2904,20 +2892,27 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 
 		// Process each account independently
 		for account, grecs := range groups {
+			// Use account name as result key when available (more human-readable), else account number.
+			resultKey := account
+			if name := groupAccName[account]; name != "" {
+				resultKey = name + " (" + account + ")"
+			}
 			// Build structured input per-account by normalizing rows into transactions.
 			stm := StructuredBankStatement{
-				AccountNumber: account,
-				BankName:      "",
+				AccountNumber: account, // always the actual account number for DB lookup
+				BankName:      groupBankName[account],
 				Transactions:  []StructuredTransaction{},
 			}
 
 			var rowsTxns []struct {
-				dt         time.Time
-				valueDate  time.Time
-				desc       string
-				withdrawal float64
-				deposit    float64
-				rawClose   string
+				dt          time.Time
+				valueDate   time.Time
+				desc        string
+				withdrawal  float64
+				deposit     float64
+				rawClose    string
+				rowBal      float64
+				rowBalValid bool
 			}
 			var minDate, maxDate time.Time
 			var openingBalance, closingBalance float64
@@ -2956,28 +2951,58 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 
 				debitStr := cleanAmount(get(debitIdx))
 				creditStr := cleanAmount(get(creditIdx))
-				closeStr := cleanAmount(get(closingIdx))
+				if len(stm.Transactions) == 0 {
+					// Log first row details to debug column index resolution
+					log.Printf("[MULTI-UPLOAD] FIRST ROW: debitIdx=%d debitStr=%q creditIdx=%d creditStr=%q balanceIdx=%d row=%v", debitIdx, debitStr, creditIdx, creditStr, balanceIdx, rrow)
+				}
+				// Per-row balance: prefer dedicated balanceIdx; fall back to closingIdx
+				rowBalStr := ""
+				if balanceIdx >= 0 {
+					rowBalStr = cleanAmount(get(balanceIdx))
+				}
+				if rowBalStr == "" && closingIdx >= 0 {
+					rowBalStr = cleanAmount(get(closingIdx))
+				}
 
 				var w, d float64
 				if debitStr != "" {
-					if v, err := strconv.ParseFloat(debitStr, 64); err == nil {
+					if v, pErr := strconv.ParseFloat(debitStr, 64); pErr == nil {
+						// Some banks (e.g. HSBC) store debits as negative in the debit column
+						if v < 0 {
+							v = -v
+						}
 						w = v
 					}
 				}
 				if creditStr != "" {
-					if v, err := strconv.ParseFloat(creditStr, 64); err == nil {
+					if v, pErr := strconv.ParseFloat(creditStr, 64); pErr == nil {
+						if v < 0 {
+							v = -v
+						}
 						d = v
 					}
 				}
 
+				// Parse the per-row running balance when available
+				var rowBal float64
+				rowBalValid := false
+				if rowBalStr != "" {
+					if v, pErr := strconv.ParseFloat(rowBalStr, 64); pErr == nil {
+						rowBal = v
+						rowBalValid = true
+					}
+				}
+
 				rowsTxns = append(rowsTxns, struct {
-					dt         time.Time
-					valueDate  time.Time
-					desc       string
-					withdrawal float64
-					deposit    float64
-					rawClose   string
-				}{dt: dt, valueDate: dt, desc: descCell, withdrawal: w, deposit: d, rawClose: closeStr})
+					dt          time.Time
+					valueDate   time.Time
+					desc        string
+					withdrawal  float64
+					deposit     float64
+					rawClose    string
+					rowBal      float64
+					rowBalValid bool
+				}{dt: dt, valueDate: dt, desc: descCell, withdrawal: w, deposit: d, rawClose: rowBalStr, rowBal: rowBal, rowBalValid: rowBalValid})
 
 				if minDate.IsZero() || dt.Before(minDate) {
 					minDate = dt
@@ -2996,41 +3021,44 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 						}
 					}
 				}
-				// closing balance: capture last non-empty closing column
-				if closeStr != "" {
-					if v, err := strconv.ParseFloat(closeStr, 64); err == nil {
-						closingBalance = v
-					}
+				// closing balance: capture last non-empty per-row balance (last row = statement closing balance)
+				if rowBalValid {
+					closingBalance = rowBal
 				}
 			}
 
 			if len(rowsTxns) == 0 {
-				results[account] = map[string]interface{}{"success": false, "message": "No parseable transactions for account"}
+				results[resultKey] = map[string]interface{}{"success": false, "message": "No parseable transactions for account"}
 				continue
 			}
 
-			// Sort transactions by date ascending to compute running balance
+			// Build structured transactions: use per-row balance when available (more accurate),
+			// otherwise compute a running balance from opening.
 			sort.Slice(rowsTxns, func(i, j int) bool { return rowsTxns[i].dt.Before(rowsTxns[j].dt) })
-
-			// If opening balance wasn't found in opening column, try to derive from first row's rawClose and deltas
+			useRowBal := len(rowsTxns) > 0 && rowsTxns[0].rowBalValid
 			running := 0.0
-			if openingFound {
-				running = openingBalance
-			} else {
-				// start from 0 and compute; we'll set opening to first computed running later
-				running = 0.0
+			if !useRowBal {
+				if openingFound {
+					running = openingBalance
+				}
 			}
 
 			// Build structured transactions with cumulative balance
 			for _, rt := range rowsTxns {
-				running = running - rt.withdrawal + rt.deposit
+				var bal float64
+				if rt.rowBalValid {
+					bal = rt.rowBal
+				} else {
+					running = running - rt.withdrawal + rt.deposit
+					bal = running
+				}
 				txn := StructuredTransaction{
 					TransactionDate: rt.dt.Format(constants.DateFormat),
 					ValueDate:       rt.valueDate.Format(constants.DateFormat),
 					Description:     rt.desc,
 					Withdrawal:      rt.withdrawal,
 					Deposit:         rt.deposit,
-					Balance:         running,
+					Balance:         bal,
 				}
 				stm.Transactions = append(stm.Transactions, txn)
 			}
@@ -3040,13 +3068,10 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			stm.PeriodEnd = maxDate.Format(constants.DateFormat)
 			if openingFound {
 				stm.OpeningBalance = openingBalance
-			} else {
-				// when opening not provided, set to running minus sum of transactions
-				// compute opening as first running minus first txn effect
-				if len(stm.Transactions) > 0 {
-					first := stm.Transactions[0]
-					stm.OpeningBalance = first.Balance - (first.Deposit - first.Withdrawal)
-				}
+			} else if len(stm.Transactions) > 0 {
+				// Derive opening from first transaction's balance and its effect
+				first := stm.Transactions[0]
+				stm.OpeningBalance = first.Balance + first.Withdrawal - first.Deposit
 			}
 			// prefer explicit captured closingBalance if present, else use running
 			if closingBalance != 0 {
@@ -3068,10 +3093,10 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			// Call structured ingestion
 			res, upErr := ProcessBankStatementFromStructuredInput(ctx, db, stm, fileHash)
 			if upErr != nil {
-				results[account] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
+				results[resultKey] = map[string]interface{}{"success": false, "message": userFriendlyUploadError(upErr)}
 				continue
 			}
-			results[account] = map[string]interface{}{"success": true, "data": res}
+			results[resultKey] = map[string]interface{}{"success": true, "data": res}
 		}
 
 		// Return aggregated results
@@ -3083,2122 +3108,3 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 }
 
 // 1. Get all bank statements (POST, req: user_id)
-func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			UserID string `json:"user_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			http.Error(w, "Missing or invalid user_id in body", http.StatusBadRequest)
-			return
-		}
-		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
-		if len(entityIDs) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusUnauthorized)
-			return
-		}
-		rows, err := db.QueryContext(ctx, `
-										WITH latest_audit AS (
-											SELECT a.*
-											FROM cimplrcorpsaas.auditactionbankstatement a
-											INNER JOIN (
-												SELECT bankstatementid, MAX(action_id) AS max_action_id
-												FROM cimplrcorpsaas.auditactionbankstatement
-												GROUP BY bankstatementid
-											) b ON a.bankstatementid = b.bankstatementid AND a.action_id = b.max_action_id
-										)
-										SELECT s.bank_statement_id, e.entity_name, s.account_number, s.statement_period_start, s.statement_period_end, s.opening_balance, s.closing_balance, s.uploaded_at,
-													 la.actiontype, la.processing_status, la.action_id, la.requested_by, la.requested_at, la.checker_by, la.checker_at, la.checker_comment, la.reason,
-														COALESCE(mb.bank_name, '') AS bank_name,
-														mba.account_nickname AS account_nickname
-										FROM cimplrcorpsaas.bank_statements s
-										JOIN public.masterentitycash e ON s.entity_id = e.entity_id
-										LEFT JOIN public.masterbankaccount mba ON mba.account_number = s.account_number AND mba.is_deleted = false
-										LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-										LEFT JOIN latest_audit la ON la.bankstatementid = s.bank_statement_id
-										WHERE s.entity_id = ANY($1)
-										ORDER BY s.uploaded_at DESC
-						`, pq.Array(entityIDs))
-		if err != nil {
-			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-		resp := []map[string]interface{}{}
-		for rows.Next() {
-			var id, entityName, acc string
-			var start, end, uploaded time.Time
-			var open, close float64
-			var actionType, processingStatus, actionID, requestedBy, checkerBy, checkerComment, reason sql.NullString
-			var bankName sql.NullString
-			var accountNickname sql.NullString
-			var requestedAt, checkerAt sql.NullTime
-			if err := rows.Scan(&id, &entityName, &acc, &start, &end, &open, &close, &uploaded,
-				&actionType, &processingStatus, &actionID, &requestedBy, &requestedAt, &checkerBy, &checkerAt, &checkerComment, &reason, &bankName, &accountNickname); err != nil {
-				continue
-			}
-			// Add computed field for delete pending approval
-			isDeletePending := false
-			if actionType.String == "DELETE" && processingStatus.String == "DELETE_PENDING_APPROVAL" {
-				isDeletePending = true
-			}
-			resp = append(resp, map[string]interface{}{
-				"bank_statement_id":          id,
-				"entity_name":                entityName,
-				"account_number":             acc,
-				"statement_period_start":     start,
-				"statement_period_end":       end,
-				"opening_balance":            open,
-				"closing_balance":            close,
-				"uploaded_at":                uploaded,
-				"action_type":                actionType.String,
-				"processing_status":          processingStatus.String,
-				"action_id":                  actionID.String,
-				"requested_by":               requestedBy.String,
-				"requested_at":               requestedAt.Time,
-				"checker_by":                 checkerBy.String,
-				"checker_at":                 checkerAt.Time,
-				"checker_comment":            checkerComment.String,
-				"reason":                     reason.String,
-				"bank_name":                  bankName.String,
-				"account_nickname":           accountNickname.String,
-				"is_delete_pending_approval": isDeletePending,
-			})
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    resp,
-		})
-	})
-
-	// 2. Get all transactions for a bank statement (POST, req: user_id, bank_statement_id)
-}
-
-func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var body struct {
-			UserID          string `json:"user_id"`
-			BankStatementID string `json:"bank_statement_id"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
-			body.UserID == "" || body.BankStatementID == "" {
-			http.Error(w, "Missing user_id or bank_statement_id", http.StatusBadRequest)
-			return
-		}
-
-		ctx := r.Context()
-		entityIDs := apictx.GetEntityIDsFromCtx(ctx)
-		if len(entityIDs) == 0 {
-			http.Error(w, "No accessible business units found", http.StatusUnauthorized)
-			return
-		}
-		rows, err := db.QueryContext(ctx, `
-			SELECT
-				t.transaction_id,
-				e.entity_name,
-				t.tran_id,
-				t.value_date,
-				t.transaction_date,
-				t.description,
-				t.withdrawal_amount,
-				t.deposit_amount,
-				t.balance,
-				c.category_name,
-				COALESCE(t.misclassified_flag, false) AS misclassified_flag
-			FROM cimplrcorpsaas.bank_statement_transactions t
-			JOIN cimplrcorpsaas.bank_statements s
-				ON t.bank_statement_id = s.bank_statement_id
-			JOIN public.masterentitycash e
-				ON s.entity_id = e.entity_id
-			LEFT JOIN cimplrcorpsaas.transaction_categories c
-				ON t.category_id = c.category_id
-			WHERE t.bank_statement_id = $1
-			  AND s.entity_id = ANY($2)
-			ORDER BY t.value_date
-		`, body.BankStatementID, pq.Array(entityIDs))
-
-		if err != nil {
-			http.Error(w, "DB error: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		resp := []map[string]interface{}{}
-
-		for rows.Next() {
-			var (
-				tid           int64
-				entityName    string
-				tranID        sql.NullString
-				desc          string
-				category      sql.NullString
-				vdate         time.Time
-				tdate         time.Time
-				withdrawal    sql.NullFloat64
-				deposit       sql.NullFloat64
-				balance       sql.NullFloat64
-				misclassified bool
-			)
-
-			if err := rows.Scan(
-				&tid,
-				&entityName,
-				&tranID,
-				&vdate,
-				&tdate,
-				&desc,
-				&withdrawal,
-				&deposit,
-				&balance,
-				&category,
-				&misclassified,
-			); err != nil {
-				continue
-			}
-
-			categoryName := category.String
-			if !category.Valid || categoryName == "" {
-				categoryName = "Uncategorized"
-			}
-
-			resp = append(resp, map[string]interface{}{
-				"transaction_id":     tid,
-				"entity_name":        entityName,
-				"tran_id":            tranID.String,
-				"value_date":         vdate,
-				"transaction_date":   tdate,
-				"description":        desc,
-				"withdrawal_amount":  withdrawal.Float64,
-				"deposit_amount":     deposit.Float64,
-				"balance":            balance.Float64,
-				"category_name":      categoryName,
-				"misclassified_flag": misclassified,
-			})
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    resp,
-		})
-	})
-}
-
-// MarkBankStatementTransactionsMisclassifiedHandler sets misclassified_flag = true
-// for the provided list of transaction IDs.
-func MarkBankStatementTransactionsMisclassifiedHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-
-		var body struct {
-			UserID         string  `json:"user_id"`
-			TransactionIDs []int64 `json:"transaction_ids"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.TransactionIDs) == 0 {
-			http.Error(w, "Missing user_id or transaction_ids", http.StatusBadRequest)
-			return
-		}
-
-		ctx := r.Context()
-		res, err := db.ExecContext(ctx, `
-			UPDATE cimplrcorpsaas.bank_statement_transactions
-			SET misclassified_flag = true
-			WHERE transaction_id = ANY($1)
-		`, pq.Array(body.TransactionIDs))
-		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		rowsAffected, _ := res.RowsAffected()
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":       true,
-			"updated_count": rowsAffected,
-		})
-	})
-}
-
-// 2b. Recompute KPIs and uncategorized data for an existing bank statement
-// (POST, req: user_id, bank_statement_id). This endpoint returns a response
-// shaped like the upload endpoint so that the frontend can refresh KPIs and
-// the list of uncategorized transactions without re-uploading the file.
-func RecomputeBankStatementSummaryHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			UserID          string `json:"user_id"`
-			BankStatementID string `json:"bank_statement_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.BankStatementID == "" {
-			http.Error(w, "Missing bank_statement_id in body", http.StatusBadRequest)
-			return
-		}
-
-		ctx := r.Context()
-
-		// Fetch statement meta to know entity/account and period
-		var entityID, accountNumber string
-		var statementPeriodStart, statementPeriodEnd time.Time
-		err := db.QueryRowContext(ctx, `
-				SELECT entity_id, account_number, statement_period_start, statement_period_end
-				FROM cimplrcorpsaas.bank_statements
-				WHERE bank_statement_id = $1
-			`, body.BankStatementID).Scan(&entityID, &accountNumber, &statementPeriodStart, &statementPeriodEnd)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				http.Error(w, "bank_statement_id not found", http.StatusNotFound)
-				return
-			}
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Fetch account currency for rule loading
-		var acctCurrency sql.NullString
-		err = db.QueryRowContext(ctx, `SELECT mba.currency FROM public.masterbankaccount mba WHERE mba.account_number = $1 LIMIT 1`, accountNumber).Scan(&acctCurrency)
-		if err != nil {
-			http.Error(w, "failed to fetch account currency: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Load all rules/components for this account/entity/bank/currency/global so we can
-		// both re-evaluate categories and attach category metadata (names/types)
-		// to the KPI response, mirroring the upload behaviour.
-		var currencyCode string
-		if acctCurrency.Valid {
-			currencyCode = acctCurrency.String
-		}
-		rules, err := loadCategoryRuleComponents(ctx, db, accountNumber, entityID, currencyCode)
-		if err != nil {
-			http.Error(w, "failed to fetch category rules: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Load all transactions for this bank statement
-		rows, err := db.QueryContext(ctx, `
-			SELECT transaction_id, tran_id, value_date, transaction_date, description,
-			       withdrawal_amount, deposit_amount, balance, raw_json, category_id
-			FROM cimplrcorpsaas.bank_statement_transactions
-			WHERE bank_statement_id = $1
-			ORDER BY value_date, transaction_date, transaction_id
-		`, body.BankStatementID)
-		if err != nil {
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-
-		categoryCount := map[int64]int{}
-		debitSum := map[int64]float64{}
-		creditSum := map[int64]float64{}
-		uncategorized := []map[string]interface{}{}
-		transactionsCount := 0
-		totalTxns := 0
-		groupedTxns := 0
-		ungroupedTxns := 0
-		categoryTxns := map[int64][]map[string]interface{}{}
-		for rows.Next() {
-			var transactionID int64
-			var tranID sql.NullString
-			var valueDate, transactionDate time.Time
-			var description string
-			var withdrawal, deposit, balance sql.NullFloat64
-			var rawJSON json.RawMessage
-			var existingCategoryID sql.NullInt64
-			if err := rows.Scan(&transactionID, &tranID, &valueDate, &transactionDate, &description,
-				&withdrawal, &deposit, &balance, &rawJSON, &existingCategoryID); err != nil {
-				continue
-			}
-			transactionsCount++
-			totalTxns++
-
-			// Re-evaluate category for this transaction using the same logic as
-			// the upload flow so that new/updated rules are applied.
-			newCategoryID := matchCategoryForTransaction(rules, description, withdrawal, deposit)
-
-			// If the category has changed (including from/to NULL), persist the
-			// new category_id back to the database.
-			if (newCategoryID.Valid != existingCategoryID.Valid) || (newCategoryID.Valid && existingCategoryID.Valid && newCategoryID.Int64 != existingCategoryID.Int64) {
-				if _, err := db.ExecContext(ctx, `
-					UPDATE cimplrcorpsaas.bank_statement_transactions
-					SET category_id = $1
-					WHERE transaction_id = $2
-				`, newCategoryID, transactionID); err != nil {
-					log.Printf("failed to update category_id for transaction_id %d: %v", transactionID, err)
-				}
-			}
-
-			// Use the (potentially updated) category for KPI aggregation and
-			// uncategorized list.
-			if newCategoryID.Valid {
-				categoryCount[newCategoryID.Int64]++
-				if withdrawal.Valid {
-					debitSum[newCategoryID.Int64] += withdrawal.Float64
-				}
-				if deposit.Valid {
-					creditSum[newCategoryID.Int64] += deposit.Float64
-				}
-				groupedTxns++
-				catID := newCategoryID.Int64
-				categoryTxns[catID] = append(categoryTxns[catID], map[string]interface{}{
-					"transaction_id":    transactionID,
-					"tran_id":           tranID.String,
-					"value_date":        valueDate,
-					"transaction_date":  transactionDate,
-					"description":       description,
-					"withdrawal_amount": withdrawal.Float64,
-					"deposit_amount":    deposit.Float64,
-					"balance":           balance.Float64,
-					"category_id":       catID,
-				})
-			} else {
-				uncategorized = append(uncategorized, map[string]interface{}{
-					"tran_id":          tranID.String,
-					"transaction_id":   transactionID,
-					"tran_date":        transactionDate,
-					"transaction_date": transactionDate,
-					"description":      description,
-					"value_date":       valueDate,
-					"amount":           map[string]interface{}{"withdrawal": withdrawal.Float64, "deposit": deposit.Float64},
-					"balance":          balance.Float64,
-				})
-				ungroupedTxns++
-			}
-		}
-
-		// Build KPI and category metadata, mirroring the upload response
-		kpiCats := []map[string]interface{}{}
-		foundCategories := []map[string]interface{}{}
-		foundCategoryIDs := map[int64]bool{}
-		for catID, count := range categoryCount {
-			var catName string
-			for _, rule := range rules {
-				if rule.CategoryID == catID {
-					catName = rule.CategoryName
-					break
-				}
-			}
-			kpiCats = append(kpiCats, map[string]interface{}{
-				"category_id":   catID,
-				"category_name": catName,
-				"count":         count,
-				"debit_sum":     debitSum[catID],
-				"credit_sum":    creditSum[catID],
-				"transactions":  categoryTxns[catID],
-			})
-			foundCategoryIDs[catID] = true
-		}
-		for _, rule := range rules {
-			if foundCategoryIDs[rule.CategoryID] {
-				foundCategories = append(foundCategories, map[string]interface{}{
-					"category_id":   rule.CategoryID,
-					"category_name": rule.CategoryName,
-					"category_type": rule.CategoryType,
-				})
-				delete(foundCategoryIDs, rule.CategoryID)
-			}
-		}
-
-		groupedPct := 0.0
-		ungroupedPct := 0.0
-		if totalTxns > 0 {
-			groupedPct = float64(groupedTxns) * 100.0 / float64(totalTxns)
-			ungroupedPct = float64(ungroupedTxns) * 100.0 / float64(totalTxns)
-		}
-		startStr := ""
-		endStr := ""
-		if !statementPeriodStart.IsZero() {
-			startStr = statementPeriodStart.Format(time.RFC3339)
-		}
-		if !statementPeriodEnd.IsZero() {
-			endStr = statementPeriodEnd.Format(time.RFC3339)
-		}
-		result := map[string]interface{}{
-			"pages_processed":                 1,
-			"bank_wise_status":                []map[string]interface{}{{"account_number": accountNumber, "status": "SUCCESS"}},
-			"statement_date_coverage":         map[string]interface{}{"start": startStr, "end": endStr},
-			"category_kpis":                   kpiCats,
-			"categories_found":                foundCategories,
-			"uncategorized":                   uncategorized,
-			"bank_statement_id":               body.BankStatementID,
-			"transactions_uploaded_count":     transactionsCount,
-			"transactions_under_review_count": 0,
-			"transactions_under_review":       []map[string]interface{}{},
-			"grouped_transaction_count":       groupedTxns,
-			"ungrouped_transaction_count":     ungroupedTxns,
-			"grouped_transaction_percent":     groupedPct,
-			"ungrouped_transaction_percent":   ungroupedPct,
-		}
-
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Bank statement summary recomputed successfully",
-			"data":    result,
-		})
-	})
-}
-
-// 3. Approve a bank statement (POST, req: user_id, bank_statement_id)
-func ApproveBankStatementHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			UserID           string   `json:"user_id"`
-			BankStatementIDs []string `json:"bank_statement_ids"`
-			Comment          string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
-			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
-			return
-		}
-		results := make([]map[string]interface{}, 0)
-		ctx := r.Context()
-		for _, bsid := range body.BankStatementIDs {
-			// entity access check
-			var entityID string
-			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
-						results = append(results, map[string]interface{}{
-							"bank_statement_id": bsid,
-							"success":           false,
-							"error":             constants.ErrNoAccessToBankStatement,
-						})
-						continue
-					}
-				}
-			}
-			// Check if the latest audit action is DELETE_PENDING_APPROVAL
-			var actionType, processingStatus string
-			err := db.QueryRowContext(ctx, `
-				       SELECT actiontype, processing_status FROM cimplrcorpsaas.auditactionbankstatement
-				       WHERE bankstatementid = $1
-				       ORDER BY action_id DESC LIMIT 1
-			       `, bsid).Scan(&actionType, &processingStatus)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"bank_statement_id": bsid,
-					"success":           false,
-					"error":             err.Error(),
-				})
-				continue
-			}
-			if actionType == "DELETE" && processingStatus == "DELETE_PENDING_APPROVAL" {
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				defer tx.Rollback()
-				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statement_transactions WHERE bank_statement_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`DELETE FROM public.bank_balances_manual WHERE balance_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "DELETE", "DELETED", body.UserID, time.Now(), body.Comment)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				if err := tx.Commit(); err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				results = append(results, map[string]interface{}{
-					"bank_statement_id": bsid,
-					"success":           true,
-					"message":           "Bank statement and related data deleted after approval",
-				})
-			} else {
-				// On normal approval, create/update the corresponding bank balance
-				// entry and its audit record, based on the already-stored statement
-				// and transactions.
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-				defer tx.Rollback()
-
-				var accountNumber string
-				var statementPeriodEnd time.Time
-				var openingBalance, closingBalance float64
-				err = tx.QueryRowContext(ctx, `
-				       SELECT account_number, statement_period_end, opening_balance, closing_balance
-				       FROM cimplrcorpsaas.bank_statements
-				       WHERE bank_statement_id = $1
-			       `, bsid).Scan(&accountNumber, &statementPeriodEnd, &openingBalance, &closingBalance)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				// Lookup account/bank details for balances_manual
-				var bankName, currencyCode, nickname, country string
-				err = tx.QueryRowContext(ctx, `
-				       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
-				       FROM public.masterbankaccount mba
-				       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-				       WHERE mba.account_number = $1 AND mba.is_deleted = false
-			       `, accountNumber).Scan(&bankName, &currencyCode, &nickname, &country)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				// Enforce bank/account/currency checks (entity already checked above)
-				if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
-					if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
-						results = append(results, map[string]interface{}{
-							"bank_statement_id": bsid,
-							"success":           false,
-							"error":             constants.ErrBankNotAllowed,
-						})
-						continue
-					}
-				}
-				if ctx.Value("ApprovedBankAccounts") != nil {
-					if !ctxHasApprovedBankAccount(ctx, accountNumber) {
-						results = append(results, map[string]interface{}{
-							"bank_statement_id": bsid,
-							"success":           false,
-							"error":             "bank account not approved",
-						})
-						continue
-					}
-				}
-				if !ctxHasApprovedCurrency(ctx, currencyCode) {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             constants.ErrCurrencyNotAllowed,
-					})
-					continue
-				}
-
-				// Calculate total credits and debits from stored transactions
-				var totalCredits, totalDebits float64
-				err = tx.QueryRowContext(ctx, `
-				       SELECT COALESCE(SUM(deposit_amount), 0), COALESCE(SUM(withdrawal_amount), 0)
-				       FROM cimplrcorpsaas.bank_statement_transactions
-				       WHERE bank_statement_id = $1
-			       `, bsid).Scan(&totalCredits, &totalDebits)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				// Upsert into public.bank_balances_manual for dashboard matching
-				_, err = tx.Exec(`
-				       INSERT INTO public.bank_balances_manual (
-					       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel
-				       ) VALUES (
-					       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-				       )
-				       ON CONFLICT (balance_id) DO UPDATE SET
-					       bank_name = EXCLUDED.bank_name,
-					       account_no = EXCLUDED.account_no,
-					       currency_code = EXCLUDED.currency_code,
-					       nickname = EXCLUDED.nickname,
-					       country = EXCLUDED.country,
-					       as_of_date = EXCLUDED.as_of_date,
-					       balance_type = EXCLUDED.balance_type,
-					       balance_amount = EXCLUDED.balance_amount,
-					       opening_balance = EXCLUDED.opening_balance,
-					       total_credits = EXCLUDED.total_credits,
-					       total_debits = EXCLUDED.total_debits,
-					       closing_balance = EXCLUDED.closing_balance,
-					       statement_type = EXCLUDED.statement_type,
-					       source_channel = EXCLUDED.source_channel
-			       `,
-					bsid,
-					bankName,
-					accountNumber,
-					currencyCode,
-					nickname,
-					country,
-					statementPeriodEnd,
-					"CLOSING",
-					closingBalance,
-					openingBalance,
-					totalCredits,
-					totalDebits,
-					closingBalance,
-					"BANK_STATEMENT_V2",
-					"UPLOAD_V2",
-				)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				// Insert audit action for bank_balances_manual marking it pending approval
-				_, err = tx.Exec(`
-				       INSERT INTO auditactionbankbalances (
-					       balance_id, actiontype, processing_status, requested_by, requested_at
-				       ) VALUES ($1, $2, $3, $4, $5)
-			       `,
-					bsid,
-					"CREATE",
-					"PENDING_APPROVAL",
-					body.UserID,
-					time.Now(),
-				)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				// Finally, record the statement approval itself
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
-				if err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				if err := tx.Commit(); err != nil {
-					results = append(results, map[string]interface{}{
-						"bank_statement_id": bsid,
-						"success":           false,
-						"error":             err.Error(),
-					})
-					continue
-				}
-
-				results = append(results, map[string]interface{}{
-					"bank_statement_id": bsid,
-					"success":           true,
-					"message":           "Bank statement approved and bank balance created",
-				})
-			}
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
-		})
-	})
-}
-
-// 4. Reject a bank statement (POST, req: user_id, bank_statement_id)
-func RejectBankStatementHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			UserID           string   `json:"user_id"`
-			BankStatementIDs []string `json:"bank_statement_ids"`
-			Comment          string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
-			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
-			return
-		}
-		results := make([]map[string]interface{}, 0)
-		ctx := r.Context()
-		for _, bsid := range body.BankStatementIDs {
-			var entityID string
-			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
-						results = append(results, map[string]interface{}{
-							"bank_statement_id": bsid,
-							"success":           false,
-							"error":             constants.ErrNoAccessToBankStatement,
-						})
-						continue
-					}
-				}
-			}
-			_, err := db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"bank_statement_id": bsid,
-					"success":           false,
-					"error":             err.Error(),
-				})
-				continue
-			}
-			results = append(results, map[string]interface{}{
-				"bank_statement_id": bsid,
-				"success":           true,
-				"message":           "Bank statement rejected",
-			})
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
-		})
-	})
-}
-
-// 5. Delete bank statement, its transactions, and its balance (POST, req: user_id, bank_statement_id)
-func DeleteBankStatementHandler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			UserID           string   `json:"user_id"`
-			BankStatementIDs []string `json:"bank_statement_ids"`
-			Comment          string   `json:"comment"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" || len(body.BankStatementIDs) == 0 {
-			http.Error(w, missingUserIDOrBankStatementIDs, http.StatusBadRequest)
-			return
-		}
-		results := make([]map[string]interface{}, 0)
-		ctx := r.Context()
-		for _, bsid := range body.BankStatementIDs {
-			var entityID string
-			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
-				if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-					if !apictx.IsEntityAllowed(ctx, entityID) {
-						results = append(results, map[string]interface{}{
-							"bank_statement_id": bsid,
-							"success":           false,
-							"error":             constants.ErrNoAccessToBankStatement,
-						})
-						continue
-					}
-				}
-			}
-			_, err := db.ExecContext(ctx, `
-				       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-					       bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment
-				       ) VALUES ($1, $2, $3, $4, $5, $6)
-			       `, bsid, "DELETE", "DELETE_PENDING_APPROVAL", body.UserID, time.Now(), body.Comment)
-			if err != nil {
-				results = append(results, map[string]interface{}{
-					"bank_statement_id": bsid,
-					"success":           false,
-					"error":             err.Error(),
-				})
-				continue
-			}
-			results = append(results, map[string]interface{}{
-				"bank_statement_id": bsid,
-				"success":           true,
-				"message":           "Delete request submitted for approval",
-			})
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"results": results,
-		})
-	})
-
-}
-
-func UploadBankStatementV2Handler(db *sql.DB) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-
-		if r.Method != http.MethodPost {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Only POST method is allowed for this endpoint.",
-			})
-			return
-		}
-
-		// Check if is_pdf flag is set in query params first (no multipart parsing needed)
-		isPDF := r.URL.Query().Get("is_pdf") == "true"
-
-		if isPDF {
-			// PDF processing: read bank.json and process it (NO FILE UPLOAD NEEDED)
-			log.Println("[BANK_STATEMENT] PDF flag detected, processing from bank.json")
-			result, err := ProcessBankStatementFromJSON(r.Context(), db)
-			if err != nil {
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": userFriendlyUploadError(err),
-				})
-				return
-			}
-
-			msg := "Bank statement from PDF uploaded successfully"
-			if rc, ok := result["transactions_under_review_count"].(int); ok && rc > 0 {
-				msg = fmt.Sprintf("Bank statement from PDF uploaded successfully. %d transactions are under review.", rc)
-			}
-
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"message": msg,
-				"data":    result,
-			})
-			return
-		}
-
-		// Regular Excel/XLS/CSV processing - requires file upload
-		if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB
-			log.Printf("[BANK-UPLOAD-ERROR] Failed to parse multipart form: %v", err)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Unable to read the uploaded file. Please try again.",
-			})
-			return
-		}
-
-		// If client requested multi-account CSV processing, delegate to the
-		// dedicated handler which groups rows by account_number and calls the
-		// existing categorization pipeline per-account.
-		if r.FormValue("multi") == "true" {
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
-			return
-		}
-
-		// Parse mapping flag
-		useMappingFlag := strings.ToLower(strings.TrimSpace(r.FormValue("mapping")))
-		useMapping := useMappingFlag == "true" || useMappingFlag == "1"
-
-		// Parse column mappings if mapping flag is true
-		var mappings *ColumnMappings
-		if useMapping {
-			mappingsJSON := r.FormValue("column_mappings")
-			if mappingsJSON != "" {
-				mappings = &ColumnMappings{}
-				if err := json.Unmarshal([]byte(mappingsJSON), mappings); err != nil {
-					log.Printf("[BANK-UPLOAD-ERROR] Invalid column_mappings JSON: %v", err)
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						"success": false,
-						"message": "Invalid column_mappings JSON: " + err.Error(),
-					})
-					return
-				}
-				log.Printf("[BANK-UPLOAD-DEBUG] Custom column mappings provided: %+v", mappings)
-			} else {
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": "mapping flag is true but column_mappings not provided",
-				})
-				return
-			}
-
-			// Validate that account_number mapping exists when mapping mode is requested
-			if mappings != nil && strings.TrimSpace(mappings.AccountNumber) == "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": "Column-Mappings must include 'Account Number' when mapping is enabled",
-				})
-				return
-			}
-		}
-
-		// Log available form fields for debugging
-		var fileFieldsAvailable []string
-		if r.MultipartForm != nil && r.MultipartForm.File != nil {
-			for fieldName := range r.MultipartForm.File {
-				fileFieldsAvailable = append(fileFieldsAvailable, fieldName)
-			}
-			log.Printf("[BANK-UPLOAD-DEBUG] Available file form fields: %v", fileFieldsAvailable)
-		} else {
-			log.Printf("[BANK-UPLOAD-ERROR] No file fields found in multipart form - request may not include a file attachment")
-		}
-
-		file, _, err := r.FormFile("file")
-		if err != nil {
-			log.Printf("[BANK-UPLOAD-ERROR] FormFile('file') error: %v", err)
-			// Try alternative field names commonly used in file uploads
-			if file == nil {
-				file, _, err = r.FormFile("statement")
-			}
-			if err != nil && file == nil {
-				file, _, err = r.FormFile("bankStatement")
-			}
-			if err != nil && file == nil {
-				// Try to use any available file field
-				if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
-					log.Printf("[BANK-UPLOAD-DEBUG] Trying first available file field from: %v", fileFieldsAvailable)
-					for fieldName, files := range r.MultipartForm.File {
-						if len(files) > 0 {
-							log.Printf("[BANK-UPLOAD-DEBUG] Using field: %s", fieldName)
-							file, err = files[0].Open()
-							break
-						}
-					}
-				}
-			}
-			if err != nil || file == nil {
-				errorMsg := "File not found in request. Please attach a bank statement file using the 'file' field in form-data."
-				if len(fileFieldsAvailable) > 0 {
-					errorMsg = fmt.Sprintf("No 'file' field found. Available fields: %v. Please use 'file' as the field name.", fileFieldsAvailable)
-				}
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": errorMsg,
-				})
-				return
-			}
-		}
-		defer file.Close()
-
-		// Use a hash of the file contents for idempotency
-		fileBytes, err := io.ReadAll(file)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": "Failed to read the uploaded file. Please try again.",
-			})
-			return
-		}
-		hash := sha256.Sum256(fileBytes)
-		fileHash := fmt.Sprintf("%x", hash[:])
-
-		// Re-create file reader for actual processing
-		fileReader := bytes.NewReader(fileBytes)
-		mf := &bytesFile{Reader: fileReader}
-
-		result, err := UploadBankStatementV2WithCategorization(r.Context(), db, mf, fileHash, useMapping, mappings)
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": userFriendlyUploadError(err),
-			})
-			return
-		}
-
-		// Build a user-friendly success message that also highlights any
-		// transactions that were detected as already present and put under review.
-		msg := "Bank statement uploaded successfully"
-		if rc, ok := result["transactions_under_review_count"].(int); ok && rc > 0 {
-			msg = fmt.Sprintf("Bank statement uploaded successfully. %d transactions are under review.", rc)
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": msg,
-			"data":    result,
-		})
-	})
-}
-
-// bytesFile implements multipart.File for a bytes.Reader
-type bytesFile struct {
-	*bytes.Reader
-}
-
-func (b *bytesFile) Close() error { return nil }
-
-// PDFBankStatementJSON represents the JSON structure from PDF parsing
-type PDFBankStatementJSON struct {
-	AccountNumber  string               `json:"account_number"`
-	AccountName    string               `json:"account_name"`
-	BankName       string               `json:"bank_name"`
-	IFSC           string               `json:"ifsc"`
-	MICR           string               `json:"micr"`
-	PeriodStart    string               `json:"period_start"`
-	PeriodEnd      string               `json:"period_end"`
-	OpeningBalance float64              `json:"opening_balance"`
-	ClosingBalance float64              `json:"closing_balance"`
-	Transactions   []PDFTransactionJSON `json:"transactions"`
-}
-
-type PDFTransactionJSON struct {
-	TranID          *string `json:"tran_id"`
-	TransactionDate string  `json:"transaction_date"`
-	ValueDate       string  `json:"value_date"`
-	Description     string  `json:"description"`
-	Withdrawal      float64 `json:"withdrawal"`
-	Deposit         float64 `json:"deposit"`
-	Balance         float64 `json:"balance"`
-}
-
-type BankStatement struct {
-	BankStatementID      string     `db:"bank_statement_id"`
-	EntityID             string     `db:"entity_id"`
-	AccountNumber        string     `db:"account_number"`
-	StatementPeriodStart time.Time  `db:"statement_period_start"`
-	StatementPeriodEnd   time.Time  `db:"statement_period_end"`
-	StatementRequestDate *time.Time `db:"statement_request_date"`
-	FileHash             string     `db:"file_hash"`
-	UploadedAt           time.Time  `db:"uploaded_at"`
-	OpeningBalance       float64    `db:"opening_balance"`
-	ClosingBalance       float64    `db:"closing_balance"`
-}
-
-type BankStatementTransaction struct {
-	TransactionID    int64           `db:"transaction_id"`
-	BankStatementID  string          `db:"bank_statement_id"`
-	AccountNumber    string          `db:"account_number"`
-	TranID           sql.NullString  `db:"tran_id"`
-	ValueDate        time.Time       `db:"value_date"`
-	TransactionDate  time.Time       `db:"transaction_date"`
-	PostedDate       sql.NullTime    `db:"posted_date"`
-	ChequeNo         sql.NullString  `db:"cheque_no"`
-	Description      string          `db:"description"`
-	WithdrawalAmount sql.NullFloat64 `db:"withdrawal_amount"`
-	DepositAmount    sql.NullFloat64 `db:"deposit_amount"`
-	Balance          sql.NullFloat64 `db:"balance"`
-	RawJSON          json.RawMessage `db:"raw_json"`
-	CategoryID       sql.NullInt64   `db:"category_id"`
-	CreatedAt        time.Time       `db:"created_at"`
-}
-
-// UploadBankStatementV2 handles the upload of a bank statement Excel file with idempotency and duplicate data checks.
-func UploadBankStatementV2(ctx context.Context, db *sql.DB, file multipart.File, fileHash string) error {
-	defer file.Close()
-
-	// 1. Idempotency: Check if file hash already exists
-	var exists bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE file_hash = $1)`, fileHash).Scan(&exists)
-	if err != nil {
-		return fmt.Errorf("failed to check file hash: %w", err)
-	}
-	if exists {
-		return ErrFileAlreadyUploaded
-	}
-
-	// 2. Parse Excel file
-	tmpFile, err := io.ReadAll(file)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-	contentType := detectContentType(tmpFile)
-	fileExt := ".xlsx"
-	xl, err := excelize.OpenReader(bytes.NewReader(tmpFile))
-	if err != nil {
-		return fmt.Errorf("failed to parse excel: %w", err)
-	}
-	defer xl.Close()
-
-	sheetName := xl.GetSheetName(0)
-	rows, err := xl.GetRows(sheetName)
-	if err != nil {
-		return fmt.Errorf("failed to get rows: %w", err)
-	}
-	if len(rows) < 2 {
-		return errors.New("excel must have at least one data row")
-	}
-
-	// 3. Extract account number, entity id, and name from header
-	var accountNumber, entityID, accountName string
-	for i := 0; i < 20 && i < len(rows); i++ {
-		for j, cell := range rows[i] {
-			if cell == acNoHeader && j+1 < len(rows[i]) {
-				accountNumber = rows[i][j+1]
-			}
-			if cell == "Name:" && j+1 < len(rows[i]) {
-				accountName = rows[i][j+1]
-			}
-		}
-	}
-	if accountNumber == "" {
-		return ErrAccountNumberMissing
-	}
-
-	// Lookup entity_id and name from masterbankaccount
-	err = db.QueryRowContext(ctx, `SELECT entity_id, COALESCE(account_nickname, bank_name) FROM public.masterbankaccount WHERE account_number = $1 AND is_deleted = false`, accountNumber).Scan(&entityID, &accountName)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrAccountNotFound
-		}
-		return fmt.Errorf(constants.ErrDBMasterBankAccountLookup, err)
-	}
-
-	// Print extracted data
-	fmt.Printf("Extracted Account Number: %s\n", accountNumber)
-	fmt.Printf("Entity ID: %s\n", entityID)
-	fmt.Printf("Account Name: %s\n", accountName)
-
-	// Context validations precedence: entity -> bank (later) -> account -> currency
-	if ids := apictx.GetEntityIDsFromCtx(ctx); len(ids) > 0 {
-		if !apictx.IsEntityAllowed(ctx, entityID) {
-			return ErrAccountNotFound
-		}
-	}
-
-	s3Key := buildBankStatementS3Key(accountNumber, fileHash, fileExt)
-	if _, err := uploadBankStatementToS3(ctx, s3Key, tmpFile, contentType); err != nil {
-		return fmt.Errorf("failed to store original file to s3: %w", err)
-	}
-
-	// 4. Extract statement period and balances from the file (assume first/last row for balances)
-	var (
-		statementPeriodStart, statementPeriodEnd time.Time
-		openingBalance, closingBalance           float64
-		transactions                             []BankStatementTransaction
-	)
-	// Find the header row for transactions. Prefer Tran Id detection but
-	// fall back to a flexible detection: a row that contains a Date column
-	// and either a description-like column or amount columns (Debit/Credit/Withdrawal/Deposit).
-	var txnHeaderIdx int = -1
-	for i, row := range rows {
-		for _, cell := range row {
-			if cell == tranIDHeader || strings.EqualFold(strings.TrimSpace(cell), "Tran Id") {
-				txnHeaderIdx = i
-				break
-			}
-		}
-		if txnHeaderIdx != -1 {
-			break
-		}
-	}
-	if txnHeaderIdx == -1 {
-		for i, row := range rows {
-			hasDate := false
-			hasDesc := false
-			hasAmountCols := false
-			for _, cell := range row {
-				c := strings.TrimSpace(cell)
-				lc := strings.ToLower(c)
-				if strings.EqualFold(c, "Date") {
-					hasDate = true
-				}
-				if strings.Contains(lc, "description") || strings.Contains(lc, "detail description") || strings.Contains(lc, "remarks") {
-					hasDesc = true
-				}
-				if strings.EqualFold(c, "Withdrawal") || strings.EqualFold(c, "Deposit") || strings.EqualFold(c, "Debit") || strings.EqualFold(c, "Credit") || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") {
-					hasAmountCols = true
-				}
-			}
-			if hasDate && (hasDesc || hasAmountCols) {
-				txnHeaderIdx = i
-				break
-			}
-		}
-	}
-	if txnHeaderIdx == -1 {
-		return errors.New(constants.ErrTransactionHeaderRowNotFound)
-	}
-
-	// Map columns by trimmed header name for flexibility
-	headerRow := rows[txnHeaderIdx]
-	colIdx := map[string]int{}
-	for idx, col := range headerRow {
-		colIdx[strings.TrimSpace(col)] = idx
-	}
-
-	// Flexible required columns: need Date and (Description or amount column)
-	hasDate := false
-	hasDesc := false
-	hasAmount := false
-	for col := range colIdx {
-		lc := strings.ToLower(col)
-		if lc == "date" {
-			hasDate = true
-		}
-		if strings.Contains(lc, "description") || strings.Contains(lc, "remarks") {
-			hasDesc = true
-		}
-		if lc == "withdrawal" || lc == "deposit" || lc == "debit" || lc == "credit" || strings.Contains(lc, "debit") || strings.Contains(lc, "credit") {
-			hasAmount = true
-		}
-	}
-	if !hasDate || (!hasDesc && !hasAmount) {
-		return errors.New(constants.ErrTransactionHeaderRowNotFound)
-	}
-
-	// Parse transactions, skip header
-	var lastValidBalance sql.NullFloat64
-	var lastValidValueDate time.Time
-	debugParse := strings.ToLower(strings.TrimSpace(os.Getenv("BANK_STMT_DEBUG_PARSE"))) == "1" || strings.ToLower(strings.TrimSpace(os.Getenv("BANK_STMT_DEBUG_PARSE"))) == "true"
-	debugCount := 0
-	for i, row := range rows[txnHeaderIdx+1:] {
-		// Skip rows that are completely empty
-		if len(row) == 0 || allEmptyRow(row) {
-			continue
-		}
-		// Defensive: fill missing columns with empty string
-		for len(row) < len(headerRow) {
-			row = append(row, "")
-		}
-		// Safe tranID lookup: only use it if header mapping exists
-		var tranID sql.NullString
-		if idx, ok := colIdx[tranIDHeader]; ok {
-			if idx < len(row) && strings.TrimSpace(row[idx]) != "" {
-				tranID = sql.NullString{String: row[idx], Valid: true}
-			} else {
-				tranID = sql.NullString{Valid: false}
-			}
-		} else {
-			// no TranID header mapped; leave empty but continue parsing
-			tranID = sql.NullString{Valid: false}
-		}
-		// Parse dates safely with checks
-		var valueDateStr, transactionDateStr string
-		var valueDate, transactionDate time.Time
-		if idx, ok := colIdx[valueDateHeader]; ok && idx < len(row) {
-			valueDateStr = row[idx]
-			valueDate, _ = parseDate(valueDateStr)
-		}
-		if idx, ok := colIdx[transactionDateHeader]; ok && idx < len(row) {
-			transactionDateStr = row[idx]
-			transactionDate, _ = parseDate(transactionDateStr)
-		}
-		if valueDate.IsZero() && !transactionDate.IsZero() {
-			valueDate = transactionDate
-		}
-		if transactionDate.IsZero() && !valueDate.IsZero() {
-			transactionDate = valueDate
-		}
-		// Safe description lookup
-		var description string
-		if idx, ok := colIdx[transactionRemarksHeader]; ok && idx < len(row) {
-			description = row[idx]
-		}
-		var withdrawal, deposit sql.NullFloat64
-		// Support single amount column + Cr/Dr indicator
-		idxW, okW := colIdx[withdrawalAmtHeader]
-		idxD, okD := colIdx[depositAmtHeader]
-		idxCr, okCr := colIdx["CrDr"]
-		if okW && okD && idxW == idxD && okCr && idxCr >= 0 && idxCr < len(row) {
-			amtStr := cleanAmount(row[idxW])
-			crdr := strings.ToLower(strings.TrimSpace(row[idxCr]))
-			if amtStr != "" {
-				var amt float64
-				fmt.Sscanf(amtStr, "%f", &amt)
-				if strings.HasPrefix(crdr, "cr") || strings.Contains(crdr, "credit") || strings.HasPrefix(crdr, "c") {
-					deposit.Valid = true
-					deposit.Float64 = amt
-				} else if strings.HasPrefix(crdr, "dr") || strings.Contains(crdr, "debit") || strings.HasPrefix(crdr, "d") {
-					withdrawal.Valid = true
-					withdrawal.Float64 = amt
-				} else {
-					if strings.HasPrefix(amtStr, "-") {
-						withdrawal.Valid = true
-						withdrawal.Float64 = -amt
-					} else {
-						deposit.Valid = true
-						deposit.Float64 = amt
-					}
-				}
-			}
-		} else {
-			var withdrawalStr, depositStr string
-			if okW && idxW < len(row) {
-				withdrawalStr = cleanAmount(row[idxW])
-			}
-			if okD && idxD < len(row) {
-				depositStr = cleanAmount(row[idxD])
-			}
-			if withdrawalStr != "" && depositStr == "" {
-				withdrawal.Valid = true
-				fmt.Sscanf(withdrawalStr, "%f", &withdrawal.Float64)
-				deposit.Valid = false
-			} else if depositStr != "" && withdrawalStr == "" {
-				deposit.Valid = true
-				fmt.Sscanf(depositStr, "%f", &deposit.Float64)
-				withdrawal.Valid = false
-			} else {
-				withdrawal.Valid = false
-				deposit.Valid = false
-			}
-		}
-		balance := sql.NullFloat64{Valid: row[colIdx[balanceHeader]] != ""}
-		if balance.Valid {
-			balanceStr := cleanAmount(row[colIdx[balanceHeader]])
-			fmt.Sscanf(balanceStr, "%f", &balance.Float64)
-		}
-		if i == 0 {
-			statementPeriodStart = valueDate
-			openingBalance = balance.Float64
-		}
-		// Track last valid balance for closing
-		if balance.Valid {
-			lastValidBalance = balance
-			lastValidValueDate = valueDate
-		}
-		rowJSON, _ := json.Marshal(row)
-		transactions = append(transactions, BankStatementTransaction{
-			AccountNumber:    accountNumber,
-			TranID:           tranID,
-			ValueDate:        valueDate,
-			TransactionDate:  transactionDate,
-			Description:      description,
-			WithdrawalAmount: withdrawal,
-			DepositAmount:    deposit,
-			Balance:          balance,
-			RawJSON:          rowJSON,
-		})
-		// Optional debug: log raw amount strings and parsed floats for first N rows
-		if debugParse && debugCount < 50 {
-			debugCount++
-			var wStr, dStr, amtShared, crdrRaw string
-			if okW && idxW < len(row) {
-				wStr = row[idxW]
-			}
-			if okD && idxD < len(row) {
-				dStr = row[idxD]
-			}
-			if okW && okD && idxW == idxD {
-				amtShared = row[idxW]
-			}
-			if okCr && idxCr < len(row) {
-				crdrRaw = row[idxCr]
-			}
-			log.Printf("[BANK-UPLOAD-DEBUG] parse row[%d]: tran=%q date=%q desc=%q withdrawal_raw=%q deposit_raw=%q sharedAmt=%q crdr=%q parsed_withdrawal=%v parsed_deposit=%v", i+txnHeaderIdx+1, tranID.String, valueDate.Format(constants.DateFormatSlash), sanitizeForPostgres(description), wStr, dStr, amtShared, crdrRaw, withdrawal, deposit)
-		}
-	}
-	// Set closing balance to last valid
-	closingBalance = lastValidBalance.Float64
-	statementPeriodEnd = lastValidValueDate
-
-	// 5. Duplicate period check
-	var periodExists bool
-	err = db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM cimplrcorpsaas.bank_statements WHERE entity_id = $1 AND account_number = $2 AND statement_period_start = $3 AND statement_period_end = $4)`, entityID, accountNumber, statementPeriodStart, statementPeriodEnd).Scan(&periodExists)
-	if err != nil {
-		return fmt.Errorf("failed to check period: %w", err)
-	}
-	if periodExists {
-		return ErrStatementPeriodExists
-	}
-
-	// 6. Insert bank statement and transactions in a transaction
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin db transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	var bankStatementID string
-	err = tx.QueryRowContext(ctx, `
-		      INSERT INTO cimplrcorpsaas.bank_statements (
-			      entity_id, account_number, statement_period_start, statement_period_end, file_hash, opening_balance, closing_balance
-		      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-		      ON CONFLICT ON CONSTRAINT uniq_stmt
-		      DO UPDATE SET
-			      file_hash = EXCLUDED.file_hash,
-			      closing_balance = EXCLUDED.closing_balance
-		      RETURNING bank_statement_id
-	      `, entityID, accountNumber, statementPeriodStart, statementPeriodEnd, fileHash, openingBalance, closingBalance).Scan(&bankStatementID)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
-	}
-
-	// Upsert into public.bank_balances_manual for dashboard matching
-	// Use bankStatementID as balance_id for uniqueness
-	// Lookup additional info from masterbankaccount and masterbank for bank_name, currency_code, nickname, country
-	var bankName, currencyCode, nickname, country string
-	err = tx.QueryRowContext(ctx, `
-		       SELECT mb.bank_name, mba.currency, COALESCE(mba.account_nickname, mb.bank_name), mba.country
-		       FROM public.masterbankaccount mba
-		       JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-		       WHERE mba.account_number = $1 AND mba.is_deleted = false
-	       `, accountNumber).Scan(&bankName, &currencyCode, &nickname, &country)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to lookup account info for balances_manual: %w", err)
-	}
-
-	// Enforce bank/account/currency checks (entity already validated earlier)
-	if names := apictx.GetBankNamesFromCtx(ctx); len(names) > 0 {
-		if bankName != "" && !apictx.IsBankAllowed(ctx, bankName) {
-			return errors.New(constants.ErrBankNotAllowed)
-		}
-	}
-	if ctx.Value("ApprovedBankAccounts") != nil {
-		if !ctxHasApprovedBankAccount(ctx, accountNumber) {
-			return ErrAccountNotFound
-		}
-	}
-	if !ctxHasApprovedCurrency(ctx, currencyCode) {
-		return errors.New(constants.ErrCurrencyNotAllowed)
-	}
-	// Calculate total credits and debits from transactions
-	var totalCredits, totalDebits float64
-	for _, t := range transactions {
-		if t.DepositAmount.Valid {
-			totalCredits += t.DepositAmount.Float64
-		}
-		if t.WithdrawalAmount.Valid {
-			totalDebits += t.WithdrawalAmount.Float64
-		}
-	}
-	_, err = tx.ExecContext(ctx, `
-			       INSERT INTO public.bank_balances_manual (
-				       balance_id, bank_name, account_no, currency_code, nickname, country, as_of_date, balance_type, balance_amount, opening_balance, total_credits, total_debits, closing_balance, statement_type, source_channel
-			       ) VALUES (
-				       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-			       )
-			       ON CONFLICT (balance_id) DO UPDATE SET
-				       bank_name = EXCLUDED.bank_name,
-				       account_no = EXCLUDED.account_no,
-				       currency_code = EXCLUDED.currency_code,
-				       nickname = EXCLUDED.nickname,
-				       country = EXCLUDED.country,
-				       as_of_date = EXCLUDED.as_of_date,
-				       balance_type = EXCLUDED.balance_type,
-				       balance_amount = EXCLUDED.balance_amount,
-				       opening_balance = EXCLUDED.opening_balance,
-				       total_credits = EXCLUDED.total_credits,
-				       total_debits = EXCLUDED.total_debits,
-				       closing_balance = EXCLUDED.closing_balance,
-				       statement_type = EXCLUDED.statement_type,
-				       source_channel = EXCLUDED.source_channel
-		       `,
-		bankStatementID,
-		bankName,
-		accountNumber,
-		currencyCode,
-		nickname,
-		country,
-		statementPeriodEnd,
-		"CLOSING",
-		closingBalance,
-		openingBalance,
-		totalCredits,
-		totalDebits,
-		closingBalance,
-		"BANK_STATEMENT_V2",
-		"UPLOAD_V2",
-	)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to upsert bank_balances_manual: %w", err)
-	}
-
-	// Insert audit action for bank_balances_manual after upsert, using correct transaction and variables
-	_, err = tx.ExecContext(ctx, `
-			       INSERT INTO auditactionbankbalances (
-				       balance_id, actiontype, processing_status, requested_by, requested_at
-			       ) VALUES ($1, $2, $3, $4, $5)
-		       `,
-		bankStatementID,
-		"CREATE",
-		"PENDING_APPROVAL",
-		"system",
-		time.Now(),
-	)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to insert audit action for bank_balances_manual: %w", err)
-	}
-
-	// Bulk insert transactions for speed, skip duplicates
-	if len(transactions) > 0 {
-		valueStrings := make([]string, 0, len(transactions))
-		valueArgs := make([]interface{}, 0, len(transactions)*10)
-		for i, t := range transactions {
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-				i*10+1, i*10+2, i*10+3, i*10+4, i*10+5, i*10+6, i*10+7, i*10+8, i*10+9, i*10+10))
-			valueArgs = append(valueArgs,
-				bankStatementID,
-				t.AccountNumber,
-				t.TranID,
-				t.ValueDate,
-				t.TransactionDate,
-				t.Description,
-				t.WithdrawalAmount,
-				t.DepositAmount,
-				t.Balance,
-				t.RawJSON,
-			)
-		}
-		stmt := `INSERT INTO cimplrcorpsaas.bank_statement_transactions (
-				       bank_statement_id, account_number, tran_id, value_date, transaction_date, description, withdrawal_amount, deposit_amount, balance, raw_json
-			       ) VALUES ` +
-			joinStrings(valueStrings, ",") +
-			` ON CONFLICT (account_number, tran_id, transaction_date) DO NOTHING`
-		_, err := tx.ExecContext(ctx, stmt, valueArgs...)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("failed to bulk insert transactions: %w", err)
-		}
-	}
-
-	// cleanAmount removes commas and trims whitespace for Indian number format
-
-	// Insert audit action for this bank statement
-	_, err = tx.ExecContext(ctx, `
-		       INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-			       bankstatementid, actiontype, processing_status, requested_by, requested_at
-		       ) VALUES ($1, $2, $3, $4, $5)
-	       `, bankStatementID, "CREATE", "PENDING_APPROVAL", "system", time.Now())
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit: %w", err)
-	}
-	return nil
-}
-
-// ProcessBankStatementFromJSON reads bank.json and processes it like Excel upload
-// This is a placeholder for future PDF OCR integration
-func ProcessBankStatementFromJSON(ctx context.Context, db *sql.DB) (map[string]interface{}, error) {
-	log.Println("[PDF_PROCESSOR] Reading bank.json file")
-
-	// Try multiple possible paths for bank.json
-	possiblePaths := []string{
-		"api/cash/bankstatement/bank.json",                               // From project root
-		"../api/cash/bankstatement/bank.json",                            // From cmd directory
-		filepath.Join("..", "api", "cash", "bankstatement", "bank.json"), // Explicit relative
-		"/Users/hardikmishra/Documents/CimplrCorpSaaS.   CI work ing/CimplrCorpSaaS-Go/api/cash/bankstatement/bank.json", // Absolute fallback
-	}
-
-	var jsonBytes []byte
-	var err error
-	var foundPath string
-
-	for _, jsonPath := range possiblePaths {
-		jsonBytes, err = os.ReadFile(jsonPath)
-		if err == nil {
-			foundPath = jsonPath
-			log.Printf("[PDF_PROCESSOR] Found bank.json at: %s", foundPath)
-			break
-		}
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to read bank.json (tried multiple paths): %w", err)
-	}
-
-	var pdfData PDFBankStatementJSON
-	if err := json.Unmarshal(jsonBytes, &pdfData); err != nil {
-		return nil, fmt.Errorf("failed to parse bank.json: %w", err)
-	}
-
-	log.Printf("[PDF_PROCESSOR] Parsed JSON: Account=%s, Bank=%s, Period=%s to %s, Transactions=%d",
-		pdfData.AccountNumber, pdfData.BankName, pdfData.PeriodStart, pdfData.PeriodEnd, len(pdfData.Transactions))
-
-	// Delegate to generic structured processor
-	var structured StructuredBankStatement
-	structured.AccountNumber = pdfData.AccountNumber
-	structured.BankName = pdfData.BankName
-	structured.PeriodStart = pdfData.PeriodStart
-	structured.PeriodEnd = pdfData.PeriodEnd
-	structured.OpeningBalance = pdfData.OpeningBalance
-	structured.ClosingBalance = pdfData.ClosingBalance
-	for _, t := range pdfData.Transactions {
-		st := StructuredTransaction{
-			TranID:          t.TranID,
-			TransactionDate: t.TransactionDate,
-			ValueDate:       t.ValueDate,
-			Description:     t.Description,
-			Withdrawal:      t.Withdrawal,
-			Deposit:         t.Deposit,
-			Balance:         t.Balance,
-		}
-		structured.Transactions = append(structured.Transactions, st)
-	}
-	hash := sha256.Sum256(jsonBytes)
-	fileHash := fmt.Sprintf("%x", hash[:])
-	return ProcessBankStatementFromStructuredInput(ctx, db, structured, fileHash)
-}
-
-// StructuredBankStatement and StructuredTransaction are canonical input types
-// for structured ingestion (PDF JSON or pre-parsed CSV JSON).
-type StructuredBankStatement struct {
-	AccountNumber  string
-	BankName       string
-	PeriodStart    string
-	PeriodEnd      string
-	OpeningBalance float64
-	ClosingBalance float64
-	Transactions   []StructuredTransaction
-}
-
-type StructuredTransaction struct {
-	TranID          *string
-	TransactionDate string
-	ValueDate       string
-	Description     string
-	Withdrawal      float64
-	Deposit         float64
-	Balance         float64
-}
-
-// ProcessBankStatementFromStructuredInput performs the same ingestion, categorization,
-// dedup and KPI computation as the PDF JSON processor but accepts structured input
-// directly (no file I/O or header detection).
-func ProcessBankStatementFromStructuredInput(ctx context.Context, db *sql.DB, input StructuredBankStatement, fileHash string) (map[string]interface{}, error) {
-	// Lookup entity_id from masterbankaccount
-	var entityID, accountName, bankName string
-	err := db.QueryRowContext(ctx, `
-		SELECT mba.entity_id, mb.bank_name, COALESCE(mba.account_nickname, mb.bank_name)
-		FROM public.masterbankaccount mba
-		LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
-		WHERE mba.account_number = $1 AND mba.is_deleted = false
-	`, input.AccountNumber).Scan(&entityID, &bankName, &accountName)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("account %s not found in master data", input.AccountNumber)
-		}
-		return nil, fmt.Errorf("failed to lookup account: %w", err)
-	}
-
-	// Parse period dates (optional: input may already be ISO; enforce format)
-	periodStart, err := time.Parse(constants.DateFormat, input.PeriodStart)
-	if err != nil {
-		return nil, fmt.Errorf("invalid period_start date: %w", err)
-	}
-	periodEnd, err := time.Parse(constants.DateFormat, input.PeriodEnd)
-	if err != nil {
-		return nil, fmt.Errorf("invalid period_end date: %w", err)
-	}
-
-	// Load category rules for this account
-	var acctCurrency sql.NullString
-	db.QueryRowContext(ctx, `SELECT currency FROM public.masterbankaccount WHERE account_number = $1`, input.AccountNumber).Scan(&acctCurrency)
-
-	var currencyCode string
-	if acctCurrency.Valid {
-		currencyCode = acctCurrency.String
-	}
-	rules, err := loadCategoryRuleComponents(ctx, db, input.AccountNumber, entityID, currencyCode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load category rules: %w", err)
-	}
-
-	// Convert structured transactions to BankStatementTransaction and build
-	// per-category transaction lists for KPI output (matching V2 format).
-	transactions := []BankStatementTransaction{}
-	categoryCount := map[int64]int{}
-	debitSum := map[int64]float64{}
-	creditSum := map[int64]float64{}
-	uncategorized := []map[string]interface{}{}
-	categoryTxns := map[int64][]map[string]interface{}{}
-
-	for i, txn := range input.Transactions {
-		txnDate, err := time.Parse(constants.DateFormat, txn.TransactionDate)
-		if err != nil {
-			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse transaction_date %s, skipping", txn.TransactionDate)
-			continue
-		}
-		valDate, err := time.Parse(constants.DateFormat, txn.ValueDate)
-		if err != nil {
-			log.Printf("[STRUCTURED_PROCESSOR] Warning: failed to parse value_date %s, skipping", txn.ValueDate)
-			continue
-		}
-
-		var withdrawal, deposit sql.NullFloat64
-		if txn.Withdrawal > 0 {
-			withdrawal = sql.NullFloat64{Float64: txn.Withdrawal, Valid: true}
-		}
-		if txn.Deposit > 0 {
-			deposit = sql.NullFloat64{Float64: txn.Deposit, Valid: true}
-		}
-
-		// Match category
-		categoryID := matchCategoryForTransaction(rules, txn.Description, withdrawal, deposit)
-
-		// Build transaction
-		t := BankStatementTransaction{
-			AccountNumber:    input.AccountNumber,
-			ValueDate:        valDate,
-			TransactionDate:  txnDate,
-			Description:      txn.Description,
-			WithdrawalAmount: withdrawal,
-			DepositAmount:    deposit,
-			Balance:          sql.NullFloat64{Float64: txn.Balance, Valid: true},
-			CategoryID:       categoryID,
-		}
-		if txn.TranID != nil && *txn.TranID != "" {
-			t.TranID = sql.NullString{String: *txn.TranID, Valid: true}
-		}
-
-		transactions = append(transactions, t)
-
-		// Update KPIs and category transaction lists
-		if categoryID.Valid {
-			catID := categoryID.Int64
-			categoryCount[catID]++
-			if withdrawal.Valid {
-				debitSum[catID] += withdrawal.Float64
-			}
-			if deposit.Valid {
-				creditSum[catID] += deposit.Float64
-			}
-			txMap := map[string]interface{}{
-				"index":             i,
-				"tran_id":           t.TranID.String,
-				"value_date":        t.ValueDate,
-				"transaction_date":  t.TransactionDate,
-				"description":       t.Description,
-				"withdrawal_amount": t.WithdrawalAmount.Float64,
-				"deposit_amount":    t.DepositAmount.Float64,
-				"balance":           t.Balance.Float64,
-				"category_id":       catID,
-			}
-			categoryTxns[catID] = append(categoryTxns[catID], txMap)
-		} else {
-			// Keep shape consistent with upload flow: nested `amount` and time.Time dates
-			uncategorized = append(uncategorized, map[string]interface{}{
-				"index":            i,
-				"tran_id":          t.TranID.String,
-				"description":      t.Description,
-				"transaction_date": t.TransactionDate,
-				"value_date":       t.ValueDate,
-				"amount":           map[string]interface{}{"withdrawal": t.WithdrawalAmount.Float64, "deposit": t.DepositAmount.Float64},
-				"balance":          t.Balance.Float64,
-			})
-		}
-	}
-
-	// Check for existing transactions
-	existingTxnKeys := make(map[string]bool)
-	rowsExisting, err := db.QueryContext(ctx, `
-		SELECT account_number, transaction_date, description, withdrawal_amount, deposit_amount
-		FROM cimplrcorpsaas.bank_statement_transactions
-		WHERE account_number = $1
-	`, input.AccountNumber)
-	if err == nil {
-		defer rowsExisting.Close()
-		for rowsExisting.Next() {
-			var acc, desc string
-			var txnDate time.Time
-			var w, d sql.NullFloat64
-			if err := rowsExisting.Scan(&acc, &txnDate, &desc, &w, &d); err == nil {
-				key := buildTxnKey(acc, txnDate, desc, w, d)
-				existingTxnKeys[key] = true
-			}
-		}
-	}
-
-	// Begin transaction
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Insert bank statement
-	var bankStatementID string
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO cimplrcorpsaas.bank_statements (
-			entity_id, account_number, statement_period_start, statement_period_end,
-			file_hash, opening_balance, closing_balance
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT ON CONSTRAINT uniq_stmt
-		DO UPDATE SET file_hash = EXCLUDED.file_hash, closing_balance = EXCLUDED.closing_balance
-		RETURNING bank_statement_id
-	`, entityID, input.AccountNumber, periodStart, periodEnd, fileHash,
-		input.OpeningBalance, input.ClosingBalance).Scan(&bankStatementID)
-	if err != nil {
-		return nil, fmt.Errorf(constants.ErrFailedToInsertBankStatement, err)
-	}
-
-	// Insert transactions
-	newTxns := []BankStatementTransaction{}
-	reviewTxns := []map[string]interface{}{}
-
-	for _, t := range transactions {
-		key := buildTxnKey(t.AccountNumber, t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount)
-		if existingTxnKeys[key] {
-			reviewTxns = append(reviewTxns, map[string]interface{}{
-				"transaction_date": t.TransactionDate.Format(constants.DateFormat),
-				"description":      t.Description,
-				"withdrawal":       t.WithdrawalAmount.Float64,
-				"deposit":          t.DepositAmount.Float64,
-			})
-			continue
-		}
-		newTxns = append(newTxns, t)
-	}
-
-	// Check if all transactions are duplicates
-	if len(newTxns) == 0 && len(reviewTxns) > 0 {
-		return nil, ErrAllTransactionsDuplicate
-	}
-
-	// Bulk insert new transactions
-	if len(newTxns) > 0 {
-		valueStrings := []string{}
-		valueArgs := []interface{}{}
-		argIdx := 1
-
-		for _, t := range newTxns {
-			valueStrings = append(valueStrings, fmt.Sprintf(
-				"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-				argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8, argIdx+9,
-			))
-			valueArgs = append(valueArgs, bankStatementID, t.AccountNumber, t.TranID, t.ValueDate,
-				t.TransactionDate, t.Description, t.WithdrawalAmount, t.DepositAmount, t.Balance, t.CategoryID)
-			argIdx += 10
-		}
-
-		insertQuery := fmt.Sprintf(`
-			INSERT INTO cimplrcorpsaas.bank_statement_transactions (
-				bank_statement_id, account_number, tran_id, value_date, transaction_date,
-				description, withdrawal_amount, deposit_amount, balance, category_id
-			) VALUES %s
-			ON CONFLICT ON CONSTRAINT uniq_transaction DO NOTHING
-		`, strings.Join(valueStrings, ","))
-
-		if _, err := tx.Exec(insertQuery, valueArgs...); err != nil {
-			return nil, fmt.Errorf("failed to insert transactions: %w", err)
-		}
-	}
-
-	// Insert audit action
-	requestedBy := "system"
-	if userID := ctx.Value("user_id"); userID != nil {
-		if uid, ok := userID.(string); ok {
-			requestedBy = uid
-		}
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO cimplrcorpsaas.auditactionbankstatement (
-			bankstatementid, actiontype, processing_status, requested_by, requested_at
-		) VALUES ($1, $2, $3, $4, $5)
-	`, bankStatementID, "CREATE", "PENDING_APPROVAL", requestedBy, time.Now())
-	if err != nil {
-		return nil, fmt.Errorf(constants.ErrFailedToInsertAuditAction, err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	// Build KPI response
-	kpiCats := []map[string]interface{}{}
-	foundCategories := []map[string]interface{}{}
-	foundCategoryIDs := map[int64]bool{}
-	totalTxns := len(transactions)
-	groupedTxns := 0
-	for catID, count := range categoryCount {
-		// find category name/type from rules
-		catName := ""
-		for _, rule := range rules {
-			if rule.CategoryID == catID {
-				catName = rule.CategoryName
-				break
-			}
-		}
-		kpiCats = append(kpiCats, map[string]interface{}{
-			"category_id":   catID,
-			"category_name": catName,
-			"count":         count,
-			"debit_sum":     debitSum[catID],
-			"credit_sum":    creditSum[catID],
-			"transactions":  categoryTxns[catID],
-		})
-		foundCategoryIDs[catID] = true
-		groupedTxns += count
-	}
-	ungroupedTxns := totalTxns - groupedTxns
-
-	groupedPct := 0.0
-	ungroupedPct := 0.0
-	if totalTxns > 0 {
-		groupedPct = (float64(groupedTxns) / float64(totalTxns)) * 100
-		ungroupedPct = (float64(ungroupedTxns) / float64(totalTxns)) * 100
-	}
-
-	// Add category names from rules
-	for _, rule := range rules {
-		if foundCategoryIDs[rule.CategoryID] {
-			foundCategories = append(foundCategories, map[string]interface{}{
-				"category_id":   rule.CategoryID,
-				"category_name": rule.CategoryName,
-				"category_type": rule.CategoryType,
-			})
-			delete(foundCategoryIDs, rule.CategoryID)
-		}
-	}
-
-	result := map[string]interface{}{
-		"pages_processed":                 1,
-		"bank_wise_status":                []map[string]interface{}{{"account_number": input.AccountNumber, "status": "SUCCESS"}},
-		"statement_date_coverage":         map[string]interface{}{"start": periodStart, "end": periodEnd},
-		"category_kpis":                   kpiCats,
-		"categories_found":                foundCategories,
-		"uncategorized":                   uncategorized,
-		"bank_statement_id":               bankStatementID,
-		"transactions_uploaded_count":     len(transactions),
-		"transactions_under_review_count": len(reviewTxns),
-		"transactions_under_review":       reviewTxns,
-		"grouped_transaction_count":       groupedTxns,
-		"ungrouped_transaction_count":     ungroupedTxns,
-		"grouped_transaction_percent":     groupedPct,
-		"ungrouped_transaction_percent":   ungroupedPct,
-		"source":                          "STRUCTURED_INPUT",
-	}
-
-	return result, nil
-}
-func cleanAmount(s string) string {
-	s = strings.ReplaceAll(s, ",", "")
-	return strings.TrimSpace(s)
-}
-
-// buildTxnKey creates a stable key used to detect whether a transaction from
-// the uploaded file already exists in the database. It mirrors the UNIQUE
-// constraint used in the ON CONFLICT clause: (account_number, transaction_date,
-// description, withdrawal_amount, deposit_amount).
-func buildTxnKey(accountNumber string, transactionDate time.Time, description string, withdrawal, deposit sql.NullFloat64) string {
-	var wStr, dStr string
-	if withdrawal.Valid {
-		wStr = fmt.Sprintf("%.2f", withdrawal.Float64)
-	}
-	if deposit.Valid {
-		dStr = fmt.Sprintf("%.2f", deposit.Float64)
-	}
-	return fmt.Sprintf("%s|%s|%s|%s|%s",
-		strings.TrimSpace(strings.ToUpper(accountNumber)),
-		transactionDate.Format(constants.DateFormat),
-		strings.TrimSpace(strings.ToLower(description)),
-		wStr,
-		dStr,
-	)
-}
-
-// userFriendlyUploadError converts internal/SQL/Go errors into messages that are safe and easy
-// for end users to understand. It intentionally hides low-level details like pq/SQLSTATE codes.
-func userFriendlyUploadError(err error) string {
-	if err == nil {
-		return ""
-	}
-
-	// Handle known sentinel errors first
-	if errors.Is(err, ErrFileAlreadyUploaded) {
-		return "This bank statement file was already uploaded earlier. Please upload a different file."
-	}
-	if errors.Is(err, ErrAccountNumberMissing) {
-		return "Could not find the bank account number in the uploaded statement. Please upload the original bank statement downloaded from the bank."
-	}
-	if errors.Is(err, ErrAccountNotFound) {
-		return "Bank account not found in the system for this statement. Please check the account number in master data."
-	}
-	if errors.Is(err, ErrStatementPeriodExists) {
-		return "A statement for this period is already uploaded for this account."
-	}
-	if errors.Is(err, ErrAllTransactionsDuplicate) {
-		return "This statement has already been uploaded. All transactions in this statement already exist in the system."
-	}
-
-	msg := err.Error()
-
-	// Map common parsing/format issues to user friendly text
-	if strings.Contains(msg, "transaction header row not found") {
-		return "Could not detect the transactions table in the statement. Please upload the original bank statement in the supported format (Excel/XLS/CSV)."
-	}
-	if strings.Contains(msg, "must have at least one data row") {
-		return "The uploaded statement does not contain any transactions."
-	}
-	if strings.Contains(msg, "failed to parse excel, xls, or csv") || strings.Contains(msg, "failed to parse excel") {
-		return "We could not read this file as a valid Excel/XLS/CSV bank statement. Please check the file format and try again."
-	}
-	if strings.Contains(msg, "failed to get rows") {
-		return "We could not read rows from the uploaded statement. The file may be corrupted or in an unsupported format."
-	}
-	if strings.Contains(msg, "could not parse date") {
-		return "One or more transaction dates in the statement could not be understood. Please verify the dates in the statement and try again."
-	}
-	log.Println("Debug raw mesage", msg)
-	// Map DB write/transaction issues to a generic safe message
-	if strings.Contains(msg, "failed to begin db transaction") ||
-		strings.Contains(msg, "failed to insert bank statement") ||
-		strings.Contains(msg, "failed to upsert bank_balances_manual") ||
-		strings.Contains(msg, "failed to bulk insert transactions") ||
-		strings.Contains(msg, "failed to insert audit action") ||
-		strings.Contains(msg, "failed to commit") {
-		return "Something went wrong while saving the uploaded statement. Please try again !!"
-	}
-
-	// Hide raw pq / SQL / driver details from end user
-	if strings.Contains(msg, "pq:") || strings.Contains(msg, "SQLSTATE") {
-		return "Database error while processing the bank statement. Please try again !!"
-	}
-
-	// Fallback: return the existing message (most of them are already human readable)
-	return msg
-}
-
-// joinStrings is a helper for bulk insert value string joining
-func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	out := strs[0]
-	for _, s := range strs[1:] {
-		out += sep + s
-	}
-	return out
-}

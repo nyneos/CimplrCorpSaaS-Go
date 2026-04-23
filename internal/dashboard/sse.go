@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type SSEClient struct {
@@ -23,11 +25,14 @@ type SSEServer struct {
 	clients    map[string]*SSEClient
 	pingTicker *time.Ticker
 	stopCh     chan struct{}
+	// OnConnect is called in a goroutine after a user connects.
+	// Typically wired to jobs.PushUnreadCountToUser to avoid an import cycle.
+	OnConnect func(userID string)
 }
 
 var globalSSEServer *SSEServer
 
-func NewSSEServer() *SSEServer {
+func NewSSEServer(pool *pgxpool.Pool) *SSEServer {
 	s := &SSEServer{
 		clients: make(map[string]*SSEClient),
 		stopCh:  make(chan struct{}),
@@ -90,6 +95,14 @@ func (s *SSEServer) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		"message": "SSE connection established",
 		"time":    time.Now().Format(time.RFC3339),
 	})
+
+	// Push pending unread count shortly after connection is stable
+	if s.OnConnect != nil {
+		go func(uid string) {
+			time.Sleep(300 * time.Millisecond)
+			s.OnConnect(uid)
+		}(userID)
+	}
 
 	// Keep connection alive until client disconnects or we close it
 	defer func() {

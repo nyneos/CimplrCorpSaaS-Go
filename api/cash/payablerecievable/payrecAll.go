@@ -17,12 +17,172 @@ import (
 	"time"
 
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xuri/excelize/v2"
 )
+
+func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string `json:"user_id"`
+			TransactionType string `json:"transaction_type"`
+			TransactionID   string `json:"transaction_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TransactionID) == "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_id is required"})
+			return
+		}
+
+		ctx := r.Context()
+		txType := strings.ToUpper(strings.TrimSpace(req.TransactionType))
+		if txType == "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
+			return
+		}
+
+		var uploadS3Key *string
+		switch txType {
+		case "PAYABLE":
+			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key)
+			if err != nil {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "payable not found"})
+				return
+			}
+		case "RECEIVABLE":
+			err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, req.TransactionID).Scan(&uploadS3Key)
+			if err != nil {
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "receivable not found"})
+				return
+			}
+		default:
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
+			return
+		}
+
+		if uploadS3Key == nil || strings.TrimSpace(*uploadS3Key) == "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "no file available"})
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, strings.TrimSpace(*uploadS3Key), 15*time.Minute)
+		if err != nil {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to generate download url"})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID          string   `json:"user_id"`
+			TransactionType string   `json:"transaction_type"`
+			TransactionIDs  []string `json:"transaction_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.TransactionIDs) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_ids are required"})
+			return
+		}
+
+		ctx := r.Context()
+		txType := strings.ToUpper(strings.TrimSpace(req.TransactionType))
+		if txType == "" {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
+			return
+		}
+
+		files := make([]map[string]string, 0, len(req.TransactionIDs))
+		failedIDs := make([]string, 0)
+
+		for _, rawID := range req.TransactionIDs {
+			transactionID := strings.TrimSpace(rawID)
+			if transactionID == "" {
+				continue
+			}
+
+			var uploadS3Key *string
+			switch txType {
+			case "PAYABLE":
+				err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_payables WHERE payable_id = $1 AND is_deleted != TRUE`, transactionID).Scan(&uploadS3Key)
+				if err != nil {
+					failedIDs = append(failedIDs, transactionID)
+					continue
+				}
+			case "RECEIVABLE":
+				err := pgxPool.QueryRow(ctx, `SELECT upload_s3_key FROM tr_receivables WHERE receivable_id = $1 AND is_deleted != TRUE`, transactionID).Scan(&uploadS3Key)
+				if err != nil {
+					failedIDs = append(failedIDs, transactionID)
+					continue
+				}
+			default:
+				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type must be PAYABLE or RECEIVABLE"})
+				return
+			}
+
+			if uploadS3Key == nil || strings.TrimSpace(*uploadS3Key) == "" {
+				failedIDs = append(failedIDs, transactionID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, strings.TrimSpace(*uploadS3Key), 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, transactionID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"transaction_id": transactionID,
+				"download_url":   downloadURL,
+			})
+		}
+
+		if len(files) == 0 {
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				constants.ValueSuccess: false,
+				"message":              "no downloadable files found",
+				"data": map[string]interface{}{
+					"files":      []map[string]string{},
+					"failed_ids": failedIDs,
+				},
+			})
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"files":      files,
+				"failed_ids": failedIDs,
+			},
+		})
+	}
+}
 
 // helpers used by bulk update flow
 func nullifyEmpty(s string) interface{} {
@@ -489,6 +649,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DueDate          string  `json:"due_date"`
 			Amount           float64 `json:"amount"`
 			CurrencyCode     string  `json:"currency_code"`
+			UploadS3Key      string  `json:"upload_s3_key"`
 			// old values
 			OldEntityName   string  `json:"old_entity_name"`
 			OldCounterparty string  `json:"old_counterparty_name"`
@@ -514,6 +675,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			DueDate          string  `json:"due_date"`
 			Amount           float64 `json:"invoice_amount"`
 			CurrencyCode     string  `json:"currency_code"`
+			UploadS3Key      string  `json:"upload_s3_key"`
 			// old values
 			OldEntityName   string  `json:"old_entity_name"`
 			OldCounterparty string  `json:"old_counterparty_name"`
@@ -532,7 +694,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 1. Fetch all payables (new table tr_payables)
-		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
+		payableRows, err := pgxPool.Query(ctx, `SELECT payable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, amount, currency_code, upload_s3_key, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_amount, old_currency_code FROM tr_payables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
@@ -544,14 +706,20 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for payableRows.Next() {
 			var p Payable
 			var invoiceDate, dueDate *time.Time
+			var uploadS3Key *string
 			var oldEntityPtr, oldCounterPtr, oldInvoicePtr *string
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := payableRows.Scan(&p.PayableID, &p.EntityName, &p.CounterpartyName, &p.InvoiceNo, &invoiceDate, &dueDate, &p.Amount, &p.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
+			}
+			if uploadS3Key != nil {
+				p.UploadS3Key = *uploadS3Key
+			} else {
+				p.UploadS3Key = ""
 			}
 			// populate old fields safely
 			if oldEntityPtr != nil {
@@ -602,7 +770,7 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// 2. Fetch all receivables (new table tr_receivables)
-		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
+		receivableRows, err := pgxPool.Query(ctx, `SELECT receivable_id, entity_name, counterparty_name, invoice_number, invoice_date, due_date, invoice_amount, currency_code, upload_s3_key, old_entity_name, old_counterparty_name, old_invoice_number, old_invoice_date, old_due_date, old_invoice_amount, old_currency_code FROM tr_receivables WHERE is_deleted != TRUE`)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
@@ -614,14 +782,20 @@ func GetAllPayableReceivable(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		for receivableRows.Next() {
 			var rcv Receivable
 			var invoiceDate, dueDate *time.Time
+			var uploadS3Key *string
 			var oldEntityPtr, oldCounterPtr, oldInvoicePtr *string
 			var oldInvoiceDate, oldDueDate *time.Time
 			var oldAmountPtr *float64
 			var oldCurrencyPtr *string
-			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
+			if err := receivableRows.Scan(&rcv.ReceivableID, &rcv.EntityName, &rcv.CounterpartyName, &rcv.InvoiceNo, &invoiceDate, &dueDate, &rcv.Amount, &rcv.CurrencyCode, &uploadS3Key, &oldEntityPtr, &oldCounterPtr, &oldInvoicePtr, &oldInvoiceDate, &oldDueDate, &oldAmountPtr, &oldCurrencyPtr); err != nil {
 				w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": err.Error()})
 				return
+			}
+			if uploadS3Key != nil {
+				rcv.UploadS3Key = *uploadS3Key
+			} else {
+				rcv.UploadS3Key = ""
 			}
 			if oldEntityPtr != nil {
 				rcv.OldEntityName = *oldEntityPtr
@@ -862,7 +1036,7 @@ func BulkRequestDeleteTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to commit"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
 			return
 		}
 		committed = true
@@ -1205,7 +1379,7 @@ func BulkCreateTransactions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := tx.Commit(ctx); err != nil {
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "failed to commit"})
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": constants.ErrTxCommitFailed})
 			return
 		}
 		committed = true

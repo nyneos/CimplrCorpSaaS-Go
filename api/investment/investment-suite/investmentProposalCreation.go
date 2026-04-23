@@ -3,6 +3,7 @@ package investmentsuite
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -203,6 +204,16 @@ func CreateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func() {
+			payload := BuildProposalNotifPayload(context.Background(), pool, []string{proposalID}, "CREATE", userEmail)
+			catalog.TriggerNotification(
+				context.Background(), pool,
+				"/investment/proposal/create",
+				fmt.Sprintf("INVESTMENT_PROPOSAL_CREATE/%s/%d", req.UserID, time.Now().UnixMilli()),
+				payload.ToMap(),
+			)
+		}()
+
 		resp := CreateProposalResponse{Success: true, ProposalID: proposalID, TotalAmount: req.TotalAmount, AllocationCount: len(allocIDs)}
 		api.RespondWithPayload(w, true, "", resp)
 
@@ -268,6 +279,16 @@ func UpdateInvestmentProposal(pool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to commit proposal transaction")
 			return
 		}
+
+		go func(pID, uID, uEmail string) {
+			payload := BuildProposalNotifPayload(context.Background(), pool, []string{pID}, "UPDATE", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pool,
+				"/investment/proposal/update",
+				fmt.Sprintf("INVESTMENT_PROPOSAL_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+				payload.ToMap(),
+			)
+		}(req.ProposalID, req.UserID, userEmail)
 
 		resp := UpdateProposalResponse{Success: true, ProposalID: req.ProposalID, TotalAmount: req.TotalAmount, AllocationCount: len(req.Allocations)}
 		api.RespondWithPayload(w, true, "", resp)
@@ -461,6 +482,51 @@ func bulkProposalDecision(pool *pgxpool.Pool, action string) http.HandlerFunc {
 			SkippedIDs:     uniqueStrings(skipped),
 			ProcessedCount: processedCount,
 		}
+
+		// Fire notifications per outcome bucket (non-blocking)
+		if len(approvedProposals) > 0 {
+			ids := append([]string{}, approvedProposals...)
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "APPROVE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pool,
+					"/investment/proposal/approve",
+					fmt.Sprintf("INVESTMENT_PROPOSAL_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+		if len(deletedProposals) > 0 {
+			ids := append([]string{}, deletedProposals...)
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "DELETE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pool,
+					"/investment/proposal/delete",
+					fmt.Sprintf("INVESTMENT_PROPOSAL_DELETE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+		if len(rejectedProposals) > 0 {
+			ids := append([]string{}, rejectedProposals...)
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "REJECT", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pool,
+					"/investment/proposal/reject",
+					fmt.Sprintf("INVESTMENT_PROPOSAL_REJECT/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, true, "", response)
 	}
 }
@@ -581,6 +647,22 @@ func BulkDeleteProposals(pool *pgxpool.Pool) http.HandlerFunc {
 			SkippedIDs:     uniqueStrings(skipped),
 			SubmittedCount: len(readyForDelete),
 		}
+
+		if len(readyForDelete) > 0 {
+			ids := append([]string{}, readyForDelete...)
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildProposalNotifPayload(context.Background(), pool, ids, "DELETE_REQUEST", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pool,
+					"/investment/proposal/delete-request",
+					fmt.Sprintf("INVESTMENT_PROPOSAL_DELETE_REQUEST/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, true, "", response)
 	}
 }
@@ -592,110 +674,122 @@ func GetProposalMeta(pool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-
 		ctx := r.Context()
-		const metaSQL = `
-			WITH latest_audit AS (
-				SELECT DISTINCT ON (proposal_id)
-					proposal_id,
-					actiontype,
-					processing_status,
-					action_id,
-					requested_by,
-					requested_at,
-					checker_by,
-					checker_at,
-					checker_comment,
-					reason
-				FROM investment.auditactionproposal
-				ORDER BY proposal_id, requested_at DESC
-			),
-			history AS (
-				SELECT
-					proposal_id,
-					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
-					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-				FROM investment.auditactionproposal
-				GROUP BY proposal_id
-			)
-			SELECT
-				p.proposal_id,
-				p.proposal_name,
-				p.old_proposal_name,
-				p.entity_name,
-				p.old_entity_name,
-				p.total_amount,
-				p.old_total_amount,
-				p.horizon_days,
-				p.old_horizon_days,
-				p.source,
-				p.old_source,
-				-- status and old_status removed per schema change
-				COALESCE(p.batch_id::text,'') AS batch_id,
-				COALESCE(p.is_deleted,false) AS is_deleted,
-				COALESCE(l.actiontype,'') AS action_type,
-				COALESCE(l.processing_status,'') AS processing_status,
-				COALESCE(l.action_id::text,'') AS action_id,
-				COALESCE(l.requested_by,'') AS requested_by,
-				COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
-				COALESCE(l.checker_by,'') AS checker_by,
-				COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
-				COALESCE(l.checker_comment,'') AS checker_comment,
-				COALESCE(l.reason,'') AS reason,
-				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at,
-				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at,
-				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
-			FROM investment.investment_proposal p
-			LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
-			LEFT JOIN history h ON h.proposal_id = p.proposal_id
-			WHERE COALESCE(p.is_deleted,false)=false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
-		`
-
-		rows, err := pool.Query(ctx, metaSQL)
+		result, err := fetchProposalRows(ctx, pool, nil)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to fetch proposal meta: "+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		result := make([]map[string]interface{}, 0, 64)
-		for rows.Next() {
-			vals, err := rows.Values()
-			if err != nil {
-				api.RespondWithError(w, http.StatusInternalServerError, "failed to read proposal meta")
-				return
-			}
-			rec := make(map[string]interface{}, len(fields))
-			for i, f := range fields {
-				key := string(f.Name)
-				switch v := vals[i].(type) {
-				case nil:
-					rec[key] = ""
-				case time.Time:
-					rec[key] = v.Format(constants.DateTimeFormat)
-				default:
-					rec[key] = v
-				}
-			}
-			result = append(result, rec)
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, "failed to iterate proposal meta: "+rows.Err().Error())
-			return
-		}
-
 		api.RespondWithPayload(w, true, "", result)
 	}
+}
+
+// fetchProposalRows is the single source-of-truth query for proposals + audit + history.
+// Pass ids=nil (or empty) to return ALL non-deleted proposals (used by GetProposalMeta).
+// Pass a non-empty ids slice to filter by proposal_id = ANY(ids) (used by notif payload builder).
+func fetchProposalRows(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	const baseSQL = `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (proposal_id)
+				proposal_id,
+				actiontype,
+				processing_status,
+				action_id,
+				requested_by,
+				requested_at,
+				checker_by,
+				checker_at,
+				checker_comment,
+				reason
+			FROM investment.auditactionproposal
+			ORDER BY proposal_id, requested_at DESC
+		),
+		history AS (
+			SELECT
+				proposal_id,
+				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.auditactionproposal
+			GROUP BY proposal_id
+		)
+		SELECT
+			p.proposal_id,
+			p.proposal_name,
+			p.old_proposal_name,
+			p.entity_name,
+			p.old_entity_name,
+			p.total_amount,
+			p.old_total_amount,
+			p.horizon_days,
+			p.old_horizon_days,
+			p.source,
+			p.old_source,
+			-- status and old_status removed per schema change
+			COALESCE(p.batch_id::text,'') AS batch_id,
+			COALESCE(p.is_deleted,false) AS is_deleted,
+			COALESCE(l.actiontype,'') AS action_type,
+			COALESCE(l.processing_status,'') AS processing_status,
+			COALESCE(l.action_id::text,'') AS action_id,
+			COALESCE(l.requested_by,'') AS requested_by,
+			COALESCE(TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS'),'') AS requested_at,
+			COALESCE(l.checker_by,'') AS checker_by,
+			COALESCE(TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS'),'') AS checker_at,
+			COALESCE(l.checker_comment,'') AS checker_comment,
+			COALESCE(l.reason,'') AS reason,
+			COALESCE(h.created_by,'') AS created_by,
+			COALESCE(h.created_at,'') AS created_at,
+			COALESCE(h.edited_by,'') AS edited_by,
+			COALESCE(h.edited_at,'') AS edited_at,
+			COALESCE(h.deleted_by,'') AS deleted_by,
+			COALESCE(h.deleted_at,'') AS deleted_at
+		FROM investment.investment_proposal p
+		LEFT JOIN latest_audit l ON l.proposal_id = p.proposal_id
+		LEFT JOIN history h ON h.proposal_id = p.proposal_id
+	`
+
+	var (
+		q    string
+		args []interface{}
+	)
+	if len(ids) > 0 {
+		q = baseSQL + " WHERE p.proposal_id = ANY($1) ORDER BY p.entity_name, p.proposal_id"
+		args = []interface{}{ids}
+	} else {
+		q = baseSQL + " WHERE COALESCE(p.is_deleted,false)=false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+	}
+
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	result := make([]map[string]interface{}, 0, 64)
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		rec := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			key := string(f.Name)
+			switch v := vals[i].(type) {
+			case nil:
+				rec[key] = ""
+			case time.Time:
+				rec[key] = v.Format(constants.DateTimeFormat)
+			default:
+				rec[key] = v
+			}
+		}
+		result = append(result, rec)
+	}
+	return result, rows.Err()
 }
 
 // GetApprovedProposalMeta returns only active proposals whose latest audit is approved.

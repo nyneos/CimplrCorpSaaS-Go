@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 
@@ -61,7 +62,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			entityIDs, entityNames, err := resolveEntityHierarchy(ctx, db, validationResult.RootEntityID)
+			entityIDs, entityNames, err := resolveEntityHierarchyMulti(ctx, db, validationResult.RootEntityIDs)
 			if err != nil {
 				if err == http.ErrMissingFile {
 					w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
@@ -136,7 +137,7 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 						ctx = context.WithValue(ctx, "admin_override_load_errors", errs)
 					}
 					// audit log
-					log.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
+					fmt.Printf("[AUDIT] AdminOverride applied for user=%s by=role matched=%v", userID, matchedRoles)
 					adminOverrideApplied = true
 				}
 			}
@@ -155,54 +156,53 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				folios, _ := loadApprovedFolios(ctx, db)
 				demats, _ := loadApprovedDemats(ctx, db)
 
-				log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
-				log.Printf("User ID: %s\n", userID)
-				log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-				log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
-				log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
-				for i, name := range entityNames {
-					log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
-				}
-				log.Printf("\nApproved AMCs (%d):\n", len(amcs))
-				for i, amc := range amcs {
-					if i < 5 || i >= len(amcs)-2 {
-						log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
-					} else if i == 5 {
-						log.Printf(constants.FormatLogMore, len(amcs)-7)
-					}
-				}
-				log.Printf("\nApproved Schemes (%d):\n", len(schemes))
-				if len(schemes) > 0 {
-					log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
-					if len(schemes) > 1 {
-						log.Printf(constants.FormatLogMore, len(schemes)-1)
-					}
-				}
-				log.Printf("\nApproved DPs (%d):\n", len(dps))
-				for i, dp := range dps {
-					log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
-				}
-				log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
-				for i, acc := range bankAccounts {
-					log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
-						i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
-				}
-				log.Printf("\nApproved Folios (%d):\n", len(folios))
-				for i, f := range folios {
-					if i < 5 || i >= len(folios)-2 {
-						log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
-					} else if i == 5 {
-						log.Printf(constants.FormatLogMore, len(folios)-7)
-					}
-				}
-				log.Printf("\nApproved Demats (%d):\n", len(demats))
-				for i, d := range demats {
-					log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
-					if i >= 20 {
-						break
-					}
-				}
-				log.Printf("=========================================\n\n")
+				// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
+				// log.Printf("User ID: %s\n", userID)
+				// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
+				// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
+				// for i, name := range entityNames {
+				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
+				// }
+				// log.Printf("\nApproved AMCs (%d):\n", len(amcs))
+				// for i, amc := range amcs {
+				// 	if i < 5 || i >= len(amcs)-2 {
+				// 		log.Printf("  [%d] %s (ID: %s, Code: %s)\n", i+1, amc["amc_name"], amc["amc_id"], amc["internal_amc_code"])
+				// 	} else if i == 5 {
+				// 		log.Printf(constants.FormatLogMore, len(amcs)-7)
+				// 	}
+				// }
+				// log.Printf("\nApproved Schemes (%d):\n", len(schemes))
+				// if len(schemes) > 0 {
+				// 	log.Printf("  [1] %s (ID: %s)\n", schemes[0]["scheme_name"], schemes[0]["scheme_id"])
+				// 	if len(schemes) > 1 {
+				// 		log.Printf(constants.FormatLogMore, len(schemes)-1)
+				// 	}
+				// }
+				// log.Printf("\nApproved DPs (%d):\n", len(dps))
+				// for i, dp := range dps {
+				// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, dp["dp_name"], dp["dp_id"])
+				// }
+				// log.Printf("\nApproved Bank Accounts (%d):\n", len(bankAccounts))
+				// for i, acc := range bankAccounts {
+				// 	log.Printf("  [%d] Account ID: %s | Account Number: %s | Nickname: %s | Bank: %s | Entity: %s\n",
+				// 		i+1, acc["account_id"], acc["account_number"], acc["account_name"], acc["bank_name"], acc["entity_name"])
+				// }
+				// log.Printf("\nApproved Folios (%d):\n", len(folios))
+				// for i, f := range folios {
+				// 	if i < 5 || i >= len(folios)-2 {
+				// 		log.Printf("  [%d] %s (ID: %s, AMC: %s)\n", i+1, f["folio_number"], f["folio_id"], f["amc_name"])
+				// 	} else if i == 5 {
+				// 		log.Printf(constants.FormatLogMore, len(folios)-7)
+				// 	}
+				// }
+				// log.Printf("\nApproved Demats (%d):\n", len(demats))
+				// for i, d := range demats {
+				// 	log.Printf("  [%d] %s (ID: %s, DP: %s)\n", i+1, d["demat_account_number"], d["demat_id"], d["dp_id"])
+				// 	if i >= 20 {
+				// 		break
+				// 	}
+				// }
+				// log.Printf("=========================================\n\n")
 
 				ctx = context.WithValue(ctx, "BankInfo", banks)
 				ctx = context.WithValue(ctx, "ActiveCurrencies", currencies)
@@ -217,7 +217,6 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 			// log.Printf("\n========== PREVALIDATION DEBUG ==========\n")
 			// log.Printf("User ID: %s\n", userID)
 			// log.Printf("Root Entity: %s (%s)\n", validationResult.RootEntityName, validationResult.RootEntityID)
-			// log.Printf("Business Unit: %s\n", validationResult.BusinessUnit)
 			// log.Printf("\nEntity Hierarchy (%d entities):\n", len(entityNames))
 			// for i, name := range entityNames {
 			// 	log.Printf("  [%d] %s (ID: %s)\n", i+1, name, entityIDs[i])
@@ -265,9 +264,11 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			ctx = context.WithValue(ctx, "user_id", userID)
 			ctx = context.WithValue(ctx, "session", session)
-			ctx = context.WithValue(ctx, "business_unit", validationResult.BusinessUnit)
+			// backward-compat single values (first mapped entity)
 			ctx = context.WithValue(ctx, "root_entity_id", validationResult.RootEntityID)
 			ctx = context.WithValue(ctx, "root_entity_name", validationResult.RootEntityName)
+			// full multi-entity lists
+			ctx = context.WithValue(ctx, "root_entity_ids", validationResult.RootEntityIDs)
 			ctx = context.WithValue(ctx, api.BusinessUnitsKey, entityNames)
 			ctx = context.WithValue(ctx, api.EntityIDsKey, entityIDs)
 			r.Body = io.NopCloser(bytes.NewBuffer(body))
@@ -330,6 +331,33 @@ func GetRootEntityFromContext(ctx context.Context) (id string, name string) {
 		name = entityName
 	}
 	return id, name
+}
+
+// resolveEntityHierarchyMulti runs resolveEntityHierarchy for each root entity ID
+// and deduplicates results. It is the multi-entity replacement for single-root resolution.
+func resolveEntityHierarchyMulti(ctx context.Context, db *pgxpool.Pool, rootEntityIDs []string) ([]string, []string, error) {
+	entityMap := make(map[string]bool)
+	var buEntityIDs []string
+	var buNames []string
+
+	for _, rootID := range rootEntityIDs {
+		ids, names, err := resolveEntityHierarchy(ctx, db, rootID)
+		if err != nil {
+			continue
+		}
+		for i, id := range ids {
+			if !entityMap[id] {
+				entityMap[id] = true
+				buEntityIDs = append(buEntityIDs, id)
+				buNames = append(buNames, names[i])
+			}
+		}
+	}
+
+	if len(buNames) == 0 {
+		return nil, nil, http.ErrMissingFile
+	}
+	return buEntityIDs, buNames, nil
 }
 
 func resolveEntityHierarchy(ctx context.Context, db *pgxpool.Pool, rootEntityId string) ([]string, []string, error) {

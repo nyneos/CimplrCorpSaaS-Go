@@ -3,6 +3,7 @@ package master
 import (
 	"CimplrCorpSaas/internal/serviceiface"
 	"database/sql"
+	"fmt"
 )
 
 type MasterService struct {
@@ -19,7 +20,20 @@ func (s *MasterService) Name() string {
 }
 
 func (s *MasterService) Start() error {
-	go StartMasterService(s.db)
+	port := "2143"
+	if s.config != nil {
+		if v, ok := s.config["port"]; ok {
+			switch t := v.(type) {
+			case string:
+				port = t
+			case int:
+				port = fmt.Sprintf("%d", t)
+			case float64:
+				port = fmt.Sprintf("%.0f", t)
+			}
+		}
+	}
+	go StartMasterService(s.db, port)
 	return nil
 }
 

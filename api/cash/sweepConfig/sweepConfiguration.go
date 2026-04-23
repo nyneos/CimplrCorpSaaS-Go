@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -103,7 +104,7 @@ func CreateSweepConfiguration(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			nullifyEmpty(req.ActiveStatus),
 		)
 		if err != nil {
-			api.RespondWithResult(w, false, "failed to insert sweep configuration: "+err.Error())
+			api.RespondWithResult(w, false, parseSweepConstraintError(err))
 			return
 		}
 
@@ -331,10 +332,10 @@ func GetSweepConfigurations(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				api.RespondWithPayload(w, true, "", []map[string]interface{}{})
 				return
 			}
-			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) ORDER BY created_at DESC, sweep_id`
+			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE AND lower(trim(entity_name)) = ANY($1) ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q, norm)
 		} else {
-			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY created_at DESC, sweep_id`
+			q := `SELECT sweep_id, entity_name, bank_name, bank_account, sweep_type, parent_account, buffer_amount, frequency, cutoff_time, auto_sweep, active_status, old_entity_name, old_bank_name, old_bank_account, old_sweep_type, old_parent_account, old_buffer_amount, old_frequency, old_cutoff_time, old_auto_sweep, old_active_status FROM mastersweepconfiguration WHERE is_deleted != TRUE ORDER BY GREATEST(COALESCE(created_at, '1970-01-01'::timestamp), COALESCE(updated_at, '1970-01-01'::timestamp)) DESC, sweep_id`
 			rows, err = pgxPool.Query(ctx, q)
 		}
 		if err != nil {
@@ -826,6 +827,10 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		return true
 	}
 
+	// Debug: log what we're checking and how many approved accounts are loaded
+	log.Printf("[CTX-ACC-CHECK] checking account=%s expectedBank=%s expectedEntity=%s approved_count=%d",
+		accountNumber, expectedBankName, expectedEntityName, len(accounts))
+
 	for _, a := range accounts {
 		if !strings.EqualFold(strings.TrimSpace(a["account_number"]), accountNumber) {
 			continue
@@ -837,6 +842,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// Account must belong to an entity the user is allowed for.
 		if strings.TrimSpace(accEntity) != "" {
 			if !api.IsEntityAllowed(ctx, accEntity) {
+				log.Printf("[CTX-ACC-CHECK] account=%s found but entity='%s' not allowed by context", accountNumber, accEntity)
 				return false
 			}
 		}
@@ -844,6 +850,7 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected entity, enforce match.
 		if expectedEntityName != "" && accEntity != "" {
 			if !strings.EqualFold(accEntity, expectedEntityName) {
+				log.Printf("[CTX-ACC-CHECK] account=%s entity mismatch: account_entity='%s' expected='%s'", accountNumber, accEntity, expectedEntityName)
 				return false
 			}
 		}
@@ -851,12 +858,15 @@ func ctxHasApprovedBankAccountFor(ctx context.Context, accountNumber, expectedBa
 		// If caller provided an expected bank, enforce match.
 		if expectedBankName != "" && accBank != "" {
 			if !strings.EqualFold(accBank, expectedBankName) {
+				log.Printf("[CTX-ACC-CHECK] account=%s bank mismatch: account_bank='%s' expected='%s'", accountNumber, accBank, expectedBankName)
 				return false
 			}
 		}
 
+		log.Printf("[CTX-ACC-CHECK] account=%s OK matched bank='%s' entity='%s'", accountNumber, accBank, accEntity)
 		return true
 	}
 
+	log.Printf("[CTX-ACC-CHECK] account=%s not found in ApprovedBankAccounts", accountNumber)
 	return false
 }

@@ -3,6 +3,7 @@ package investmentsuite
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/notification/catalog"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -139,6 +140,16 @@ func CreateConfirmationSingle(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(cID, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, "CREATE", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/create",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_CREATE/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(confirmationID, req.UserID, userEmail)
+
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"confirmation_id": confirmationID,
 			"initiation_id":   req.InitiationID,
@@ -266,6 +277,30 @@ func CreateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			})
 		}
 
+		// Fire bulk-create notification for all successfully created IDs
+		createdCIDs := make([]string, 0)
+		for _, r := range results {
+			if ok, _ := r[constants.ValueSuccess].(bool); ok {
+				if id, _ := r["confirmation_id"].(string); id != "" {
+					createdCIDs = append(createdCIDs, id)
+				}
+			}
+		}
+		if len(createdCIDs) > 0 {
+			ids := createdCIDs
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "CREATE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/bulk-create",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_BULK_CREATE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -383,6 +418,16 @@ func UpdateConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(cID, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, []string{cID}, "UPDATE", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/update",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(req.ConfirmationID, req.UserID, userEmail)
 
 		api.RespondWithPayload(w, true, "", map[string]any{
 			"confirmation_id": req.ConfirmationID,
@@ -511,6 +556,30 @@ func UpdateConfirmationBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			results = append(results, map[string]interface{}{constants.ValueSuccess: true, "confirmation_id": row.ConfirmationID, "requested": userEmail})
 		}
 
+		// Fire bulk-update notification for all successful IDs
+		updatedCIDs := make([]string, 0)
+		for _, r := range results {
+			if ok, _ := r[constants.ValueSuccess].(bool); ok {
+				if id, _ := r["confirmation_id"].(string); id != "" {
+					updatedCIDs = append(updatedCIDs, id)
+				}
+			}
+		}
+		if len(updatedCIDs) > 0 {
+			ids := updatedCIDs
+			uID := req.UserID
+			uEmail := userEmail
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "UPDATE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/bulk-update",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_BULK_UPDATE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		api.RespondWithPayload(w, api.IsBulkSuccess(results), "", results)
 	}
 }
@@ -569,6 +638,17 @@ func DeleteConfirmation(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrCommitFailed+err.Error())
 			return
 		}
+
+		go func(ids []string, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "DELETE_REQUEST", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/delete-request",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_DELETE_REQUEST/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(append([]string{}, req.ConfirmationIDs...), req.UserID, requestedBy)
+
 		api.RespondWithPayload(w, true, "", map[string]any{"delete_requested": req.ConfirmationIDs})
 	}
 }
@@ -722,6 +802,35 @@ func BulkApproveConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			deleteMasterIDs = []string{}
 		}
 
+		if len(toApproveConfirmations) > 0 {
+			ids := append([]string{}, toApproveConfirmations...)
+			uID := req.UserID
+			uEmail := checkerBy
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "APPROVE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/approve",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_APPROVE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+		if len(deleteMasterIDs) > 0 {
+			ids := append([]string{}, deleteMasterIDs...)
+			uID := req.UserID
+			uEmail := checkerBy
+			go func() {
+				pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "DELETE", uEmail)
+				catalog.TriggerNotification(
+					context.Background(), pgxPool,
+					"/investment/confirmation/delete",
+					fmt.Sprintf("INVESTMENT_CONFIRMATION_DELETE/%s/%d", uID, time.Now().UnixMilli()),
+					pl.ToMap(),
+				)
+			}()
+		}
+
 		response := map[string]any{
 			"approved_confirmation_ids": toApproveConfirmations,
 			"deleted_confirmations":     deleteMasterIDs,
@@ -830,6 +939,16 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go func(ids []string, uID, uEmail string) {
+			pl := BuildConfirmationNotifPayload(context.Background(), pgxPool, ids, "REJECT", uEmail)
+			catalog.TriggerNotification(
+				context.Background(), pgxPool,
+				"/investment/confirmation/reject",
+				fmt.Sprintf("INVESTMENT_CONFIRMATION_REJECT/%s/%d", uID, time.Now().UnixMilli()),
+				pl.ToMap(),
+			)
+		}(append([]string{}, req.ConfirmationIDs...), req.UserID, checkerBy)
+
 		api.RespondWithPayload(w, true, "", map[string]any{"rejected_action_ids": actionIDs})
 	}
 }
@@ -841,183 +960,194 @@ func BulkRejectConfirmationActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func GetConfirmationsWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := `
-			WITH latest_audit AS (
-				SELECT DISTINCT ON (a.confirmation_id)
-					a.confirmation_id,
-					a.actiontype,
-					a.processing_status,
-					a.action_id,
-					a.requested_by,
-					a.requested_at,
-					a.checker_by,
-					a.checker_at,
-					a.checker_comment,
-					a.reason
-				FROM investment.auditactioninvestmentconfirmation a
-				ORDER BY a.confirmation_id, a.requested_at DESC
-			),
-			history AS (
-				SELECT 
-					confirmation_id,
-					MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
-					MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
-					MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
-					MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
-					MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
-					MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
-				FROM investment.auditactioninvestmentconfirmation
-				GROUP BY confirmation_id
-			)
-			SELECT
-				m.confirmation_id,
-				m.initiation_id,
-				m.old_initiation_id,
-				TO_CHAR(m.nav_date, 'YYYY-MM-DD') AS nav_date,
-				TO_CHAR(m.old_nav_date, 'YYYY-MM-DD') AS old_nav_date,
-				m.nav,
-				m.old_nav,
-				m.allotted_units,
-				m.old_allotted_units,
-				m.stamp_duty,
-				m.old_stamp_duty,
-				m.net_amount,
-				m.old_net_amount,
-				(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
-				(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
-				m.actual_nav,
-				m.old_actual_nav,
-				m.actual_allotted_units,
-				m.old_actual_allotted_units,
-				m.variance_nav,
-				m.old_variance_nav,
-				m.variance_units,
-				m.old_variance_units,
-	                m.resolution_comment,
-	                m.old_resolution_comment,
-	                m.resolution_variance,
-	                m.old_resolution_variance,
-				m.status,
-				m.old_status,
-				m.confirmed_by,
-				TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
-				m.is_deleted,
-				TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
-
-				-- initiation fields
-				TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
-				i.entity_name AS initiation_entity_name,
-				COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
-				COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
-				COALESCE(s.amc_name, '') AS initiation_amc_name,
-				COALESCE(f.folio_number, '') AS initiation_folio_number,
-				COALESCE(f.folio_id::text, '') AS initiation_folio_id,
-				COALESCE(d.demat_account_number, '') AS initiation_demat_number,
-				COALESCE(d.demat_id::text, '') AS initiation_demat_id,
-				COALESCE(i.amount, 0) AS initiation_amount,
-				
-				COALESCE(l.actiontype,'') AS action_type,
-				COALESCE(l.processing_status,'') AS processing_status,
-				COALESCE(l.action_id::text,'') AS action_id,
-				COALESCE(l.requested_by,'') AS requested_by,
-				TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
-				COALESCE(l.checker_by,'') AS checker_by,
-				TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
-				COALESCE(l.checker_comment,'') AS checker_comment,
-				COALESCE(l.reason,'') AS reason,
-				
-				COALESCE(h.created_by,'') AS created_by,
-				COALESCE(h.created_at,'') AS created_at,
-				COALESCE(h.edited_by,'') AS edited_by,
-				COALESCE(h.edited_at,'') AS edited_at,
-				COALESCE(h.deleted_by,'') AS deleted_by,
-				COALESCE(h.deleted_at,'') AS deleted_at
-			FROM investment.investment_confirmation m
-			LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
-			LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
-			LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
-			LEFT JOIN investment.masterscheme s ON (
-				s.scheme_id::text = i.scheme_id OR
-				s.scheme_name = i.scheme_id OR
-				s.internal_scheme_code = i.scheme_id OR
-				s.isin = i.scheme_id
-			)
-			LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
-			LEFT JOIN investment.masterdemataccount d ON (
-				d.demat_id::text = i.demat_id OR
-				d.default_settlement_account = i.demat_id OR
-				d.demat_account_number = i.demat_id
-			)
-			WHERE COALESCE(m.is_deleted, false) = false
-			ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC;
-		`
-
-		rows, err := pgxPool.Query(ctx, q)
+		out, err := fetchConfirmationRows(ctx, pgxPool, nil)
 		if err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrQueryFailed+err.Error())
 			return
 		}
-		defer rows.Close()
-
-		fields := rows.FieldDescriptions()
-		out := make([]map[string]interface{}, 0, 1000)
-		// columns that should default to numeric zero when NULL
-		numericCols := map[string]bool{
-			"nav": true, "old_nav": true,
-			"allotted_units": true, "old_allotted_units": true,
-			"stamp_duty": true, "old_stamp_duty": true,
-			"net_amount": true, "old_net_amount": true,
-			"gross_amount": true, "old_gross_amount": true,
-			"actual_nav": true, "old_actual_nav": true,
-			"actual_allotted_units": true, "old_actual_allotted_units": true,
-			"variance_nav": true, "old_variance_nav": true,
-			"variance_units": true, "old_variance_units": true,
-		}
-		// boolean cols default to false
-		boolCols := map[string]bool{"is_deleted": true}
-
-		for rows.Next() {
-			vals, _ := rows.Values()
-			rec := make(map[string]interface{}, len(fields))
-			for i, f := range fields {
-				colName := string(f.Name)
-				if vals[i] == nil {
-					// postpone defaulting until after type maps
-					rec[colName] = nil
-					continue
-				}
-				switch v := vals[i].(type) {
-				case time.Time:
-					rec[colName] = v.Format(constants.DateTimeFormat)
-				default:
-					rec[colName] = v
-				}
-			}
-
-			// Normalize nils: numbers -> 0, bools -> false, others -> ""
-			for _, f := range fields {
-				colName := string(f.Name)
-				if rec[colName] == nil {
-					if numericCols[colName] {
-						rec[colName] = 0
-					} else if boolCols[colName] {
-						rec[colName] = false
-					} else {
-						rec[colName] = ""
-					}
-				}
-			}
-
-			out = append(out, rec)
-		}
-
-		if rows.Err() != nil {
-			api.RespondWithError(w, http.StatusInternalServerError, constants.ErrRowsScanFailed+rows.Err().Error())
-			return
-		}
-
 		api.RespondWithPayload(w, true, "", out)
 	}
+}
+
+// fetchConfirmationRows is the single source-of-truth query for confirmations + audit + history + initiation/scheme/folio/demat joins.
+// Pass ids=nil (or empty) to return ALL non-deleted confirmations (used by GetConfirmationsWithAudit).
+// Pass a non-empty ids slice to filter by confirmation_id = ANY(ids) (used by notif payload builder).
+func fetchConfirmationRows(ctx context.Context, pgxPool *pgxpool.Pool, ids []string) ([]map[string]interface{}, error) {
+	const baseSQL = `
+		WITH latest_audit AS (
+			SELECT DISTINCT ON (a.confirmation_id)
+				a.confirmation_id,
+				a.actiontype,
+				a.processing_status,
+				a.action_id,
+				a.requested_by,
+				a.requested_at,
+				a.checker_by,
+				a.checker_at,
+				a.checker_comment,
+				a.reason
+			FROM investment.auditactioninvestmentconfirmation a
+			ORDER BY a.confirmation_id, a.requested_at DESC
+		),
+		history AS (
+			SELECT 
+				confirmation_id,
+				MAX(CASE WHEN actiontype='CREATE' THEN requested_by END) AS created_by,
+				MAX(CASE WHEN actiontype='CREATE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS created_at,
+				MAX(CASE WHEN actiontype='EDIT' THEN requested_by END) AS edited_by,
+				MAX(CASE WHEN actiontype='EDIT' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS edited_at,
+				MAX(CASE WHEN actiontype='DELETE' THEN requested_by END) AS deleted_by,
+				MAX(CASE WHEN actiontype='DELETE' THEN TO_CHAR(requested_at,'YYYY-MM-DD HH24:MI:SS') END) AS deleted_at
+			FROM investment.auditactioninvestmentconfirmation
+			GROUP BY confirmation_id
+		)
+		SELECT
+			m.confirmation_id,
+			m.initiation_id,
+			m.old_initiation_id,
+			TO_CHAR(m.nav_date, 'YYYY-MM-DD') AS nav_date,
+			TO_CHAR(m.old_nav_date, 'YYYY-MM-DD') AS old_nav_date,
+			m.nav,
+			m.old_nav,
+			m.allotted_units,
+			m.old_allotted_units,
+			m.stamp_duty,
+			m.old_stamp_duty,
+			m.net_amount,
+			m.old_net_amount,
+			(COALESCE(m.net_amount, 0) + COALESCE(m.stamp_duty, 0)) AS gross_amount,
+			(COALESCE(m.old_net_amount, 0) + COALESCE(m.old_stamp_duty, 0)) AS old_gross_amount,
+			m.actual_nav,
+			m.old_actual_nav,
+			m.actual_allotted_units,
+			m.old_actual_allotted_units,
+			m.variance_nav,
+			m.old_variance_nav,
+			m.variance_units,
+			m.old_variance_units,
+			m.resolution_comment,
+			m.old_resolution_comment,
+			m.resolution_variance,
+			m.old_resolution_variance,
+			m.status,
+			m.old_status,
+			m.confirmed_by,
+			TO_CHAR(m.confirmed_at, 'YYYY-MM-DD HH24:MI:SS') AS confirmed_at,
+			m.is_deleted,
+			TO_CHAR(m.updated_at, 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+
+			-- initiation fields
+			TO_CHAR(i.transaction_date, 'YYYY-MM-DD') AS initiation_transaction_date,
+			i.entity_name AS initiation_entity_name,
+			COALESCE(s.scheme_id::text, i.scheme_id::text) AS initiation_scheme_id,
+			COALESCE(s.scheme_name, i.scheme_id) AS initiation_scheme_name,
+			COALESCE(s.amc_name, '') AS initiation_amc_name,
+			COALESCE(f.folio_number, '') AS initiation_folio_number,
+			COALESCE(f.folio_id::text, '') AS initiation_folio_id,
+			COALESCE(d.demat_account_number, '') AS initiation_demat_number,
+			COALESCE(d.demat_id::text, '') AS initiation_demat_id,
+			COALESCE(i.amount, 0) AS initiation_amount,
+			
+			COALESCE(l.actiontype,'') AS action_type,
+			COALESCE(l.processing_status,'') AS processing_status,
+			COALESCE(l.action_id::text,'') AS action_id,
+			COALESCE(l.requested_by,'') AS requested_by,
+			TO_CHAR(l.requested_at,'YYYY-MM-DD HH24:MI:SS') AS requested_at,
+			COALESCE(l.checker_by,'') AS checker_by,
+			TO_CHAR(l.checker_at,'YYYY-MM-DD HH24:MI:SS') AS checker_at,
+			COALESCE(l.checker_comment,'') AS checker_comment,
+			COALESCE(l.reason,'') AS reason,
+			
+			COALESCE(h.created_by,'') AS created_by,
+			COALESCE(h.created_at,'') AS created_at,
+			COALESCE(h.edited_by,'') AS edited_by,
+			COALESCE(h.edited_at,'') AS edited_at,
+			COALESCE(h.deleted_by,'') AS deleted_by,
+			COALESCE(h.deleted_at,'') AS deleted_at
+		FROM investment.investment_confirmation m
+		LEFT JOIN latest_audit l ON l.confirmation_id = m.confirmation_id
+		LEFT JOIN history h ON h.confirmation_id = m.confirmation_id
+		LEFT JOIN investment.investment_initiation i ON i.initiation_id = m.initiation_id
+		LEFT JOIN investment.masterscheme s ON (
+			s.scheme_id::text = i.scheme_id OR
+			s.scheme_name = i.scheme_id OR
+			s.internal_scheme_code = i.scheme_id OR
+			s.isin = i.scheme_id
+		)
+		LEFT JOIN investment.masterfolio f ON (f.folio_id::text = i.folio_id OR f.folio_number = i.folio_id)
+		LEFT JOIN investment.masterdemataccount d ON (
+			d.demat_id::text = i.demat_id OR
+			d.default_settlement_account = i.demat_id OR
+			d.demat_account_number = i.demat_id
+		)
+	`
+
+	var (
+		q    string
+		args []interface{}
+	)
+	if len(ids) > 0 {
+		q = baseSQL + " WHERE m.confirmation_id = ANY($1) ORDER BY m.confirmation_id"
+		args = []interface{}{ids}
+	} else {
+		q = baseSQL + " WHERE COALESCE(m.is_deleted, false) = false ORDER BY GREATEST(COALESCE(l.requested_at, '1970-01-01'::timestamp), COALESCE(l.checker_at, '1970-01-01'::timestamp)) DESC"
+	}
+
+	rows, err := pgxPool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fields := rows.FieldDescriptions()
+	out := make([]map[string]interface{}, 0, 1000)
+	// columns that should default to numeric zero when NULL
+	numericCols := map[string]bool{
+		"nav": true, "old_nav": true,
+		"allotted_units": true, "old_allotted_units": true,
+		"stamp_duty": true, "old_stamp_duty": true,
+		"net_amount": true, "old_net_amount": true,
+		"gross_amount": true, "old_gross_amount": true,
+		"actual_nav": true, "old_actual_nav": true,
+		"actual_allotted_units": true, "old_actual_allotted_units": true,
+		"variance_nav": true, "old_variance_nav": true,
+		"variance_units": true, "old_variance_units": true,
+	}
+	// boolean cols default to false
+	boolCols := map[string]bool{"is_deleted": true}
+
+	for rows.Next() {
+		vals, _ := rows.Values()
+		rec := make(map[string]interface{}, len(fields))
+		for i, f := range fields {
+			colName := string(f.Name)
+			if vals[i] == nil {
+				rec[colName] = nil
+				continue
+			}
+			switch v := vals[i].(type) {
+			case time.Time:
+				rec[colName] = v.Format(constants.DateTimeFormat)
+			default:
+				rec[colName] = v
+			}
+		}
+		// Normalize nils: numbers -> 0, bools -> false, others -> ""
+		for _, f := range fields {
+			colName := string(f.Name)
+			if rec[colName] == nil {
+				if numericCols[colName] {
+					rec[colName] = 0
+				} else if boolCols[colName] {
+					rec[colName] = false
+				} else {
+					rec[colName] = ""
+				}
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // GetAllConfirmationsWithAudit returns all rows from investment_confirmation along with

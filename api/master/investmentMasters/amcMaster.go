@@ -67,7 +67,7 @@ func getUserFriendlyAMCError(err error, context string) (string, int) {
 	}
 
 	// Check constraint violations - Known error, return 200
-	if strings.Contains(errStr, "check constraint") {
+	if strings.Contains(errStr, constants.CheckConstraint) {
 		if strings.Contains(errStr, "status_check") || strings.Contains(errStr, "masteramc_status_check") {
 			return "Invalid status. Must be 'Active' or 'Inactive'.", http.StatusOK
 		}
@@ -1237,7 +1237,7 @@ func GetApprovedActiveAMCs(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		rows, err := pgxPool.Query(ctx, q)
 		if err != nil {
-			msg, status := getUserFriendlyAMCError(err, "Query failed")
+			msg, status := getUserFriendlyAMCError(err, constants.ErrQueryFailed)
 			api.RespondWithError(w, status, msg)
 			return
 		}

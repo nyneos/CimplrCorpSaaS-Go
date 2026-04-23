@@ -3,22 +3,68 @@ package uam
 import (
 	"CimplrCorpSaas/api"
 	// "CimplrCorpSaas/api/auth"
+	middlewares "CimplrCorpSaas/api/middlewares"
+	approvalMatrix "CimplrCorpSaas/api/uam/approvalMatrix"
 	"CimplrCorpSaas/api/uam/permissions" // <-- Import permissions
 	"CimplrCorpSaas/api/uam/role"        // <-- Import role
 	"CimplrCorpSaas/api/uam/user"        // <-- Import user
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func StartUAMService(db *sql.DB) {
+func StartUAMService(db *sql.DB, port string) {
 	mux := http.NewServeMux()
+
+	// Build pgx pool for approval matrix handlers (PreValidationMiddleware pattern)
+	pgxPool := func() *pgxpool.Pool {
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+		host := os.Getenv("DB_HOST")
+		port := os.Getenv("DB_PORT")
+		name := os.Getenv("DB_NAME")
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)
+		}
+		return pool
+	}()
+	defer pgxPool.Close()
 	mux.HandleFunc("/uam/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("UAM Service is active"))
 	})
+
+	/*Approval Matrix*/
+	mux.Handle("/uam/approval-matrix/create", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.CreateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteApprovalMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.BulkApproveMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.BulkRejectMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/all", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovalMatrixAll(pgxPool)))
+	mux.Handle("/uam/approval-matrix/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovalMatrixDetail(pgxPool)))
+	mux.Handle("/uam/approval-matrix/audit-history", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovalMatrixAuditHistory(pgxPool)))
+	mux.Handle("/uam/approval-matrix/approved-active", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetApprovedActiveMatrices(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/add", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.AddEyeToMatrix(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/add", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.AddMemberToEye(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/update", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.UpdateMember(pgxPool)))
+	mux.Handle("/uam/approval-matrix/eye/member/delete", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.DeleteMember(pgxPool)))
+	/*Approval Engine Instances*/
+	mux.Handle("/uam/instance/action", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.RecordApprovalAction(pgxPool)))
+	mux.Handle("/uam/instance/pending", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetMyPendingApprovals(pgxPool)))
+	mux.Handle("/uam/instance/submissions", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetMySubmissions(pgxPool)))
+	mux.Handle("/uam/instance/detail", middlewares.PreValidationMiddleware(pgxPool)(approvalMatrix.GetInstanceDetail(pgxPool)))
 	/*users*/
-	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db))))
+	mux.Handle("/uam/users/create-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.CreateUser(db, pgxPool))))
 	mux.Handle("/uam/users/get-users", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUsers(db))))
+	mux.Handle("/uam/users/get-approved-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetApprovedUser(db))))
 	mux.Handle("/uam/users/get-user-by-id", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.GetUserById(db))))
 	mux.Handle("/uam/users/update-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.UpdateUser(db))))
 	mux.Handle("/uam/users/delete-user", api.BusinessUnitMiddleware(db)(http.HandlerFunc(user.DeleteUser(db))))
@@ -42,13 +88,15 @@ func StartUAMService(db *sql.DB) {
 	mux.Handle("/uam/permissions/get-role-permissions", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionsJsonByRoleName(db))))
 	mux.Handle("/uam/permissions/sidebar", api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetSidebarPermissions(db))))
 
-	log.Println("UAM Service started on :5143")
-	err := http.ListenAndServe(":5143", mux)
+	mux.Handle("/uam/permissions/requests/all",
+		api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetAllPermissionRequests(db))))
+
+	mux.Handle("/uam/permissions/requests/role-summary",
+		api.BusinessUnitMiddleware(db)(http.HandlerFunc(permissions.GetRolePermissionAuditTable(db))))
+
+	log.Printf("UAM Service started on :%s", port)
+	err := http.ListenAndServe(":"+port, mux)
 	if err != nil {
 		log.Fatalf("UAM Service failed: %v", err)
 	}
 }
-
-
-
-

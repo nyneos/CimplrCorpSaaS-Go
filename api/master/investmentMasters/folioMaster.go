@@ -55,7 +55,7 @@ func getUserFriendlyFolioError(err error, context string) (string, int) {
 	}
 
 	// Check constraint violations (HTTP 200 - user errors)
-	if strings.Contains(errMsg, "check constraint") {
+	if strings.Contains(errMsg, constants.CheckConstraint) {
 		if strings.Contains(errMsg, "status_check") || strings.Contains(errMsg, "masterfolio_status_ck") {
 			return "Invalid status. Must be 'Active', 'Inactive', or 'Closed'.", http.StatusOK
 		}

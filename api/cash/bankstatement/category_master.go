@@ -17,7 +17,7 @@ import (
 
 // TransactionCategory represents a category master
 type TransactionCategory struct {
-	CategoryID   int64  `json:"category_id"`
+	CategoryID   string `json:"category_id"`
 	CategoryName string `json:"category_name"`
 	CategoryType string `json:"category_type"`
 	Description  string `json:"description"`
@@ -35,13 +35,14 @@ type RuleScope struct {
 
 // CategoryRule represents a category rule
 type CategoryRule struct {
-	RuleID     int64     `json:"rule_id"`
-	RuleName   string    `json:"rule_name"`
-	CategoryID int64     `json:"category_id"`
-	ScopeID    int64     `json:"scope_id"`
-	Priority   int       `json:"priority"`
-	IsActive   bool      `json:"is_active"`
-	CreatedAt  time.Time `json:"created_at"`
+	RuleID        int64      `json:"rule_id"`
+	RuleName      string     `json:"rule_name"`
+	CategoryID    string     `json:"category_id"`
+	ScopeID       int64      `json:"scope_id"`
+	Priority      int        `json:"priority"`
+	IsActive      bool       `json:"is_active"`
+	CreatedAt     time.Time  `json:"created_at"`
+	EffectiveDate *time.Time `json:"effective_date,omitempty"`
 }
 
 // CategoryRuleComponent represents a rule component
@@ -168,21 +169,22 @@ func validateScopeAccess(ctx context.Context, scopeType string, entityID, bankCo
 // loadCategoryRuleComponentsLocal mirrors the rule loader used during upload/recompute without depending on the upload file.
 func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, accountNumber, entityID string, accountCurrency *string) ([]categoryRuleComponent, error) {
 	const q = `
-	   SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code
-	   FROM cimplrcorpsaas.category_rules r
-	   JOIN cimplrcorpsaas.transaction_categories c ON r.category_id = c.category_id
-	   JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
-	   JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
-	   WHERE r.is_active = true
-	 AND (
-		   (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
-		   OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
-		   OR (s.scope_type = 'BANK' AND s.bank_code IS NOT NULL)
-		   OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
-		   OR (s.scope_type = 'GLOBAL')
-	 )
-	   ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
-   `
+		 SELECT r.rule_id, r.priority, r.category_id, c.category_name, c.category_type, comp.component_type, comp.match_type, comp.match_value, comp.amount_operator, comp.amount_value, comp.txn_flow, comp.currency_code, r.effective_date
+	 FROM cimplrcorpsaas.category_rules r
+	 JOIN public.mastercashflowcategory c ON r.category_id = c.category_id
+		 JOIN cimplrcorpsaas.category_rule_components comp ON r.rule_id = comp.rule_id AND comp.is_active = true
+		 JOIN cimplrcorpsaas.rule_scope s ON r.scope_id = s.scope_id
+		 LEFT JOIN public.masterbankaccount mba ON mba.account_number = $1
+		 WHERE r.is_active = true
+	  AND (
+			  (s.scope_type = 'ACCOUNT' AND s.account_number = $1)
+			  OR (s.scope_type = 'ENTITY' AND s.entity_id = $2)
+			  OR (s.scope_type = 'BANK' AND s.bank_code = mba.bank_id)
+			  OR (s.scope_type = 'CURRENCY' AND s.currency = $3)
+			  OR (s.scope_type = 'GLOBAL')
+	  )
+		 ORDER BY r.priority ASC, r.rule_id ASC, comp.component_id ASC
+	`
 
 	// pass accountCurrency (may be nil) so currency-scoped rules are matched only when account currency is known
 	var acctCurrencyParam interface{}
@@ -201,7 +203,7 @@ func loadCategoryRuleComponentsLocal(ctx context.Context, db ruleQueryerLocal, a
 	var rules []categoryRuleComponent
 	for rows.Next() {
 		var rc categoryRuleComponent
-		if err := rows.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode); err != nil {
+		if err := rows.Scan(&rc.RuleID, &rc.Priority, &rc.CategoryID, &rc.CategoryName, &rc.CategoryType, &rc.ComponentType, &rc.MatchType, &rc.MatchValue, &rc.AmountOperator, &rc.AmountValue, &rc.TxnFlow, &rc.CurrencyCode, &rc.EffectiveDate); err != nil {
 			return nil, err
 		}
 		rules = append(rules, rc)
@@ -225,7 +227,7 @@ func ListCategoriesForUserHandler(db *sql.DB) http.Handler {
 		// best-effort parse; no filter yet
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
-		rows, err := db.Query(`SELECT category_id, category_name FROM cimplrcorpsaas.transaction_categories ORDER BY category_name`)
+		rows, err := db.Query(`SELECT category_id, category_name FROM public.mastercashflowcategory ORDER BY category_name`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -257,10 +259,10 @@ func MapTransactionsToCategoryHandler(db *sql.DB) http.Handler {
 		}
 		var body struct {
 			TransactionIDs []int64 `json:"transaction_ids"`
-			CategoryID     int64   `json:"category_id"`
+			CategoryID     string  `json:"category_id"`
 			UserID         string  `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 || body.CategoryID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.TransactionIDs) == 0 || strings.TrimSpace(body.CategoryID) == "" {
 			http.Error(w, "Missing transaction_ids or category_id", http.StatusBadRequest)
 			return
 		}
@@ -402,10 +404,10 @@ func CategorizeUncategorizedTransactionsHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			CategoryID int64  `json:"category_id"`
+			CategoryID string `json:"category_id"`
 			UserID     string `json:"user_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CategoryID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.CategoryID) == "" {
 			http.Error(w, "Missing category_id", http.StatusBadRequest)
 			return
 		}
@@ -436,6 +438,7 @@ SELECT t.transaction_id,
 			 COALESCE(t.description, ''),
 			 t.withdrawal_amount,
 			 t.deposit_amount,
+			 t.value_date,
 			 m.currency
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
@@ -452,20 +455,21 @@ WHERE t.category_id IS NULL
 		defer rows.Close()
 
 		type txnRow struct {
-			id       int64
-			bsID     string
-			acct     string
-			entity   string
-			desc     string
-			wd       sql.NullFloat64
-			dep      sql.NullFloat64
-			currency sql.NullString
+			id        int64
+			bsID      string
+			acct      string
+			entity    string
+			desc      string
+			wd        sql.NullFloat64
+			dep       sql.NullFloat64
+			valueDate sql.NullTime
+			currency  sql.NullString
 		}
 
 		var txns []txnRow
 		for rows.Next() {
 			var tr txnRow
-			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.currency); err == nil {
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.valueDate, &tr.currency); err == nil {
 				// Skip transactions whose account currency is not approved (enforce currency after account)
 				if tr.currency.Valid && strings.TrimSpace(tr.currency.String) != "" {
 					if !ctxHasApprovedCurrency(ctx, tr.currency.String) {
@@ -484,7 +488,7 @@ WHERE t.category_id IS NULL
 
 		ruleCache := make(map[string][]categoryRuleComponent)
 		bsSet := make(map[string]struct{})
-		matchedByCategory := make(map[int64][]int64)
+		matchedByCategory := make(map[string][]int64)
 
 		for _, tr := range txns {
 			if !ctxHasApprovedBankAccount(ctx, tr.acct) {
@@ -511,9 +515,9 @@ WHERE t.category_id IS NULL
 				ruleCache[cacheKey] = rules
 			}
 
-			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep)
-			if matched.Valid && matched.Int64 == body.CategoryID {
-				matchedByCategory[matched.Int64] = append(matchedByCategory[matched.Int64], tr.id)
+			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep, tr.valueDate)
+			if matched.Valid && matched.String == body.CategoryID {
+				matchedByCategory[matched.String] = append(matchedByCategory[matched.String], tr.id)
 				bsSet[tr.bsID] = struct{}{}
 			}
 		}
@@ -592,6 +596,7 @@ SELECT t.transaction_id,
 			 COALESCE(t.description, ''),
 			 t.withdrawal_amount,
 			 t.deposit_amount,
+			 t.value_date,
 			 m.currency
 FROM cimplrcorpsaas.bank_statement_transactions t
 JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
@@ -608,20 +613,21 @@ WHERE t.category_id IS NULL
 		defer rows.Close()
 
 		type txnRow struct {
-			id       int64
-			bsID     string
-			acct     string
-			entity   string
-			desc     string
-			wd       sql.NullFloat64
-			dep      sql.NullFloat64
-			currency sql.NullString
+			id        int64
+			bsID      string
+			acct      string
+			entity    string
+			desc      string
+			wd        sql.NullFloat64
+			dep       sql.NullFloat64
+			valueDate sql.NullTime
+			currency  sql.NullString
 		}
 
 		var txns []txnRow
 		for rows.Next() {
 			var tr txnRow
-			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.currency); err == nil {
+			if err := rows.Scan(&tr.id, &tr.bsID, &tr.acct, &tr.entity, &tr.desc, &tr.wd, &tr.dep, &tr.valueDate, &tr.currency); err == nil {
 				txns = append(txns, tr)
 			}
 		}
@@ -660,9 +666,9 @@ WHERE t.category_id IS NULL
 				ruleCache[cacheKey] = rules
 			}
 
-			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep)
+			matched := matchCategoryForTransaction(rules, tr.desc, tr.wd, tr.dep, tr.valueDate)
 			if matched.Valid {
-				if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.Int64, tr.id); err == nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE cimplrcorpsaas.bank_statement_transactions SET category_id = $1 WHERE transaction_id = $2`, matched.String, tr.id); err == nil {
 					updated++
 					bsSet[tr.bsID] = struct{}{}
 				}
@@ -700,7 +706,7 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			CategoryIDs []int64 `json:"category_ids"`
+			CategoryIDs []string `json:"category_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.CategoryIDs) == 0 {
 			http.Error(w, "Missing or invalid category_ids", http.StatusBadRequest)
@@ -718,6 +724,19 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
 			}
 		}()
+		ctx := r.Context()
+		// Safety check: abort if any transactions currently reference these categories
+		var txnCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM cimplrcorpsaas.bank_statement_transactions WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs)).Scan(&txnCount); err != nil {
+			tx.Rollback()
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if txnCount > 0 {
+			tx.Rollback()
+			http.Error(w, "Cannot delete rules: some transactions currently reference these categories. Unassign transactions first.", http.StatusBadRequest)
+			return
+		}
 
 		// 1. Get all rules and scope_ids for these categories
 		ruleRows, err := tx.Query(`SELECT rule_id, scope_id FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
@@ -774,18 +793,11 @@ func DeleteMultipleTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			}
 		}
 
-		// 5. Delete the categories themselves
-		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = ANY($1)`, pq.Array(body.CategoryIDs))
-		if err != nil {
-			if isFKViolation(err) {
-				tx.Rollback()
-				writeFKConflict(w)
-				return
-			}
-			tx.Rollback()
-			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		// NOTE: Do NOT delete the master category rows here. Categories are managed
+		// in `public.mastercashflowcategory` and should only be removed via the
+		// category management UI/API when safe to do so. Here we only remove
+		// rules, components, and orphaned scopes. The caller is expected to
+		// unassign transactions first if they intend to delete the category.
 
 		if err := tx.Commit(); err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
@@ -819,8 +831,8 @@ func CreateTransactionCategoryHandler(db *sql.DB) http.Handler {
 		if body.CategoryType == "" {
 			body.CategoryType = "BOTH"
 		}
-		var id int64
-		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.transaction_categories (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
+		var id string
+		err := db.QueryRow(`INSERT INTO public.mastercashflowcategory (category_name, category_type, description) VALUES ($1, $2, $3) RETURNING category_id`, body.CategoryName, body.CategoryType, body.Description).Scan(&id)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -839,7 +851,7 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
 			return
 		}
-		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM cimplrcorpsaas.transaction_categories`)
+		catRows, err := db.Query(`SELECT category_id, category_name, category_type, description FROM public.mastercashflowcategory`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -858,8 +870,8 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 		}
 
 		var categories []CategoryWithRules
-		var catIDs []int64
-		catIndex := make(map[int64]int)
+		var catIDs []string
+		catIndex := make(map[string]int)
 
 		for catRows.Next() {
 			var c TransactionCategory
@@ -881,22 +893,22 @@ func ListTransactionCategoriesHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		// Fetch all rules for these categories in one query
-		ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1)`, pq.Array(catIDs))
+		// Fetch all rules for these categories in one query (include effective_date)
+		ruleRows, err := db.Query(`SELECT rule_id, rule_name, category_id, scope_id, priority, is_active, created_at, effective_date FROM cimplrcorpsaas.category_rules WHERE category_id = ANY($1) ORDER BY rule_id DESC`, pq.Array(catIDs))
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer ruleRows.Close()
 
-		rulesByCat := make(map[int64][]CategoryRule)
+		rulesByCat := make(map[string][]CategoryRule)
 		var scopeIDs []int64
 		scopeSeen := make(map[int64]struct{})
 		var ruleIDs []int64
 
 		for ruleRows.Next() {
 			var rule CategoryRule
-			if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt); err != nil {
+			if err := ruleRows.Scan(&rule.RuleID, &rule.RuleName, &rule.CategoryID, &rule.ScopeID, &rule.Priority, &rule.IsActive, &rule.CreatedAt, &rule.EffectiveDate); err != nil {
 				continue
 			}
 			rulesByCat[rule.CategoryID] = append(rulesByCat[rule.CategoryID], rule)
@@ -1001,13 +1013,14 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			RuleName   string `json:"rule_name"`
-			CategoryID int64  `json:"category_id"`
-			ScopeID    int64  `json:"scope_id"`
-			Priority   int    `json:"priority"`
-			IsActive   *bool  `json:"is_active"`
+			RuleName      string  `json:"rule_name"`
+			CategoryID    string  `json:"category_id"`
+			ScopeID       int64   `json:"scope_id"`
+			Priority      int     `json:"priority"`
+			IsActive      *bool   `json:"is_active"`
+			EffectiveDate *string `json:"effective_date,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleName == "" || body.CategoryID == 0 || body.ScopeID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RuleName == "" || strings.TrimSpace(body.CategoryID) == "" || body.ScopeID == 0 {
 			http.Error(w, "Missing or invalid fields", http.StatusBadRequest)
 			return
 		}
@@ -1048,9 +1061,26 @@ func CreateCategoryRuleHandler(db *sql.DB) http.Handler {
 			return
 		}
 
+		// Parse effective date if provided (accepts multiple formats)
+		var eff *time.Time
+		if body.EffectiveDate != nil && strings.TrimSpace(*body.EffectiveDate) != "" {
+			t, err := parseDate(*body.EffectiveDate)
+			if err != nil {
+				http.Error(w, "invalid effective_date format", http.StatusBadRequest)
+				return
+			}
+			eff = &t
+		}
+
 		var id int64
-		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive).Scan(&id)
+		err = db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.RuleName, body.CategoryID, body.ScopeID, body.Priority, isActive, eff).Scan(&id)
 		if err != nil {
+			if pqErr, ok := err.(*pq.Error); ok {
+				if strings.EqualFold(pqErr.Constraint, "uniq_rule_name_per_category") {
+					http.Error(w, fmt.Sprintf("A rule named '%s' already exists for this category. Please choose a different rule name.", body.RuleName), http.StatusBadRequest)
+					return
+				}
+			}
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -1108,39 +1138,53 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 				}
 			}()
 
-			// Build multi-row INSERT with RETURNING component_id
-			placeholders := make([]string, 0, len(requestBody.Components))
-			args := make([]interface{}, 0, len(requestBody.Components)*9)
-			for i, comp := range requestBody.Components {
-				base := i * 9
-				placeholders = append(placeholders, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
-				args = append(args, comp.RuleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
-			}
-			query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
-			rows, err := tx.Query(query, args...)
-			if err != nil {
-				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-				return
-			}
+			// Batch insert components to avoid extremely large single SQL statements
+			const batchSize = 200
 			var componentIDs []int64
-			for rows.Next() {
-				var id int64
-				if err := rows.Scan(&id); err != nil {
+			for start := 0; start < len(requestBody.Components); start += batchSize {
+				end := start + batchSize
+				if end > len(requestBody.Components) {
+					end = len(requestBody.Components)
+				}
+				batch := requestBody.Components[start:end]
+				placeholders := make([]string, 0, len(batch))
+				args := make([]interface{}, 0, len(batch)*9)
+				for i, comp := range batch {
+					base := i * 9
+					placeholders = append(placeholders, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
+					args = append(args, comp.RuleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
+				}
+				query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
+				rows, err := tx.Query(query, args...)
+				if err != nil {
+					tx.Rollback()
+					if pqErr, ok := err.(*pq.Error); ok {
+						if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
+							http.Error(w, "One or more active components in the request duplicate an existing active component for the same rule. Please remove duplicates and try again.", http.StatusBadRequest)
+							return
+						}
+					}
+					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				for rows.Next() {
+					var id int64
+					if err := rows.Scan(&id); err != nil {
+						rows.Close()
+						tx.Rollback()
+						http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+						return
+					}
+					componentIDs = append(componentIDs, id)
+				}
+				if err := rows.Err(); err != nil {
 					rows.Close()
 					tx.Rollback()
 					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 					return
 				}
-				componentIDs = append(componentIDs, id)
-			}
-			if err := rows.Err(); err != nil {
 				rows.Close()
-				tx.Rollback()
-				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
-				return
 			}
-			rows.Close()
 			if err := tx.Commit(); err != nil {
 				http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 				return
@@ -1167,6 +1211,12 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		var id int64
 		err := db.QueryRow(`INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING component_id`, requestBody.RuleID, requestBody.ComponentType, requestBody.MatchType, requestBody.MatchValue, requestBody.AmountOperator, requestBody.AmountValue, requestBody.TxnFlow, requestBody.CurrencyCode, requestBody.IsActive).Scan(&id)
 		if err != nil {
+			if pqErr, ok := err.(*pq.Error); ok {
+				if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
+					http.Error(w, "An active component with the same parameters already exists for this rule. Please modify the component and try again.", http.StatusBadRequest)
+					return
+				}
+			}
 			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
 			return
 		}
@@ -1174,6 +1224,173 @@ func CreateCategoryRuleComponentHandler(db *sql.DB) http.Handler {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    map[string]interface{}{"component_id": id},
+		})
+	})
+}
+
+// CreateCategoryRuleMasterHandler creates a rule scope, a category rule, and multiple
+// components in a single transactional operation. If any step fails, the entire
+// operation is rolled back and a friendly error message is returned.
+func CreateCategoryRuleMasterHandler(db *sql.DB) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, constants.ErrMethodNotAllowed, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var body struct {
+			Scope RuleScope `json:"scope"`
+			Rule  struct {
+				RuleName      string  `json:"rule_name"`
+				CategoryID    string  `json:"category_id"`
+				Priority      int     `json:"priority"`
+				IsActive      *bool   `json:"is_active"`
+				EffectiveDate *string `json:"effective_date,omitempty"`
+			} `json:"rule"`
+			Components []CategoryRuleComponent `json:"components,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Basic validations
+		if body.Rule.RuleName == "" || strings.TrimSpace(body.Rule.CategoryID) == "" {
+			http.Error(w, "Missing required rule fields: rule_name or category_id", http.StatusBadRequest)
+			return
+		}
+
+		// Validate scope access for the caller (same as CreateRuleScopeHandler)
+		if code, msg := validateScopeAccess(r.Context(), body.Scope.ScopeType, body.Scope.EntityID, body.Scope.BankCode, body.Scope.AccountNumber, body.Scope.Currency); code != 0 {
+			http.Error(w, msg, code)
+			return
+		}
+
+		// Validate component currencies early
+		for i, comp := range body.Components {
+			if comp.CurrencyCode != nil && strings.TrimSpace(*comp.CurrencyCode) != "" {
+				if !ctxHasApprovedCurrency(r.Context(), *comp.CurrencyCode) {
+					http.Error(w, constants.ErrCurrencyNotAllowed+" in component at index "+fmt.Sprint(i), http.StatusForbidden)
+					return
+				}
+			}
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			if p := recover(); p != nil {
+				tx.Rollback()
+				http.Error(w, constants.ErrInternalServer, http.StatusInternalServerError)
+			}
+		}()
+
+		// 1) Insert scope
+		var scopeID int64
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO cimplrcorpsaas.rule_scope (scope_type, entity_id, bank_code, account_number, currency) VALUES ($1,$2,$3,$4,$5) RETURNING scope_id`, body.Scope.ScopeType, body.Scope.EntityID, body.Scope.BankCode, body.Scope.AccountNumber, body.Scope.Currency).Scan(&scopeID)
+		if err != nil {
+			tx.Rollback()
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
+			return
+		}
+
+		// 2) Insert rule
+		isActive := true
+		if body.Rule.IsActive != nil {
+			isActive = *body.Rule.IsActive
+		}
+		var eff *time.Time
+		if body.Rule.EffectiveDate != nil && strings.TrimSpace(*body.Rule.EffectiveDate) != "" {
+			t, err := parseDate(*body.Rule.EffectiveDate)
+			if err != nil {
+				tx.Rollback()
+				http.Error(w, "invalid effective_date format", http.StatusBadRequest)
+				return
+			}
+			eff = &t
+		}
+
+		var ruleID int64
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO cimplrcorpsaas.category_rules (rule_name, category_id, scope_id, priority, is_active, effective_date) VALUES ($1, $2, $3, $4, $5, $6) RETURNING rule_id`, body.Rule.RuleName, body.Rule.CategoryID, scopeID, body.Rule.Priority, isActive, eff).Scan(&ruleID)
+		if err != nil {
+			tx.Rollback()
+			if pqErr, ok := err.(*pq.Error); ok {
+				if strings.EqualFold(pqErr.Constraint, "uniq_rule_name_per_category") {
+					http.Error(w, fmt.Sprintf("A rule named '%s' already exists for this category. Please choose a different rule name.", body.Rule.RuleName), http.StatusBadRequest)
+					return
+				}
+			}
+			http.Error(w, pqUserFriendlyMessage(err), http.StatusInternalServerError)
+			return
+		}
+
+		// 3) Insert components (bulk if provided)
+		var createdComponentIDs []int64
+		if len(body.Components) > 0 {
+			const batchSize = 200
+			for start := 0; start < len(body.Components); start += batchSize {
+				end := start + batchSize
+				if end > len(body.Components) {
+					end = len(body.Components)
+				}
+				batch := body.Components[start:end]
+				placeholders := make([]string, 0, len(batch))
+				args := make([]interface{}, 0, len(batch)*9)
+				for i, comp := range batch {
+					base := i * 9
+					placeholders = append(placeholders, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
+					args = append(args, ruleID, comp.ComponentType, comp.MatchType, comp.MatchValue, comp.AmountOperator, comp.AmountValue, comp.TxnFlow, comp.CurrencyCode, comp.IsActive)
+				}
+				query := "INSERT INTO cimplrcorpsaas.category_rule_components (rule_id, component_type, match_type, match_value, amount_operator, amount_value, txn_flow, currency_code, is_active) VALUES " + strings.Join(placeholders, ",") + " RETURNING component_id"
+				rows, err := tx.QueryContext(r.Context(), query, args...)
+				if err != nil {
+					tx.Rollback()
+					if pqErr, ok := err.(*pq.Error); ok {
+						if strings.EqualFold(pqErr.Constraint, "uniq_active_components_per_rule") {
+							http.Error(w, "One or more active components duplicate an existing active component for this rule. Please remove duplicates and try again.", http.StatusBadRequest)
+							return
+						}
+					}
+					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				for rows.Next() {
+					var cid int64
+					if err := rows.Scan(&cid); err != nil {
+						rows.Close()
+						tx.Rollback()
+						http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+						return
+					}
+					createdComponentIDs = append(createdComponentIDs, cid)
+				}
+				if err := rows.Err(); err != nil {
+					rows.Close()
+					tx.Rollback()
+					http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				rows.Close()
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"scope_id":      scopeID,
+				"rule_id":       ruleID,
+				"component_ids": createdComponentIDs,
+			},
 		})
 	})
 }
@@ -1186,9 +1403,9 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 			return
 		}
 		var body struct {
-			CategoryID int64 `json:"category_id"`
+			CategoryID string `json:"category_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.CategoryID == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.CategoryID) == "" {
 			http.Error(w, "Missing or invalid category_id", http.StatusBadRequest)
 			return
 		}
@@ -1261,7 +1478,7 @@ func DeleteTransactionCategoryHandler(db *sql.DB) http.Handler {
 		}
 
 		// 5. Delete the category itself
-		_, err = tx.Exec(`DELETE FROM cimplrcorpsaas.transaction_categories WHERE category_id = $1`, body.CategoryID)
+		_, err = tx.Exec(`DELETE FROM public.mastercashflowcategory WHERE category_id = $1`, body.CategoryID)
 		if err != nil {
 			if isFKViolation(err) {
 				tx.Rollback()

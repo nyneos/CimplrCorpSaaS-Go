@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -76,9 +77,20 @@ func RespondWithError(w http.ResponseWriter, status int, errMsg string) {
 func RespondWithResult(w http.ResponseWriter, success bool, errMsg string) {
 	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	if success {
+		w.WriteHeader(http.StatusOK) // 200
 		log.Println("[INFO] RespondWithResult success")
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true})
 	} else {
+		// Set appropriate error status code based on error type
+		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
+			w.WriteHeader(http.StatusBadRequest) // 400
+		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
+			w.WriteHeader(http.StatusUnprocessableEntity) // 422
+		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
+			w.WriteHeader(http.StatusUnauthorized) // 401
+		} else {
+			w.WriteHeader(http.StatusInternalServerError) // 500
+		}
 		log.Println("[ERROR] RespondWithResult", errMsg)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: errMsg})
 	}
@@ -91,6 +103,18 @@ func RespondWithPayload(w http.ResponseWriter, success bool, errMsg string, payl
 	if !success && errMsg != "" {
 		resp[constants.ValueError] = errMsg
 		log.Println("[ERROR] RespondWithPayload", errMsg)
+		// Set appropriate error status code
+		if strings.Contains(errMsg, "duplicate") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "required") {
+			w.WriteHeader(http.StatusBadRequest) // 400
+		} else if strings.Contains(errMsg, "limit exceeded") || strings.Contains(errMsg, "validation") {
+			w.WriteHeader(http.StatusUnprocessableEntity) // 422
+		} else if strings.Contains(errMsg, "unauthorized") || strings.Contains(errMsg, "session") {
+			w.WriteHeader(http.StatusUnauthorized) // 401
+		} else {
+			w.WriteHeader(http.StatusInternalServerError) // 500
+		}
+	} else {
+		w.WriteHeader(http.StatusOK) // 200
 	}
 	if payload != nil {
 		// use a conventional key `rows` for list payloads

@@ -2,9 +2,13 @@ package forwards
 
 import (
 	"CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +16,7 @@ import (
 	"strings"
 
 	"CimplrCorpSaas/api/constants"
+	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"fmt"
 	"strconv"
 	"time"
@@ -20,6 +25,88 @@ import (
 	"github.com/lib/pq"
 	"github.com/xuri/excelize/v2"
 )
+
+var ErrForwardBookingFileAlreadyUploaded = errors.New("forward booking file already uploaded")
+
+const duplicateForwardBookingUploadMessage = "This forward booking file was already uploaded earlier. Please upload a different file."
+
+var ErrForwardConfirmationFileAlreadyUploaded = errors.New("forward confirmation file already uploaded")
+
+const duplicateForwardConfirmationUploadMessage = "This forward confirmation file was already uploaded earlier. Please upload a different file."
+
+func existingForwardBookingUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT upload_s3_key
+		FROM forward_bookings
+		WHERE COALESCE(TRIM(upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueForwardBookingUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
+	keys, err := existingForwardBookingUploadKeys(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate forward booking upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare forward booking upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrForwardBookingFileAlreadyUploaded
+	}
+	return nil
+}
+
+func existingForwardConfirmationUploadKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT confirmation_upload_s3_key
+		FROM forward_bookings
+		WHERE COALESCE(TRIM(confirmation_upload_s3_key), '') <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if scanErr := rows.Scan(&key); scanErr != nil {
+			return nil, scanErr
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func ensureUniqueForwardConfirmationUpload(ctx context.Context, db *sql.DB, fileBytes []byte) error {
+	keys, err := existingForwardConfirmationUploadKeys(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to check duplicate forward confirmation upload: %w", err)
+	}
+	duplicateKey, err := s3storage.FindDuplicateObjectKey(ctx, fileBytes, keys)
+	if err != nil {
+		return fmt.Errorf("failed to compare forward confirmation upload content: %w", err)
+	}
+	if duplicateKey != "" {
+		return ErrForwardConfirmationFileAlreadyUploaded
+	}
+	return nil
+}
 
 func NormalizeDate(dateStr string) string {
 	dateStr = strings.TrimSpace(dateStr)
@@ -87,6 +174,22 @@ func normalizeOrderType(orderType string) string {
 	return orderType
 }
 
+func forwardUploadUserName(userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "user"
+	}
+	for _, session := range auth.GetActiveSessions() {
+		if session.UserID == userID {
+			if name := strings.TrimSpace(session.Name); name != "" {
+				return name
+			}
+			break
+		}
+	}
+	return userID
+}
+
 // Handler: AddForwardBookingManualEntry
 func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +229,7 @@ func AddForwardBookingManualEntry(db *sql.DB) http.HandlerFunc {
 			Narration                   string      `json:"narration"`
 			TransactionTimestamp        string      `json:"transaction_timestamp"`
 		}
+
 		dec := json.NewDecoder(r.Body)
 		dec.UseNumber()
 		if err := dec.Decode(&req); err != nil || req.UserID == "" {
@@ -300,8 +404,7 @@ func GetEntityRelevantForwardBookings(db *sql.DB) http.HandlerFunc {
 func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse multipart form
-		err := r.ParseMultipartForm(32 << 20) // 32MB
-		if err != nil {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
 			return
@@ -318,155 +421,269 @@ func UploadForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
-		results := []map[string]interface{}{}
-		for _, fileHeader := range files {
-			file, err := fileHeader.Open()
-			if err != nil {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
-				continue
-			}
-			defer file.Close()
-			ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-			var rows []map[string]interface{}
-			if ext == ".csv" {
-				reader := csv.NewReader(file)
-				headers, err := reader.Read()
-				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
-					continue
-				}
-				for i, h := range headers {
-					headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
-				}
-				for {
-					record, err := reader.Read()
-					if err == io.EOF {
-						break
-					}
-					if err != nil {
-						continue
-					}
-					row := make(map[string]interface{})
-					for i, h := range headers {
-						row[h] = record[i]
-					}
-					rows = append(rows, row)
-				}
-			} else if ext == ".xls" || ext == ".xlsx" {
-				tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
-				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
-					continue
-				}
-				defer os.Remove(tmpFile.Name())
-				_, err = io.Copy(tmpFile, file)
-				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
-					tmpFile.Close()
-					continue
-				}
-				tmpFile.Close()
-				f, err := excelize.OpenFile(tmpFile.Name())
-				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
-					continue
-				}
-				sheetName := f.GetSheetName(0)
-				rowsData, err := f.GetRows(sheetName)
-				if err != nil || len(rowsData) < 2 {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
-					continue
-				}
-				headers := rowsData[0]
-				for _, record := range rowsData[1:] {
-					row := make(map[string]interface{})
-					for i, h := range headers {
-						if i < len(record) {
-							row[h] = record[i]
-						} else {
-							row[h] = nil
-						}
-					}
-					rows = append(rows, row)
-				}
-			} else {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
-				continue
-			}
-			if len(rows) == 0 {
-				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
-				continue
-			}
-			successCount := 0
-			errorRows := []map[string]interface{}{}
-			invalidRows := []map[string]interface{}{}
-			for i, r := range rows {
-				entityLevel0, _ := r["entity_level_0"].(string)
-				if !contains(buNames, entityLevel0) {
-					invalidRows = append(invalidRows, map[string]interface{}{"row": i + 1, "entity": entityLevel0})
-					continue
-				}
-				if ot, ok := r["order_type"].(string); ok {
-					r["order_type"] = normalizeOrderType(ot)
-				}
-
-				for k, v := range r {
-					// Normalize dates
-					if isDateColumn(k) {
-						if v == nil || v == "" {
-							r[k] = nil
-							continue
-						}
-						norm := NormalizeDate(fmt.Sprint(v))
-						if norm == "" {
-							r[k] = nil
-						} else {
-							r[k] = norm
-						}
-						continue
-					}
-
-					lower := strings.ToLower(k)
-					if lower == "booking_amount" || lower == "actual_value_base_currency" || lower == "spot_rate" || lower == "forward_points" || lower == "bank_margin" || lower == "total_rate" || lower == "value_quote_currency" || lower == "intervening_rate_quote_to_local" || lower == "value_local_currency" {
-						s := fmt.Sprint(v)
-						s = strings.TrimSpace(s)
-						if s == "" {
-							r[k] = nil
-						} else {
-							if f, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64); err == nil {
-								r[k] = f
-							} else {
-								r[k] = v
-							}
-						}
-					}
-				}
-				query := `INSERT INTO forward_bookings (
-					internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status
-				) VALUES (
-					$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
-				)`
-				values := []interface{}{
-					r["internal_reference_id"], r["entity_level_0"], r["entity_level_1"], r["entity_level_2"], r["entity_level_3"], r["local_currency"], r["order_type"], r["transaction_type"], r["counterparty"], r["mode_of_delivery"], r["delivery_period"], r["add_date"], r["settlement_date"], r["maturity_date"], r["delivery_date"], r["currency_pair"], r["base_currency"], r["quote_currency"], r["booking_amount"], r["value_type"], r["actual_value_base_currency"], r["spot_rate"], r["forward_points"], r["bank_margin"], r["total_rate"], r["value_quote_currency"], r["intervening_rate_quote_to_local"], r["value_local_currency"], r["internal_dealer"], r["counterparty_dealer"], r["remarks"], r["narration"], r["transaction_timestamp"], "pending",
-				}
-				_, err := db.Exec(query, values...)
-				if err != nil {
-					errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Database insert error", "details": err.Error()})
-				} else {
-					successCount++
-				}
-			}
-			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"inserted":    successCount,
-				"errors":      errorRows,
-				"invalidRows": invalidRows,
-			})
+		// Delegate to service
+		ctx := r.Context()
+		results, err := processUploadForwardBookings(ctx, db, r, buNames)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
 		}
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
 	}
+}
+
+// processUploadForwardBookings contains all business logic for the forward bookings upload.
+// It is called by the thin UploadForwardBookingsMulti controller.
+func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+	files := r.MultipartForm.File["files"]
+	results := []map[string]interface{}{}
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
+			continue
+		}
+		// Read all file bytes for parsing, hashing, and deferred S3 upload.
+		fileBytes, _ := io.ReadAll(file)
+		file.Close()
+		if s3storage.IsS3UploadEnabled() {
+			if err := ensureUniqueForwardBookingUpload(ctx, db, fileBytes); err != nil {
+				message := err.Error()
+				if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
+					message = duplicateForwardBookingUploadMessage
+				}
+				results = append(results, map[string]interface{}{
+					"filename":             fileHeader.Filename,
+					"inserted":             0,
+					"errors":               []map[string]interface{}{},
+					"invalidRows":          []map[string]interface{}{},
+					"message":              message,
+					constants.ValueSuccess: false,
+				})
+				continue
+			}
+		}
+		fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
+		s3Key := s3storage.BuildUploadedS3Key("fx/forwards/bookings", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
+		ext := fileExt
+		var rows []map[string]interface{}
+		if ext == ".csv" {
+			reader := csv.NewReader(bytes.NewReader(fileBytes))
+			headers, err := reader.Read()
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
+				continue
+			}
+			for i, h := range headers {
+				headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
+			}
+			for {
+				record, err := reader.Read()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					continue
+				}
+				row := make(map[string]interface{})
+				for i, h := range headers {
+					row[h] = record[i]
+				}
+				rows = append(rows, row)
+			}
+		} else if ext == ".xls" || ext == ".xlsx" {
+			tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
+				continue
+			}
+			_, err = tmpFile.Write(fileBytes)
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
+				tmpFile.Close()
+				continue
+			}
+			tmpFile.Close()
+			f, err := excelize.OpenFile(tmpFile.Name())
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
+				continue
+			}
+			sheetName := f.GetSheetName(0)
+			rowsData, err := f.GetRows(sheetName)
+			if err != nil || len(rowsData) < 2 {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
+				continue
+			}
+			headers := rowsData[0]
+			for _, record := range rowsData[1:] {
+				row := make(map[string]interface{})
+				for i, h := range headers {
+					if i < len(record) {
+						row[h] = record[i]
+					} else {
+						row[h] = nil
+					}
+				}
+				rows = append(rows, row)
+			}
+			os.Remove(tmpFile.Name())
+		} else {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
+			continue
+		}
+		if len(rows) == 0 {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
+			continue
+		}
+		invalidRows := []map[string]interface{}{}
+		for i, row := range rows {
+			entityLevel0, _ := row["entity_level_0"].(string)
+			if !contains(buNames, entityLevel0) {
+				invalidRows = append(invalidRows, map[string]interface{}{"row": i + 1, "entity": entityLevel0})
+			}
+			if ot, ok := row["order_type"].(string); ok {
+				row["order_type"] = normalizeOrderType(ot)
+			}
+
+			for k, v := range row {
+				// Normalize dates
+				if isDateColumn(k) {
+					if v == nil || v == "" {
+						row[k] = nil
+						continue
+					}
+					norm := NormalizeDate(fmt.Sprint(v))
+					if norm == "" {
+						row[k] = nil
+					} else {
+						row[k] = norm
+					}
+					continue
+				}
+
+				lower := strings.ToLower(k)
+				if lower == "booking_amount" || lower == "actual_value_base_currency" || lower == "spot_rate" || lower == "forward_points" || lower == "bank_margin" || lower == "total_rate" || lower == "value_quote_currency" || lower == "intervening_rate_quote_to_local" || lower == "value_local_currency" {
+					s := fmt.Sprint(v)
+					s = strings.TrimSpace(s)
+					if s == "" {
+						row[k] = nil
+					} else {
+						if f, err := strconv.ParseFloat(strings.ReplaceAll(s, ",", ""), 64); err == nil {
+							row[k] = f
+						} else {
+							row[k] = v
+						}
+					}
+				}
+			}
+		}
+		if len(invalidRows) > 0 {
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        []map[string]interface{}{},
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+
+		uploadS3Key := ""
+		s3Uploaded := false
+		if s3storage.IsS3UploadEnabled() {
+			contentType := s3storage.DetectContentType(fileBytes)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				_ = tx.Rollback()
+				results = append(results, map[string]interface{}{
+					"filename":      fileHeader.Filename,
+					"upload_s3_key": "",
+					"inserted":      0,
+					"errors":        []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+					"invalidRows":   invalidRows,
+				})
+				continue
+			}
+			uploadS3Key = s3Key
+			s3Uploaded = true
+		}
+
+		successCount := 0
+		errorRows := []map[string]interface{}{}
+		for i, row := range rows {
+			query := `INSERT INTO forward_bookings (
+				internal_reference_id, entity_level_0, entity_level_1, entity_level_2, entity_level_3, local_currency, order_type, transaction_type, counterparty, mode_of_delivery, delivery_period, add_date, settlement_date, maturity_date, delivery_date, currency_pair, base_currency, quote_currency, booking_amount, value_type, actual_value_base_currency, spot_rate, forward_points, bank_margin, total_rate, value_quote_currency, intervening_rate_quote_to_local, value_local_currency, internal_dealer, counterparty_dealer, remarks, narration, transaction_timestamp, processing_status, upload_s3_key
+			) VALUES (
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
+			)`
+			values := []interface{}{
+				row["internal_reference_id"], row["entity_level_0"], row["entity_level_1"], row["entity_level_2"], row["entity_level_3"], row["local_currency"], row["order_type"], row["transaction_type"], row["counterparty"], row["mode_of_delivery"], row["delivery_period"], row["add_date"], row["settlement_date"], row["maturity_date"], row["delivery_date"], row["currency_pair"], row["base_currency"], row["quote_currency"], row["booking_amount"], row["value_type"], row["actual_value_base_currency"], row["spot_rate"], row["forward_points"], row["bank_margin"], row["total_rate"], row["value_quote_currency"], row["intervening_rate_quote_to_local"], row["value_local_currency"], row["internal_dealer"], row["counterparty_dealer"], row["remarks"], row["narration"], row["transaction_timestamp"], "pending", uploadS3Key,
+			}
+			_, err := tx.ExecContext(ctx, query, values...)
+			if err != nil {
+				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Database insert error", "details": err.Error()})
+				break
+			} else {
+				successCount++
+			}
+		}
+		if len(errorRows) > 0 {
+			_ = tx.Rollback()
+			if s3Uploaded {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					fmt.Printf("[forward-upload] failed to cleanup S3 object for %s after insert failure: %v\n", fileHeader.Filename, cleanupErr)
+				}
+			}
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        errorRows,
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+		if err := tx.Commit(); err != nil {
+			if s3Uploaded {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					fmt.Printf("[forward-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
+				}
+			}
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"inserted":      0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"filename":             fileHeader.Filename,
+			"upload_s3_key":        uploadS3Key,
+			"inserted":             successCount,
+			"errors":               errorRows,
+			"invalidRows":          invalidRows,
+			constants.ValueSuccess: successCount > 0,
+		})
+	}
+	return results, nil
 }
 
 func contains(arr []string, str string) bool {
@@ -479,12 +696,11 @@ func contains(arr []string, str string) bool {
 }
 
 // Handler: UploadForwardConfirmationsMulti
-// Multi-file upload for forward confirmations (CSV/Excel) - UPDATE existing records
-// Place below imports and package declaration
+
 func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := r.ParseMultipartForm(32 << 20)
-		if err != nil {
+		// Parse multipart form
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
 			return
@@ -501,18 +717,630 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrNoAccessibleBusinessUnit})
 			return
 		}
-		results := []map[string]interface{}{}
+		// Delegate to service
+		ctx := r.Context()
+		results, err := processUploadForwardConfirmations(ctx, db, r, buNames)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
+	}
+}
+
+func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.Request, buNames []string) ([]map[string]interface{}, error) {
+	files := r.MultipartForm.File["files"]
+	results := []map[string]interface{}{}
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
+			continue
+		}
+		// Read all file bytes for parsing, hashing, and deferred S3 upload.
+		fileBytes, _ := io.ReadAll(file)
+		file.Close()
+		if s3storage.IsS3UploadEnabled() {
+			if err := ensureUniqueForwardConfirmationUpload(ctx, db, fileBytes); err != nil {
+				message := err.Error()
+				if errors.Is(err, ErrForwardConfirmationFileAlreadyUploaded) {
+					message = duplicateForwardConfirmationUploadMessage
+				}
+				results = append(results, map[string]interface{}{
+					"filename":             fileHeader.Filename,
+					"updated":              0,
+					"errors":               []map[string]interface{}{},
+					"invalidRows":          []map[string]interface{}{},
+					"message":              message,
+					constants.ValueSuccess: false,
+				})
+				continue
+			}
+		}
+		fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
+		s3Key := s3storage.BuildUploadedS3Key("fx/forwards/confirmations", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
+		ext := fileExt
+		var rows []map[string]interface{}
+		if ext == ".csv" {
+			reader := csv.NewReader(bytes.NewReader(fileBytes))
+			headers, err := reader.Read()
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
+				continue
+			}
+			for i, h := range headers {
+				headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
+			}
+			for {
+				record, err := reader.Read()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					continue
+				}
+				row := make(map[string]interface{})
+				for i, h := range headers {
+					row[h] = record[i]
+				}
+				rows = append(rows, row)
+			}
+		} else if ext == ".xls" || ext == ".xlsx" {
+			tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
+				continue
+			}
+			_, err = tmpFile.Write(fileBytes)
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
+				tmpFile.Close()
+				continue
+			}
+			tmpFile.Close()
+			f, err := excelize.OpenFile(tmpFile.Name())
+			if err != nil {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
+				continue
+			}
+			sheetName := f.GetSheetName(0)
+			rowsData, err := f.GetRows(sheetName)
+			if err != nil || len(rowsData) < 2 {
+				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
+				continue
+			}
+			headers := rowsData[0]
+			for _, record := range rowsData[1:] {
+				row := make(map[string]interface{})
+				for i, h := range headers {
+					if i < len(record) {
+						row[h] = record[i]
+					} else {
+						row[h] = nil
+					}
+				}
+				rows = append(rows, row)
+			}
+			os.Remove(tmpFile.Name())
+		} else {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
+			continue
+		}
+		if len(rows) == 0 {
+			results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
+			continue
+		}
+		invalidRows := []map[string]interface{}{}
+		for i, row := range rows {
+			entityLevel0, _ := row["entity_level_0"].(string)
+			if !contains(buNames, entityLevel0) {
+				invalidRows = append(invalidRows, map[string]interface{}{"row": i + 1, "entity": entityLevel0})
+			}
+			// Normalize bank_confirmation_date if provided
+			if v, ok := row["bank_confirmation_date"]; ok {
+				if v == nil || v == "" {
+					row["bank_confirmation_date"] = nil
+				} else {
+					n := NormalizeDate(fmt.Sprint(v))
+					if n == "" {
+						row["bank_confirmation_date"] = nil
+					} else {
+						row["bank_confirmation_date"] = n
+					}
+				}
+			}
+		}
+		if len(invalidRows) > 0 {
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        []map[string]interface{}{},
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+
+		uploadS3Key := ""
+		s3Uploaded := false
+		if s3storage.IsS3UploadEnabled() {
+			contentType := s3storage.DetectContentType(fileBytes)
+			if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+				_ = tx.Rollback()
+				results = append(results, map[string]interface{}{
+					"filename":      fileHeader.Filename,
+					"upload_s3_key": "",
+					"updated":       0,
+					"errors":        []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+					"invalidRows":   invalidRows,
+				})
+				continue
+			}
+			uploadS3Key = s3Key
+			s3Uploaded = true
+		}
+
+		successCount := 0
+		errorRows := []map[string]interface{}{}
+		for i, row := range rows {
+			updateQuery := `UPDATE forward_bookings SET
+				status = 'Confirmed',
+				bank_transaction_id = $1,
+				swift_unique_id = $2,
+				bank_confirmation_date = $3,
+				processing_status = 'pending',
+				confirmation_upload_s3_key = $6
+			WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5`
+			updateValues := []interface{}{
+				row["bank_transaction_id"],
+				row["swift_unique_id"],
+				row["bank_confirmation_date"],
+				row["internal_reference_id"],
+				row["entity_level_0"],
+				uploadS3Key,
+			}
+			res, err := tx.ExecContext(ctx, updateQuery, updateValues...)
+			if err != nil {
+				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "Failed to update record", "details": err.Error()})
+				break
+			}
+			rowsAffected, _ := res.RowsAffected()
+			if rowsAffected == 0 {
+				errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "No matching record found or already confirmed"})
+				break
+			}
+			successCount++
+		}
+		if len(errorRows) > 0 {
+			_ = tx.Rollback()
+			if s3Uploaded {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					fmt.Printf("[forward-confirmation-upload] failed to cleanup S3 object for %s after update failure: %v\n", fileHeader.Filename, cleanupErr)
+				}
+			}
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        errorRows,
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+		if err := tx.Commit(); err != nil {
+			if s3Uploaded {
+				if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+					fmt.Printf("[forward-confirmation-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
+				}
+			}
+			results = append(results, map[string]interface{}{
+				"filename":      fileHeader.Filename,
+				"upload_s3_key": "",
+				"updated":       0,
+				"errors":        []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				"invalidRows":   invalidRows,
+			})
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"filename":             fileHeader.Filename,
+			"upload_s3_key":        uploadS3Key,
+			"updated":              successCount,
+			"errors":               errorRows,
+			"invalidRows":          invalidRows,
+			constants.ValueSuccess: successCount > 0,
+		})
+	}
+	return results, nil
+}
+
+func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Parse multipart form
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
+			return
+		}
+		// Validate user_id
+		if userID := r.FormValue(constants.KeyUserID); userID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPleaseLogin})
+			return
+		}
+		// Delegate to service
+		ctx := r.Context()
+		results, batchID, err := processUploadBankForwardBookings(ctx, db, r)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
+			return
+		}
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_id": batchID, "results": results})
+	}
+}
+
+func GetForwardDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RecordID            string `json:"record_id"`
+			InternalReferenceID string `json:"internal_reference_id"`
+			UploadBatchID       string `json:"upload_batch_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		recordID := strings.TrimSpace(req.InternalReferenceID)
+		if recordID == "" {
+			recordID = strings.TrimSpace(req.RecordID)
+		}
+		uploadBatchID := strings.TrimSpace(req.UploadBatchID)
+
+		if recordID == "" && uploadBatchID == "" {
+			respondWithError(w, http.StatusBadRequest, "internal_reference_id or upload_batch_id is required")
+			return
+		}
+
+		var uploadS3Key sql.NullString
+
+		if recordID != "" {
+			err := db.QueryRowContext(r.Context(), `
+				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), NULLIF(upload_s3_key, ''), '')
+				FROM forward_bookings
+				WHERE internal_reference_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, recordID).Scan(&uploadS3Key)
+			if err != nil && err != sql.ErrNoRows {
+				respondWithError(w, http.StatusInternalServerError, "failed to fetch forward booking")
+				return
+			}
+		}
+
+		if strings.TrimSpace(uploadS3Key.String) == "" && uploadBatchID != "" {
+			err := db.QueryRowContext(r.Context(), `
+				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
+				FROM staging_bank_forward
+				WHERE upload_batch_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, uploadBatchID).Scan(&uploadS3Key)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					respondWithError(w, http.StatusNotFound, "record not found")
+					return
+				}
+				respondWithError(w, http.StatusInternalServerError, "failed to fetch upload batch")
+				return
+			}
+		}
+
+		s3Key := strings.TrimSpace(uploadS3Key.String)
+		if s3Key == "" {
+			respondWithError(w, http.StatusNotFound, "no file available for download")
+			return
+		}
+
+		downloadURL, err := s3storage.GetDownloadPresignedURL(r.Context(), s3Key, 15*time.Minute)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "failed to generate download url")
+			return
+		}
+
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: true,
+			"data": map[string]interface{}{
+				"download_url": downloadURL,
+			},
+		})
+	}
+}
+
+func normalizeBulkIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func writeBulkDownloadResponse(w http.ResponseWriter, files []map[string]string, failedIDs []string) {
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
+	if len(files) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			constants.ValueSuccess: false,
+			"message":              "no downloadable files found",
+			"data": map[string]interface{}{
+				"files":      []map[string]string{},
+				"failed_ids": failedIDs,
+			},
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		constants.ValueSuccess: true,
+		"data": map[string]interface{}{
+			"files":      files,
+			"failed_ids": failedIDs,
+		},
+	})
+}
+
+func GetForwardBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			InternalReferenceIDs []string `json:"internal_reference_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.InternalReferenceIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "internal_reference_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, referenceID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
+				FROM forward_bookings
+				WHERE internal_reference_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, referenceID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if s3Key == "" {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"internal_reference_id": referenceID,
+				"download_url":          downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
+}
+
+func GetForwardConfirmationBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			InternalReferenceIDs []string `json:"internal_reference_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.InternalReferenceIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "internal_reference_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, referenceID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT COALESCE(NULLIF(confirmation_upload_s3_key, ''), '')
+				FROM forward_bookings
+				WHERE internal_reference_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, referenceID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if s3Key == "" {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, referenceID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"internal_reference_id": referenceID,
+				"download_url":          downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
+}
+
+func GetForwardBankBulkDownloadURL(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UploadBatchIDs []string `json:"upload_batch_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
+			return
+		}
+
+		ids := normalizeBulkIDs(req.UploadBatchIDs)
+		if len(ids) == 0 {
+			respondWithError(w, http.StatusBadRequest, "upload_batch_ids is required")
+			return
+		}
+
+		ctx := r.Context()
+		files := make([]map[string]string, 0, len(ids))
+		failedIDs := make([]string, 0)
+
+		for _, uploadBatchID := range ids {
+			var uploadS3Key sql.NullString
+			err := db.QueryRowContext(ctx, `
+				SELECT COALESCE(NULLIF(upload_s3_key, ''), '')
+				FROM staging_bank_forward
+				WHERE upload_batch_id = $1
+				ORDER BY add_date DESC
+				LIMIT 1
+			`, uploadBatchID).Scan(&uploadS3Key)
+			if err != nil {
+				failedIDs = append(failedIDs, uploadBatchID)
+				continue
+			}
+
+			s3Key := strings.TrimSpace(uploadS3Key.String)
+			if s3Key == "" {
+				failedIDs = append(failedIDs, uploadBatchID)
+				continue
+			}
+
+			downloadURL, err := s3storage.GetDownloadPresignedURL(ctx, s3Key, 15*time.Minute)
+			if err != nil {
+				failedIDs = append(failedIDs, uploadBatchID)
+				continue
+			}
+
+			files = append(files, map[string]string{
+				"upload_batch_id": uploadBatchID,
+				"download_url":    downloadURL,
+			})
+		}
+
+		writeBulkDownloadResponse(w, files, failedIDs)
+	}
+}
+
+// processUploadBankForwardBookings contains all business logic for the bank forward upload.
+// It is called by the thin UploadBankForwardBookingsMulti controller.
+func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.Request) ([]map[string]interface{}, string, error) {
+	uploadBatchID := uuid.New().String()
+	// Get staging table columns
+	stagingCols := []string{}
+	colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to fetch staging table columns: %w", err)
+	}
+	defer colRows.Close()
+	for colRows.Next() {
+		var col string
+		if err := colRows.Scan(&col); err == nil {
+			stagingCols = append(stagingCols, col)
+		}
+	}
+	results := []map[string]interface{}{}
+	uploadedBy := forwardUploadUserName(r.FormValue(constants.KeyUserID))
+	// Loop over file arrays (e.g., forward_axis, forward_hdfc)
+	for arrayName, files := range r.MultipartForm.File {
+		bankIdentifier := strings.ToUpper(strings.Replace(arrayName, "forward_", "", 1))
 		for _, fileHeader := range files {
 			file, err := fileHeader.Open()
 			if err != nil {
 				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
 				continue
 			}
-			defer file.Close()
-			ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+			// Read all file bytes for parsing, hashing, and deferred S3 upload.
+			fileBytes, _ := io.ReadAll(file)
+			file.Close()
+			if s3storage.IsS3UploadEnabled() {
+				if err := ensureUniqueForwardBookingUpload(ctx, db, fileBytes); err != nil {
+					message := err.Error()
+					if errors.Is(err, ErrForwardBookingFileAlreadyUploaded) {
+						message = duplicateForwardBookingUploadMessage
+					}
+					results = append(results, map[string]interface{}{
+						"filename":             fileHeader.Filename,
+						"upload_s3_key":        "",
+						"staging_inserted":     0,
+						"staging_errors":       []map[string]interface{}{},
+						"bookings_inserted":    0,
+						"booking_errors":       []map[string]interface{}{},
+						"message":              message,
+						constants.ValueSuccess: false,
+					})
+					continue
+				}
+			}
+			fileExt := strings.ToLower(filepath.Ext(fileHeader.Filename))
+			s3Key := s3storage.BuildUploadedS3Key("fx/forwards/bank", "", fileHeader.Filename, uploadedBy, time.Now().UTC())
+			ext := fileExt
 			var rows []map[string]interface{}
 			if ext == ".csv" {
-				reader := csv.NewReader(file)
+				reader := csv.NewReader(bytes.NewReader(fileBytes))
 				headers, err := reader.Read()
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
@@ -541,8 +1369,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
 					continue
 				}
-				defer os.Remove(tmpFile.Name())
-				_, err = io.Copy(tmpFile, file)
+				_, err = tmpFile.Write(fileBytes)
 				if err != nil {
 					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
 					tmpFile.Close()
@@ -572,6 +1399,7 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 					}
 					rows = append(rows, row)
 				}
+				os.Remove(tmpFile.Name())
 			} else {
 				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
 				continue
@@ -580,341 +1408,254 @@ func UploadForwardConfirmationsMulti(db *sql.DB) http.HandlerFunc {
 				results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
 				continue
 			}
-			successCount := 0
-			errorRows := []map[string]interface{}{}
-			invalidRows := []map[string]interface{}{}
-			for i, r := range rows {
-				entityLevel0, _ := r["entity_level_0"].(string)
-				if !contains(buNames, entityLevel0) {
-					invalidRows = append(invalidRows, map[string]interface{}{"row": i + 1, "entity": entityLevel0})
-					continue
+			// Get all mappings for this bank before S3/upload persistence work.
+			mappings := []map[string]interface{}{}
+			mapRows, err := db.Query(`SELECT * FROM fwd_mapping_bank_forward WHERE bank_identifier = $1 AND is_active = true`, bankIdentifier)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"filename":          fileHeader.Filename,
+					"upload_s3_key":     "",
+					"staging_inserted":  0,
+					"staging_errors":    []map[string]interface{}{},
+					"bookings_inserted": 0,
+					"booking_errors":    []map[string]interface{}{{constants.ValueError: "Failed to fetch mapping: " + err.Error()}},
+				})
+				continue
+			}
+			cols, _ := mapRows.Columns()
+			for mapRows.Next() {
+				vals := make([]interface{}, len(cols))
+				valPtrs := make([]interface{}, len(cols))
+				for i := range vals {
+					valPtrs[i] = &vals[i]
 				}
-				// Normalize bank_confirmation_date if provided
-				if v, ok := r["bank_confirmation_date"]; ok {
-					if v == nil || v == "" {
-						r["bank_confirmation_date"] = nil
-					} else {
-						n := NormalizeDate(fmt.Sprint(v))
-						if n == "" {
-							r["bank_confirmation_date"] = nil
-						} else {
-							r["bank_confirmation_date"] = n
-						}
+				if err := mapRows.Scan(valPtrs...); err == nil {
+					m := map[string]interface{}{}
+					for i, col := range cols {
+						m[col] = vals[i]
 					}
-				}
-				updateQuery := `UPDATE forward_bookings SET
-					status = 'Confirmed',
-					bank_transaction_id = $1,
-					swift_unique_id = $2,
-					bank_confirmation_date = $3,
-					processing_status = 'pending'
-				WHERE internal_reference_id = $4 AND status = 'Pending Confirmation' AND entity_level_0 = $5
-				RETURNING *`
-				updateValues := []interface{}{
-					r["bank_transaction_id"],
-					r["swift_unique_id"],
-					r["bank_confirmation_date"],
-					r["internal_reference_id"],
-					r["entity_level_0"],
-				}
-				row := db.QueryRow(updateQuery, updateValues...)
-				var dummy string
-				err := row.Scan(&dummy)
-				if err == nil {
-					successCount++
-				} else {
-					errorRows = append(errorRows, map[string]interface{}{"row": i + 1, constants.ValueError: "No matching record found or already confirmed"})
+					mappings = append(mappings, m)
 				}
 			}
-			results = append(results, map[string]interface{}{
-				"filename":    fileHeader.Filename,
-				"updated":     successCount,
-				"errors":      errorRows,
-				"invalidRows": invalidRows,
-			})
-		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "results": results})
-	}
-}
+			mapRows.Close()
 
-func UploadBankForwardBookingsMulti(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		err := r.ParseMultipartForm(32 << 20)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrFailedToParseForm + err.Error()})
-			return
-		}
-		userID := r.FormValue(constants.KeyUserID)
-		if userID == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: constants.ErrPleaseLogin})
-			return
-		}
-		// sessions := getSessionsByUserId(userID)
-		// if len(sessions) == 0 {
-		// 	w.WriteHeader(http.StatusNotFound)
-		// 	json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Session expired or not found. Please login again."})
-		// 	return
-		// }
-		uploadBatchID := uuid.New().String()
-		// Get staging table columns
-		stagingCols := []string{}
-		colRows, err := db.Query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'staging_bank_forward'`)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Failed to fetch staging table columns"})
-			return
-		}
-		defer colRows.Close()
-		for colRows.Next() {
-			var col string
-			if err := colRows.Scan(&col); err == nil {
-				stagingCols = append(stagingCols, col)
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"filename":          fileHeader.Filename,
+					"upload_s3_key":     "",
+					"staging_inserted":  0,
+					"staging_errors":    []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+					"bookings_inserted": 0,
+					"booking_errors":    []map[string]interface{}{},
+				})
+				continue
 			}
-		}
-		results := []map[string]interface{}{}
-		// Loop over file arrays (e.g., forward_axis, forward_hdfc)
-		for arrayName, files := range r.MultipartForm.File {
-			bankIdentifier := strings.ToUpper(strings.Replace(arrayName, "forward_", "", 1))
-			for _, fileHeader := range files {
-				file, err := fileHeader.Open()
-				if err != nil {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToOpenFile, "details": err.Error()})
+
+			uploadS3Key := ""
+			s3Uploaded := false
+			if s3storage.IsS3UploadEnabled() {
+				contentType := s3storage.DetectContentType(fileBytes)
+				if err = s3storage.PutObjectToS3(ctx, s3Key, fileBytes, contentType); err != nil {
+					_ = tx.Rollback()
+					results = append(results, map[string]interface{}{
+						"filename":          fileHeader.Filename,
+						"upload_s3_key":     "",
+						"staging_inserted":  0,
+						"staging_errors":    []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+						"bookings_inserted": 0,
+						"booking_errors":    []map[string]interface{}{},
+					})
 					continue
 				}
-				ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-				var rows []map[string]interface{}
-				if ext == ".csv" {
-					reader := csv.NewReader(file)
-					headers, err := reader.Read()
-					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToReadCSVHeaders, "details": err.Error()})
-						file.Close()
-						continue
-					}
-					for i, h := range headers {
-						headers[i] = strings.TrimSpace(strings.TrimPrefix(h, constants.ErrInvalidJSONBOM))
-					}
-					for {
-						record, err := reader.Read()
-						if err == io.EOF {
-							break
-						}
-						if err != nil {
-							continue
-						}
-						row := make(map[string]interface{})
-						for i, h := range headers {
-							row[h] = record[i]
-						}
-						rows = append(rows, row)
-					}
-				} else if ext == ".xls" || ext == ".xlsx" {
-					tmpFile, err := os.CreateTemp("", constants.ErrExposureUploadFilenamePattern)
-					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCreateTempFile, "details": err.Error()})
-						file.Close()
-						continue
-					}
-					_, err = io.Copy(tmpFile, file)
-					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToCopyFile, "details": err.Error()})
-						tmpFile.Close()
-						file.Close()
-						continue
-					}
-					tmpFile.Close()
-					f, err := excelize.OpenFile(tmpFile.Name())
-					if err != nil {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrFailedToParseExcelFile, "details": err.Error()})
-						file.Close()
-						continue
-					}
-					sheetName := f.GetSheetName(0)
-					rowsData, err := f.GetRows(sheetName)
-					if err != nil || len(rowsData) < 2 {
-						results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
-						file.Close()
-						continue
-					}
-					headers := rowsData[0]
-					for _, record := range rowsData[1:] {
-						row := make(map[string]interface{})
-						for i, h := range headers {
-							if i < len(record) {
-								row[h] = record[i]
-							} else {
-								row[h] = nil
-							}
-						}
-						rows = append(rows, row)
-					}
-					os.Remove(tmpFile.Name())
-				} else {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrUnsupportedFileType})
-					file.Close()
-					continue
+				uploadS3Key = s3Key
+				s3Uploaded = true
+			}
+
+			// Insert into staging_bank_forward
+			stagingSuccess := 0
+			stagingErrors := []map[string]interface{}{}
+			for i, row := range rows {
+				insertObj := map[string]interface{}{
+					"upload_batch_id":     uploadBatchID,
+					"bank_identifier":     bankIdentifier,
+					"bank_reference_id":   getStringOrUUID(row["bank_reference_id"]),
+					"row_number":          i + 1,
+					"source_reference_id": row["source_reference_id"],
+					"raw_data":            marshalJSON(row),
+					"processing_status":   "Pending",
+					"upload_s3_key":       uploadS3Key,
 				}
-				file.Close()
-				if len(rows) == 0 {
-					results = append(results, map[string]interface{}{"filename": fileHeader.Filename, constants.ValueError: constants.ErrNoDataToUpload})
-					continue
-				}
-				// Insert into staging_bank_forward
-				stagingSuccess := 0
-				stagingErrors := []map[string]interface{}{}
-				for i, r := range rows {
-					insertObj := map[string]interface{}{
-						"upload_batch_id":     uploadBatchID,
-						"bank_identifier":     bankIdentifier,
-						"bank_reference_id":   getStringOrUUID(r["bank_reference_id"]),
-						"row_number":          i + 1,
-						"source_reference_id": r["source_reference_id"],
-						"raw_data":            marshalJSON(r),
-						"processing_status":   "Pending",
+				// Add other columns from stagingCols
+				for _, col := range stagingCols {
+					if _, ok := insertObj[col]; ok {
+						continue
 					}
-					// Add other columns from stagingCols
-					for _, col := range stagingCols {
-						if _, ok := insertObj[col]; ok {
-							continue
-						}
-						value := r[col]
-						// For date columns, normalize and set NULL if empty/invalid
-						if isDateColumn(col) {
-							if value == nil || value == "" {
+					value := row[col]
+					// For date columns, normalize and set NULL if empty/invalid
+					if isDateColumn(col) {
+						if value == nil || value == "" {
+							insertObj[col] = nil
+						} else {
+							norm := NormalizeDate(fmt.Sprint(value))
+							if norm == "" {
 								insertObj[col] = nil
 							} else {
-								norm := NormalizeDate(fmt.Sprint(value))
-								if norm == "" {
-									insertObj[col] = nil
-								} else {
-									insertObj[col] = norm
-								}
+								insertObj[col] = norm
 							}
-						} else if value != nil {
-							insertObj[col] = value
 						}
-					}
-					// Build dynamic insert
-					fields := []string{}
-					placeholders := []string{}
-					values := []interface{}{}
-					idx := 1
-					for k, v := range insertObj {
-						fields = append(fields, fmt.Sprintf("\"%s\"", k))
-						placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
-						values = append(values, v)
-						idx++
-					}
-					_, err := db.Exec(fmt.Sprintf("INSERT INTO staging_bank_forward (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
-					if err != nil {
-						stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
-					} else {
-						stagingSuccess++
+					} else if value != nil {
+						insertObj[col] = value
 					}
 				}
-				// Mapping and insert into forward_bookings
-				bookingSuccess := 0
-				bookingErrors := []map[string]interface{}{}
-				// Get all mappings for this bank
-				mappings := []map[string]interface{}{}
-				mapRows, err := db.Query(`SELECT * FROM fwd_mapping_bank_forward WHERE bank_identifier = $1 AND is_active = true`, bankIdentifier)
-				if err == nil {
-					defer mapRows.Close()
-					cols, _ := mapRows.Columns()
-					for mapRows.Next() {
-						vals := make([]interface{}, len(cols))
-						valPtrs := make([]interface{}, len(cols))
-						for i := range vals {
-							valPtrs[i] = &vals[i]
-						}
-						if err := mapRows.Scan(valPtrs...); err == nil {
-							m := map[string]interface{}{}
-							for i, col := range cols {
-								m[col] = vals[i]
-							}
-							mappings = append(mappings, m)
-						}
-					}
-				} else {
-					bookingErrors = append(bookingErrors, map[string]interface{}{constants.ValueError: "Failed to fetch mapping: " + err.Error()})
+				// Build dynamic insert
+				fields := []string{}
+				placeholders := []string{}
+				values := []interface{}{}
+				idx := 1
+				for k, v := range insertObj {
+					fields = append(fields, fmt.Sprintf("\"%s\"", k))
+					placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
+					values = append(values, v)
+					idx++
 				}
-				for i, r := range rows {
-					booking := map[string]interface{}{}
-					unmapped := map[string]interface{}{}
-					for key, val := range r {
-						found := false
-						for _, m := range mappings {
-							if m["source_field"] == key && m["target_table"] == "forward_bookings" {
-								// Transformation logic can be added here
-								booking[m["target_field"].(string)] = val
-								found = true
-								break
-							}
-						}
-						if !found {
-							unmapped[key] = val
-						}
-					}
-					booking["additional_bank_details"] = marshalJSON(unmapped)
-					// Required fields fallback
-					booking["entity_level_0"] = getStringOrDefault(booking["entity_level_0"], r["entity_level_0"])
-					booking["maturity_date"] = getStringOrDefault(booking["maturity_date"], r["maturity_date"])
-					booking["currency_pair"] = getStringOrDefault(booking["currency_pair"], r["currency_pair"])
-					booking["order_type"] = getStringOrDefault(booking["order_type"], r["order_type"])
-					booking["booking_amount"] = getStringOrDefault(booking["booking_amount"], r["booking_amount"])
-					booking["total_rate"] = getStringOrDefault(booking["total_rate"], r["total_rate"])
-					booking["processing_status"] = "pending"
-					// Normalize date fields in booking before insert
-					for k, v := range booking {
-						if isDateColumn(k) {
-							if v == nil || v == "" {
-								booking[k] = nil
-							} else {
-								norm := NormalizeDate(fmt.Sprint(v))
-								if norm == "" {
-									booking[k] = nil
-								} else {
-									booking[k] = norm
-								}
-							}
-						}
-					}
-
-					// Build dynamic insert
-					fields := []string{}
-					placeholders := []string{}
-					values := []interface{}{}
-					idx := 1
-					for k, v := range booking {
-						fields = append(fields, k)
-						placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
-						values = append(values, v)
-						idx++
-					}
-					_, err := db.Exec(fmt.Sprintf("INSERT INTO forward_bookings (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
-					if err != nil {
-						bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
-					} else {
-						bookingSuccess++
+				_, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO staging_bank_forward (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
+				if err != nil {
+					stagingErrors = append(stagingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
+					break
+				}
+				stagingSuccess++
+			}
+			if len(stagingErrors) > 0 {
+				_ = tx.Rollback()
+				if s3Uploaded {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after staging failure: %v\n", fileHeader.Filename, cleanupErr)
 					}
 				}
 				results = append(results, map[string]interface{}{
 					"filename":          fileHeader.Filename,
-					"staging_inserted":  stagingSuccess,
+					"upload_s3_key":     "",
+					"staging_inserted":  0,
 					"staging_errors":    stagingErrors,
-					"bookings_inserted": bookingSuccess,
+					"bookings_inserted": 0,
+					"booking_errors":    []map[string]interface{}{},
+				})
+				continue
+			}
+			// Mapping and insert into forward_bookings
+			bookingSuccess := 0
+			bookingErrors := []map[string]interface{}{}
+			for i, r := range rows {
+				booking := map[string]interface{}{}
+				unmapped := map[string]interface{}{}
+				for key, val := range r {
+					found := false
+					for _, m := range mappings {
+						if m["source_field"] == key && m["target_table"] == "forward_bookings" {
+							// Transformation logic can be added here
+							booking[m["target_field"].(string)] = val
+							found = true
+							break
+						}
+					}
+					if !found {
+						unmapped[key] = val
+					}
+				}
+				booking["additional_bank_details"] = marshalJSON(unmapped)
+				// Required fields fallback
+				booking["entity_level_0"] = getStringOrDefault(booking["entity_level_0"], r["entity_level_0"])
+				booking["maturity_date"] = getStringOrDefault(booking["maturity_date"], r["maturity_date"])
+				booking["currency_pair"] = getStringOrDefault(booking["currency_pair"], r["currency_pair"])
+				booking["order_type"] = getStringOrDefault(booking["order_type"], r["order_type"])
+				booking["booking_amount"] = getStringOrDefault(booking["booking_amount"], r["booking_amount"])
+				booking["total_rate"] = getStringOrDefault(booking["total_rate"], r["total_rate"])
+				booking["processing_status"] = "pending"
+				booking["upload_s3_key"] = uploadS3Key
+				for bk := range booking {
+					legacyCol := strings.ToLower(strings.TrimSpace(bk))
+					if strings.Contains(legacyCol, "upload") && strings.Contains(legacyCol, "link") {
+						delete(booking, bk)
+					}
+				}
+				// Normalize date fields in booking before insert
+				for k, v := range booking {
+					if isDateColumn(k) {
+						if v == nil || v == "" {
+							booking[k] = nil
+						} else {
+							norm := NormalizeDate(fmt.Sprint(v))
+							if norm == "" {
+								booking[k] = nil
+							} else {
+								booking[k] = norm
+							}
+						}
+					}
+				}
+				// Build dynamic insert
+				fields := []string{}
+				placeholders := []string{}
+				values := []interface{}{}
+				idx := 1
+				for k, v := range booking {
+					fields = append(fields, k)
+					placeholders = append(placeholders, fmt.Sprintf("$%d", idx))
+					values = append(values, v)
+					idx++
+				}
+				_, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO forward_bookings (%s) VALUES (%s)", strings.Join(fields, ", "), strings.Join(placeholders, ", ")), values...)
+				if err != nil {
+					bookingErrors = append(bookingErrors, map[string]interface{}{"row": i + 1, constants.ValueError: err.Error()})
+					break
+				}
+				bookingSuccess++
+			}
+			if len(bookingErrors) > 0 {
+				_ = tx.Rollback()
+				if s3Uploaded {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after booking failure: %v\n", fileHeader.Filename, cleanupErr)
+					}
+				}
+				results = append(results, map[string]interface{}{
+					"filename":          fileHeader.Filename,
+					"upload_s3_key":     "",
+					"staging_inserted":  0,
+					"staging_errors":    []map[string]interface{}{},
+					"bookings_inserted": 0,
 					"booking_errors":    bookingErrors,
 				})
+				continue
 			}
+			if err := tx.Commit(); err != nil {
+				if s3Uploaded {
+					if cleanupErr := s3storage.DeleteFromS3(ctx, s3Key); cleanupErr != nil {
+						fmt.Printf("[bank-forward-upload] failed to cleanup S3 object for %s after commit failure: %v\n", fileHeader.Filename, cleanupErr)
+					}
+				}
+				results = append(results, map[string]interface{}{
+					"filename":          fileHeader.Filename,
+					"upload_s3_key":     "",
+					"staging_inserted":  0,
+					"staging_errors":    []map[string]interface{}{},
+					"bookings_inserted": 0,
+					"booking_errors":    []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				})
+				continue
+			}
+			results = append(results, map[string]interface{}{
+				"filename":          fileHeader.Filename,
+				"upload_s3_key":     uploadS3Key,
+				"staging_inserted":  stagingSuccess,
+				"staging_errors":    stagingErrors,
+				"bookings_inserted": bookingSuccess,
+				"booking_errors":    bookingErrors,
+			})
 		}
-		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: true, "batch_id": uploadBatchID, "results": results})
 	}
+	return results, uploadBatchID, nil
 }
 
 // Helper: marshal map to JSON
