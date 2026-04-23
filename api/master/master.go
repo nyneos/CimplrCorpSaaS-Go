@@ -146,11 +146,13 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/entitycash/upload", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadEntityCash(pgxPool)))
 	mux.Handle("/master/entitycash/upload-simple", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UploadEntitySimple(pgxPool)))
 	mux.Handle("/master/entitycash/hierarchy", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashEntityHierarchy(pgxPool)))
+	mux.Handle("/master/entitycash/logo-url", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashEntityLogoURL(pgxPool)))
 	mux.Handle("/master/entitycash/updatebulk", middlewares.PreValidationMiddleware(pgxPool)(allMaster.UpdateCashEntityBulk(pgxPool)))
 	mux.Handle("/master/entitycash/find-parent-at-level", middlewares.PreValidationMiddleware(pgxPool)(allMaster.FindParentCashEntityAtLevel(pgxPool)))
 	mux.Handle("/master/entitycash/delete", middlewares.PreValidationMiddleware(pgxPool)(allMaster.DeleteCashEntity(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-approve", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkApproveCashEntityActions(pgxPool)))
 	mux.Handle("/master/entitycash/bulk-reject", middlewares.PreValidationMiddleware(pgxPool)(allMaster.BulkRejectCashEntityActions(pgxPool)))
+	mux.Handle("/master/entitycash/assigned-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetAssignedCashEntityNamesWithID(pgxPool)))
 	mux.Handle("/master/entitycash/all-names", middlewares.PreValidationMiddleware(pgxPool)(allMaster.GetCashEntityNamesWithID(pgxPool)))
 
 	mux.Handle("/master/amc/create", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.CreateAMCsingle(pgxPool)))

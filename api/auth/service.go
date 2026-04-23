@@ -7,22 +7,35 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
+type SessionEntity struct {
+	EntityID         string `json:"entity_id"`
+	EntityName       string `json:"entity_name"`
+	EntityShortName  string `json:"entity_short_name,omitempty"`
+	ParentEntityName string `json:"parent_entity_name,omitempty"`
+	EntityLevel      string `json:"entity_level,omitempty"`
+	ActiveStatus     string `json:"active_status,omitempty"`
+	ApprovalStatus   string `json:"approval_status,omitempty"`
+}
+
 type UserSession struct {
-	SessionID     string
-	UserID        string
-	Name          string
-	Email         string
-	Role          string
-	RoleCode      string
-	LastLoginTime string
-	ClientIP      string
-	IsLoggedIn    bool
+	SessionID       string
+	UserID          string
+	Name            string
+	Email           string
+	Role            string
+	RoleCode        string
+	LastLoginTime   string
+	ClientIP        string
+	IsLoggedIn      bool
+	CreatedEntities []SessionEntity `json:"created_entities,omitempty"`
 }
 
 type failedAttempt struct {
@@ -171,15 +184,16 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 
 	sessionID := generateSessionID()
 	session := &UserSession{
-		SessionID:     sessionID,
-		UserID:        dbUserID,
-		Name:          dbName,
-		Email:         dbEmail,
-		Role:          roleName.String,
-		RoleCode:      roleCode.String,
-		LastLoginTime: time.Now().Format(time.RFC3339),
-		ClientIP:      clientIP,
-		IsLoggedIn:    true,
+		SessionID:       sessionID,
+		UserID:          dbUserID,
+		Name:            dbName,
+		Email:           dbEmail,
+		Role:            roleName.String,
+		RoleCode:        roleCode.String,
+		LastLoginTime:   time.Now().Format(time.RFC3339),
+		ClientIP:        clientIP,
+		IsLoggedIn:      true,
+		CreatedEntities: a.loadCreatedEntities(dbName, dbEmail),
 	}
 
 	// Check MFA — only gate login if BOTH enabled AND secret is configured
@@ -239,6 +253,76 @@ func (a *AuthService) forceLogoutUser(userID string) {
 			break
 		}
 	}
+}
+
+func (a *AuthService) loadCreatedEntities(requestedBy string, fallbackRequestedBy string) []SessionEntity {
+	requestedBy = strings.TrimSpace(requestedBy)
+	fallbackRequestedBy = strings.TrimSpace(fallbackRequestedBy)
+	if requestedBy == "" && fallbackRequestedBy == "" || a.db == nil {
+		return nil
+	}
+
+	rows, err := a.db.Query(`
+		SELECT
+			m.entity_id,
+			m.entity_name,
+			COALESCE(m.entity_short_name, ''),
+			COALESCE(m.parent_entity_name, ''),
+			COALESCE(m.entity_level::text, ''),
+			COALESCE(m.active_status, ''),
+			COALESCE(ae.processing_status, '')
+		FROM masterentitycash m
+		LEFT JOIN LATERAL (
+			SELECT a.processing_status
+			FROM auditactionentity a
+			WHERE a.entity_id = m.entity_id
+			ORDER BY a.requested_at DESC
+			LIMIT 1
+		) ae ON TRUE
+		JOIN (
+			SELECT DISTINCT ON (a.entity_id)
+				a.entity_id,
+				a.requested_by
+			FROM auditactionentity a
+			WHERE a.actiontype = 'CREATE'
+			ORDER BY a.entity_id, a.requested_at ASC
+		) created_audit ON created_audit.entity_id = m.entity_id
+		WHERE (
+			LOWER(TRIM(created_audit.requested_by)) = LOWER(TRIM($1))
+			OR ($2 <> '' AND LOWER(TRIM(created_audit.requested_by)) = LOWER(TRIM($2)))
+		)
+		  AND (m.is_deleted = false OR m.is_deleted IS NULL)
+		ORDER BY m.entity_name
+	`, requestedBy, fallbackRequestedBy)
+	if err != nil {
+		log.Printf("[auth] failed to load created entities for %s/%s: %v", requestedBy, fallbackRequestedBy, err)
+		return nil
+	}
+	defer rows.Close()
+
+	entities := make([]SessionEntity, 0)
+	for rows.Next() {
+		var entity SessionEntity
+		if err := rows.Scan(
+			&entity.EntityID,
+			&entity.EntityName,
+			&entity.EntityShortName,
+			&entity.ParentEntityName,
+			&entity.EntityLevel,
+			&entity.ActiveStatus,
+			&entity.ApprovalStatus,
+		); err != nil {
+			log.Printf("[auth] failed to scan created entity for %s/%s: %v", requestedBy, fallbackRequestedBy, err)
+			return entities
+		}
+		entities = append(entities, entity)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("[auth] failed to iterate created entities for %s/%s: %v", requestedBy, fallbackRequestedBy, err)
+	}
+
+	return entities
 }
 
 // HashPassword hashes a plaintext password with bcrypt.
