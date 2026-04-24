@@ -137,14 +137,90 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// horizon: default 14 days; if query param `days` provided and >14, use it
-		days := 14
-		if raw := r.URL.Query().Get("days"); raw != "" {
-			if v, err := strconv.Atoi(raw); err == nil && v > 14 {
-				days = v
+		// ── Parse filters: body takes priority, query params as fallback ──
+		type reqBody struct {
+			Entity   string `json:"entity"`
+			Bank     string `json:"bank"`
+			Currency string `json:"currency"`
+			Horizon  string `json:"horizon"`
+			FromDate string `json:"from_date"`
+			ToDate   string `json:"to_date"`
+			AsOnDate string `json:"as_on_date"`
+		}
+		var req reqBody
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		// also fall back to query params
+		q := r.URL.Query()
+		if req.Entity == "" {
+			req.Entity = q.Get("entity")
+		}
+		if req.Bank == "" {
+			req.Bank = q.Get("bank")
+		}
+		if req.Currency == "" {
+			req.Currency = q.Get("currency")
+		}
+		if req.Horizon == "" {
+			req.Horizon = q.Get("horizon")
+		}
+		if req.FromDate == "" {
+			req.FromDate = q.Get("from_date")
+		}
+		if req.ToDate == "" {
+			req.ToDate = q.Get("to_date")
+		}
+
+		// Normalize "all" → ""
+		clean := func(s string) string {
+			if strings.EqualFold(strings.TrimSpace(s), "all") {
+				return ""
+			}
+			return strings.TrimSpace(s)
+		}
+		filterEntity := clean(req.Entity)
+		filterBank := clean(req.Bank)
+		filterCurrency := clean(req.Currency)
+
+		// Resolve date window
+		var fromDate string
+		fromDateParam := strings.TrimSpace(req.FromDate)
+		toDateParam := strings.TrimSpace(req.ToDate)
+		if fromDateParam != "" {
+			fromDate = fromDateParam
+		} else {
+			days := 14
+			if raw := strings.TrimSpace(req.Horizon); raw != "" {
+				if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+					days = v
+				}
+			} else if raw := q.Get("days"); raw != "" {
+				if v, err := strconv.Atoi(raw); err == nil && v > 14 {
+					days = v
+				}
+			}
+			fromDate = time.Now().AddDate(0, 0, -(days - 1)).Format(constants.DateFormat)
+			if toDateParam == "" {
+				toDateParam = time.Now().Format(constants.DateFormat)
 			}
 		}
-		fromDate := time.Now().AddDate(0, 0, -(days - 1)).Format(constants.DateFormat)
+		if toDateParam == "" {
+			toDateParam = time.Now().Format(constants.DateFormat)
+		}
+
+		// Apply optional entity/bank/currency narrowing on top of prevalidation scope
+		effectiveEntityIDs := allowedEntityIDs
+		if filterEntity != "" {
+			effectiveEntityIDs = []string{filterEntity}
+		}
+		effectiveBankNorms := allowedBankNamesNorm
+		if filterBank != "" {
+			effectiveBankNorms = []string{strings.ToLower(strings.TrimSpace(filterBank))}
+		}
+		effectiveCurrNorms := allowedCurrencyCodesNorm
+		if filterCurrency != "" {
+			effectiveCurrNorms = []string{strings.ToUpper(strings.TrimSpace(filterCurrency))}
+		}
 
 		// 1) Accounts list: only accounts whose bank is APPROVED in auditactionbank
 		accountsSQL := `
@@ -179,6 +255,7 @@ LEFT JOIN LATERAL (
 	) a2 ON a2.bankstatementid = bs2.bank_statement_id AND a2.processing_status = 'APPROVED'
 	WHERE bs2.account_number = mba.account_number
 		AND bs2.statement_period_end >= $1::date
+		AND bs2.statement_period_end <= $6::date
 	ORDER BY bs2.statement_period_end DESC
 	LIMIT 1
 ) bs_latest ON true
@@ -229,6 +306,7 @@ LEFT JOIN LATERAL (
 	) txn ON true
 	WHERE bs3.account_number = mba.account_number
 		AND bs3.statement_period_end >= $1::date
+		AND bs3.statement_period_end <= $6::date
 ) stmts ON true
 WHERE mba.is_deleted = false
   AND mba.entity_id = ANY($2)
@@ -237,7 +315,15 @@ WHERE mba.is_deleted = false
   AND upper(trim(COALESCE(mba.currency, ''))) = ANY($5);
 `
 
-		rows, err := pgxPool.Query(ctx, accountsSQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedBankNamesNorm, allowedCurrencyCodesNorm)
+		rows, err := pgxPool.Query(ctx, accountsSQL,
+			fromDate,             // $1 — period start
+			effectiveEntityIDs,   // $2
+			allowedAccountNumbers, // $3
+			effectiveBankNorms,   // $4
+			effectiveCurrNorms,   // $5
+			toDateParam,          // $6 — period end cap
+		)
+
 		if err != nil {
 			http.Error(w, "error querying accounts: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -313,7 +399,7 @@ GROUP BY bank_label
 ORDER BY percent DESC;
 `
 
-		bankRows, err := pgxPool.Query(ctx, bankSQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedBankNamesNorm, allowedCurrencyCodesNorm)
+		bankRows, err := pgxPool.Query(ctx, bankSQL, fromDate, effectiveEntityIDs, allowedAccountNumbers, effectiveBankNorms, effectiveCurrNorms)
 		if err != nil {
 			http.Error(w, "error querying bank compliance: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -369,7 +455,7 @@ GROUP BY me.entity_name
 ORDER BY percent DESC;
 `
 
-		entityRows, err := pgxPool.Query(ctx, entitySQL, fromDate, allowedEntityIDs, allowedAccountNumbers, allowedCurrencyCodesNorm)
+		entityRows, err := pgxPool.Query(ctx, entitySQL, fromDate, effectiveEntityIDs, allowedAccountNumbers, effectiveCurrNorms)
 		if err != nil {
 			http.Error(w, "error querying entity completeness: "+err.Error(), http.StatusInternalServerError)
 			return

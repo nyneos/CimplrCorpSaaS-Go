@@ -554,33 +554,55 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			colIdx[constants.TranID] = idx
 		}
 	}
-
 	// Parse transactions
 	transactions := []map[string]interface{}{}
+	previewRowNum := txnHeaderIdx
+	// Unique 6-char prefix shared across all synthetic tran_ids in this preview batch
+	previewBatchID := generateBatchID()
 
 	for i := txnHeaderIdx + 1; i < len(rows); i++ {
 		row := rows[i]
+		previewRowNum++
 
 		if isEmptyRow(row) {
 			continue
 		}
 
-		// Skip non-transaction rows
-		if len(row) > 0 {
-			firstCell := strings.ToLower(strings.TrimSpace(row[0]))
-			if strings.Contains(firstCell, "call 1800") ||
-				strings.Contains(firstCell, "write to us") ||
-				strings.Contains(firstCell, "closing balance") ||
-				strings.Contains(firstCell, "opening balance") ||
-				strings.Contains(firstCell, "balance carried forward") ||
-				strings.Contains(firstCell, "toll free") {
-				continue
-			}
-		}
-
-		// Pad row
+		// Pad row before any column access
 		for len(row) < len(headerRow) {
 			row = append(row, "")
+		}
+
+	// Skip non-transaction rows — check first cell AND the description column.
+	// Note: "balance brought forward" / "balance carried forward" are real transactions, NOT skipped.
+	nonTxnKeywords := []string{
+		"call 1800", "write to us", "closing balance", "opening balance",
+		"toll free", "balance b/f", "balance c/f",
+		"new balance", "new val",
+		"avl", "avil", "available balance",
+	}
+		skipRow := false
+		// Build candidate cells: always include row[0]; also include description column if mapped
+		candidateCells := []string{strings.ToLower(strings.TrimSpace(row[0]))}
+		if descIdx, ok := colIdx["Description"]; ok && descIdx < len(row) {
+			candidateCells = append(candidateCells, strings.ToLower(strings.TrimSpace(row[descIdx])))
+		}
+		if descIdx, ok := colIdx[constants.TransactionRemarks]; ok && descIdx < len(row) {
+			candidateCells = append(candidateCells, strings.ToLower(strings.TrimSpace(row[descIdx])))
+		}
+		for _, cell := range candidateCells {
+			for _, kw := range nonTxnKeywords {
+				if strings.Contains(cell, kw) {
+					skipRow = true
+					break
+				}
+			}
+			if skipRow {
+				break
+			}
+		}
+		if skipRow {
+			continue
 		}
 
 		txn := map[string]interface{}{
@@ -592,10 +614,11 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			"misclassified_flag": false,
 		}
 
-		// Extract fields
-		if idx, ok := colIdx[constants.TranID]; ok && idx < len(row) {
-			txn["tran_id"] = strings.TrimSpace(row[idx])
-		}
+	// Extract tran_id — prefer explicit column; fall back to batchID+seq synthetic ID
+	tranIDStr := ""
+	if idx, ok := colIdx[constants.TranID]; ok && idx < len(row) {
+		tranIDStr = strings.TrimSpace(row[idx])
+	}
 
 		// Parse dates
 		var transactionDate, valueDate time.Time
@@ -640,6 +663,23 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 			description = sanitizeForPostgres(normalizeCell(row[idx]))
 		}
 		txn["description"] = description
+
+	// Resolve tran_id: file column → cheque/ref → date+timestamp+seq synthetic ID
+	if tranIDStr == "" {
+		// Cheque/ref column fallback
+		for _, hdr := range []string{"Cheque", "Chq", "Reference", "Ref No"} {
+			if idx, ok := colIdx[hdr]; ok && idx < len(row) {
+				if v := strings.TrimSpace(row[idx]); v != "" {
+					tranIDStr = v
+					break
+				}
+			}
+		}
+	}
+	if tranIDStr == "" {
+		tranIDStr = buildSyntheticTranID(previewBatchID, previewRowNum)
+	}
+	txn["tran_id"] = tranIDStr
 
 		// Amounts
 		var withdrawal, deposit sql.NullFloat64

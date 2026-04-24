@@ -1324,23 +1324,71 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 					}
 				}
 			}
-			if multiActuallySucceeded {
-				log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
-				for k, v := range multiRec.Header() {
-					w.Header()[k] = v
-				}
-				w.WriteHeader(multiRec.Code)
-				w.Write(multiRec.Body.Bytes())
-				return
+		if multiActuallySucceeded {
+			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback succeeded for at least one account")
+			for k, v := range multiRec.Header() {
+				w.Header()[k] = v
 			}
-			// Both V2 and multi failed — always surface the original V2 error (never multi's)
-			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning original V2 error")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": userFriendlyUploadError(err),
-			})
+			w.WriteHeader(multiRec.Code)
+			w.Write(multiRec.Body.Bytes())
 			return
 		}
+		// Both V2 and multi failed.
+		// Check whether the multi per-account errors carry a more informative message
+		// (e.g. "statement already uploaded") that should be surfaced instead of V2's
+		// generic "bank account not found" — which would be misleading to the user.
+		surfaceMsg := userFriendlyUploadError(err)
+		if multiRec.Code == http.StatusOK {
+			var multiResp2 struct {
+				Success bool                       `json:"success"`
+				Data    map[string]json.RawMessage `json:"data"`
+			}
+			if json.Unmarshal(multiRec.Body.Bytes(), &multiResp2) == nil && len(multiResp2.Data) > 0 {
+				var multiMsgs []string
+				allAlreadyStored := true
+				for _, raw := range multiResp2.Data {
+					var acct struct {
+						Success bool   `json:"success"`
+						Message string `json:"message"`
+					}
+					if json.Unmarshal(raw, &acct) == nil && !acct.Success {
+						msg := acct.Message
+						if msg == "" {
+							allAlreadyStored = false
+							continue
+						}
+						msgLower := strings.ToLower(msg)
+						if !strings.Contains(msgLower, "already") && !strings.Contains(msgLower, "exist") && !strings.Contains(msgLower, "duplicate") {
+							allAlreadyStored = false
+						}
+						// Collect unique messages
+						duplicate := false
+						for _, m := range multiMsgs {
+							if m == msg {
+								duplicate = true
+								break
+							}
+						}
+						if !duplicate {
+							multiMsgs = append(multiMsgs, msg)
+						}
+					}
+				}
+				// If every failing account reported an "already stored" style error, surface
+				// those messages — they are more actionable than V2's account-not-found error.
+				if allAlreadyStored && len(multiMsgs) > 0 {
+					surfaceMsg = strings.Join(multiMsgs, " | ")
+					log.Printf("[BANK-UPLOAD-DEBUG] Surfacing multi 'already stored' error instead of V2 error: %s", surfaceMsg)
+				}
+			}
+		}
+		log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"message": surfaceMsg,
+		})
+		return
+	}
 
 		msg := "Bank statement uploaded successfully"
 		if rc, ok := result["transactions_under_review_count"].(int); ok && rc > 0 {

@@ -58,6 +58,7 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		Horizon  string `json:"horizon,omitempty"`   // "7", "30", "90", "Year to Date", etc.
 		FromDate string `json:"from_date,omitempty"` // YYYY-MM-DD
 		ToDate   string `json:"to_date,omitempty"`   // YYYY-MM-DD
+		AsOnDate string `json:"as_on_date,omitempty"` // YYYY-MM-DD — snapshot date for balances
 		Bank     string `json:"bank,omitempty"`
 		Account  string `json:"account,omitempty"`
 		Entity   string `json:"entity,omitempty"`    // entity_id
@@ -100,6 +101,12 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		filterAccount  := cleanFilter(req.Account)
 		filterEntity   := cleanFilter(req.Entity) // entity_id UUID
 		filterCurrency := cleanFilter(req.Currency)
+		filterAsOnDate := cleanFilter(req.AsOnDate) // snapshot date for balances
+
+		// also accept as_on_date from query params
+		if filterAsOnDate == "" {
+			filterAsOnDate = cleanFilter(r.URL.Query().Get("as_on_date"))
+		}
 
 		ctx := context.Background()
 
@@ -132,46 +139,97 @@ func GetLandingCashDashboard(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		balDateEnd   := endStr
 
 
-		// ── 1) Fetch APPROVED balance per account with optional SQL-level filters ──
-		//    • Default/horizon: latest balance per account (no date restriction)
-		//    • Custom date range: only balances whose as_of_date falls within the range
-		q := `
-		WITH latest_approved_balance AS (
-			SELECT DISTINCT ON (bbm.account_no)
-				bbm.account_no,
-				COALESCE(bbm.closing_balance, 0)       AS closing_balance,
-				COALESCE(bbm.currency_code, 'INR')     AS currency_code,
-				COALESCE(bbm.nickname, '')              AS nickname,
-				COALESCE(bbm.country, mba.country, '') AS country
-			FROM public.bank_balances_manual bbm
-			JOIN public.auditactionbankbalances  a   ON a.balance_id   = bbm.balance_id
-			JOIN masterbankaccount               mba ON mba.account_number = bbm.account_no
-			WHERE a.processing_status = 'APPROVED'
-			  AND mba.is_deleted = false
-			  AND COALESCE(mba.status, 'Active') = 'Active'
-			  AND ($1 = '' OR LOWER(TRIM(mba.bank_name))                              = LOWER(TRIM($1)))
-			  AND ($2 = '' OR mba.account_number                                      = $2)
-			  AND ($3 = '' OR mba.entity_id::text                                     = $3)
-			  AND ($4 = '' OR UPPER(TRIM(COALESCE(bbm.currency_code, '')))            = UPPER(TRIM($4)))
-			  AND ($5 = '' OR bbm.as_of_date >= $5::date)
-			  AND ($6 = '' OR bbm.as_of_date <= $6::date)
-			ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
-		)
-		SELECT
-			lab.account_no,
-			lab.nickname,
-			lab.currency_code,
-			lab.closing_balance::float8,
-			COALESCE(mba.bank_name,  '')   AS bank_name,
-			COALESCE(me.entity_name, '')   AS entity_name,
-			lab.country
-		FROM latest_approved_balance lab
-		JOIN masterbankaccount  mba ON mba.account_number = lab.account_no
-		LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
-		ORDER BY lab.account_no
-		`
+		// ── 1) Fetch balance per account ──
+		//   • as_on_date provided → last transaction's running balance on/before that date (from statement transactions)
+		//   • otherwise          → latest APPROVED balance from bank_balances_manual within the date window
+		var q string
+		var qArgs []interface{}
+		if filterAsOnDate != "" {
+			// Transaction-derived balance: pick the last tx.balance (running balance) per account
+			// where the transaction date is on or before as_on_date.
+			q = `
+			WITH tx_balance AS (
+				SELECT DISTINCT ON (mba.account_number)
+					mba.account_number                           AS account_no,
+					COALESCE(tx.balance, 0)                      AS closing_balance,
+					COALESCE(mba.currency, 'INR')                AS currency_code,
+					COALESCE(mba.nickname, '')                   AS nickname,
+					COALESCE(mba.country, '')                    AS country
+				FROM public.masterbankaccount mba
+				JOIN cimplrcorpsaas.bank_statements bs
+					ON bs.account_number = mba.account_number
+				JOIN (
+					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+					FROM cimplrcorpsaas.auditactionbankstatement
+					ORDER BY bankstatementid, requested_at DESC
+				) aab ON aab.bankstatementid = bs.bank_statement_id AND aab.processing_status = 'APPROVED'
+				JOIN cimplrcorpsaas.bank_statement_transactions tx
+					ON tx.bank_statement_id = bs.bank_statement_id
+				WHERE mba.is_deleted = false
+				  AND COALESCE(mba.status, 'Active') = 'Active'
+				  AND COALESCE(tx.transaction_date, tx.value_date) <= $1::date
+				  AND ($2 = '' OR LOWER(TRIM(mba.bank_name))              = LOWER(TRIM($2)))
+				  AND ($3 = '' OR mba.account_number                      = $3)
+				  AND ($4 = '' OR mba.entity_id::text                     = $4)
+				  AND ($5 = '' OR UPPER(TRIM(COALESCE(mba.currency, ''))) = UPPER(TRIM($5)))
+				ORDER BY mba.account_number, COALESCE(tx.transaction_date, tx.value_date) DESC, tx.transaction_id DESC
+			)
+			SELECT
+				lab.account_no,
+				lab.nickname,
+				lab.currency_code,
+				lab.closing_balance::float8,
+				COALESCE(mba.bank_name,  '')  AS bank_name,
+				COALESCE(me.entity_name, '')  AS entity_name,
+				lab.country
+			FROM tx_balance lab
+			JOIN masterbankaccount  mba ON mba.account_number = lab.account_no
+			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
+			ORDER BY lab.account_no
+			`
+			qArgs = []interface{}{filterAsOnDate, filterBank, filterAccount, filterEntity, filterCurrency}
+		} else {
+			// Manual approved balance snapshot within the date window
+			q = `
+			WITH latest_approved_balance AS (
+				SELECT DISTINCT ON (bbm.account_no)
+					bbm.account_no,
+					COALESCE(bbm.closing_balance, 0)       AS closing_balance,
+					COALESCE(bbm.currency_code, 'INR')     AS currency_code,
+					COALESCE(bbm.nickname, '')              AS nickname,
+					COALESCE(bbm.country, mba.country, '') AS country
+				FROM public.bank_balances_manual bbm
+				JOIN public.auditactionbankbalances  a   ON a.balance_id   = bbm.balance_id
+				JOIN masterbankaccount               mba ON mba.account_number = bbm.account_no
+				WHERE a.processing_status = 'APPROVED'
+				  AND mba.is_deleted = false
+				  AND COALESCE(mba.status, 'Active') = 'Active'
+				  AND ($1 = '' OR LOWER(TRIM(mba.bank_name))                              = LOWER(TRIM($1)))
+				  AND ($2 = '' OR mba.account_number                                      = $2)
+				  AND ($3 = '' OR mba.entity_id::text                                     = $3)
+				  AND ($4 = '' OR UPPER(TRIM(COALESCE(bbm.currency_code, '')))            = UPPER(TRIM($4)))
+				  AND ($5 = '' OR bbm.as_of_date >= $5::date)
+				  AND ($6 = '' OR bbm.as_of_date <= $6::date)
+				ORDER BY bbm.account_no, bbm.as_of_date DESC, bbm.as_of_time DESC, a.requested_at DESC
+			)
+			SELECT
+				lab.account_no,
+				lab.nickname,
+				lab.currency_code,
+				lab.closing_balance::float8,
+				COALESCE(mba.bank_name,  '')   AS bank_name,
+				COALESCE(me.entity_name, '')   AS entity_name,
+				lab.country
+			FROM latest_approved_balance lab
+			JOIN masterbankaccount  mba ON mba.account_number = lab.account_no
+			LEFT JOIN masterentitycash me  ON me.entity_id::text = mba.entity_id
+			ORDER BY lab.account_no
+			`
+			qArgs = []interface{}{filterBank, filterAccount, filterEntity, filterCurrency, balDateStart, balDateEnd}
+		}
 
-		rows, err := pgxPool.Query(ctx, q, filterBank, filterAccount, filterEntity, filterCurrency, balDateStart, balDateEnd)
+		rows, err := pgxPool.Query(ctx, q, qArgs...)
+
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
