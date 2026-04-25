@@ -23,8 +23,13 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
+			r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB limit
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
+				if err.Error() == "http: request body too large" {
+					api.RespondWithError(w, http.StatusRequestEntityTooLarge, "Request body too large (max 10MB)")
+					return
+				}
 				api.RespondWithError(w, http.StatusBadRequest, "Failed to read request body")
 				return
 			}
@@ -105,6 +110,12 @@ func PreValidationMiddleware(db *pgxpool.Pool) func(http.Handler) http.Handler {
 				if !roleMatched && session.RoleCode != "" && IsRoleAdminName(session.RoleCode) {
 					roleMatched = true
 					matchedRoles = append(matchedRoles, session.RoleCode)
+				}
+				for _, rc := range session.RoleCodes {
+					if !roleMatched && IsRoleAdminName(rc) {
+						roleMatched = true
+						matchedRoles = append(matchedRoles, rc)
+					}
 				}
 				// fallback to DB role lookup only if session had no role info
 				if !roleMatched {

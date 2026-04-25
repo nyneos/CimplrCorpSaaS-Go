@@ -32,7 +32,11 @@ func StartFXService(db *sql.DB, port string) {
 	dbPort := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
 	if user != "" && pass != "" && host != "" && dbPort != "" && name != "" {
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, dbPort, name)
+		sslMode := os.Getenv("DB_SSLMODE")
+		if sslMode == "" {
+			sslMode = "disable"
+		}
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, dbPort, name, sslMode)
 
 		// create a shared pgx pool once for the v91 and prevalidation middleware
 		pgxPool, err := pgxpool.New(context.Background(), dsn)

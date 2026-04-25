@@ -26,9 +26,13 @@ func InitDB() (*sql.DB, error) {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
 	connStr := fmt.Sprintf(
-		"user=%s password=%s host=%s port=%s dbname=%s sslmode=disable",
-		user, pass, host, port, name,
+		"user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
+		user, pass, host, port, name, sslMode,
 	)
 	return sql.Open("postgres", connStr)
 }
@@ -61,8 +65,7 @@ func main() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	// Use sslmode=disable when connecting directly to RDS (no SSL terminator).
-	// Switch to sslmode=require only when routing through a Supabase/pgBouncer pooler.
+	// DB_SSLMODE controls TLS: set to "require" in production, "disable" for local/RDS direct.
 	// connect_timeout and statement_timeout guard against hung connections.
 	sslMode := os.Getenv("DB_SSLMODE")
 	if sslMode == "" {

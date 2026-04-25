@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -66,6 +67,13 @@ func respondWithError(w http.ResponseWriter, status int, errMsg string) {
 		"success": false,
 		"error":   errMsg,
 	})
+}
+
+// respondWithInternalError logs the real error internally and returns a generic
+// 500 message to the client so DB internals are never exposed.
+func respondWithInternalError(w http.ResponseWriter, err error) {
+	log.Println("[ERROR] user:", err)
+	respondWithError(w, http.StatusInternalServerError, "Internal server error")
 }
 
 // decodeSQLValue converts SQL driver types to JSON-friendly Go values.
@@ -150,7 +158,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 
 		tx, err := db.Begin()
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer tx.Rollback()
@@ -172,7 +180,8 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			respondWithError(w, http.StatusBadRequest, msg)
 			return
 		} else if err != sql.ErrNoRows {
-			respondWithError(w, http.StatusInternalServerError, constants.ErrFailedToValidateUniqueness+err.Error())
+			log.Println("[ERROR] user uniqueness check:", err)
+			respondWithError(w, http.StatusInternalServerError, "Internal server error")
 			return
 		}
 		var userId string
@@ -200,7 +209,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 			createdBy,
 		).Scan(&userId)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		var roleId string
@@ -211,7 +220,7 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		_, err = tx.Exec(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`, userId, roleId)
 		if err != nil {
-			respondWithError(w, http.StatusBadRequest, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		// Insert entity mappings
@@ -226,7 +235,8 @@ func CreateUser(db *sql.DB, pool *pgxpool.Pool) http.HandlerFunc {
 				userId, em.EntityID, em.EntityName,
 			)
 			if err != nil {
-				respondWithError(w, http.StatusBadRequest, "Failed to insert entity mapping: "+err.Error())
+				log.Println("[ERROR] user entity mapping insert:", err)
+				respondWithError(w, http.StatusInternalServerError, "Internal server error")
 				return
 			}
 		}
@@ -333,7 +343,7 @@ WHERE EXISTS (SELECT 1 FROM user_entity_mappings uem WHERE uem.user_id = u.id AN
 
 		rows, err := db.Query(query, args...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -394,7 +404,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 			req.UserID, pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -409,7 +419,7 @@ func GetUserById(db *sql.DB) http.HandlerFunc {
 			valPtrs[i] = &vals[i]
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		userMap := map[string]interface{}{}
@@ -476,7 +486,7 @@ func GetApprovedUser(db *sql.DB) http.HandlerFunc {
 		}
 
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -630,7 +640,7 @@ func UpdateUser(db *sql.DB) http.HandlerFunc {
 		values = append(values, id, pq.Array(entityIDs))
 		rows, err := db.Query(query, values...)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -723,7 +733,7 @@ func DeleteUser(db *sql.DB) http.HandlerFunc {
 			deleter, pq.Array(targetIds), pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -775,7 +785,7 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 			pq.Array(req.Ids), pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()
@@ -802,7 +812,8 @@ func ApproveMultipleUsers(db *sql.DB) http.HandlerFunc {
 				pq.Array(toDelete),
 			)
 			if err != nil {
-				respondWithError(w, http.StatusInternalServerError, "Failed to delete user_roles: "+err.Error())
+				log.Println("[ERROR] delete user_roles:", err)
+				respondWithError(w, http.StatusInternalServerError, "Internal server error")
 				return
 			}
 			delRows, err := db.Query(`
@@ -913,7 +924,7 @@ func RejectMultipleUsers(db *sql.DB) http.HandlerFunc {
 			rejectedBy, req.RejectionComment, pq.Array(req.Ids), pq.Array(entityIDs),
 		)
 		if err != nil {
-			respondWithError(w, http.StatusInternalServerError, err.Error())
+			respondWithInternalError(w, err)
 			return
 		}
 		defer rows.Close()

@@ -30,7 +30,11 @@ func StartUAMService(db *sql.DB, port string) {
 		host := os.Getenv("DB_HOST")
 		port := os.Getenv("DB_PORT")
 		name := os.Getenv("DB_NAME")
-		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+		sslMode := os.Getenv("DB_SSLMODE")
+		if sslMode == "" {
+			sslMode = "disable"
+		}
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslMode)
 		pool, err := pgxpool.New(context.Background(), dsn)
 		if err != nil {
 			log.Fatalf("UAM: failed to connect to pgxpool DB: %v", err)

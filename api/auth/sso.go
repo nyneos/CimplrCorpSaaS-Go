@@ -437,7 +437,7 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 
 	if dbStatus.Valid && !strings.EqualFold(dbStatus.String, "Approved") &&
 		!strings.EqualFold(dbStatus.String, "pending") {
-		return nil, false, fmt.Errorf("account status is %s", dbStatus.String)
+		return nil, false, errors.New("Account is not active")
 	}
 
 	a.forceLogoutUser(dbUserID)
@@ -446,11 +446,28 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		return nil, false, errors.New("maximum concurrent users reached")
 	}
 
-	var roleName, roleCode sql.NullString
-	_ = a.db.QueryRow(
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
+	var primaryRole, primaryRoleCode string
+	var allRoleCodes []string
+	if roleRows, err := a.db.Query(
+		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC`,
 		dbUserID,
-	).Scan(&roleName, &roleCode)
+	); err == nil {
+		defer roleRows.Close()
+		first := true
+		for roleRows.Next() {
+			var rn, rc sql.NullString
+			if roleRows.Scan(&rn, &rc) == nil {
+				if first {
+					primaryRole = rn.String
+					primaryRoleCode = rc.String
+					first = false
+				}
+				if rc.String != "" {
+					allRoleCodes = append(allRoleCodes, rc.String)
+				}
+			}
+		}
+	}
 
 	sessionID := generateSessionID()
 	session := &UserSession{
@@ -458,8 +475,9 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		UserID:        dbUserID,
 		Name:          dbName,
 		Email:         dbEmail,
-		Role:          roleName.String,
-		RoleCode:      roleCode.String,
+		Role:          primaryRole,
+		RoleCode:      primaryRoleCode,
+		RoleCodes:     allRoleCodes,
 		LastLoginTime: time.Now().Format(time.RFC3339),
 		ClientIP:      clientIP,
 		IsLoggedIn:    true,

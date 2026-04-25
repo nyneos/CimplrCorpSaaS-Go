@@ -20,7 +20,8 @@ type UserSession struct {
 	Name          string
 	Email         string
 	Role          string
-	RoleCode      string
+	RoleCode      string   // primary role code (first assigned, kept for backward compat)
+	RoleCodes     []string // all assigned role codes
 	LastLoginTime string
 	ClientIP      string
 	IsLoggedIn    bool
@@ -170,11 +171,28 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		return nil, false, errors.New("maximum concurrent users reached")
 	}
 
-	var roleName, roleCode sql.NullString
-	_ = a.db.QueryRow(
-		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 LIMIT 1`,
+	var primaryRole, primaryRoleCode string
+	var allRoleCodes []string
+	if roleRows, err := a.db.Query(
+		`SELECT r.name, r.rolecode FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1 ORDER BY ur.id ASC`,
 		dbUserID,
-	).Scan(&roleName, &roleCode)
+	); err == nil {
+		defer roleRows.Close()
+		first := true
+		for roleRows.Next() {
+			var rn, rc sql.NullString
+			if roleRows.Scan(&rn, &rc) == nil {
+				if first {
+					primaryRole = rn.String
+					primaryRoleCode = rc.String
+					first = false
+				}
+				if rc.String != "" {
+					allRoleCodes = append(allRoleCodes, rc.String)
+				}
+			}
+		}
+	}
 
 	sessionID := generateSessionID()
 	session := &UserSession{
@@ -182,8 +200,9 @@ func (a *AuthService) Login(username, password string, clientIP string) (*UserSe
 		UserID:        dbUserID,
 		Name:          dbName,
 		Email:         dbEmail,
-		Role:          roleName.String,
-		RoleCode:      roleCode.String,
+		Role:          primaryRole,
+		RoleCode:      primaryRoleCode,
+		RoleCodes:     allRoleCodes,
 		LastLoginTime: time.Now().Format(time.RFC3339),
 		ClientIP:      clientIP,
 		IsLoggedIn:    true,

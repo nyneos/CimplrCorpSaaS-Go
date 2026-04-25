@@ -29,10 +29,10 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 		      e.currency,
 		      SUM(CASE WHEN lower(e.exposure_type) = 'debitors'  THEN ABS(e.total_original_amount) ELSE 0 END) AS debitors,
 		      SUM(CASE WHEN lower(e.exposure_type) = 'creditors' THEN ABS(e.total_original_amount) ELSE 0 END) AS creditors,
-		      SUM(CASE WHEN lower(e.exposure_type) = 'LC'       THEN ABS(e.total_original_amount) ELSE 0 END) AS lc,
+		      SUM(CASE WHEN lower(e.exposure_type) = 'lc'       THEN ABS(e.total_original_amount) ELSE 0 END) AS lc,
 		      SUM(CASE WHEN lower(e.exposure_type) = 'grn'      THEN ABS(e.total_original_amount) ELSE 0 END) AS grn,
 		      SUM(
-		  CASE WHEN lower(e.exposure_type) IN ('debitors','creditors','LC','grn')
+		  CASE WHEN lower(e.exposure_type) IN ('debitors','creditors','lc','grn')
 		       THEN ABS(e.total_original_amount) ELSE 0 END
 		) AS total_payable_exposure
 		  FROM exposure_headers e
@@ -80,7 +80,7 @@ func GetDashboard(db *sql.DB) http.HandlerFunc {
 			respondWithError(w, http.StatusInternalServerError, "Business units not found in context")
 			return
 		}
-		rows, err := db.Query(query)
+		rows, err := db.QueryContext(r.Context(), query)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueError: "Server error"})

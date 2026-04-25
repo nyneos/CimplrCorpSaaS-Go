@@ -137,7 +137,11 @@ func ProcessUncategorizedTransactions(db *pgxpool.Pool, batchSize int) error {
 	pgHost := db.Config().ConnConfig.Host
 	pgPort := db.Config().ConnConfig.Port
 
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", pgUser, pgPass, pgHost, pgPort, pgDB)
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", pgUser, pgPass, pgHost, pgPort, pgDB, sslMode)
 	sqlDB, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return fmt.Errorf("failed to open sql.DB connection: %w", err)
