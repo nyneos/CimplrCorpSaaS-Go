@@ -1263,17 +1263,16 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				colIdx["PostedDate"] = idx
 			}
 		}
-		if _, exists := colIdx[tranIDHeader]; !exists {
-			// Prefer explicit "Transaction ID" over generic "No." by ordering keywords
-			if idx := findColContaining("transaction id", "tran id", "txn id", "reference"); idx >= 0 {
-				colIdx[tranIDHeader] = idx
-			} else if idx := findColContaining("no.", "sl.", "sl no"); idx >= 0 {
-				colIdx[tranIDHeader] = idx
-			}
+	if _, exists := colIdx[tranIDHeader]; !exists {
+		// Prefer explicit "Transaction ID" over generic "No." by ordering keywords
+		if idx := findColContaining("transaction id", "tran id", "txn id", "reference"); idx >= 0 {
+			colIdx[tranIDHeader] = idx
+		} else if idx := findColContaining("no.", "sl.", "sl no"); idx >= 0 {
+			colIdx[tranIDHeader] = idx
 		}
-
-		// Prefer explicit amount-like column, but only if we don't have separate debit/credit columns
-		amountIdx = findAmountLike()
+	}
+	// Prefer explicit amount-like column, but only if we don't have separate debit/credit columns
+	amountIdx = findAmountLike()
 
 		// Detect Cr/Dr indicator column (if present)
 		if crDrIdx = findCrDrLike(); crDrIdx >= 0 {
@@ -1432,6 +1431,9 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 		}
 	}
 	// Data rows start after header
+	// Unique 6-char prefix for all synthetic tran_ids in this upload batch.
+	// Combined with a 7-digit sequence it supports up to 10M transactions per statement.
+	stmtBatchID := generateBatchID()
 	debugParse := strings.ToLower(strings.TrimSpace(os.Getenv("BANK_STMT_DEBUG_PARSE"))) == "1" || strings.ToLower(strings.TrimSpace(os.Getenv("BANK_STMT_DEBUG_PARSE"))) == "true"
 	debugCount := 0
 	// iterate with index so we can log original row number
@@ -1448,27 +1450,34 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					descCell = strings.ToLower(strings.TrimSpace(row[descIdx]))
 				}
 			}
-			if strings.Contains(firstCell, "call 1800") ||
-				strings.Contains(firstCell, "write to us") ||
-				strings.Contains(firstCell, constants.ClosingBalance) ||
-				strings.Contains(firstCell, "opening balance") ||
-				strings.Contains(firstCell, "toll free") ||
-				descCell == "new balance" ||
-				strings.HasPrefix(descCell, "avl balance") ||
-				strings.HasPrefix(descCell, "available balance") {
-				skippedNonTxnRows++
-				continue
-			}
+		// Summary/footer rows that appear at the top or bottom of sheets — no dates, not transactions.
+		// Checks run on both the first cell and the description column (whichever is available).
+		isSummaryRow := func(cell string) bool {
+			return strings.Contains(cell, "call 1800") ||
+				strings.Contains(cell, "write to us") ||
+				strings.Contains(cell, constants.ClosingBalance) ||
+				strings.Contains(cell, "opening balance") ||
+				strings.Contains(cell, "toll free") ||
+				strings.Contains(cell, "new balance") ||
+				strings.Contains(cell, "new val") || // "new value balance", "new val bal" etc.
+				strings.Contains(cell, "avl") || // "avl balance", "avail balance"
+				strings.Contains(cell, "avil") || // common mis-spell / variant
+				strings.Contains(cell, "available balance")
+		}
+		if isSummaryRow(firstCell) || isSummaryRow(descCell) {
+			skippedNonTxnRows++
+			continue
+		}
 		}
 		// Defensive: fill missing columns with empty string
 		for len(row) < len(headerRow) {
 			row = append(row, "")
 		}
-		var tranID sql.NullString
-		var valueDate, transactionDate, postedDate time.Time
-		var description string
-		var withdrawal, deposit sql.NullFloat64
-		var balance sql.NullFloat64
+	var tranID sql.NullString
+	var valueDate, transactionDate, postedDate time.Time
+	var description string
+	var withdrawal, deposit sql.NullFloat64
+	var balance sql.NullFloat64
 
 		// Try to locate cheque/ref and serial-no columns for fallback IDs or description enrichment
 		chequeRefIdx := -1
@@ -1483,26 +1492,10 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			}
 		}
 
-		if isCSV {
-			// CSV: Sl. No., Date, Description, Chq / Ref number, Value Date, Withdrawal, Deposit, Balance, CR/DR
-			// First check for opening balance row BEFORE filtering empty tranID
-			var tmpDesc string
-			if colIdx["Description"] < len(row) {
-				tmpDesc = strings.ToLower(strings.TrimSpace(row[colIdx["Description"]]))
-			}
-			balanceIdx, hasBalance := colIdx[balanceHeader]
-			if strings.Contains(tmpDesc, constants.BalanceCarriedForward) {
-				// Extract opening balance from Balance column
-				if hasBalance && balanceIdx >= 0 && balanceIdx < len(row) {
-					balanceStr := cleanAmount(row[balanceIdx])
-					if balanceStr != "" {
-						fmt.Sscanf(balanceStr, "%f", &openingBalance)
-						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected: %.2f (cumulative stays at 0, will be added via openingBalance + cumulative)", openingBalance)
-					}
-				}
-				skippedOpeningBalanceRows++
-				continue
-			}
+	if isCSV {
+		// CSV: Sl. No., Date, Description, Chq / Ref number, Value Date, Withdrawal, Deposit, Balance, CR/DR
+		// "BALANCE BROUGHT FORWARD" / "BALANCE CARRIED FORWARD" rows are treated as real transactions.
+		balanceIdx, hasBalance := colIdx[balanceHeader]
 			if len(row) == 0 {
 				skippedEmptyRows++
 				continue
@@ -1518,24 +1511,26 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			if transactionDate.IsZero() && !valueDate.IsZero() {
 				transactionDate = valueDate
 			}
-			if colIdx[tranIDHeader] < len(row) {
-				tranID = sql.NullString{String: row[colIdx[tranIDHeader]], Valid: strings.TrimSpace(row[colIdx[tranIDHeader]]) != ""}
-			} else {
-				tranID = sql.NullString{Valid: false}
+		// Use two-value map lookup to avoid Go's zero-value default for missing keys
+		// (single-value colIdx[tranIDHeader] returns 0 when missing, which points to the wrong column)
+		if tidx, ok := colIdx[tranIDHeader]; ok && tidx < len(row) {
+			tranID = sql.NullString{String: row[tidx], Valid: strings.TrimSpace(row[tidx]) != ""}
+		} else {
+			tranID = sql.NullString{Valid: false}
+		}
+		// Fallback: use cheque/ref number when Tran Id cell is empty
+		if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && chequeRefIdx >= 0 && chequeRefIdx < len(row) {
+			val := strings.TrimSpace(row[chequeRefIdx])
+			if val != "" {
+				tranID = sql.NullString{String: val, Valid: true}
 			}
-			// Fallback: use cheque/ref number when Tran Id cell is empty
-			if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && chequeRefIdx >= 0 && chequeRefIdx < len(row) {
-				val := strings.TrimSpace(row[chequeRefIdx])
-				if val != "" {
-					tranID = sql.NullString{String: val, Valid: true}
-				}
+		}
+		// If still empty, use serial number with an M-prefix to keep IDs stable
+		if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && serialIdx >= 0 && serialIdx < len(row) {
+			val := strings.TrimSpace(row[serialIdx])
+			if val != "" {
+				tranID = sql.NullString{String: "M" + val, Valid: true}
 			}
-			// If still empty, use serial number with an M-prefix to keep IDs stable
-			if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && serialIdx >= 0 && serialIdx < len(row) {
-				val := strings.TrimSpace(row[serialIdx])
-				if val != "" {
-					tranID = sql.NullString{String: "M" + val, Valid: true}
-				}
 			}
 			description = row[colIdx["Description"]]
 			// sanitize early so any NULs/newlines are removed before matching/JSON
@@ -1654,15 +1649,6 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 			} else {
 				balance = sql.NullFloat64{Valid: false}
 			}
-			// Check for opening balance row
-			if strings.Contains(strings.ToLower(description), constants.BalanceCarriedForward) {
-				if balance.Valid {
-					openingBalance = balance.Float64
-					cumulative = openingBalance
-					log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected: %.2f (initial cumulative set)", openingBalance)
-				}
-				continue
-			}
 			// Filter out rows only when both dates are invalid or explicitly marked as custom placeholders
 			// If both dates are missing, fall back to the last seen valid value date before skipping.
 			if valueDate.IsZero() && transactionDate.IsZero() && !lastValidValueDate.IsZero() {
@@ -1747,21 +1733,21 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				// postedDate is already populated; no further assignment required
 			}
 
-			// Extract TranID early so we can use it in fallback logic
-			originalTranIDStr := ""
-			if idx, ok := colIdx[tranIDHeader]; ok && idx >= 0 && idx < len(row) {
-				originalTranIDStr = row[idx]
-				tranID = sql.NullString{String: row[idx], Valid: strings.TrimSpace(row[idx]) != ""}
-			} else {
-				tranID = sql.NullString{Valid: false}
+		// Extract TranID early so we can use it in fallback logic
+		originalTranIDStr := ""
+		if idx, ok := colIdx[tranIDHeader]; ok && idx >= 0 && idx < len(row) {
+			originalTranIDStr = row[idx]
+			tranID = sql.NullString{String: row[idx], Valid: strings.TrimSpace(row[idx]) != ""}
+		} else {
+			tranID = sql.NullString{Valid: false}
+		}
+	// Fallback: use cheque/ref number when Tran Id cell is empty
+		if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && chequeRefIdx >= 0 && chequeRefIdx < len(row) {
+			val := strings.TrimSpace(row[chequeRefIdx])
+			if val != "" {
+				tranID = sql.NullString{String: val, Valid: true}
 			}
-			// Fallback: use cheque/ref number when Tran Id cell is empty
-			if (!tranID.Valid || strings.TrimSpace(tranID.String) == "") && chequeRefIdx >= 0 && chequeRefIdx < len(row) {
-				val := strings.TrimSpace(row[chequeRefIdx])
-				if val != "" {
-					tranID = sql.NullString{String: val, Valid: true}
-				}
-			}
+		}
 
 			// If the Tran ID cell looks like a date/time and the Value Date cell is actually an ID (non-date), swap them.
 			if tranID.Valid {
@@ -1843,69 +1829,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				}
 			}
 
-			// Check for opening balance row
-			if strings.Contains(tempDescLower, constants.BalanceCarriedForward) {
-				// Extract opening balance from balance column
-				if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
-					balanceStr := cleanAmount(row[bIdx])
-					if balanceStr != "" {
-						fmt.Sscanf(balanceStr, "%f", &openingBalance)
-						cumulative = openingBalance
-						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel): %.2f", openingBalance)
-						skippedOpeningBalanceRows++
-						continue
-					}
-				}
-				// Fallback: scan from the end for a numeric-looking cell
-				for i := len(row) - 1; i >= 0; i-- {
-					cand := cleanAmount(row[i])
-					if cand != "" {
-						fmt.Sscanf(cand, "%f", &openingBalance)
-						cumulative = openingBalance
-						log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel scan): %.2f", openingBalance)
-						skippedOpeningBalanceRows++
-						continue
-					}
-				}
-				// If nothing numeric found, still skip as opening balance row
-				skippedOpeningBalanceRows++
-				continue
-			}
+	// "BALANCE BROUGHT FORWARD" / "BALANCE CARRIED FORWARD" rows are treated as real transactions.
+	// Opening balance initialises at 0; the BBF entry (credit) raises the running balance to the
+	// correct starting value naturally through the firstValidRow cumulative logic.
 
-			// Fallback: scan entire row for 'balance carried forward' in any cell
-			for _, cell := range row {
-				if strings.Contains(strings.ToLower(strings.TrimSpace(cell)), constants.BalanceCarriedForward) {
-					// Prefer balance column
-					if bIdx, ok := colIdx[balanceHeader]; ok && bIdx >= 0 && bIdx < len(row) {
-						balanceStr := cleanAmount(row[bIdx])
-						if balanceStr != "" {
-							fmt.Sscanf(balanceStr, "%f", &openingBalance)
-							cumulative = openingBalance
-							log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel fallback): %.2f", openingBalance)
-							skippedOpeningBalanceRows++
-							goto continueRowExcel
-						}
-					}
-					// Scan for last numeric
-					for i := len(row) - 1; i >= 0; i-- {
-						cand := cleanAmount(row[i])
-						if cand != "" {
-							fmt.Sscanf(cand, "%f", &openingBalance)
-							cumulative = openingBalance
-							log.Printf("[BANK-UPLOAD-DEBUG] OPENING BALANCE detected (Excel scan fallback): %.2f", openingBalance)
-							skippedOpeningBalanceRows++
-							goto continueRowExcel
-						}
-					}
-					skippedOpeningBalanceRows++
-					goto continueRowExcel
-				}
-			}
-
-		continueRowExcel:
-			_ = 0
-
-			// NOW check if we should skip - AFTER all fallback attempts
+	// NOW check if we should skip - AFTER all fallback attempts
 			if (valueDate.IsZero() && transactionDate.IsZero()) || (valueDateStr == constants.DateFormatCustom && transactionDateStr == constants.DateFormatCustom) {
 				// Check if this is a closing balance row before skipping
 				if strings.Contains(tempDescLower, constants.ClosingBalance) || tempDescLower == constants.ClosingBalance {
@@ -2123,11 +2051,20 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 					}
 					openingBalance = derivedOpening
 				}
-			} else {
-				// No balance provided on the first row; seed cumulative from openingBalance if known.
-				cumulative = openingBalance
+		} else {
+			// No Balance column: seed from opening balance, then immediately apply this row's
+			// own amounts so the stored balance represents the state AFTER this transaction —
+			// exactly the same as every subsequent row. Without this, the first row always
+			// shows the opening balance instead of the post-transaction balance.
+			cumulative = openingBalance
+			if deposit.Valid {
+				cumulative += deposit.Float64
 			}
-			firstValidRow = false
+			if withdrawal.Valid {
+				cumulative -= withdrawal.Float64
+			}
+		}
+		firstValidRow = false
 			effectiveStart := valueDate
 			if effectiveStart.IsZero() {
 				effectiveStart = transactionDate
@@ -2181,10 +2118,11 @@ func UploadBankStatementV2WithCategorization(ctx context.Context, db *sql.DB, fi
 				"balance":          balance.Float64,
 			})
 		}
-		// Ensure a non-empty tran_id so downstream consumers see stable identifiers even when the file omits them.
-		if !tranID.Valid || strings.TrimSpace(tranID.String) == "" {
-			tranID = sql.NullString{Valid: true, String: fmt.Sprintf("M%s", strings.TrimSpace(fmt.Sprintf("%d", rowNum)))}
-		}
+	// Ensure a non-empty tran_id so downstream consumers see stable identifiers.
+	// Priority: file column → cheque/ref → serial → synthetic {batchID}{seq7}
+	if !tranID.Valid || strings.TrimSpace(tranID.String) == "" {
+		tranID = sql.NullString{Valid: true, String: buildSyntheticTranID(stmtBatchID, rowNum)}
+	}
 
 		keptRows++
 		transactions = append(transactions, BankStatementTransaction{

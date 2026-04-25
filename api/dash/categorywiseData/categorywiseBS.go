@@ -123,13 +123,29 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		bankF := q.Get("bank")
 		currencyF := q.Get("currency")
 		horizon := q.Get("horizon")
+		fromDateParam := strings.TrimSpace(q.Get("from_date"))
+		toDateParam := strings.TrimSpace(q.Get("to_date"))
+		asOnDate := strings.TrimSpace(q.Get("as_on_date"))
 
-		// dynamic horizon (any positive integer, default 30)
-		days, err := strconv.Atoi(horizon)
-		if err != nil || days <= 0 {
-			days = 30
+		// Resolve date window: from_date+to_date take priority over horizon
+		var fromDate, toDate string
+		if fromDateParam != "" && toDateParam != "" {
+			fromDate = fromDateParam
+			toDate = toDateParam
+		} else {
+			// dynamic horizon (any positive integer, default 30)
+			days, err := strconv.Atoi(horizon)
+			if err != nil || days <= 0 {
+				days = 30
+			}
+			toDate = time.Now().Format(constants.DateFormat)
+			fromDate = time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
 		}
-		fromDate := time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
+
+		// as_on_date: defaults to toDate if not provided
+		if asOnDate == "" {
+			asOnDate = toDate
+		}
 
 		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
 		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
@@ -148,6 +164,9 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// date filter on COALESCE(transaction_date, value_date)
 		filters = append(filters, fmt.Sprintf("COALESCE(t.transaction_date, t.value_date) >= $%d::date", arg))
 		args = append(args, fromDate)
+		arg++
+		filters = append(filters, fmt.Sprintf("COALESCE(t.transaction_date, t.value_date) <= $%d::date", arg))
+		args = append(args, toDate)
 		arg++
 
 		// mandatory scope filters from prevalidation context
@@ -421,9 +440,12 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		kArg := 1
 		var kpiFilters []string
 
-		// limit to recent data by horizon
+		// limit to date window
 		kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.as_of_date, CURRENT_DATE) >= $%d::date", kArg))
 		kpiArgs = append(kpiArgs, fromDate)
+		kArg++
+		kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.as_of_date, CURRENT_DATE) <= $%d::date", kArg))
+		kpiArgs = append(kpiArgs, asOnDate)
 		kArg++
 
 		// mandatory scope filters from prevalidation context
@@ -664,8 +686,9 @@ LIMIT 2000;
 			}
 
 			resp["debug"] = map[string]interface{}{
-				"horizon_days":          days,
+				"horizon":               horizon,
 				"from_date":             fromDate,
+				"to_date":               toDate,
 				"entity_filter":         entityF,
 				"bank_filter":           bankF,
 				"currency_filter":        currencyF,

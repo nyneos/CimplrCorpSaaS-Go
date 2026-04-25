@@ -2,6 +2,7 @@ package bankstatement
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -254,4 +255,39 @@ func joinStrings(strs []string, sep string) string {
 		out += sep + s
 	}
 	return out
+}
+
+// generateBatchID returns a random 6-character uppercase alphanumeric string that acts as a
+// unique prefix for all synthetic tran_ids in one statement upload.  Using crypto/rand keeps
+// the prefix collision probability negligible even across millions of re-uploads.
+// Character space: A-Z + 0-9 (36 chars) → 36^6 ≈ 2.18 billion unique prefixes.
+func generateBatchID() string {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		// Extremely unlikely; produce a time-seeded fallback so we never return ""
+		t := time.Now().UnixNano()
+		for i := range raw {
+			raw[i] = chars[int(t>>uint(i*8))%len(chars)]
+		}
+		return string(raw)
+	}
+	out := make([]byte, 6)
+	for i, v := range raw {
+		out[i] = chars[int(v)%len(chars)]
+	}
+	return string(out)
+}
+
+// buildSyntheticTranID creates a compact, sequential transaction identifier.
+//
+// Format: {batchID}{seq7}  (total 13 characters)
+// Examples:
+//   - "A3B9X20000001" — first row of a batch with prefix A3B9X2
+//   - "A3B9X20000008" — eighth row of the same batch
+//
+// batchID is generated once per upload via generateBatchID().
+// seq is the raw row number within the statement — supports up to 9,999,999 rows (10M+).
+func buildSyntheticTranID(batchID string, seq int) string {
+	return fmt.Sprintf("%s%07d", batchID, seq)
 }

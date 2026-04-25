@@ -356,6 +356,7 @@ const (
 	DebitAmount                    = "debit amt"
 	ClosingBalance                 = "closing balance"
 	BalanceCarriedForward          = "balance carried forward"
+	BalanceBroughtForward          = "balance brought forward"
 	ErrFailedToInsertBankStatement = "failed to insert bank statement: %w"
 	ErrNoAccessToBankStatement     = "No access to this bank statement"
 	ErrFailedToInsertAuditAction   = "failed to insert audit action: %w"

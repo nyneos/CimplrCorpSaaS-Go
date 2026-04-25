@@ -207,6 +207,8 @@ func moduleDefaultPrefix(module string) string {
 		return "cash/bankstatements/"
 	case "bankbalance":
 		return "cash/bank-balance/"
+	case "entitylogo":
+		return "Entity logo/"
 	case "projection":
 		return "cash/projections/"
 	case "payables":
@@ -484,6 +486,27 @@ func GetDownloadPresignedURL(ctx context.Context, key string, expiry time.Durati
 	}, s3.WithPresignExpires(presignExpiry(expiry)))
 	if err != nil {
 		return "", fmt.Errorf("failed to generate pre-signed URL: %w", err)
+	}
+
+	return presignedReq.URL, nil
+}
+
+func GetInlinePresignedURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	client, bucket, err := newS3Client(ctx)
+	if err != nil {
+		return "", err
+	}
+	contentType := contentTypeFromExtension(key, "")
+	contentDisposition := fmt.Sprintf("inline; filename=%q", safeObjectName(key))
+	presignClient := s3.NewPresignClient(client)
+	presignedReq, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket:                     aws.String(bucket),
+		Key:                        aws.String(key),
+		ResponseContentType:        aws.String(contentType),
+		ResponseContentDisposition: aws.String(contentDisposition),
+	}, s3.WithPresignExpires(presignExpiry(expiry)))
+	if err != nil {
+		return "", fmt.Errorf("failed to generate inline pre-signed URL: %w", err)
 	}
 
 	return presignedReq.URL, nil
