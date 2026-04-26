@@ -2285,7 +2285,11 @@ func populateRecipientsForTemplate(ctx context.Context, pgxPool *pgxpool.Pool, t
 			if v, ok := rmap["recipient_priority"].(float64); ok && v > 0 {
 				recipPriority = int(v)
 			}
-			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy, recipPriority})
+			dbRtype := strings.ToUpper(rtype)
+			if dbRtype == "EXTERNAL" {
+				dbRtype = "USER" // DB constraint only allows USER|ROLE; external emails stored as USER
+			}
+			rows = append(rows, []interface{}{templateID, dbRtype, ruser, rrole, isActive, createdBy, recipPriority})
 		}
 		if err := batchInsertRecipients(ctx, pgxPool, templateID, rows); err != nil {
 			return 0, err
@@ -2426,7 +2430,11 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 			if v, ok := rmap["recipient_priority"].(float64); ok && v > 0 {
 				recipPriority = int(v)
 			}
-			rows = append(rows, []interface{}{templateID, strings.ToUpper(rtype), ruser, rrole, isActive, createdBy, recipPriority})
+			dbRtype := strings.ToUpper(rtype)
+			if dbRtype == "EXTERNAL" {
+				dbRtype = "USER" // DB constraint only allows USER|ROLE; external emails stored as USER
+			}
+			rows = append(rows, []interface{}{templateID, dbRtype, ruser, rrole, isActive, createdBy, recipPriority})
 		}
 		return len(rows), batchInsertRecipientsOnTx(ctx, tx, rows)
 

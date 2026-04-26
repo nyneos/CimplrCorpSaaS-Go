@@ -284,6 +284,8 @@ func attachStreamKey(u string) string {
 	return u + "?stream_key=" + url.QueryEscape(first)
 }
 
+// uploadBankStatementV2FromBytes replays an upload through UploadBankStatementV2Handler
+// (each call may enqueue its own notification — e.g. one email per file in a zip preview).
 func uploadBankStatementV2FromBytes(ctx context.Context, db *sql.DB, pool *pgxpool.Pool, filename string, data []byte, formValues map[string][]string, query url.Values) (map[string]interface{}, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)

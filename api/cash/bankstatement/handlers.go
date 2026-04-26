@@ -1133,7 +1133,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
 			// explicit multi=true: only try multi approach, surface error if it fails
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
 			return
 		}
 		// No explicit multi flag: run normal single-account V2 first.
@@ -1305,7 +1305,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
+			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
 			// We must check that at least one account in data{} actually succeeded.
 			var multiResp struct {
@@ -1722,29 +1722,26 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		json.NewEncoder(w).Encode(response)
 
 		if pool != nil {
-			for _, fres := range results {
-				if fres.Success && fres.Result != nil {
-					if rid, ok := fres.Result["id"].(string); ok && rid == "" {
-						if bsid, ok2 := fres.Result["bank_statement_id"].(string); ok2 {
-							rid = bsid
-						}
-					}
-					capturedResult := fres.Result
-					capturedZipFile := zipHeader.Filename
-					go func() {
-						notifPayload := BuildBankStatementPayloadFromV2Result(
-							capturedResult,
-							userID,
-							capturedZipFile,
-							"PENDING_APPROVAL",
-						)
-						catalog.TriggerNotification(context.Background(), pool,
-							"/cash/upload-bank-statement-zip",
-							fmt.Sprintf("BSUPLOAD/%s/%d", notifPayload.BankStatementID, time.Now().UnixMilli()),
-							notifPayload.ToMap(),
-						)
-					}()
+			for i := range results {
+				fres := results[i]
+				if !fres.Success || fres.Result == nil {
+					continue
 				}
+				capturedResult := fres.Result
+				capturedZipFile := zipHeader.Filename
+				go func() {
+					notifPayload := BuildBankStatementPayloadFromV2Result(
+						capturedResult,
+						userID,
+						capturedZipFile,
+						"PENDING_APPROVAL",
+					)
+					catalog.TriggerNotification(context.Background(), pool,
+						"/cash/upload-bank-statement-zip",
+						fmt.Sprintf("BSUPLOAD/%s/%d", notifPayload.BankStatementID, time.Now().UnixMilli()),
+						notifPayload.ToMap(),
+					)
+				}()
 			}
 		}
 	})

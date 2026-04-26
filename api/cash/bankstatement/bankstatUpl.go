@@ -3,6 +3,8 @@ package bankstatement
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/auth"
+	"CimplrCorpSaas/api/notification/catalog"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -829,6 +831,36 @@ func BulkApproveBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		// Match /cash/bank-statements/v2/approve: checker bulk-approve must enqueue notifications
+		// per statement. This path was previously missing TriggerNotification entirely, so approve
+		// emails/pushes never fired until some later unrelated notification run (felt "batched").
+		pool, uID, notifRows := pgxPool, req.UserID, updated
+		go func() {
+			if pool == nil {
+				return
+			}
+			nctx := context.Background()
+			for _, row := range notifRows {
+				bid, _ := row["bankstatementid"].(string)
+				atype, _ := row["action_type"].(string)
+				if bid == "" {
+					continue
+				}
+				switch strings.ToUpper(strings.TrimSpace(atype)) {
+				case "DELETE":
+					payload := BuildBankStatementNotifPayload(nctx, pool, []string{bid}, "DELETE_APPROVED", uID)
+					catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/delete",
+						fmt.Sprintf("BSDELETE-APPROVED/%s/%d", bid, time.Now().UnixMilli()), payload)
+				default:
+					// CREATE, EDIT, or unknown — same route as ApproveBankStatementHandler
+					payload := BuildBankStatementNotifPayload(nctx, pool, []string{bid}, "APPROVE", uID)
+					catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/approve",
+						fmt.Sprintf("BSAPPROVE/%s/%d", bid, time.Now().UnixMilli()), payload)
+				}
+			}
+		}()
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }
@@ -929,6 +961,25 @@ func BulkRejectBankStatements(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		committed = true
+
+		pool, uID, comment := pgxPool, req.UserID, req.Comment
+		rejectedIDs := make([]string, 0, len(updated))
+		for _, row := range updated {
+			if bid, ok := row["bankstatementid"].(string); ok && bid != "" {
+				rejectedIDs = append(rejectedIDs, bid)
+			}
+		}
+		go func() {
+			if pool == nil || len(rejectedIDs) == 0 {
+				return
+			}
+			nctx := context.Background()
+			payload := BuildBankStatementNotifPayload(nctx, pool, rejectedIDs, "REJECT", uID)
+			payload["Comment"] = comment
+			catalog.TriggerNotification(nctx, pool, "/cash/bank-statements/v2/reject",
+				fmt.Sprintf("BSREJECT/%s/%d", uID, time.Now().UnixMilli()), payload)
+		}()
+
 		api.RespondWithPayload(w, true, "", map[string]interface{}{"updated": updated})
 	}
 }

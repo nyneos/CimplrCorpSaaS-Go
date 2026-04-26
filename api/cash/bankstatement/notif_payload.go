@@ -5,8 +5,9 @@ package bankstatement
 // OVERVIEW
 // ────────
 // When a bank statement is committed (PDF path via /cash/commit) or uploaded
-// and processed (CSV/XLS path via /cash/preview → V2 handler), we fire
-// TriggerNotification with a payload built from BankStatementNotifPayload.
+// and processed (CSV/XLS via /cash/preview → V2, multi=true, V2→multi fallback,
+// or zip preview per inner file), we fire TriggerNotification with a payload built
+// from BankStatementNotifPayload — one dispatch per successful statement write.
 //
 // The payload is serialised to map[string]interface{} so that the template
 // engine can access every nested field by name.  All slice fields become

@@ -3,6 +3,7 @@ package bankstatement
 import (
 	apictx "CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"CimplrCorpSaas/api/notification/catalog"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"archive/zip"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 	"github.com/shakinm/xlsReader/xls"
 	"github.com/xuri/excelize/v2"
@@ -2680,7 +2682,7 @@ func parseFileToRows(fileBytes []byte) ([][]string, error) {
 //     builds a per-account CSV, computes idempotent `fileHash = sha256(csvBytes + account_number)`,
 //     and calls UploadBankStatementV2WithCategorization for each account.
 //   - Aggregates results per-account and isolates failures to the account level.
-func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
+func UploadMultiAccountBankStatementHandler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		if r.Method != http.MethodPost {
@@ -2730,6 +2732,8 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 			return
 		}
 		defer file.Close()
+
+		uploadUserID := r.FormValue("user_id")
 
 		// Read file bytes
 		fileBytes, err := io.ReadAll(file)
@@ -3157,6 +3161,30 @@ func UploadMultiAccountBankStatementHandler(db *sql.DB) http.Handler {
 				continue
 			}
 			results[resultKey] = map[string]interface{}{"success": true, "data": res}
+			// One notification per successfully written statement (same as single-file V2 upload).
+			if pool != nil {
+				resSnap := res
+				uid := uploadUserID
+				srcFile := fhHeader.Filename
+				go func() {
+					notifPayload := BuildBankStatementPayloadFromV2Result(resSnap, uid, srcFile, "PREVIEW")
+					bsID := notifPayload.BankStatementID
+					if bsID == "" {
+						if v, ok := resSnap["bank_statement_id"].(string); ok {
+							bsID = v
+						}
+					}
+					if bsID == "" {
+						return
+					}
+					catalog.TriggerNotification(
+						context.Background(), pool,
+						"/cash/preview",
+						fmt.Sprintf("BSUPLOAD/%s/%d", bsID, time.Now().UnixMilli()),
+						notifPayload.ToMap(),
+					)
+				}()
+			}
 		}
 
 		// Return aggregated results
