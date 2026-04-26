@@ -40,6 +40,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		txType := strings.ToUpper(strings.TrimSpace(req.TransactionType))
+		requestedBy := transactionRequestedBy(req.UserID)
 		if txType == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
@@ -83,6 +84,8 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy)
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -108,6 +111,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		ctx := r.Context()
 		txType := strings.ToUpper(strings.TrimSpace(req.TransactionType))
+		requestedBy := transactionRequestedBy(req.UserID)
 		if txType == "" {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, "message": "transaction_type is required"})
@@ -158,6 +162,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"transaction_id": transactionID,
 				"download_url":   downloadURL,
 			})
+			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy)
 		}
 
 		if len(files) == 0 {

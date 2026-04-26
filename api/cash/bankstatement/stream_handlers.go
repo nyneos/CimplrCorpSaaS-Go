@@ -1976,6 +1976,16 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 			respondWithError(w, err, "Database error", http.StatusInternalServerError)
 			return
 		}
+
+		var bankStatementID sql.NullString
+		if storagePath.Valid && strings.TrimSpace(storagePath.String) != "" {
+			_ = db.QueryRowContext(r.Context(), `
+				SELECT bank_statement_id
+				FROM cimplrcorpsaas.bank_statements
+				WHERE upload_s3_key = $1
+				LIMIT 1
+			`, storagePath.String).Scan(&bankStatementID)
+		}
 		// entity validation: if DB row has entity_name, ensure requester is allowed
 		// try to get entity from request header `X-Entity-Name` or context
 		requesterEntity := r.Header.Get("X-Entity-Name")
@@ -2060,7 +2070,7 @@ func DownloadPDFHandler(db *sql.DB) http.Handler {
 		ip := r.RemoteAddr
 		go func() {
 			// best-effort; log on error
-			if err := insertDownloadAudit(r.Context(), db, id, userID, ip, entityName); err != nil {
+			if err := insertDownloadAudit(r.Context(), db, sql.NullString{String: strings.TrimSpace(id), Valid: strings.TrimSpace(id) != ""}, bankStatementID, userID, ip, entityName); err != nil {
 				log.Printf("failed to insert download audit: %v", err)
 			}
 		}()
@@ -2105,10 +2115,15 @@ func processPDFViaPDFCo(ctx context.Context, db *sql.DB, pdfBytes []byte, filena
 	return stagingIDs, nil
 }
 
-// insertDownloadAudit records who downloaded a file
-func insertDownloadAudit(ctx context.Context, db *sql.DB, fileID, userID, ip string, entityName sql.NullString) error {
-	q := `INSERT INTO cimplrcorpsaas.bank_pdf_download_audits (file_id, user_id, ip, entity_name) VALUES ($1,$2,$3,$4)`
-	_, err := db.ExecContext(ctx, q, fileID, userID, ip, entityName)
+// insertDownloadAudit records who downloaded a file.
+// Some bank statements are stored directly in bank_statements without a linked
+// bank_pdf_uploads row, so file_id falls back to a generated UUID when absent.
+func insertDownloadAudit(ctx context.Context, db *sql.DB, fileID sql.NullString, bankStatementID sql.NullString, userID, ip string, entityName sql.NullString) error {
+	q := `
+		INSERT INTO cimplrcorpsaas.bank_pdf_download_audits (file_id, bankstatementid, user_id, ip, entity_name)
+		VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5)
+	`
+	_, err := db.ExecContext(ctx, q, fileID, bankStatementID, userID, ip, entityName)
 	return err
 }
 func z4() string {

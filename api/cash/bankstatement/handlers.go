@@ -273,6 +273,7 @@ func GetBankStatementTransactionsHandler(db *sql.DB) http.Handler {
 func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
+			UserID          string `json:"user_id"`
 			BankStatementID string `json:"bank_statement_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.BankStatementID) == "" {
@@ -284,11 +285,15 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 
 		ctx := r.Context()
 		var uploadS3Key sql.NullString
+		var entityName sql.NullString
+		var auditFileID sql.NullString
 		err := db.QueryRowContext(ctx, `
-			SELECT upload_s3_key
-			FROM cimplrcorpsaas.bank_statements
-			WHERE bank_statement_id = $1
-		`, body.BankStatementID).Scan(&uploadS3Key)
+			SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id
+			FROM cimplrcorpsaas.bank_statements s
+			LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+			LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
+			WHERE s.bank_statement_id = $1
+		`, body.BankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID)
 		if err != nil {
 			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			if errors.Is(err, sql.ErrNoRows) {
@@ -316,6 +321,26 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 			return
 		}
 
+		requestedBy := requestedByFromCtx(ctx, strings.TrimSpace(body.UserID))
+		if requestedBy == "" {
+			requestedBy = strings.TrimSpace(body.UserID)
+		}
+		if requestedBy != "" {
+			auditFileID.String = strings.TrimSpace(auditFileID.String)
+			auditFileID.Valid = auditFileID.String != ""
+			if err := insertDownloadAudit(
+				ctx,
+				db,
+				auditFileID,
+				sql.NullString{String: body.BankStatementID, Valid: true},
+				requestedBy,
+				r.RemoteAddr,
+				entityName,
+			); err != nil {
+				log.Printf("failed to insert bank statement download audit for %s: %v", body.BankStatementID, err)
+			}
+		}
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -329,6 +354,7 @@ func GetBankStatementDownloadURLHandler(db *sql.DB) http.Handler {
 func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
+			UserID           string   `json:"user_id"`
 			BankStatementIDs []string `json:"bank_statement_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.BankStatementIDs) == 0 {
@@ -349,11 +375,15 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 			}
 
 			var uploadS3Key sql.NullString
+			var entityName sql.NullString
+			var auditFileID sql.NullString
 			err := db.QueryRowContext(ctx, `
-				SELECT upload_s3_key
-				FROM cimplrcorpsaas.bank_statements
-				WHERE bank_statement_id = $1
-			`, bankStatementID).Scan(&uploadS3Key)
+				SELECT s.upload_s3_key, COALESCE(e.entity_name, '') AS entity_name, p.id
+				FROM cimplrcorpsaas.bank_statements s
+				LEFT JOIN public.masterentitycash e ON s.entity_id = e.entity_id
+				LEFT JOIN cimplrcorpsaas.bank_pdf_uploads p ON p.storage_path = s.upload_s3_key
+				WHERE s.bank_statement_id = $1
+			`, bankStatementID).Scan(&uploadS3Key, &entityName, &auditFileID)
 			if err != nil {
 				failedIDs = append(failedIDs, bankStatementID)
 				continue
@@ -369,6 +399,26 @@ func GetBankStatementBulkDownloadURLHandler(db *sql.DB) http.Handler {
 			if err != nil {
 				failedIDs = append(failedIDs, bankStatementID)
 				continue
+			}
+
+			requestedBy := requestedByFromCtx(ctx, strings.TrimSpace(body.UserID))
+			if requestedBy == "" {
+				requestedBy = strings.TrimSpace(body.UserID)
+			}
+			if requestedBy != "" {
+				auditFileID.String = strings.TrimSpace(auditFileID.String)
+				auditFileID.Valid = auditFileID.String != ""
+				if err := insertDownloadAudit(
+					ctx,
+					db,
+					auditFileID,
+					sql.NullString{String: bankStatementID, Valid: true},
+					requestedBy,
+					r.RemoteAddr,
+					entityName,
+				); err != nil {
+					log.Printf("failed to insert bank statement bulk download audit for %s: %v", bankStatementID, err)
+				}
 			}
 
 			files = append(files, map[string]string{

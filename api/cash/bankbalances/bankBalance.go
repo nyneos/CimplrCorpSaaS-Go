@@ -247,6 +247,8 @@ func GetBankBalanceDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		insertBankBalanceDownloadAudit(ctx, pgxPool, req.BalanceID, requestedByFromCtx(ctx, req.UserID))
+
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			constants.ValueSuccess: true,
@@ -271,6 +273,7 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		ctx := r.Context()
 		files := make([]map[string]string, 0, len(req.BalanceIDs))
 		failedIDs := make([]string, 0)
+		requestedBy := requestedByFromCtx(ctx, req.UserID)
 
 		for _, rawID := range req.BalanceIDs {
 			balanceID := strings.TrimSpace(rawID)
@@ -305,6 +308,7 @@ func GetBankBalanceBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"balance_id":   balanceID,
 				"download_url": downloadURL,
 			})
+			insertBankBalanceDownloadAudit(ctx, pgxPool, balanceID, requestedBy)
 		}
 
 		if len(files) == 0 {

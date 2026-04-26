@@ -23,6 +23,7 @@ import (
 )
 
 func StartCashService(db *sql.DB, port string) {
+
 	mux := http.NewServeMux()
 	user := os.Getenv("DB_USER")
 	pass := os.Getenv("DB_PASSWORD")
@@ -102,6 +103,13 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/bank-statements/v2/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DownloadSelectedAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.DeleteAdditionalFileHandler(pgxPool)))
+	// Audit bank statement
+	mux.Handle("/cash/bank-statements/v2/audit", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementAuditHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/audit/downloads", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementDownloadAuditHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/audit/balance-impact", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementBalanceImpactAuditHandler(db)))
+	mux.Handle("/cash/bank-statements/v2/audit/transactions", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.GetBankStatementTransactionAuditHandler(db)))
+	// -----------
+
 	mux.Handle("/cash/bank-statements/v2/recompute-kpis", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RecomputeBankStatementSummaryHandler(db)))
 	mux.Handle("/cash/bank-statements/v2/approve", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.ApproveBankStatementHandler(db, pgxPool)))
 	mux.Handle("/cash/bank-statements/v2/reject", middlewares.PreValidationMiddleware(pgxPool)(bankstatement.RejectBankStatementHandler(db, pgxPool)))
@@ -135,6 +143,7 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/transactions/receivables/additional-files/download", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadReceivableAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/download-bulk", api.BusinessUnitMiddleware(db)(payablerecievable.DownloadSelectedReceivableAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/transactions/receivables/additional-files/delete", api.BusinessUnitMiddleware(db)(payablerecievable.DeleteReceivableAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/transactions/audit", api.BusinessUnitMiddleware(db)(payablerecievable.GetTransactionAuditHandler(pgxPool)))
 	mux.Handle("/cash/transactions/all", api.BusinessUnitMiddleware(db)(payablerecievable.GetAllPayableReceivable(pgxPool)))
 
 	//fundplanning
@@ -249,6 +258,7 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/projection/v2/additional-files/download", middlewares.PreValidationMiddleware(pgxPool)(projection.DownloadAdditionalFileHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(projection.DownloadSelectedAdditionalFilesHandler(pgxPool)))
 	mux.Handle("/cash/projection/v2/additional-files/delete", middlewares.PreValidationMiddleware(pgxPool)(projection.DeleteAdditionalFileHandler(pgxPool)))
+	mux.Handle("/cash/projections/audit", middlewares.PreValidationMiddleware(pgxPool)(projection.GetProjectionAuditHandler(pgxPool)))
 
 	//bank balance
 	mux.Handle("/cash/bank-balances/create", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.CreateBankBalance(pgxPool)))
@@ -258,6 +268,7 @@ func StartCashService(db *sql.DB, port string) {
 	mux.Handle("/cash/bank-balances/all", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalances(pgxPool)))
 	// mux.Handle("/cash/bank-balances/upload",(bankbalances.UploadBankBalances(pgxPool)))
 	mux.Handle("/cash/bank-balances/upload", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.UploadBankBalances(pgxPool)))
+	mux.Handle("/cash/bank-balances/audit", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalanceAuditHandler(pgxPool)))
 	mux.Handle("/cash/bank-balances/download", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalanceDownloadURL(pgxPool)))
 	mux.Handle("/cash/bank-balances/download-bulk", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.GetBankBalanceBulkDownloadURL(pgxPool)))
 	mux.Handle("/cash/bank-balances/additional-files/list", middlewares.PreValidationMiddleware(pgxPool)(bankbalances.ListAdditionalFilesHandler(pgxPool)))

@@ -26,13 +26,9 @@ func InitDB() (*sql.DB, error) {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	name := os.Getenv("DB_NAME")
-	sslMode := os.Getenv("DB_SSLMODE")
-	if sslMode == "" {
-		sslMode = "disable"
-	}
 	connStr := fmt.Sprintf(
-		"user=%s password=%s host=%s port=%s dbname=%s sslmode=%s",
-		user, pass, host, port, name, sslMode,
+		"user=%s password=%s host=%s port=%s dbname=%s sslmode=disable",
+		user, pass, host, port, name,
 	)
 	return sql.Open("postgres", connStr)
 }
@@ -95,7 +91,7 @@ func main() {
 	manager := appmanager.NewAppManager()
 
 	// Load service configs from YAML
-	servicesCfg, err := appmanager.LoadServiceSequence("../services.yaml")
+	servicesCfg, err := appmanager.LoadServiceSequence("./services.yaml")
 	if err != nil {
 		log.Fatal("failed to load service sequence:", err)
 	}
