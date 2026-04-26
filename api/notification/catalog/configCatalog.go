@@ -268,7 +268,7 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pos++
 		}
 
-		whereClause := "WHERE COALESCE(e.is_deleted, false) = false"
+		whereClause := "WHERE COALESCE(e.is_deleted, false) = false" + sqlFilterMasterEntityLiveORGlobalE
 		if len(whereParts) > 0 {
 			whereClause += " AND " + strings.Join(whereParts, " AND ")
 		}
@@ -306,7 +306,7 @@ func GetNotifConfig(pgxPool *pgxpool.Pool) http.HandlerFunc {
 					  AND COALESCE(at.is_deleted, false) = false
 				) AS has_template
 			FROM notification_svc.notification_config nc
-			LEFT JOIN notification_svc.event e ON e.event_id = nc.event_id
+			INNER JOIN notification_svc.event e ON e.event_id = nc.event_id
 			-- exclude configs whose parent event has been soft-deleted
 			-- latest config audit row by last activity (maker request vs checker action)
 			LEFT JOIN LATERAL (

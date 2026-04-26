@@ -773,6 +773,7 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 				SELECT 1 FROM notification_svc.template t
 				JOIN notification_svc.audit_template at ON at.template_id = t.template_id
 				WHERE t.event_id = e.event_id AND at.processing_status = 'APPROVED'
+				  AND COALESCE(at.is_deleted, false) = false
 			)) DESC,
 			-- finally most recently approved
 			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
@@ -869,6 +870,7 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 				SELECT 1 FROM notification_svc.template t
 				JOIN notification_svc.audit_template at ON at.template_id = t.template_id
 				WHERE t.event_id = e.event_id AND at.processing_status = 'APPROVED'
+				  AND COALESCE(at.is_deleted, false) = false
 			)) DESC,
 			(SELECT MAX(ae2.checker_at) FROM notification_svc.audit_event ae2
 			 WHERE ae2.event_id = e.event_id AND ae2.processing_status = 'APPROVED') DESC NULLS LAST
@@ -893,10 +895,12 @@ func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, 
 // priority_level defaults to 3 when NULL so that finalPriority = 3*10+3 = 33.
 func lookupEnabledChannels(ctx context.Context, pool *pgxpool.Pool, eventID string) ([]enabledChannel, error) {
 	q := `
-		SELECT channel, COALESCE(retry_max,3), COALESCE(retry_backoff_secs,60),
-		       COALESCE(priority_level,3)
-		FROM notification_svc.notification_config
-		WHERE event_id = $1 AND is_enabled = true
+		SELECT nc.channel, COALESCE(nc.retry_max,3), COALESCE(nc.retry_backoff_secs,60),
+		       COALESCE(nc.priority_level,3)
+		FROM notification_svc.notification_config nc
+		INNER JOIN notification_svc.event e ON e.event_id = nc.event_id
+		WHERE nc.event_id = $1 AND nc.is_enabled = true
+		  AND COALESCE(e.is_deleted, false) = false
 	`
 	rows, err := pool.Query(ctx, q, eventID)
 	if err != nil {
@@ -930,10 +934,12 @@ func lookupTemplates(ctx context.Context, pool *pgxpool.Pool, eventID, channel s
 			UPPER(t.channel)                     AS channel
 		FROM notification_svc.audit_template at
 		JOIN notification_svc.template t ON t.template_id = at.template_id
+		INNER JOIN notification_svc.event ev ON ev.event_id = t.event_id
 		WHERE t.event_id = $1
 		  AND UPPER(t.channel) = UPPER($2)
 		  AND at.processing_status = 'APPROVED'
 		  AND COALESCE(at.is_deleted, false) = false
+		  AND COALESCE(ev.is_deleted, false) = false
 		ORDER BY at.requested_at ASC NULLS LAST
 	`
 	dbRows, err := pool.Query(ctx, q, eventID, channel)
