@@ -1022,7 +1022,7 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, "proposal_ids required")
+			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 

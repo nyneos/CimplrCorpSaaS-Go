@@ -171,7 +171,7 @@ func UploadBankStatement(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithPayload(w, false, "user_id required in form", nil)
+				api.RespondWithPayload(w, false, constants.ErrUserIDRequired, nil)
 				return
 			}
 		}

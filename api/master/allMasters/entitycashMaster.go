@@ -165,14 +165,14 @@ type cashEntityUpdateUpload struct {
 
 func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkRequest, cashEntityCreateUpload, error) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-	if strings.HasPrefix(contentType, "multipart/form-data") {
+	if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
 		}
 
 		userID := strings.TrimSpace(r.FormValue(constants.KeyUserID))
 		if userID == "" {
-			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("user_id required in form")
+			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf(constants.ErrUserIDRequired)
 		}
 
 		entityPayload := strings.TrimSpace(r.FormValue("entity_payload"))
@@ -219,14 +219,14 @@ func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkReque
 
 func parseUpdateCashEntityBulkRequest(r *http.Request) (cashEntityUpdateRequest, cashEntityUpdateUpload, error) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-	if strings.HasPrefix(contentType, "multipart/form-data") {
+	if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
 		}
 
 		userID := strings.TrimSpace(r.FormValue(constants.KeyUserID))
 		if userID == "" {
-			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("user_id required in form")
+			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf(constants.ErrUserIDRequired)
 		}
 
 		entityID := strings.TrimSpace(r.FormValue("entity_id"))
@@ -309,7 +309,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req, upload, err := parseCreateAndSyncCashEntitiesRequest(r)
 		if err != nil {
 			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-			if strings.HasPrefix(contentType, "multipart/form-data") {
+			if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 				api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			} else {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -928,7 +928,7 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -996,7 +996,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 			w.WriteHeader(http.StatusBadRequest)
-			if strings.HasPrefix(contentType, "multipart/form-data") {
+			if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			} else {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
@@ -1420,8 +1420,6 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("is_deleted=$%d", pos))
 						args = append(args, newBool)
 						pos++
-					default:
-						// ignore unknown keys
 					}
 				}
 
@@ -1755,7 +1753,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.EntityIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		// Get checker_by from session
@@ -1862,7 +1860,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.EntityIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		// Get checker_by from session
@@ -2346,7 +2344,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}
@@ -2622,7 +2620,7 @@ func (r *UploadValidationResult) addErr(row int, field, value, msg string) {
 
 // uploadEntityError writes a flat {success:false, error:"…"} JSON response.
 func uploadEntityError(w http.ResponseWriter, statusCode int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,

@@ -251,10 +251,10 @@ func insertCcpCsdInTx(ctx context.Context, pool *pgxpool.Pool, inp CcpCsdInput, 
 func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID    string                 `json:"user_id"`
-			CcpCsdID  string                 `json:"ccp_csd_id"`
-			Fields    map[string]interface{} `json:"fields"`
-			Reason    string                 `json:"reason"`
+			UserID   string                 `json:"user_id"`
+			CcpCsdID string                 `json:"ccp_csd_id"`
+			Fields   map[string]interface{} `json:"fields"`
+			Reason   string                 `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
@@ -357,16 +357,16 @@ func UpdateCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 func BulkApproveCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			UserID     string   `json:"user_id"`
-			CcpCsdIDs  []string `json:"ccp_csd_ids"`
-			Comment    string   `json:"comment"`
+			UserID    string   `json:"user_id"`
+			CcpCsdIDs []string `json:"ccp_csd_ids"`
+			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONRequired)
 			return
 		}
 		if len(req.CcpCsdIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No ccp_csd_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
 		}
 
@@ -449,7 +449,7 @@ func BulkRejectCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CcpCsdIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No ccp_csd_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
 		}
 
@@ -506,7 +506,7 @@ func BulkDeleteCcpCsd(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.CcpCsdIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "No ccp_csd_ids provided")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrNoCCPCSDIDsProvided)
 			return
 		}
 

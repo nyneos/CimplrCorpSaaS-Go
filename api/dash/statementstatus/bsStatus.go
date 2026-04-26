@@ -215,26 +215,26 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fromDate = dashboardFromMin
 			if fromDateParam != "" {
 				fromDate = fromDateParam
-			} else if raw := strings.TrimSpace(req.Horizon); raw != "" {
-				if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-					if t, err := time.Parse(constants.DateFormat, toDateParam); err == nil {
-						fromDate = t.AddDate(0, 0, -(v - 1)).Format(constants.DateFormat)
-					}
+			} else {
+				raw := strings.TrimSpace(req.Horizon)
+				if raw == "" {
+					raw = q.Get("days")
 				}
-			} else if raw := q.Get("days"); raw != "" {
-				if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-					if t, err := time.Parse(constants.DateFormat, toDateParam); err == nil {
-						fromDate = t.AddDate(0, 0, -(v - 1)).Format(constants.DateFormat)
+				if raw != "" {
+					if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+						if t, err := time.Parse(constants.DateFormat, toDateParam); err == nil {
+							fromDate = t.AddDate(0, 0, -(v - 1)).Format(constants.DateFormat)
+						}
 					}
 				}
 			}
 		} else {
 			days := 0
-			if raw := strings.TrimSpace(req.Horizon); raw != "" {
-				if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-					days = v
-				}
-			} else if raw := q.Get("days"); raw != "" {
+			raw := strings.TrimSpace(req.Horizon)
+			if raw == "" {
+				raw = q.Get("days")
+			}
+			if raw != "" {
 				if v, err := strconv.Atoi(raw); err == nil && v > 0 {
 					days = v
 				}

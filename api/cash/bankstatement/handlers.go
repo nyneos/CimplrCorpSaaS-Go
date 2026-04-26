@@ -1295,11 +1295,13 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			db,
 			mf,
 			fileHash,
-			useMapping,
-			mappings,
-			accountOverride,
-			uploadFileName,
-			requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+			UploadOpts{
+				UseMapping:            useMapping,
+				Mappings:              mappings,
+				AccountNumberOverride: accountOverride,
+				UploadFileName:        uploadFileName,
+				UploadedBy:            requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+			},
 		)
 		if err != nil {
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
@@ -1682,11 +1684,13 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 				db,
 				file,
 				ze.fileHash,
-				useMapping,
-				mappings,
-				accountOverride,
-				ze.name,
-				requestedByFromCtx(ctx, r.FormValue("user_id")),
+				UploadOpts{
+					UseMapping:            useMapping,
+					Mappings:              mappings,
+					AccountNumberOverride: accountOverride,
+					UploadFileName:        ze.name,
+					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
+				},
 			)
 			if err != nil {
 				results = append(results, FileResult{

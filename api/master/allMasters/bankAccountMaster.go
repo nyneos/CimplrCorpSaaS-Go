@@ -711,7 +711,7 @@ func BulkDeleteBankAccountAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Reason     string   `json:"reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.AccountIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		sessions := auth.GetActiveSessions()
@@ -1225,7 +1225,7 @@ func GetApprovedBankAccountsWithBankEntity(pgxPool *pgxpool.Pool) http.HandlerFu
 
 func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
+		ctx := r.Context()
 
 		// Step 1: Get user_id
 		userID := ""
@@ -1241,7 +1241,7 @@ func UploadBankAccount(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}

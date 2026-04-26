@@ -493,8 +493,9 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 			wsStr := ws.Format(constants.DateFormat)
 			weStr := we.Format(constants.DateFormat)
 
-			aIn  := sumTxnRange(ctx, pgxPool, txnFilter("t.deposit_amount"),    wsStr, weStr, filterBank, filterAccount, filterEntity, filterCurrency)
-			aOut := sumTxnRange(ctx, pgxPool, txnFilter("t.withdrawal_amount"),  wsStr, weStr, filterBank, filterAccount, filterEntity, filterCurrency)
+			filters := txnRangeFilters{Bank: filterBank, Account: filterAccount, Entity: filterEntity, Currency: filterCurrency}
+			aIn  := sumTxnRange(ctx, pgxPool, txnFilter("t.deposit_amount"),   wsStr, weStr, filters)
+			aOut := sumTxnRange(ctx, pgxPool, txnFilter("t.withdrawal_amount"), wsStr, weStr, filters)
 
 			var fIn, fOut float64
 			for d := ws; !d.After(we); d = d.AddDate(0, 0, 1) {
@@ -531,10 +532,17 @@ WHERE (cpm.year*12+cpm.month) BETWEEN $1 AND $2
 	}
 }
 
+type txnRangeFilters struct {
+	Bank     string
+	Account  string
+	Entity   string
+	Currency string
+}
+
 // sumTxnRange executes a transaction aggregation query for the given period and filters,
 // returns the total in INR.
-func sumTxnRange(ctx context.Context, pgxPool *pgxpool.Pool, q, startStr, endStr, bank, account, entity, currency string) float64 {
-	rs, err := pgxPool.Query(ctx, q, startStr, endStr, bank, account, entity, currency)
+func sumTxnRange(ctx context.Context, pgxPool *pgxpool.Pool, q, startStr, endStr string, f txnRangeFilters) float64 {
+	rs, err := pgxPool.Query(ctx, q, startStr, endStr, f.Bank, f.Account, f.Entity, f.Currency)
 	if err != nil {
 		return 0
 	}

@@ -625,7 +625,7 @@ func UploadBankStatementV3Handler(db *sql.DB, pool *pgxpool.Pool) http.Handler {
 		// commit the metadata only after parsing and storage upload succeed.
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			respondWithError(w, err, "Failed to start DB transaction", http.StatusInternalServerError)
+			respondWithError(w, err, constants.ErrFailedToStartDBTransaction, http.StatusInternalServerError)
 			return
 		}
 		// Ensure rollback if we return before explicit commit.

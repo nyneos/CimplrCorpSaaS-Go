@@ -29,7 +29,7 @@ func pqUserFriendlyMessage(err error) string {
 	case "23505":
 		switch pqErr.Constraint {
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
+			return constants.ErrBankStatementFileAlreadyUploaded
 		case "uniq_stmt":
 			return "A statement for this period is already uploaded for this account."
 		default:
@@ -209,7 +209,7 @@ func userFriendlyUploadError(err error) string {
 	}
 
 	if errors.Is(err, ErrFileAlreadyUploaded) {
-		return "This bank statement file was already uploaded earlier. Please upload a different file."
+		return constants.ErrBankStatementFileAlreadyUploaded
 	}
 	if errors.Is(err, ErrAccountNumberMissing) {
 		return "Could not find the bank account number in the uploaded statement. Please upload the original bank statement downloaded from the bank."
@@ -248,7 +248,7 @@ func userFriendlyUploadError(err error) string {
 		case "uniq_stmt":
 			return "A statement for this account and period is already uploaded. Use force_override=true to re-upload."
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
+			return constants.ErrBankStatementFileAlreadyUploaded
 		}
 	}
 	log.Println("Debug raw mesage", msg)

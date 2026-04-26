@@ -804,7 +804,7 @@ func UploadAndSyncCostProfitCenters(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}

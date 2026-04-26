@@ -151,7 +151,7 @@ func GetProjectionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, "proposal_ids required")
+			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 
@@ -236,7 +236,7 @@ func DeleteCashFlowProposal(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, "proposal_ids required")
+			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 		if strings.TrimSpace(req.Reason) == "" {
@@ -402,7 +402,7 @@ func BulkApproveCashFlowProposalActions(pgxPool *pgxpool.Pool) http.HandlerFunc 
 			return
 		}
 		if len(req.ProposalIDs) == 0 {
-			api.RespondWithResult(w, false, "proposal_ids required")
+			api.RespondWithResult(w, false, constants.ErrProposalIDsRequired)
 			return
 		}
 		if strings.TrimSpace(req.Comment) == "" {

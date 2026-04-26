@@ -479,7 +479,7 @@ func GetUploadTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			api.RespondWithError(w, http.StatusBadRequest, "type must be one of BANK, EXCHANGE, DATA_PROVIDER, CCP_CSD, PAYMENT_NETWORK, ERP_SYSTEM")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"counterparty_type": cpType,
 			"columns":           cols,
@@ -495,9 +495,10 @@ func GetUploadTemplate(pgxPool *pgxpool.Pool) http.HandlerFunc {
 //
 // POST /master/v2/counterparty-hub/upload
 // Multipart form fields:
-//   user_id           – required
-//   counterparty_type – optional; if omitted every row must have a counterparty_type column
-//   file              – required: CSV or XLSX
+//
+//	user_id           – required
+//	counterparty_type – optional; if omitted every row must have a counterparty_type column
+//	file              – required: CSV or XLSX
 //
 // Column headers must match the JSON tag names in HubCreateRequest
 // (e.g. counterparty_code, bank_code, exchange_code, mic_code, asset_classes, …).
@@ -787,7 +788,7 @@ func GetUploadTemplateV2(_ *pgxpool.Pool) http.HandlerFunc {
 			for t, extra := range typed {
 				all[t] = append(common, extra...)
 			}
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 			json.NewEncoder(w).Encode(map[string]interface{}{"templates": all})
 			return
 		}
@@ -800,13 +801,13 @@ func GetUploadTemplateV2(_ *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		cols := append(common, extra...)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"counterparty_type": cpType,
 			"columns":           cols,
 			"notes": map[string]string{
-				"asset_classes": "semicolon-separated, e.g. EQUITY;DERIVATIVES",
-				"data_types":    "semicolon-separated, e.g. PRICE;CORPORATE_ACTION",
+				"asset_classes":  "semicolon-separated, e.g. EQUITY;DERIVATIVES",
+				"data_types":     "semicolon-separated, e.g. PRICE;CORPORATE_ACTION",
 				"effective_from": "YYYY-MM-DD",
 				"renewal_date":   "YYYY-MM-DD (DATA_PROVIDER only)",
 			},

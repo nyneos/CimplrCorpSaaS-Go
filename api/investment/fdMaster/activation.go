@@ -244,7 +244,7 @@ func getFDMasterError(err error, contextMessage string) (string, int) {
 
 func resolveFDAuditTable(ctx context.Context, exec queryExecutor) string {
 	return resolveFirstExistingTable(ctx, exec, []string{
-		"investment.fd_audit_master",
+		constants.QuerryAuditMaster,
 		"investment.fd_audit_fd_master",
 		"investment.fd_master_audit",
 	})
@@ -581,7 +581,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.ConfirmationID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 
