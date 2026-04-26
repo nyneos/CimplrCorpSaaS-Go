@@ -5,11 +5,14 @@ package commonpool
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -47,10 +50,37 @@ func nullToString(ns sql.NullString) string {
 	return "Uncategorized"
 }
 
+func setFromBody(q url.Values, body map[string]any, queryKey string, bodyKeys ...string) {
+	if strings.TrimSpace(q.Get(queryKey)) != "" || body == nil {
+		return
+	}
+	for _, bk := range bodyKeys {
+		if v, ok := body[bk].(string); ok {
+			if s := strings.TrimSpace(v); s != "" {
+				q.Set(queryKey, s)
+				return
+			}
+		}
+	}
+}
+
 func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		transactions, err := FetchConsolidatedTransactionPool(ctx, db)
+		q := r.URL.Query()
+		if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			var body map[string]any
+			if json.Unmarshal(bodyBytes, &body) == nil {
+				setFromBody(q, body, "from_date", "from_date", "fromDate")
+				setFromBody(q, body, "to_date", "to_date", "toDate")
+				setFromBody(q, body, "as_on_date", "as_on_date", "asOnDate")
+				setFromBody(q, body, "entity", "entity")
+				setFromBody(q, body, "bank", "bank")
+				setFromBody(q, body, "currency", "currency")
+			}
+		}
+		transactions, err := FetchConsolidatedTransactionPool(ctx, db, q)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -60,8 +90,10 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-// FetchConsolidatedTransactionPool fetches and maps all transactions for dashboard
-func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]ConsolidatedTransactionPool, error) {
+// FetchConsolidatedTransactionPool fetches and maps all transactions for dashboard.
+// Optional query params: from_date, to_date, as_on_date (YYYY-MM-DD) cap the value/transaction date range; as_on_date is an inclusive upper bound.
+// Optional narrowing: entity, bank (name/short_name or bank_id), currency — must remain within prevalidation scope.
+func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB, q url.Values) ([]ConsolidatedTransactionPool, error) {
 	allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
 	allowedBankNames := api.GetBankNamesFromCtx(ctx)
 	allowedCurrencyCodes := api.GetCurrencyCodesFromCtx(ctx)
@@ -92,32 +124,129 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 		return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
 	}
 
-	// Adjust the query to join with entity, bank, currency as needed
-	query := `
-		SELECT 
-			t.value_date, 
-			me.entity_name, 
-			s.account_number, 
-			mb.bank_name, 
-			mba.currency, 
-			c.category_name, 
-			c.category_type, 
-			t.description, 
-			t.withdrawal_amount, 
-			t.deposit_amount
-		FROM cimplrcorpsaas.bank_statement_transactions t
-		LEFT JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
-		JOIN public.masterbankaccount mba ON t.account_number = mba.account_number AND mba.is_deleted = false
-		JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
-		LEFT JOIN public.mastercashflowcategory c ON t.category_id = c.category_id
-		LEFT JOIN public.masterentitycash me ON s.entity_id = me.entity_id
-		WHERE s.entity_id = ANY($1)
-		  AND s.account_number = ANY($2)
-		  AND lower(trim(mb.bank_name)) = ANY($3)
-		  AND upper(trim(mba.currency)) = ANY($4)
-		ORDER BY t.value_date DESC
-	`
-	rows, err := db.QueryContext(ctx, query, pq.Array(allowedEntityIDs), pq.Array(allowedAccountNumbers), pq.Array(normBanks), pq.Array(normCurrencies))
+	effectiveEntityIDs := allowedEntityIDs
+	entityF := strings.TrimSpace(q.Get("entity"))
+	if entityF != "" {
+		if !api.IsEntityAllowed(ctx, entityF) {
+			return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+		}
+		eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
+		if !ok {
+			return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+		}
+		effectiveEntityIDs = []string{eid}
+	}
+
+	effectiveNormBanks := normBanks
+	var filterBankID interface{}
+	bankF := strings.TrimSpace(q.Get("bank"))
+	if bankF != "" {
+		if !api.IsBankAllowed(ctx, bankF) {
+			return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+		}
+		if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+			filterBankID = bid
+		} else {
+			bn, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
+			if !ok {
+				return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+			}
+			effectiveNormBanks = []string{bn}
+		}
+	}
+
+	effectiveNormCurrencies := normCurrencies
+	currencyF := strings.TrimSpace(q.Get("currency"))
+	if currencyF != "" {
+		if !api.IsCurrencyAllowed(ctx, currencyF) {
+			return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+		}
+		cc, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
+		if !ok {
+			return nil, fmt.Errorf(constants.ErrNoAccessibleBusinessUnit)
+		}
+		effectiveNormCurrencies = []string{cc}
+	}
+
+	fromD := strings.TrimSpace(q.Get("from_date"))
+	toD := strings.TrimSpace(q.Get("to_date"))
+	asOn := strings.TrimSpace(q.Get("as_on_date"))
+	if asOn != "" && toD == "" {
+		toD = asOn
+	}
+	const dashboardFromMin = "1970-01-01"
+	if toD != "" && fromD == "" {
+		fromD = dashboardFromMin
+	}
+
+	args := []interface{}{
+		pq.Array(effectiveEntityIDs),
+		pq.Array(allowedAccountNumbers),
+		pq.Array(effectiveNormBanks),
+		pq.Array(effectiveNormCurrencies),
+	}
+	argN := 5
+	extra := ""
+	if filterBankID != nil {
+		extra += fmt.Sprintf(" AND mba.bank_id = $%d", argN)
+		args = append(args, filterBankID)
+		argN++
+	}
+	if fromD != "" {
+		extra += fmt.Sprintf(" AND COALESCE(t.transaction_date, t.value_date) >= $%d::date", argN)
+		args = append(args, fromD)
+		argN++
+	}
+	if toD != "" {
+		extra += fmt.Sprintf(" AND COALESCE(t.transaction_date, t.value_date) <= $%d::date", argN)
+		args = append(args, toD)
+		argN++
+	}
+
+	baseSQL := `
+SELECT
+	COALESCE(t.transaction_date, t.value_date) AS value_date,
+	COALESCE(me.entity_name, '') AS entity_name,
+	COALESCE(mb.bank_name, '') AS bank_name,
+	COALESCE(mba.currency, '') AS currency,
+	c.category_name,
+	c.category_type,
+	COALESCE(t.description, '') AS description,
+	t.withdrawal_amount,
+	t.deposit_amount
+FROM cimplrcorpsaas.bank_statement_transactions t
+JOIN cimplrcorpsaas.bank_statements s ON t.bank_statement_id = s.bank_statement_id
+JOIN public.masterbankaccount mba
+	ON t.account_number = mba.account_number
+	AND mba.entity_id = s.entity_id
+	AND mba.is_deleted = false
+JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
+LEFT JOIN public.mastercashflowcategory c ON t.category_id = c.category_id
+LEFT JOIN public.masterentitycash me ON s.entity_id = me.entity_id
+JOIN (
+	SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+	FROM cimplrcorpsaas.auditactionbankstatement
+	ORDER BY bankstatementid, requested_at DESC
+) ap ON ap.bankstatementid = s.bank_statement_id AND ap.processing_status = 'APPROVED'
+WHERE s.entity_id = ANY($1)
+  AND s.account_number = ANY($2)
+  AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
+  AND upper(trim(mba.currency)) = ANY($4)` + extra
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE _ctp_pool ON COMMIT DROP AS `+baseSQL, args...); err != nil {
+		return nil, fmt.Errorf("materialize pool: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+SELECT value_date, entity_name, bank_name, currency, category_name, category_type, description, withdrawal_amount, deposit_amount
+FROM _ctp_pool
+ORDER BY value_date DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}
@@ -126,13 +255,11 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 	var result []ConsolidatedTransactionPool
 	for rows.Next() {
 		var r TransactionDBRow
-		var entity, bank, currency sql.NullString
 		err := rows.Scan(
 			&r.ValueDate,
-			&entity,
+			&r.Entity,
 			&r.Bank,
-			&bank,
-			&currency,
+			&r.Currency,
 			&r.Category,
 			&r.CategoryType,
 			&r.Description,
@@ -142,7 +269,6 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 		if err != nil {
 			return nil, fmt.Errorf("scan error: %w", err)
 		}
-		// Determine type and amount
 		var typ, amt string
 		if r.WithdrawalAmount.Valid && r.WithdrawalAmount.Float64 > 0 {
 			typ = "debit"
@@ -157,16 +283,20 @@ func FetchConsolidatedTransactionPool(ctx context.Context, db *sql.DB) ([]Consol
 
 		result = append(result, ConsolidatedTransactionPool{
 			Date:      r.ValueDate.Format(constants.DateFormat),
-			Entity:    entity.String,
-			Bank:      bank.String,
-			Currency:  currency.String,
+			Entity:    r.Entity,
+			Bank:      r.Bank,
+			Currency:  r.Currency,
 			Category:  nullToString(r.Category),
 			Type:      typ,
 			Amount:    amt,
 			Narration: r.Description,
 		})
-		// nullToString safely converts sql.NullString to string
-
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
 	}
 	return result, nil
 }

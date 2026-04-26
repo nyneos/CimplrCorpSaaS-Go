@@ -574,12 +574,15 @@ func processSingleFilePreviewFlat(ctx context.Context, db *sql.DB, fileBytes []b
 		}
 
 	// Skip non-transaction rows — check first cell AND the description column.
-	// Note: "balance brought forward" / "balance carried forward" are real transactions, NOT skipped.
+	// "balance brought forward", "balance carried forward", "b/f", "balance b/f", "balance c/f"
+	// are real transactions and must NOT be skipped — they establish the period opening balance.
 	nonTxnKeywords := []string{
 		"call 1800", "write to us", "closing balance", "opening balance",
-		"toll free", "balance b/f", "balance c/f",
+		"toll free",
 		"new balance", "new val",
 		"avl", "avil", "available balance",
+		"page total", "statement total", "grand total",
+		"total debit", "total credit", "total withdrawals", "total deposits",
 	}
 		skipRow := false
 		// Build candidate cells: always include row[0]; also include description column if mapped
@@ -860,12 +863,23 @@ func parseAmount(s string) (float64, error) {
 	if s == "" || s == "-" {
 		return 0, nil
 	}
-
 	s = strings.ReplaceAll(s, ",", "")
 	s = strings.ReplaceAll(s, "₹", "")
 	s = strings.ReplaceAll(s, "$", "")
 	s = strings.TrimSpace(s)
-
+	// Strip trailing Cr/Dr indicator (e.g. ICICI: "53,90,593.75 Cr")
+	lc := strings.ToLower(s)
+	switch {
+	case strings.HasSuffix(lc, " cr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(lc, " dr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case len(s) > 2 && strings.HasSuffix(lc, "cr") && lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9':
+		s = strings.TrimSpace(s[:len(s)-2])
+	case len(s) > 2 && strings.HasSuffix(lc, "dr") && lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9':
+		s = strings.TrimSpace(s[:len(s)-2])
+	}
+	s = strings.TrimSpace(s)
 	return strconv.ParseFloat(s, 64)
 }
 

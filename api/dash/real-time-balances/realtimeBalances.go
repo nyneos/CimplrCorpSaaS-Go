@@ -1,12 +1,14 @@
 package realtimebalances
 
 import (
+	"bytes"
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -164,6 +166,39 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		entity := strings.TrimSpace(r.URL.Query().Get("entity"))
 		bank := strings.TrimSpace(r.URL.Query().Get("bank"))
 		currency := strings.TrimSpace(r.URL.Query().Get("currency"))
+		asOnDate := strings.TrimSpace(r.URL.Query().Get("as_on_date"))
+
+		// POST (and some clients) send filters only in JSON body; query string may be empty → wrong snapshot date.
+		if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			var body map[string]any
+			if json.Unmarshal(bodyBytes, &body) == nil {
+				if asOnDate == "" {
+					for _, k := range []string{"as_on_date", "asOnDate", "snapshot_date", "snapshotDate"} {
+						if v, ok := body[k].(string); ok && strings.TrimSpace(v) != "" {
+							asOnDate = strings.TrimSpace(v)
+							break
+						}
+					}
+				}
+				if entity == "" {
+					if v, ok := body["entity"].(string); ok {
+						entity = strings.TrimSpace(v)
+					}
+				}
+				if bank == "" {
+					if v, ok := body["bank"].(string); ok {
+						bank = strings.TrimSpace(v)
+					}
+				}
+				if currency == "" {
+					if v, ok := body["currency"].(string); ok {
+						currency = strings.TrimSpace(v)
+					}
+				}
+			}
+		}
+
 		if entity != "" && !api.IsEntityAllowed(ctx, entity) {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
@@ -176,46 +211,103 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 			return
 		}
-		bankNorm := strings.ToLower(strings.TrimSpace(bank))
-		currencyNorm := strings.ToUpper(strings.TrimSpace(currency))
+		bankNorm := ""
+		if bank != "" {
+			bn, ok := api.ResolveBankNameNormForFilter(ctx, bank)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
+			bankNorm = bn
+		}
+		currencyNorm := ""
+		if currency != "" {
+			cc, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currency)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
+			currencyNorm = cc
+		}
 
-		approvedBalancesCTETmpl := `
-			WITH approved_balances AS (
-				SELECT b.*, mba.entity_id
-				FROM bank_balances_manual b
-				JOIN LATERAL (
-					SELECT aa.*
-					FROM auditactionbankbalances aa
-					WHERE aa.balance_id = b.balance_id
-					ORDER BY aa.requested_at DESC
-					LIMIT 1
-				) latest_audit ON latest_audit.processing_status = 'APPROVED'
-				JOIN public.masterbankaccount mba
-					ON b.account_no = mba.account_number
-					AND mba.is_deleted = false
-				WHERE b.account_no = ANY($1)
-					AND mba.entity_id = ANY($2)
-					AND lower(trim(COALESCE(b.bank_name, ''))) = ANY($3)
-					AND upper(trim(COALESCE(b.currency_code, ''))) = ANY($4)
-					%s
-			)
+		// Snapshot date: balances are derived from the last running balance on approved
+		// bank-statement transactions on or before this date (not bank_balances_manual).
+		evalAsOn := strings.TrimSpace(asOnDate)
+		if evalAsOn == "" {
+			evalAsOn = time.Now().Format(constants.DateFormat)
+		}
+		if _, err := time.Parse(constants.DateFormat, evalAsOn); err != nil {
+			http.Error(w, fmt.Sprintf(constants.ErrInvalidDateFormat, "as_on_date"), http.StatusBadRequest)
+			return
+		}
+
+		// Warm snapshot: one scan of approved statement transactions (not bank_balances_manual).
+		// $1 accounts, $2 entities, $3 bank norms, $4 currency norms, $5 as-on date inclusive
+		warmTxSelectTmpl := `
+			SELECT
+				bs.entity_id,
+				mba.account_number AS account_no,
+				COALESCE(NULLIF(LTRIM(TRIM(mba.account_number), '0'), ''), '0') AS acct_key,
+				COALESCE(mba.bank_name, mb.bank_name, '') AS bank_name,
+				upper(trim(COALESCE(mba.currency, ''))) AS currency_code,
+				tx.transaction_id,
+				(COALESCE(tx.transaction_date, tx.value_date))::date AS eff_date,
+				COALESCE(tx.transaction_date, tx.value_date) AS eff_ts,
+				COALESCE(tx.balance, 0)::float8 AS run_balance,
+				COALESCE(tx.deposit_amount, 0)::float8 AS dep_amt,
+				COALESCE(tx.withdrawal_amount, 0)::float8 AS wd_amt,
+				COALESCE(tx.description, '') AS description,
+				tx.category_id
+			FROM cimplrcorpsaas.bank_statement_transactions tx
+			INNER JOIN cimplrcorpsaas.bank_statements bs ON tx.bank_statement_id = bs.bank_statement_id
+			INNER JOIN public.masterbankaccount mba ON bs.account_number = mba.account_number AND COALESCE(mba.is_deleted, false) = false
+			INNER JOIN public.masterbank mb ON mba.bank_id = mb.bank_id
+			INNER JOIN (
+				SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+				FROM cimplrcorpsaas.auditactionbankstatement
+				ORDER BY bankstatementid, requested_at DESC
+			) a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
+			WHERE bs.account_number = ANY($1)
+				AND bs.entity_id = ANY($2)
+				AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
+				AND upper(trim(COALESCE(mba.currency, ''))) = ANY($4)
+				AND (COALESCE(tx.transaction_date, tx.value_date))::date <= $5::date
+				%s
 		`
 
 		extraFilters := make([]string, 0, 3)
-		args := []interface{}{pq.Array(allowedAccountNumbers), pq.Array(allowedEntityIDs), pq.Array(allowedBanksNorm), pq.Array(allowedCurrenciesNorm)}
-		argIdx := 5
+		args := []interface{}{
+			pq.Array(allowedAccountNumbers),
+			pq.Array(allowedEntityIDs),
+			pq.Array(allowedBanksNorm),
+			pq.Array(allowedCurrenciesNorm),
+			evalAsOn,
+		}
+		argIdx := 6
 		if entity != "" {
+			eid, ok := api.ResolveEntityIDForFilter(ctx, entity)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			extraFilters = append(extraFilters, "mba.entity_id = $"+strconv.Itoa(argIdx))
-			args = append(args, entity)
+			args = append(args, eid)
 			argIdx++
 		}
-		if bankNorm != "" {
-			extraFilters = append(extraFilters, "lower(trim(COALESCE(b.bank_name, ''))) = $"+strconv.Itoa(argIdx))
-			args = append(args, bankNorm)
-			argIdx++
+		if bank != "" {
+			// Prefer bank_id: many accounts share the same display name (e.g. "ICICI Bank") under different bank_id.
+			if bid, ok := api.ResolveBankIDForFilter(ctx, bank); ok {
+				extraFilters = append(extraFilters, "mba.bank_id = $"+strconv.Itoa(argIdx))
+				args = append(args, bid)
+				argIdx++
+			} else if bankNorm != "" {
+				extraFilters = append(extraFilters, "lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = $"+strconv.Itoa(argIdx))
+				args = append(args, bankNorm)
+				argIdx++
+			}
 		}
 		if currencyNorm != "" {
-			extraFilters = append(extraFilters, "upper(trim(COALESCE(b.currency_code, ''))) = $"+strconv.Itoa(argIdx))
+			extraFilters = append(extraFilters, "upper(trim(COALESCE(mba.currency, ''))) = $"+strconv.Itoa(argIdx))
 			args = append(args, currencyNorm)
 			argIdx++
 		}
@@ -223,16 +315,121 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		if len(extraFilters) > 0 {
 			extraWhere = " AND " + strings.Join(extraFilters, " AND ")
 		}
-		approvedBalancesCTE := fmt.Sprintf(approvedBalancesCTETmpl, extraWhere)
+		warmTxSelect := fmt.Sprintf(warmTxSelectTmpl, extraWhere)
 
-		// Build old-style response structures for backward compatibility
+		const tempTx = "_rtb_kpi_tx"
+		const tempAb = "_rtb_kpi_ab"
+
+		txn, err := db.BeginTx(ctx, &sql.TxOptions{})
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = txn.Rollback()
+			}
+		}()
+
+		_, err = txn.ExecContext(ctx, `DROP TABLE IF EXISTS `+tempTx+`; DROP TABLE IF EXISTS `+tempAb)
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_, err = txn.ExecContext(ctx, `CREATE TEMP TABLE `+tempTx+` ON COMMIT DROP AS `+warmTxSelect, args...)
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Latest row per (entity, account, currency) on or before as_on_date: ROW_NUMBER so ordering is
+		// deterministic (eff_date, eff_ts, transaction_id). Do not aggregate balances.
+		approvedFromTempSQL := `
+			CREATE TEMP TABLE ` + tempAb + ` ON COMMIT DROP AS
+			WITH tx_scoped AS (SELECT * FROM ` + tempTx + `),
+			closing_pick AS (
+				SELECT entity_id, bank_name, currency_code, account_no, acct_key, closing_balance, as_of_date
+				FROM (
+					SELECT
+						entity_id,
+						bank_name,
+						currency_code,
+						account_no,
+						acct_key,
+						run_balance AS closing_balance,
+						eff_date AS as_of_date,
+						ROW_NUMBER() OVER (
+							PARTITION BY entity_id, acct_key, currency_code
+							ORDER BY eff_date DESC, eff_ts DESC, transaction_id DESC
+						) AS rn
+					FROM tx_scoped
+				) z WHERE rn = 1
+			),
+			opening_pick AS (
+				SELECT entity_id, acct_key, currency_code, opening_balance
+				FROM (
+					SELECT
+						entity_id,
+						acct_key,
+						currency_code,
+						run_balance AS opening_balance,
+						ROW_NUMBER() OVER (
+							PARTITION BY entity_id, acct_key, currency_code
+							ORDER BY eff_date DESC, eff_ts DESC, transaction_id DESC
+						) AS rn
+					FROM tx_scoped
+					WHERE eff_date < $1::date
+				) z WHERE rn = 1
+			),
+			first_txn_opening AS (
+				SELECT entity_id, acct_key, currency_code, derived_opening
+				FROM (
+					SELECT
+						entity_id,
+						acct_key,
+						currency_code,
+						(run_balance - COALESCE(dep_amt, 0) + COALESCE(wd_amt, 0))::float8 AS derived_opening,
+						ROW_NUMBER() OVER (
+							PARTITION BY entity_id, acct_key, currency_code
+							ORDER BY eff_ts ASC, transaction_id ASC
+						) AS rn
+					FROM tx_scoped
+					WHERE eff_date = $1::date
+				) z WHERE rn = 1
+			)
+			SELECT
+				c.entity_id,
+				c.bank_name,
+				c.currency_code,
+				c.account_no AS account_no,
+				COALESCE(o.opening_balance, f.derived_opening, 0)::float8 AS opening_balance,
+				c.closing_balance::float8 AS closing_balance,
+				c.as_of_date
+			FROM closing_pick c
+			LEFT JOIN opening_pick o
+				ON o.entity_id = c.entity_id
+				AND o.acct_key = c.acct_key
+				AND o.currency_code = c.currency_code
+			LEFT JOIN first_txn_opening f
+				ON f.entity_id = c.entity_id
+				AND f.acct_key = c.acct_key
+				AND f.currency_code = c.currency_code
+		`
+		_, err = txn.ExecContext(ctx, approvedFromTempSQL, evalAsOn)
+		if err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Build old-style response structures — all reads hit small temp tables (no repeated base joins).
 		varianceBars := []VarianceBar{}
-		vbRows, err := db.QueryContext(ctx, approvedBalancesCTE+`
-			SELECT mec.entity_name, COALESCE(b.bank_name,'') AS bank_name, COALESCE(SUM(b.closing_balance),0) as value
-			FROM approved_balances b
+		vbRows, err := txn.QueryContext(ctx, `
+			SELECT mec.entity_name, COALESCE(b.bank_name,'') AS bank_name, COALESCE(SUM(b.closing_balance),0) AS value
+			FROM `+tempAb+` b
 			JOIN public.masterentitycash mec ON b.entity_id = mec.entity_id
-			GROUP BY mec.entity_name, bank_name
-			ORDER BY value DESC`, args...)
+			GROUP BY mec.entity_name, b.bank_name
+			ORDER BY value DESC`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -247,11 +444,11 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		vbRows.Close()
 
 		donutSlices := []DonutSlice{}
-		dRows, err := db.QueryContext(ctx, approvedBalancesCTE+`
-			SELECT currency_code, COALESCE(SUM(closing_balance),0) as value
-			FROM approved_balances
+		dRows, err := txn.QueryContext(ctx, `
+			SELECT currency_code, COALESCE(SUM(closing_balance),0) AS value
+			FROM `+tempAb+`
 			GROUP BY currency_code
-			ORDER BY value DESC`, args...)
+			ORDER BY value DESC`)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -266,7 +463,7 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		dRows.Close()
 
 		entityRows := []EntityRow{}
-		eRows, err := db.QueryContext(ctx, approvedBalancesCTE+`
+		eRows, err := txn.QueryContext(ctx, `
 			SELECT
 				b.entity_id,
 				mec.entity_name,
@@ -274,10 +471,10 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 				COALESCE(b.currency_code,'INR') AS currency_code,
 				COALESCE(SUM(b.opening_balance),0) AS opening,
 				COALESCE(SUM(b.closing_balance),0) AS closing
-			FROM approved_balances b
+			FROM `+tempAb+` b
 			JOIN public.masterentitycash mec ON b.entity_id = mec.entity_id
-			GROUP BY b.entity_id, mec.entity_name, bank_name, currency_code
-			ORDER BY mec.entity_name, bank_name, currency_code`, args...)
+			GROUP BY b.entity_id, mec.entity_name, b.bank_name, b.currency_code
+			ORDER BY mec.entity_name, b.bank_name, b.currency_code`)
 		if err == nil {
 			for eRows.Next() {
 				var id, entityName, bankName, ccy string
@@ -297,12 +494,12 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			"JPY": "#e64a19",
 		}
 		topCurrencies := []TopCurrency{}
-		tcRows, err := db.QueryContext(ctx, approvedBalancesCTE+`
-			SELECT currency_code, COALESCE(SUM(closing_balance),0) as amount
-			FROM approved_balances
+		tcRows, err := txn.QueryContext(ctx, `
+			SELECT currency_code, COALESCE(SUM(closing_balance),0) AS amount
+			FROM `+tempAb+`
 			GROUP BY currency_code
 			ORDER BY amount DESC
-			LIMIT 5`, args...)
+			LIMIT 5`)
 		if err == nil {
 			for tcRows.Next() {
 				var code string
@@ -321,19 +518,19 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		// Build new Trends structure
 		trends := []Trend{}
 
-		aggSQL := approvedBalancesCTE + `
+		aggSQL := `
 			SELECT
 				mec.entity_name,
 				COALESCE(b.bank_name,'') AS bank_name,
 				COALESCE(b.currency_code,'INR') AS currency_code,
 				COALESCE(SUM(b.opening_balance),0) AS opening,
 				COALESCE(SUM(b.closing_balance),0) AS closing
-			FROM approved_balances b
+			FROM ` + tempAb + ` b
 			JOIN public.masterentitycash mec ON b.entity_id = mec.entity_id
-			GROUP BY mec.entity_name, bank_name, currency_code
-			ORDER BY mec.entity_name, bank_name, currency_code`
+			GROUP BY mec.entity_name, b.bank_name, b.currency_code
+			ORDER BY mec.entity_name, b.bank_name, b.currency_code`
 
-		aggRows, err := db.QueryContext(ctx, aggSQL, args...)
+		aggRows, err := txn.QueryContext(ctx, aggSQL)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
@@ -360,46 +557,38 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		}
 		aggRows.Close()
 
-		// Attach transaction-level rows (like categorywise) to each trend.
-		trendTxnSQL := approvedBalancesCTE + `
-			, tx_rows AS (
+		// Trend lines: read only from temp tx snapshot; join approved rows on entity + account + currency.
+		trendTxnSQL := `
+			WITH tx_rows AS (
 				SELECT
 					mec.entity_name,
 					COALESCE(ab.bank_name,'') AS bank_name,
 					COALESCE(ab.currency_code,'INR') AS currency_code,
-					COALESCE(tx.transaction_date, tx.value_date) AS dt,
-					tx.transaction_id,
-					COALESCE((tx.balance - COALESCE(tx.deposit_amount,0) + COALESCE(tx.withdrawal_amount,0)),0) AS opening_balance,
-					COALESCE(tx.deposit_amount,0) AS inflow,
-					COALESCE(tx.withdrawal_amount,0) AS outflow,
-					COALESCE(tx.balance,0) AS closing_balance,
-					COALESCE(tx.description,'') AS narration,
-					CASE WHEN tx.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(tc.category_name,'') END AS category,
+					ts.eff_ts AS dt,
+					ts.transaction_id,
+					COALESCE((ts.run_balance - ts.dep_amt + ts.wd_amt), 0) AS opening_balance,
+					ts.dep_amt AS inflow,
+					ts.wd_amt AS outflow,
+					ts.run_balance AS closing_balance,
+					ts.description AS narration,
+					CASE WHEN ts.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(tc.category_name,'') END AS category,
 					row_number() OVER (
-						PARTITION BY mec.entity_name, COALESCE(ab.bank_name,''), COALESCE(ab.currency_code,'INR')
-						ORDER BY COALESCE(tx.transaction_date, tx.value_date) DESC, tx.transaction_id DESC
+						PARTITION BY ts.entity_id, ts.account_no, ts.currency_code
+						ORDER BY ts.eff_ts DESC, ts.transaction_id DESC
 					) AS rn
-				FROM approved_balances ab
-				JOIN public.masterentitycash mec
-					ON ab.entity_id = mec.entity_id
-				JOIN cimplrcorpsaas.bank_statements bs
-					ON bs.entity_id = ab.entity_id
-					AND COALESCE(NULLIF(ltrim(trim(bs.account_number), '0'), ''), '0') = COALESCE(NULLIF(ltrim(trim(ab.account_no), '0'), ''), '0')
-				JOIN (
-					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-					FROM cimplrcorpsaas.auditactionbankstatement
-					ORDER BY bankstatementid, requested_at DESC
-				) a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
-				JOIN cimplrcorpsaas.bank_statement_transactions tx
-					ON tx.bank_statement_id = bs.bank_statement_id
-				LEFT JOIN public.mastercashflowcategory tc
-					ON tx.category_id = tc.category_id
+				FROM ` + tempAb + ` ab
+				JOIN public.masterentitycash mec ON ab.entity_id = mec.entity_id
+				JOIN ` + tempTx + ` ts ON ts.entity_id = ab.entity_id
+					AND ts.account_no = ab.account_no
+					AND ts.currency_code = ab.currency_code
+				LEFT JOIN public.mastercashflowcategory tc ON ts.category_id = tc.category_id
 			)
 			SELECT
 				entity_name,
 				bank_name,
 				currency_code,
 				dt,
+				transaction_id,
 				opening_balance,
 				inflow,
 				outflow,
@@ -410,16 +599,18 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			WHERE rn <= 200
 			ORDER BY entity_name, bank_name, currency_code, dt DESC, transaction_id DESC`
 
-		trendTxnRows, err := db.QueryContext(ctx, trendTxnSQL, args...)
+		trendTxnRows, err := txn.QueryContext(ctx, trendTxnSQL)
 		if err == nil {
 			stmtsByKey := map[string][]AccountStatement{}
 			for trendTxnRows.Next() {
 				var entityName, bankName, ccy, narration, category string
 				var dt time.Time
+				var txnID int64
 				var opening, inflow, outflow, closing float64
-				if err := trendTxnRows.Scan(&entityName, &bankName, &ccy, &dt, &opening, &inflow, &outflow, &closing, &narration, &category); err != nil {
+				if err := trendTxnRows.Scan(&entityName, &bankName, &ccy, &dt, &txnID, &opening, &inflow, &outflow, &closing, &narration, &category); err != nil {
 					continue
 				}
+				_ = txnID
 				key := entityName + "_" + bankName + "_" + ccy
 				stmt := AccountStatement{
 					Date:           dt.Format(constants.DateFormat),
@@ -442,63 +633,51 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 		}
 
 		var kpi Kpi
-		row := db.QueryRowContext(ctx, approvedBalancesCTE+`SELECT COALESCE(SUM(closing_balance),0) FROM approved_balances`, args...)
-		_ = row.Scan(&kpi.TotalBalance)
-		row = db.QueryRowContext(ctx, approvedBalancesCTE+`SELECT COALESCE(SUM(opening_balance),0), COALESCE(SUM(closing_balance),0) FROM approved_balances`, args...)
-		_ = row.Scan(&kpi.Opening, &kpi.Closing)
-		kpi.Delta = kpi.Closing - kpi.Opening
-		// Day change based on today's net transactions vs yesterday's closing balance.
 		var dayChangeAbs, yesterdayClosing float64
-		dayChangeSQL := approvedBalancesCTE + `
-			, yesterday AS (
-				SELECT SUM(closing_balance) AS closing
-				FROM approved_balances
-				WHERE as_of_date = CURRENT_DATE - INTERVAL '1 day'
-			),
-			today_tx AS (
-				SELECT
-					COALESCE(SUM(tx.deposit_amount), 0) AS inflow,
-					COALESCE(SUM(tx.withdrawal_amount), 0) AS outflow
-				FROM cimplrcorpsaas.bank_statements bs
-				JOIN approved_balances ab
-					ON COALESCE(NULLIF(ltrim(trim(bs.account_number),'0'),''),'0') = COALESCE(NULLIF(ltrim(trim(ab.account_no),'0'),''),'0')
-				JOIN cimplrcorpsaas.bank_statement_transactions tx
-					ON tx.bank_statement_id = bs.bank_statement_id
-				JOIN (
-					SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-					FROM cimplrcorpsaas.auditactionbankstatement
-					ORDER BY bankstatementid, requested_at DESC
-				) a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
-				WHERE COALESCE(tx.transaction_date, tx.value_date) = CURRENT_DATE
-			)
+		kpiRow := txn.QueryRowContext(ctx, `
 			SELECT
-				COALESCE(t.inflow, 0) - COALESCE(t.outflow, 0) AS day_change_abs,
-				COALESCE(y.closing, 0) AS yesterday_closing
-			FROM (SELECT 1) dummy
-			LEFT JOIN today_tx t ON true
-			LEFT JOIN yesterday y ON true
-		`
-		if err := db.QueryRowContext(ctx, dayChangeSQL, args...).Scan(&dayChangeAbs, &yesterdayClosing); err == nil {
-			kpi.DayChangeAbs = dayChangeAbs
-			if yesterdayClosing > 0 {
-				kpi.DayChangePct = (dayChangeAbs / yesterdayClosing) * 100
-			} else {
-				kpi.DayChangePct = 0
-			}
+				COALESCE((SELECT SUM(closing_balance) FROM `+tempAb+`), 0),
+				COALESCE((SELECT SUM(opening_balance) FROM `+tempAb+`), 0),
+				COALESCE((SELECT SUM(closing_balance) FROM `+tempAb+`), 0),
+				COALESCE((SELECT COUNT(DISTINCT account_no) FROM `+tempAb+`), 0),
+				COALESCE((SELECT SUM(dep_amt - wd_amt) FROM `+tempTx+` WHERE eff_date = $1::date), 0),
+				COALESCE((
+					SELECT SUM(run_balance) FROM (
+						SELECT run_balance,
+							ROW_NUMBER() OVER (
+								PARTITION BY entity_id, acct_key, currency_code
+								ORDER BY eff_date DESC, eff_ts DESC, transaction_id DESC
+							) AS rn
+						FROM `+tempTx+`
+						WHERE eff_date < $1::date
+					) s WHERE rn = 1
+				), 0)
+		`, evalAsOn)
+		var acctCnt int64
+		if err := kpiRow.Scan(&kpi.TotalBalance, &kpi.Opening, &kpi.Closing, &acctCnt, &dayChangeAbs, &yesterdayClosing); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		kpi.Delta = kpi.Closing - kpi.Opening
+		kpi.DayChangeAbs = dayChangeAbs
+		if yesterdayClosing != 0 {
+			kpi.DayChangePct = (dayChangeAbs / yesterdayClosing) * 100
+		} else {
+			kpi.DayChangePct = 0
 		}
 		if entity != "" {
 			kpi.ActiveEntities = 1
 		} else {
 			kpi.ActiveEntities = len(allowedEntityIDs)
 		}
-		row = db.QueryRowContext(ctx, approvedBalancesCTE+`SELECT COUNT(DISTINCT account_no) FROM approved_balances`, args...)
-		_ = row.Scan(&kpi.BankAccounts)
+		kpi.BankAccounts = int(acctCnt)
 
 		// Build simple account-level balances with statements (one level of nesting)
 		accountBalances := []AccountBalance{}
-		accountIndex := map[string]int{} // For O(1) statement attachment
+		// Key: entity_id + normalized account (same account number can exist under different entities).
+		accountIndex := map[string]int{}
 
-		abSQL := approvedBalancesCTE + `
+		abSQL := `
 			SELECT
 				b.entity_id,
 				mec.entity_name,
@@ -507,11 +686,11 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 				COALESCE(b.currency_code,'INR') AS currency_code,
 				COALESCE(b.opening_balance,0) AS opening,
 				COALESCE(b.closing_balance,0) AS closing
-			FROM approved_balances b
+			FROM ` + tempAb + ` b
 			JOIN public.masterentitycash mec ON b.entity_id = mec.entity_id
-			ORDER BY mec.entity_name, bank_name, b.account_no`
+			ORDER BY mec.entity_name, b.bank_name, b.account_no`
 
-		abRows, err := db.QueryContext(ctx, abSQL, args...)
+		abRows, err := txn.QueryContext(ctx, abSQL)
 		if err == nil {
 			for abRows.Next() {
 				var entityID, entityName, bankName, accountNo, ccy string
@@ -534,49 +713,42 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 				// Index for fast lookup - normalize account number
 				normalizedAcctNo := normalizeAccountNumber(accountNo)
 				if normalizedAcctNo != "" {
-					accountIndex[normalizedAcctNo] = len(accountBalances) - 1
+					accountIndex[entityID+"\x1f"+normalizedAcctNo] = len(accountBalances) - 1
 				}
 			}
 			abRows.Close()
 		}
 
-		// Attach daily statements to accounts - drive from the SAME approved_balances set
-		stmtSQL2 := approvedBalancesCTE + `
+		stmtSQL2 := `
 			SELECT
-				bs.account_number,
-				COALESCE(tx.transaction_date, tx.value_date) AS date,
-				COALESCE((tx.balance - COALESCE(tx.deposit_amount,0) + COALESCE(tx.withdrawal_amount,0)),0) AS opening_balance,
-				COALESCE(tx.deposit_amount,0) AS inflow,
-				COALESCE(tx.withdrawal_amount,0) AS outflow,
-				COALESCE(tx.balance,0) AS closing_balance,
-				COALESCE(tx.description,'') AS narration,
-				CASE WHEN tx.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(tc.category_name,'') END AS category
-			FROM cimplrcorpsaas.bank_statements bs
-			JOIN approved_balances ab
-				ON COALESCE(NULLIF(ltrim(trim(bs.account_number), '0'), ''), '0') = COALESCE(NULLIF(ltrim(trim(ab.account_no), '0'), ''), '0')
-			JOIN cimplrcorpsaas.bank_statement_transactions tx
-				ON tx.bank_statement_id = bs.bank_statement_id
-			LEFT JOIN public.mastercashflowcategory tc
-				ON tx.category_id = tc.category_id
-			JOIN (
-				SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
-				FROM cimplrcorpsaas.auditactionbankstatement
-				ORDER BY bankstatementid, requested_at DESC
-			) a ON a.bankstatementid = bs.bank_statement_id AND a.processing_status = 'APPROVED'
-			ORDER BY bs.account_number, COALESCE(tx.transaction_date, tx.value_date) DESC, tx.transaction_id DESC
+				ts.entity_id,
+				ts.account_no,
+				ts.eff_ts AS date,
+				COALESCE((ts.run_balance - ts.dep_amt + ts.wd_amt), 0) AS opening_balance,
+				ts.dep_amt AS inflow,
+				ts.wd_amt AS outflow,
+				ts.run_balance AS closing_balance,
+				ts.description AS narration,
+				CASE WHEN ts.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(tc.category_name,'') END AS category
+			FROM ` + tempTx + ` ts
+			JOIN ` + tempAb + ` ab ON ts.entity_id = ab.entity_id
+				AND ts.account_no = ab.account_no
+				AND ts.currency_code = ab.currency_code
+			LEFT JOIN public.mastercashflowcategory tc ON ts.category_id = tc.category_id
+			ORDER BY ts.account_no, ts.eff_ts DESC, ts.transaction_id DESC
 			LIMIT 5000`
 
-		stmt2Rows, err := db.QueryContext(ctx, stmtSQL2, args...)
+		stmt2Rows, err := txn.QueryContext(ctx, stmtSQL2)
 		if err != nil {
 			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		for stmt2Rows.Next() {
-			var accountNo string
+			var entID, accountNo string
 			var dt time.Time
 			var opening, inflow, outflow, closing float64
 			var narration, category string
-			if err := stmt2Rows.Scan(&accountNo, &dt, &opening, &inflow, &outflow, &closing, &narration, &category); err != nil {
+			if err := stmt2Rows.Scan(&entID, &accountNo, &dt, &opening, &inflow, &outflow, &closing, &narration, &category); err != nil {
 				continue
 			}
 
@@ -591,11 +763,19 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			}
 
 			normalizedAcctNo := normalizeAccountNumber(accountNo)
-			if idx, ok := accountIndex[normalizedAcctNo]; ok {
-				accountBalances[idx].Statements = append(accountBalances[idx].Statements, stmt)
+			if normalizedAcctNo != "" {
+				if idx, ok := accountIndex[entID+"\x1f"+normalizedAcctNo]; ok {
+					accountBalances[idx].Statements = append(accountBalances[idx].Statements, stmt)
+				}
 			}
 		}
 		stmt2Rows.Close()
+
+		if err := txn.Commit(); err != nil {
+			http.Error(w, constants.ErrDBPrefix+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		committed = true
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 

@@ -3,16 +3,42 @@ package categorywisedata
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const (
+	defaultCategorywiseTxnListLimit = 50000
+	maxCategorywiseTxnListLimit     = 100000
+)
+
+func strFromReq(q url.Values, body map[string]any, queryKey string, bodyKeys ...string) string {
+	if s := strings.TrimSpace(q.Get(queryKey)); s != "" {
+		return s
+	}
+	keys := append([]string{queryKey}, bodyKeys...)
+	for _, bk := range keys {
+		if body == nil {
+			break
+		}
+		if v, ok := body[bk].(string); ok {
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
 
 type CategoryAgg struct {
 	Category string  `json:"category"`
@@ -116,24 +142,48 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		var body map[string]any
+		if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			_ = json.Unmarshal(bodyBytes, &body)
+		}
 		q := r.URL.Query()
-		debug := strings.TrimSpace(q.Get("debug")) == "1"
+		debug := strings.TrimSpace(strFromReq(q, body, "debug")) == "1"
 
-		entityF := q.Get("entity")
-		bankF := q.Get("bank")
-		currencyF := q.Get("currency")
-		horizon := q.Get("horizon")
-		fromDateParam := strings.TrimSpace(q.Get("from_date"))
-		toDateParam := strings.TrimSpace(q.Get("to_date"))
-		asOnDate := strings.TrimSpace(q.Get("as_on_date"))
+		entityF := strFromReq(q, body, "entity")
+		bankF := strFromReq(q, body, "bank")
+		currencyF := strFromReq(q, body, "currency")
+		horizon := strFromReq(q, body, "horizon")
+		fromDateParam := strFromReq(q, body, "from_date", "fromDate")
+		toDateParam := strFromReq(q, body, "to_date", "toDate")
+		asOnDate := strFromReq(q, body, "as_on_date", "asOnDate")
 
-		// Resolve date window: from_date+to_date take priority over horizon
+		// Resolve date window:
+		// - explicit from_date + to_date wins
+		// - else as_on_date alone means cumulative through that date (from 1970-01-01, or horizon days before as_on if horizon is set)
+		// - else rolling horizon ending today
+		const dashboardFromMin = "1970-01-01"
 		var fromDate, toDate string
 		if fromDateParam != "" && toDateParam != "" {
 			fromDate = fromDateParam
 			toDate = toDateParam
+		} else if asOnDate != "" {
+			toDate = asOnDate
+			fromDate = dashboardFromMin
+			if fromDateParam != "" {
+				fromDate = fromDateParam
+			} else {
+				days, err := strconv.Atoi(horizon)
+				if err != nil || days <= 0 {
+					days = 0
+				}
+				if days > 0 {
+					if t, err := time.Parse(constants.DateFormat, toDate); err == nil {
+						fromDate = t.AddDate(0, 0, -(days - 1)).Format(constants.DateFormat)
+					}
+				}
+			}
 		} else {
-			// dynamic horizon (any positive integer, default 30)
 			days, err := strconv.Atoi(horizon)
 			if err != nil || days <= 0 {
 				days = 30
@@ -142,9 +192,22 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			fromDate = time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
 		}
 
-		// as_on_date: defaults to toDate if not provided
+		// KPI balance window upper bound tracks transaction window end
 		if asOnDate == "" {
 			asOnDate = toDate
+		}
+
+		txnLimit := defaultCategorywiseTxnListLimit
+		if raw := strings.TrimSpace(strFromReq(q, body, "txn_limit", "txnLimit")); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil {
+				if n < 1 {
+					n = 1
+				}
+				if n > maxCategorywiseTxnListLimit {
+					n = maxCategorywiseTxnListLimit
+				}
+				txnLimit = n
+			}
 		}
 
 		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
@@ -188,8 +251,13 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 				return
 			}
+			eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			filters = append(filters, fmt.Sprintf("bs.entity_id = $%d", arg))
-			args = append(args, entityF)
+			args = append(args, eid)
 			arg++
 		}
 		if bankF != "" {
@@ -197,18 +265,33 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 				return
 			}
-			// bank name may exist on mba.bank_name or masterbank.mb.bank_name
-			filters = append(filters, fmt.Sprintf("(mba.bank_name = $%d OR mb.bank_name = $%d)", arg, arg))
-			args = append(args, bankF)
-			arg++
+			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+				filters = append(filters, fmt.Sprintf("mba.bank_id = $%d", arg))
+				args = append(args, bid)
+				arg++
+			} else {
+				bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
+				if !ok {
+					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					return
+				}
+				filters = append(filters, fmt.Sprintf("(lower(trim(COALESCE(mba.bank_name,''))) = $%d OR lower(trim(COALESCE(mb.bank_name,''))) = $%d)", arg, arg))
+				args = append(args, bankNorm)
+				arg++
+			}
 		}
 		if currencyF != "" {
 			if !api.IsCurrencyAllowed(ctx, currencyF) {
 				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 				return
 			}
-			filters = append(filters, fmt.Sprintf("mba.currency = $%d", arg))
-			args = append(args, currencyF)
+			currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
+			filters = append(filters, fmt.Sprintf("upper(trim(COALESCE(mba.currency,''))) = $%d", arg))
+			args = append(args, currCode)
 			arg++
 		}
 
@@ -328,14 +411,14 @@ LEFT JOIN LATERAL (
   ) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
      AND ap2.processing_status = 'APPROVED'
   WHERE bs2.account_number = x.account_number
+    AND bs2.entity_id = x.entity_id
     AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
+    AND COALESCE(tx.transaction_date, tx.value_date) <= $2::date
 ) stmts ON TRUE
 ORDER BY x.entity_name, x.bank_name, x.account_number;
 `
 
-		// Note: above, the lateral already filters transactions by date using placeholder $1; additional filters
-		// for entity/bank/currency are applied in the outer subquery (x) so entities list is already filtered.
-		// If you want to further restrict transactions inside statements by bank or currency, extend the WHERE accordingly.
+		// Lateral uses $1/$2 for the same from/to window as the outer `whereClause` on transactions.
 
 		entityRows, err := pgxPool.Query(ctx, entitySQL, args...)
 		if err != nil {
@@ -405,7 +488,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	   AND ap.processing_status = 'APPROVED'
 	` + whereClause + `
 	ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
-	LIMIT 2000;
+	LIMIT ` + strconv.Itoa(txnLimit) + `;
 	`
 
 		txnRows, err := pgxPool.Query(ctx, txnSQL, args...)
@@ -463,13 +546,29 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		kArg++
 
 		if bankF != "" {
-			kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = $%d", kArg))
-			kpiArgs = append(kpiArgs, strings.ToLower(strings.TrimSpace(bankF)))
-			kArg++
+			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+				kpiFilters = append(kpiFilters, fmt.Sprintf("mba.bank_id = $%d", kArg))
+				kpiArgs = append(kpiArgs, bid)
+				kArg++
+			} else {
+				bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
+				if !ok {
+					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					return
+				}
+				kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = $%d", kArg))
+				kpiArgs = append(kpiArgs, bankNorm)
+				kArg++
+			}
 		}
 		if currencyF != "" {
+			currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			kpiFilters = append(kpiFilters, fmt.Sprintf("upper(trim(COALESCE(b.currency_code, ''))) = $%d", kArg))
-			kpiArgs = append(kpiArgs, strings.ToUpper(strings.TrimSpace(currencyF)))
+			kpiArgs = append(kpiArgs, currCode)
 			kArg++
 		}
 
@@ -590,7 +689,7 @@ JOIN (
 ` + whereClause + `
 AND COALESCE(t.misclassified_flag, false) = true
 ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
-LIMIT 2000;
+LIMIT ` + strconv.Itoa(txnLimit) + `;
 `
 
 		misclassifiedRows, err := pgxPool.Query(ctx, misclassifiedSQL, args...)
@@ -673,6 +772,7 @@ LIMIT 2000;
 					AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
 					AND upper(trim(COALESCE(mba.currency, ''))) = ANY($4)
 					AND bs.statement_period_end >= $5::date
+					AND bs.statement_period_end <= $6::date
 			`
 			var stmtCount int64
 			if err := pgxPool.QueryRow(ctx, stmtCountSQL,
@@ -681,6 +781,7 @@ LIMIT 2000;
 				allowedBanksNorm,
 				allowedCurrenciesNorm,
 				fromDate,
+				toDate,
 			).Scan(&stmtCount); err != nil {
 				stmtCount = -1
 			}
@@ -689,6 +790,7 @@ LIMIT 2000;
 				"horizon":               horizon,
 				"from_date":             fromDate,
 				"to_date":               toDate,
+				"txn_list_limit":        txnLimit,
 				"entity_filter":         entityF,
 				"bank_filter":           bankF,
 				"currency_filter":        currencyF,

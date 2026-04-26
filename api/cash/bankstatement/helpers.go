@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -155,8 +156,30 @@ func allEmptyRow(row []string) bool {
 }
 
 func cleanAmount(s string) string {
+	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, ",", "")
-	return strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "₹", "")
+	s = strings.ReplaceAll(s, "$", "")
+	s = strings.TrimSpace(s)
+	// Strip trailing Cr/Dr indicator used by some banks (e.g. ICICI: "53,90,593.75 Cr").
+	// For balance columns: "Dr" means overdraft (caller handles sign if needed).
+	// For debit/credit amount columns: the indicator is redundant — value is already positive.
+	lc := strings.ToLower(s)
+	switch {
+	case strings.HasSuffix(lc, " cr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(lc, " dr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case len(s) > 2 && strings.HasSuffix(lc, "cr") && (lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9'):
+		s = strings.TrimSpace(s[:len(s)-2])
+	case len(s) > 2 && strings.HasSuffix(lc, "dr") && (lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9'):
+		s = strings.TrimSpace(s[:len(s)-2])
+	}
+	return s
+}
+
+func isFiniteNumber(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // buildTxnKey creates a stable key used to detect whether a transaction from

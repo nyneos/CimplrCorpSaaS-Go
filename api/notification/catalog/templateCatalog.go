@@ -2386,9 +2386,35 @@ func populateRecipientsOnTx(ctx context.Context, tx pgx.Tx, pgxPool *pgxpool.Poo
 			}
 			rtype, _ := rmap["recipient_type"].(string)
 			var ruser, rrole interface{}
+
+			// Resolve recipient_user_id: if it's an email, look up the internal user ID.
+			// Also accept recipient_email as a fallback key (EXTERNAL callers use it).
+			candidateEmail := ""
 			if s, ok := rmap["recipient_user_id"].(string); ok && s != "" {
-				ruser = s
+				if strings.Contains(s, "@") {
+					candidateEmail = s
+				} else {
+					ruser = s
+				}
 			}
+			if candidateEmail == "" {
+				if s, ok := rmap["recipient_email"].(string); ok && s != "" {
+					candidateEmail = s
+				}
+			}
+			if candidateEmail != "" {
+				var resolvedUID string
+				lookupErr := pgxPool.QueryRow(ctx,
+					`SELECT id::text FROM users WHERE email = $1 LIMIT 1`, candidateEmail,
+				).Scan(&resolvedUID)
+				if lookupErr == nil && resolvedUID != "" {
+					ruser = resolvedUID
+				} else {
+					// External/unknown email — store directly; dispatcher treats it as external.
+					ruser = candidateEmail
+				}
+			}
+
 			if s, ok := rmap["recipient_role"].(string); ok && s != "" {
 				rrole = s
 			}
