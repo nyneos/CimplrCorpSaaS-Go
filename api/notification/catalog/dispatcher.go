@@ -816,26 +816,25 @@ func lookupEvents(ctx context.Context, pool *pgxpool.Pool, sourceRoute string) (
 //	→ any event scoped to any entity in the pool (or global) fires.
 //	→ self-entity match (depth=0) is ranked first, then nearest relatives, then global.
 func lookupEventsForActor(ctx context.Context, pool *pgxpool.Pool, sourceRoute, actorEntity string) ([]resolvedEvent, error) {
+	// Single recursive CTE: PostgreSQL rejects UNION (dedup) between anchor and recursive terms
+	// and can error (42P19) when RECURSIVE is paired with a non-recursive CTE before the working table.
+	// rel_edges is inlined; anchor ∪ recursive uses UNION ALL only.
 	q := `
-		WITH RECURSIVE rel_edges AS (
-			-- Make hierarchy traversal bidirectional using a single edge list.
-			SELECT r.parent_entity_name AS from_entity, r.child_entity_name AS to_entity, 1 AS step
-			FROM cashentityrelationships r
+		WITH RECURSIVE org_pool AS (
+			SELECT mec.entity_name::text AS entity_name, 0 AS depth
+			FROM public.masterentitycash mec
+			WHERE mec.entity_name = $2
+			  AND (mec.is_deleted = false OR mec.is_deleted IS NULL)
 			UNION ALL
-			SELECT r.child_entity_name AS from_entity, r.parent_entity_name AS to_entity, -1 AS step
-			FROM cashentityrelationships r
-		),
-		org_pool AS (
-			-- Anchor: actor's own entity (depth 0).
-			SELECT entity_name, 0 AS depth
-			FROM masterentitycash
-			WHERE entity_name = $2
-			  AND (is_deleted = false OR is_deleted IS NULL)
-			UNION
-			-- Recursive: walk both ways via rel_edges.
-			SELECT e.to_entity AS entity_name, op.depth + e.step AS depth
-			FROM rel_edges e
-			INNER JOIN org_pool op ON op.entity_name = e.from_entity
+			SELECT rel.to_entity::text AS entity_name, op.depth + rel.step AS depth
+			FROM org_pool op
+			INNER JOIN (
+				SELECT r.parent_entity_name AS from_entity, r.child_entity_name AS to_entity, 1 AS step
+				FROM public.cashentityrelationships r
+				UNION ALL
+				SELECT r.child_entity_name AS from_entity, r.parent_entity_name AS to_entity, -1 AS step
+				FROM public.cashentityrelationships r
+			) rel ON rel.from_entity = op.entity_name
 			WHERE ABS(op.depth) < 10
 		)
 		SELECT e.event_id, COALESCE(e.entity_name,'')

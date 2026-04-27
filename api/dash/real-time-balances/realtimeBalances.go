@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -150,6 +151,51 @@ func normalizeAccountNumber(s string) string {
 	return s
 }
 
+// strFromBodyThenQuery returns the first non-empty string from JSON body keys (queryKey + camelCase),
+// else the URL query value for queryKey.
+func strFromBodyThenQuery(body map[string]any, q url.Values, queryKey string) string {
+	if s := strFromBodyKeys(body, queryKey, camelJSONKey(queryKey)); s != "" {
+		return s
+	}
+	return strings.TrimSpace(q.Get(queryKey))
+}
+
+func strFromBodyKeysThenQuery(body map[string]any, q url.Values, queryKey string, bodyKeys ...string) string {
+	if s := strFromBodyKeys(body, bodyKeys...); s != "" {
+		return s
+	}
+	return strings.TrimSpace(q.Get(queryKey))
+}
+
+func strFromBodyKeys(body map[string]any, keys ...string) string {
+	if body == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v, ok := body[k].(string); ok {
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func camelJSONKey(snake string) string {
+	parts := strings.Split(snake, "_")
+	for i := range parts {
+		if parts[i] == "" {
+			continue
+		}
+		if i == 0 {
+			parts[i] = strings.ToLower(parts[i][:1]) + parts[i][1:]
+		} else {
+			parts[i] = strings.ToUpper(parts[i][:1]) + strings.ToLower(parts[i][1:])
+		}
+	}
+	return strings.Join(parts, "")
+}
+
 func GetKpiHandler(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -163,41 +209,18 @@ func GetKpiHandler(db *sql.DB) http.Handler {
 			return
 		}
 
-		entity := strings.TrimSpace(r.URL.Query().Get("entity"))
-		bank := strings.TrimSpace(r.URL.Query().Get("bank"))
-		currency := strings.TrimSpace(r.URL.Query().Get("currency"))
-		asOnDate := strings.TrimSpace(r.URL.Query().Get("as_on_date"))
-
-		// POST (and some clients) send filters only in JSON body; query string may be empty → wrong snapshot date.
+		// JSON body is the primary source for filters; query string fills only missing fields.
+		var body map[string]any
 		if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			var body map[string]any
-			if json.Unmarshal(bodyBytes, &body) == nil {
-				if asOnDate == "" {
-					for _, k := range []string{"as_on_date", "asOnDate", "snapshot_date", "snapshotDate"} {
-						if v, ok := body[k].(string); ok && strings.TrimSpace(v) != "" {
-							asOnDate = strings.TrimSpace(v)
-							break
-						}
-					}
-				}
-				if entity == "" {
-					if v, ok := body["entity"].(string); ok {
-						entity = strings.TrimSpace(v)
-					}
-				}
-				if bank == "" {
-					if v, ok := body["bank"].(string); ok {
-						bank = strings.TrimSpace(v)
-					}
-				}
-				if currency == "" {
-					if v, ok := body["currency"].(string); ok {
-						currency = strings.TrimSpace(v)
-					}
-				}
-			}
+			_ = json.Unmarshal(bodyBytes, &body)
 		}
+		q := r.URL.Query()
+		entity := strFromBodyThenQuery(body, q, "entity")
+		bank := strFromBodyThenQuery(body, q, "bank")
+		currency := strFromBodyThenQuery(body, q, "currency")
+		asOnDate := strFromBodyKeysThenQuery(body, q, "as_on_date",
+			"as_on_date", "asOnDate", "snapshot_date", "snapshotDate")
 
 		if entity != "" && !api.IsEntityAllowed(ctx, entity) {
 			http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)

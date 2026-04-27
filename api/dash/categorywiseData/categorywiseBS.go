@@ -22,10 +22,8 @@ const (
 	maxCategorywiseTxnListLimit     = 100000
 )
 
+// strFromReq resolves a filter: JSON body keys (queryKey + alternates) first, then URL query.
 func strFromReq(q url.Values, body map[string]any, queryKey string, bodyKeys ...string) string {
-	if s := strings.TrimSpace(q.Get(queryKey)); s != "" {
-		return s
-	}
 	keys := append([]string{queryKey}, bodyKeys...)
 	for _, bk := range keys {
 		if body == nil {
@@ -36,6 +34,9 @@ func strFromReq(q url.Values, body map[string]any, queryKey string, bodyKeys ...
 				return s
 			}
 		}
+	}
+	if s := strings.TrimSpace(q.Get(queryKey)); s != "" {
+		return s
 	}
 	return ""
 }
@@ -651,6 +652,108 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 					Balance:  balance,
 					Currency: currency,
 					AsOfDate: asOf,
+				}
+			}
+		}
+
+		// Fallback when manual balances are missing: last approved statement txn per (entity, account, currency)
+		// on or before as_on_date (running balance column), then aggregate like the KPIs above.
+		if highestBank == nil || lowestAcct == nil {
+			snapParts := []string{`COALESCE(t.transaction_date, t.value_date)::date <= $1::date`}
+			snapArgs := []interface{}{asOnDate}
+			sn := 2
+			snapParts = append(snapParts, fmt.Sprintf("bs.entity_id = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedEntityIDs)
+			sn++
+			snapParts = append(snapParts, fmt.Sprintf("bs.account_number = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedAccountNumbers)
+			sn++
+			snapParts = append(snapParts, fmt.Sprintf("lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedBanksNorm)
+			sn++
+			snapParts = append(snapParts, fmt.Sprintf("upper(trim(COALESCE(mba.currency, ''))) = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedCurrenciesNorm)
+			sn++
+			if entityF != "" {
+				eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
+				if ok {
+					snapParts = append(snapParts, fmt.Sprintf("bs.entity_id = $%d", sn))
+					snapArgs = append(snapArgs, eid)
+					sn++
+				}
+			}
+			if bankF != "" {
+				if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+					snapParts = append(snapParts, fmt.Sprintf("mba.bank_id = $%d", sn))
+					snapArgs = append(snapArgs, bid)
+					sn++
+				} else if bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF); ok {
+					snapParts = append(snapParts, fmt.Sprintf("(lower(trim(COALESCE(mba.bank_name,''))) = $%d OR lower(trim(COALESCE(mb.bank_name,''))) = $%d)", sn, sn))
+					snapArgs = append(snapArgs, bankNorm)
+					sn++
+				}
+			}
+			if currencyF != "" {
+				if currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF); ok {
+					snapParts = append(snapParts, fmt.Sprintf("upper(trim(COALESCE(mba.currency,''))) = $%d", sn))
+					snapArgs = append(snapArgs, currCode)
+					sn++
+				}
+			}
+			snapWhere := "WHERE " + strings.Join(snapParts, " AND ")
+			rankedCTE := `
+WITH ranked AS (
+  SELECT
+    COALESCE(mba.bank_name, mb.bank_name, 'Unknown') AS bank_name,
+    bs.account_number,
+    upper(trim(COALESCE(mba.currency, ''))) AS currency_code,
+    COALESCE(t.balance, 0)::float8 AS balance,
+    COALESCE(t.transaction_date, t.value_date)::date AS eff_date,
+    ROW_NUMBER() OVER (
+      PARTITION BY bs.entity_id, bs.account_number, upper(trim(COALESCE(mba.currency, '')))
+      ORDER BY COALESCE(t.transaction_date, t.value_date) DESC NULLS LAST, t.transaction_id DESC
+    ) AS rn
+  FROM cimplrcorpsaas.bank_statement_transactions t
+  JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+  LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number AND COALESCE(mba.is_deleted, false) = false
+  LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+  JOIN (
+    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+    FROM cimplrcorpsaas.auditactionbankstatement
+    ORDER BY bankstatementid, requested_at DESC
+  ) ap ON ap.bankstatementid = bs.bank_statement_id AND ap.processing_status = 'APPROVED'
+  ` + snapWhere + `
+)
+`
+			if highestBank == nil {
+				fbSQL := rankedCTE + `
+SELECT bank_name, SUM(balance)::float8 AS total
+FROM ranked WHERE rn = 1
+GROUP BY 1
+ORDER BY total DESC NULLS LAST
+LIMIT 1`
+				var b string
+				var tot float64
+				if err := pgxPool.QueryRow(ctx, fbSQL, snapArgs...).Scan(&b, &tot); err == nil {
+					highestBank = &BankBalanceKPI{Bank: b, Total: tot}
+				}
+			}
+			if lowestAcct == nil {
+				fbSQL := rankedCTE + `
+SELECT bank_name, account_number, balance, currency_code, to_char(eff_date, 'YYYY-MM-DD')
+FROM ranked WHERE rn = 1
+ORDER BY balance ASC NULLS LAST, account_number
+LIMIT 1`
+				var b, acct, ccy, asof string
+				var bal float64
+				if err := pgxPool.QueryRow(ctx, fbSQL, snapArgs...).Scan(&b, &acct, &bal, &ccy, &asof); err == nil {
+					lowestAcct = &LowestBalanceAccount{
+						Bank:     b,
+						Account:  acct,
+						Balance:  bal,
+						Currency: ccy,
+						AsOfDate: asof,
+					}
 				}
 			}
 		}

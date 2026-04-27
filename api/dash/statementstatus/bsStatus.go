@@ -3,8 +3,10 @@ package statementstatus
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -137,20 +139,35 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// ── Parse filters: body takes priority, query params as fallback ──
+		// ── Parse filters: JSON body is primary; URL query fills only missing fields ──
 		type reqBody struct {
-			Entity   string `json:"entity"`
-			Bank     string `json:"bank"`
-			Currency string `json:"currency"`
-			Horizon  string `json:"horizon"`
-			FromDate string `json:"from_date"`
-			ToDate   string `json:"to_date"`
-			AsOnDate string `json:"as_on_date"`
+			Entity      string `json:"entity"`
+			Bank        string `json:"bank"`
+			Currency    string `json:"currency"`
+			Horizon     string `json:"horizon"`
+			Days        string `json:"days"`
+			FromDate    string `json:"from_date"`
+			FromDateAlt string `json:"fromDate"`
+			ToDate      string `json:"to_date"`
+			ToDateAlt   string `json:"toDate"`
+			AsOnDate    string `json:"as_on_date"`
+			AsOnDateAlt string `json:"asOnDate"`
 		}
 		var req reqBody
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			_ = json.Unmarshal(bodyBytes, &req)
+		}
+		if req.FromDate == "" {
+			req.FromDate = strings.TrimSpace(req.FromDateAlt)
+		}
+		if req.ToDate == "" {
+			req.ToDate = strings.TrimSpace(req.ToDateAlt)
+		}
+		if req.AsOnDate == "" {
+			req.AsOnDate = strings.TrimSpace(req.AsOnDateAlt)
+		}
 
-		// also fall back to query params
 		q := r.URL.Query()
 		if req.Entity == "" {
 			req.Entity = q.Get("entity")
@@ -218,6 +235,9 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			} else {
 				raw := strings.TrimSpace(req.Horizon)
 				if raw == "" {
+					raw = strings.TrimSpace(req.Days)
+				}
+				if raw == "" {
 					raw = q.Get("days")
 				}
 				if raw != "" {
@@ -231,6 +251,9 @@ func GetStatementStatusHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			days := 0
 			raw := strings.TrimSpace(req.Horizon)
+			if raw == "" {
+				raw = strings.TrimSpace(req.Days)
+			}
 			if raw == "" {
 				raw = q.Get("days")
 			}

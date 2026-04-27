@@ -50,8 +50,10 @@ func nullToString(ns sql.NullString) string {
 	return "Uncategorized"
 }
 
-func setFromBody(q url.Values, body map[string]any, queryKey string, bodyKeys ...string) {
-	if strings.TrimSpace(q.Get(queryKey)) != "" || body == nil {
+// mergeBodyIntoQuery sets queryKey from the JSON body when any listed body key has a non-empty string.
+// Body wins over existing query values (POST payload is primary).
+func mergeBodyIntoQuery(q url.Values, body map[string]any, queryKey string, bodyKeys ...string) {
+	if body == nil {
 		return
 	}
 	for _, bk := range bodyKeys {
@@ -72,12 +74,12 @@ func GetTransactionPoolHandler(db *sql.DB) http.HandlerFunc {
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			var body map[string]any
 			if json.Unmarshal(bodyBytes, &body) == nil {
-				setFromBody(q, body, "from_date", "from_date", "fromDate")
-				setFromBody(q, body, "to_date", "to_date", "toDate")
-				setFromBody(q, body, "as_on_date", "as_on_date", "asOnDate")
-				setFromBody(q, body, "entity", "entity")
-				setFromBody(q, body, "bank", "bank")
-				setFromBody(q, body, "currency", "currency")
+				mergeBodyIntoQuery(q, body, "from_date", "from_date", "fromDate")
+				mergeBodyIntoQuery(q, body, "to_date", "to_date", "toDate")
+				mergeBodyIntoQuery(q, body, "as_on_date", "as_on_date", "asOnDate")
+				mergeBodyIntoQuery(q, body, "entity", "entity")
+				mergeBodyIntoQuery(q, body, "bank", "bank")
+				mergeBodyIntoQuery(q, body, "currency", "currency")
 			}
 		}
 		transactions, err := FetchConsolidatedTransactionPool(ctx, db, q)
