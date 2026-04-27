@@ -41,4 +41,6 @@ func RegisterFDMaturityRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB
 	mux.Handle("/investment/fd/maturity/summary",
 		mid(http.HandlerFunc(GetFDMaturitySummary(pool))))
 
+	mux.Handle("/investment/fd/closure/audit",
+		mid(http.HandlerFunc(GetClosureAuditHandler(pool))))
 }

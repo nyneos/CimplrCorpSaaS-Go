@@ -71,8 +71,12 @@ func RegisterFDAccrualRoutes(mux *http.ServeMux, pool *pgxpool.Pool, db *sql.DB)
 		mid(http.HandlerFunc(GetExecutionLog(pool))),
 	)
 	mux.Handle(
+		"/investment/fd/accrual/run/audit",
+		mid(http.HandlerFunc(GetAccrualRunAuditHandler(pool))),
+	)
+	mux.Handle(
 		"/investment/fd/accrual/ledger/audit",
-		mid(http.HandlerFunc(GetAccrualLedgerAudit(pool))),
+		mid(http.HandlerFunc(GetAccrualLedgerAuditHandler(pool))),
 	)
 	mux.Handle(
 		"/investment/fd/accrual/exceptions",
