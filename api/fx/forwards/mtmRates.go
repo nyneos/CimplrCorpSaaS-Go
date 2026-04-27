@@ -363,7 +363,7 @@ func processUploadMTMFiles(ctx context.Context, db *sql.DB, r *http.Request, buN
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"filename":           fileHeader.Filename,
-				constants.ValueError: "Failed to start DB transaction",
+				constants.ValueError: constants.ErrFailedToStartDBTransaction,
 			})
 			continue
 		}

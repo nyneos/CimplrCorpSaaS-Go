@@ -2,10 +2,12 @@ package bankstatement
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -27,7 +29,7 @@ func pqUserFriendlyMessage(err error) string {
 	case "23505":
 		switch pqErr.Constraint {
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
+			return constants.ErrBankStatementFileAlreadyUploaded
 		case "uniq_stmt":
 			return "A statement for this period is already uploaded for this account."
 		default:
@@ -154,8 +156,30 @@ func allEmptyRow(row []string) bool {
 }
 
 func cleanAmount(s string) string {
+	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, ",", "")
-	return strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "₹", "")
+	s = strings.ReplaceAll(s, "$", "")
+	s = strings.TrimSpace(s)
+	// Strip trailing Cr/Dr indicator used by some banks (e.g. ICICI: "53,90,593.75 Cr").
+	// For balance columns: "Dr" means overdraft (caller handles sign if needed).
+	// For debit/credit amount columns: the indicator is redundant — value is already positive.
+	lc := strings.ToLower(s)
+	switch {
+	case strings.HasSuffix(lc, " cr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(lc, " dr"):
+		s = strings.TrimSpace(s[:len(s)-3])
+	case len(s) > 2 && strings.HasSuffix(lc, "cr") && (lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9'):
+		s = strings.TrimSpace(s[:len(s)-2])
+	case len(s) > 2 && strings.HasSuffix(lc, "dr") && (lc[len(lc)-3] >= '0' && lc[len(lc)-3] <= '9'):
+		s = strings.TrimSpace(s[:len(s)-2])
+	}
+	return s
+}
+
+func isFiniteNumber(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // buildTxnKey creates a stable key used to detect whether a transaction from
@@ -185,7 +209,7 @@ func userFriendlyUploadError(err error) string {
 	}
 
 	if errors.Is(err, ErrFileAlreadyUploaded) {
-		return "This bank statement file was already uploaded earlier. Please upload a different file."
+		return constants.ErrBankStatementFileAlreadyUploaded
 	}
 	if errors.Is(err, ErrAccountNumberMissing) {
 		return "Could not find the bank account number in the uploaded statement. Please upload the original bank statement downloaded from the bank."
@@ -224,7 +248,7 @@ func userFriendlyUploadError(err error) string {
 		case "uniq_stmt":
 			return "A statement for this account and period is already uploaded. Use force_override=true to re-upload."
 		case "uniq_file_hash", "bank_statements_uniq_file_hash", "uniq_file_hash_key":
-			return "This bank statement file was already uploaded earlier. Please upload a different file."
+			return constants.ErrBankStatementFileAlreadyUploaded
 		}
 	}
 	log.Println("Debug raw mesage", msg)
@@ -254,4 +278,39 @@ func joinStrings(strs []string, sep string) string {
 		out += sep + s
 	}
 	return out
+}
+
+// generateBatchID returns a random 6-character uppercase alphanumeric string that acts as a
+// unique prefix for all synthetic tran_ids in one statement upload.  Using crypto/rand keeps
+// the prefix collision probability negligible even across millions of re-uploads.
+// Character space: A-Z + 0-9 (36 chars) → 36^6 ≈ 2.18 billion unique prefixes.
+func generateBatchID() string {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		// Extremely unlikely; produce a time-seeded fallback so we never return ""
+		t := time.Now().UnixNano()
+		for i := range raw {
+			raw[i] = chars[int(t>>uint(i*8))%len(chars)]
+		}
+		return string(raw)
+	}
+	out := make([]byte, 6)
+	for i, v := range raw {
+		out[i] = chars[int(v)%len(chars)]
+	}
+	return string(out)
+}
+
+// buildSyntheticTranID creates a compact, sequential transaction identifier.
+//
+// Format: {batchID}{seq7}  (total 13 characters)
+// Examples:
+//   - "A3B9X20000001" — first row of a batch with prefix A3B9X2
+//   - "A3B9X20000008" — eighth row of the same batch
+//
+// batchID is generated once per upload via generateBatchID().
+// seq is the raw row number within the statement — supports up to 9,999,999 rows (10M+).
+func buildSyntheticTranID(batchID string, seq int) string {
+	return fmt.Sprintf("%s%07d", batchID, seq)
 }

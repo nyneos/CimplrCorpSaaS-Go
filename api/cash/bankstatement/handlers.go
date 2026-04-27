@@ -1183,7 +1183,7 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 		multiFlag := r.FormValue("multi") == "true"
 		if multiFlag {
 			// explicit multi=true: only try multi approach, surface error if it fails
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(w, r)
+			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(w, r)
 			return
 		}
 		// No explicit multi flag: run normal single-account V2 first.
@@ -1345,17 +1345,19 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 			db,
 			mf,
 			fileHash,
-			useMapping,
-			mappings,
-			accountOverride,
-			uploadFileName,
-			requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+			UploadOpts{
+				UseMapping:            useMapping,
+				Mappings:              mappings,
+				AccountNumberOverride: accountOverride,
+				UploadFileName:        uploadFileName,
+				UploadedBy:            requestedByFromCtx(r.Context(), r.FormValue("user_id")),
+			},
 		)
 		if err != nil {
 			// V2 failed — try multi as a last-resort fallback (e.g. multi-account sheet)
 			log.Printf("[BANK-UPLOAD-DEBUG] V2 failed (%v); trying multi handler as fallback", err)
 			multiRec := httptest.NewRecorder()
-			UploadMultiAccountBankStatementHandler(db).ServeHTTP(multiRec, r)
+			UploadMultiAccountBankStatementHandler(db, pgxPool).ServeHTTP(multiRec, r)
 			// Multi handler returns outer "success":true even when ALL individual accounts fail.
 			// We must check that at least one account in data{} actually succeeded.
 			var multiResp struct {
@@ -1383,11 +1385,59 @@ func UploadBankStatementV2Handler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handle
 				w.Write(multiRec.Body.Bytes())
 				return
 			}
-			// Both V2 and multi failed — always surface the original V2 error (never multi's)
-			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning original V2 error")
+			// Both V2 and multi failed.
+			// Check whether the multi per-account errors carry a more informative message
+			// (e.g. "statement already uploaded") that should be surfaced instead of V2's
+			// generic "bank account not found" — which would be misleading to the user.
+			surfaceMsg := userFriendlyUploadError(err)
+			if multiRec.Code == http.StatusOK {
+				var multiResp2 struct {
+					Success bool                       `json:"success"`
+					Data    map[string]json.RawMessage `json:"data"`
+				}
+				if json.Unmarshal(multiRec.Body.Bytes(), &multiResp2) == nil && len(multiResp2.Data) > 0 {
+					var multiMsgs []string
+					allAlreadyStored := true
+					for _, raw := range multiResp2.Data {
+						var acct struct {
+							Success bool   `json:"success"`
+							Message string `json:"message"`
+						}
+						if json.Unmarshal(raw, &acct) == nil && !acct.Success {
+							msg := acct.Message
+							if msg == "" {
+								allAlreadyStored = false
+								continue
+							}
+							msgLower := strings.ToLower(msg)
+							if !strings.Contains(msgLower, "already") && !strings.Contains(msgLower, "exist") && !strings.Contains(msgLower, "duplicate") {
+								allAlreadyStored = false
+							}
+							// Collect unique messages
+							duplicate := false
+							for _, m := range multiMsgs {
+								if m == msg {
+									duplicate = true
+									break
+								}
+							}
+							if !duplicate {
+								multiMsgs = append(multiMsgs, msg)
+							}
+						}
+					}
+					// If every failing account reported an "already stored" style error, surface
+					// those messages — they are more actionable than V2's account-not-found error.
+					if allAlreadyStored && len(multiMsgs) > 0 {
+						surfaceMsg = strings.Join(multiMsgs, " | ")
+						log.Printf("[BANK-UPLOAD-DEBUG] Surfacing multi 'already stored' error instead of V2 error: %s", surfaceMsg)
+					}
+				}
+			}
+			log.Printf("[BANK-UPLOAD-DEBUG] Multi fallback also failed; returning error: %s", surfaceMsg)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
-				"message": userFriendlyUploadError(err),
+				"message": surfaceMsg,
 			})
 			return
 		}
@@ -1684,11 +1734,13 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 				db,
 				file,
 				ze.fileHash,
-				useMapping,
-				mappings,
-				accountOverride,
-				ze.name,
-				requestedByFromCtx(ctx, r.FormValue("user_id")),
+				UploadOpts{
+					UseMapping:            useMapping,
+					Mappings:              mappings,
+					AccountNumberOverride: accountOverride,
+					UploadFileName:        ze.name,
+					UploadedBy:            requestedByFromCtx(ctx, r.FormValue("user_id")),
+				},
 			)
 			if err != nil {
 				results = append(results, FileResult{
@@ -1724,29 +1776,26 @@ func UploadZippedBankStatementsHandler(db *sql.DB, pool *pgxpool.Pool) http.Hand
 		json.NewEncoder(w).Encode(response)
 
 		if pool != nil {
-			for _, fres := range results {
-				if fres.Success && fres.Result != nil {
-					if rid, ok := fres.Result["id"].(string); ok && rid == "" {
-						if bsid, ok2 := fres.Result["bank_statement_id"].(string); ok2 {
-							rid = bsid
-						}
-					}
-					capturedResult := fres.Result
-					capturedZipFile := zipHeader.Filename
-					go func() {
-						notifPayload := BuildBankStatementPayloadFromV2Result(
-							capturedResult,
-							userID,
-							capturedZipFile,
-							"PENDING_APPROVAL",
-						)
-						catalog.TriggerNotification(context.Background(), pool,
-							"/cash/upload-bank-statement-zip",
-							fmt.Sprintf("BSUPLOAD/%s/%d", notifPayload.BankStatementID, time.Now().UnixMilli()),
-							notifPayload.ToMap(),
-						)
-					}()
+			for i := range results {
+				fres := results[i]
+				if !fres.Success || fres.Result == nil {
+					continue
 				}
+				capturedResult := fres.Result
+				capturedZipFile := zipHeader.Filename
+				go func() {
+					notifPayload := BuildBankStatementPayloadFromV2Result(
+						capturedResult,
+						userID,
+						capturedZipFile,
+						"PENDING_APPROVAL",
+					)
+					catalog.TriggerNotification(context.Background(), pool,
+						"/cash/upload-bank-statement-zip",
+						fmt.Sprintf("BSUPLOAD/%s/%d", notifPayload.BankStatementID, time.Now().UnixMilli()),
+						notifPayload.ToMap(),
+					)
+				}()
 			}
 		}
 	})

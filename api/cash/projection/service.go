@@ -71,12 +71,21 @@ func ensureUniqueProjectionUpload(ctx context.Context, pgxPool *pgxpool.Pool, fi
 	return nil
 }
 
+type proposalUploadOpts struct {
+	ProposalName   string
+	RecurrenceType string
+	EffectiveDate  string
+	Currency       string
+}
+
 func uploadCashflowProposalService(
 	ctx context.Context,
 	pgxPool *pgxpool.Pool,
 	fh *multipart.FileHeader,
-	userEmail, proposalName, recurrenceType, effectiveDate, currency string,
+	userEmail string,
+	opts proposalUploadOpts,
 ) (string, int, int, error) {
+	proposalName, recurrenceType, effectiveDate, currency := opts.ProposalName, opts.RecurrenceType, opts.EffectiveDate, opts.Currency
 	fileExt := strings.ToLower(filepath.Ext(fh.Filename))
 	file, err := fh.Open()
 	if err != nil {

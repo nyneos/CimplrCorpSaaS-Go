@@ -463,7 +463,7 @@ func (a *AuthService) LoginViaSSO(email string, clientIP string) (*UserSession, 
 		LastLoginTime:   time.Now().Format(time.RFC3339),
 		ClientIP:        clientIP,
 		IsLoggedIn:      true,
-		CreatedEntities: a.loadCreatedEntities(dbName, dbEmail),
+		CreatedEntities: a.loadCreatedEntities(dbUserID, roleName.String, roleCode.String),
 	}
 
 	// Check MFA — only pending if BOTH enabled AND secret is configured

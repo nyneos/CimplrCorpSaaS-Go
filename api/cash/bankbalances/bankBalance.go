@@ -750,7 +750,11 @@ func GetBankBalances(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				   b.old_opening_balance, b.old_total_credits, b.old_total_debits, b.old_closing_balance,
 			   COALESCE(ec.entity_name, me.entity_name, '') AS entity_name
 		   FROM bank_balances_manual b
-		   JOIN masterbankaccount mba ON b.account_no = mba.account_number
+		   JOIN (
+			   SELECT account_number, MIN(entity_id) AS entity_id
+			   FROM masterbankaccount
+			   GROUP BY account_number
+		   ) mba ON b.account_no = mba.account_number
 		   LEFT JOIN public.masterentitycash ec ON mba.entity_id = ec.entity_id
 		   LEFT JOIN public.masterentity me ON me.entity_id::text = mba.entity_id
 		`

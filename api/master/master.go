@@ -2,6 +2,7 @@ package master
 
 import (
 	allMaster "CimplrCorpSaas/api/master/allMasters"
+	counterpartyHub "CimplrCorpSaas/api/master/counterpartyHub"
 	investmentMasters "CimplrCorpSaas/api/master/investmentMasters"
 	middlewares "CimplrCorpSaas/api/middlewares"
 	"context"
@@ -343,6 +344,9 @@ func StartMasterService(db *sql.DB, port string) {
 	mux.Handle("/master/bank-rate-card/audit-history", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCardAuditHistory(pgxPool)))
 	mux.Handle("/master/bank-rate-card/upload", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.UploadBankRateCardSimple(pgxPool)))
 	mux.Handle("/master/bank-rate-card/get", middlewares.PreValidationMiddleware(pgxPool)(investmentMasters.GetBankRateCard(pgxPool)))
+
+	// Counterparty Hub Master routes
+	counterpartyHub.RegisterCounterpartyHubRoutes(mux, pgxPool, db)
 
 	log.Printf("Master Service started on :%s", port)
 	err = http.ListenAndServe(":"+port, mux)

@@ -599,7 +599,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"inserted":      0,
-				"errors":        []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": err.Error()}},
 				"invalidRows":   invalidRows,
 			})
 			continue
@@ -615,7 +615,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 					"filename":      fileHeader.Filename,
 					"upload_s3_key": "",
 					"inserted":      0,
-					"errors":        []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+					"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": err.Error()}},
 					"invalidRows":   invalidRows,
 				})
 				continue
@@ -669,7 +669,7 @@ func processUploadForwardBookings(ctx context.Context, db *sql.DB, r *http.Reque
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"inserted":      0,
-				"errors":        []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": err.Error()}},
 				"invalidRows":   invalidRows,
 			})
 			continue
@@ -871,7 +871,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"updated":       0,
-				"errors":        []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": err.Error()}},
 				"invalidRows":   invalidRows,
 			})
 			continue
@@ -887,7 +887,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 					"filename":      fileHeader.Filename,
 					"upload_s3_key": "",
 					"updated":       0,
-					"errors":        []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+					"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": err.Error()}},
 					"invalidRows":   invalidRows,
 				})
 				continue
@@ -953,7 +953,7 @@ func processUploadForwardConfirmations(ctx context.Context, db *sql.DB, r *http.
 				"filename":      fileHeader.Filename,
 				"upload_s3_key": "",
 				"updated":       0,
-				"errors":        []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+				"errors":        []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": err.Error()}},
 				"invalidRows":   invalidRows,
 			})
 			continue
@@ -1445,7 +1445,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 					"filename":          fileHeader.Filename,
 					"upload_s3_key":     "",
 					"staging_inserted":  0,
-					"staging_errors":    []map[string]interface{}{{constants.ValueError: "Failed to start DB transaction", "details": err.Error()}},
+					"staging_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToStartDBTransaction, "details": err.Error()}},
 					"bookings_inserted": 0,
 					"booking_errors":    []map[string]interface{}{},
 				})
@@ -1462,7 +1462,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 						"filename":          fileHeader.Filename,
 						"upload_s3_key":     "",
 						"staging_inserted":  0,
-						"staging_errors":    []map[string]interface{}{{constants.ValueError: "Failed to upload file to S3", "details": err.Error()}},
+						"staging_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToUploadFileToS3, "details": err.Error()}},
 						"bookings_inserted": 0,
 						"booking_errors":    []map[string]interface{}{},
 					})
@@ -1641,7 +1641,7 @@ func processUploadBankForwardBookings(ctx context.Context, db *sql.DB, r *http.R
 					"staging_inserted":  0,
 					"staging_errors":    []map[string]interface{}{},
 					"bookings_inserted": 0,
-					"booking_errors":    []map[string]interface{}{{constants.ValueError: "Database commit error", "details": err.Error()}},
+					"booking_errors":    []map[string]interface{}{{constants.ValueError: constants.ErrFailedToCommitTransaction, "details": err.Error()}},
 				})
 				continue
 			}

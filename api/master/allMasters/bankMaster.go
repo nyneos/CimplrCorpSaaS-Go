@@ -555,16 +555,24 @@ func GetBankNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		query := `
-			SELECT m.bank_id, m.bank_name, m.bank_short_name
-			FROM masterbank m
-			LEFT JOIN LATERAL (
-				SELECT processing_status
+			WITH latest_audit AS (
+				SELECT DISTINCT ON (a.bank_id)
+					a.bank_id,
+					a.processing_status
 				FROM auditactionbank a
-				WHERE a.bank_id = m.bank_id
-				ORDER BY requested_at DESC
-				LIMIT 1
-			) a ON TRUE
-			WHERE m.active_status = 'Active' AND a.processing_status = 'APPROVED' AND COALESCE(m.is_deleted, false) = false
+				ORDER BY a.bank_id, a.requested_at DESC
+			)
+			SELECT
+				m.bank_id,
+				m.bank_name,
+				COALESCE(m.bank_short_name, '') AS bank_short_name
+			FROM masterbank m
+			LEFT JOIN latest_audit la ON la.bank_id = m.bank_id
+			WHERE
+				UPPER(TRIM(COALESCE(m.active_status, ''))) = 'ACTIVE'
+				AND UPPER(TRIM(COALESCE(la.processing_status, ''))) = 'APPROVED'
+				AND COALESCE(m.is_deleted, false) = false
+			ORDER BY m.bank_name
 		`
 		ctx := r.Context()
 		rows, err := pgxPool.Query(ctx, query)
@@ -626,7 +634,7 @@ func UploadBank(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}

@@ -244,7 +244,7 @@ func getFDMasterError(err error, contextMessage string) (string, int) {
 
 func resolveFDAuditTable(ctx context.Context, exec queryExecutor) string {
 	return resolveFirstExistingTable(ctx, exec, []string{
-		"investment.fd_audit_master",
+		constants.QuerryAuditMaster,
 		"investment.fd_audit_fd_master",
 		"investment.fd_master_audit",
 	})
@@ -581,7 +581,7 @@ func ActivateFD(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.ConfirmationID) == "" {
-			api.RespondWithError(w, http.StatusBadRequest, "confirmation_id is required")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrConfirmationIDsRequired)
 			return
 		}
 
@@ -1205,28 +1205,69 @@ func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		query := "SELECT * FROM investment.fd_master WHERE COALESCE(is_deleted,false)=false"
+		// ── Resolve audit table and its reference column ─────────────────────
+		auditTable := resolveFDAuditTable(ctx, pgxPool)
+		var auditRefCol string
+		if auditTable != "" {
+			schemaName, tableName := splitQualifiedTable(auditTable)
+			auditCols, _ := loadTableColumns(ctx, pgxPool, schemaName, tableName)
+			auditRefCol = pickFirstExistingColumn(auditCols, "fd_id", "master_id", "confirmation_id")
+		}
+
+		// ── Build main query with optional audit join for ordering ───────────
+		var query string
+		if auditTable != "" && auditRefCol != "" {
+			// Join with a lateral subquery that picks the latest audit timestamp
+			query = fmt.Sprintf(`
+				SELECT m.*
+				FROM investment.fd_master m
+				LEFT JOIN LATERAL (
+					SELECT GREATEST(
+						COALESCE(a.requested_at, '1970-01-01'::timestamp),
+						COALESCE(a.checker_at, '1970-01-01'::timestamp)
+					) AS latest_audit_ts
+					FROM %s a
+					WHERE a.%s = m.%s
+					ORDER BY GREATEST(
+						COALESCE(a.requested_at, '1970-01-01'::timestamp),
+						COALESCE(a.checker_at, '1970-01-01'::timestamp)
+					) DESC
+					LIMIT 1
+				) aud ON true
+				WHERE COALESCE(m.is_deleted, false) = false`,
+				auditTable, auditRefCol,
+				pickFirstExistingColumn(masterCols, "fd_id", "master_id", "confirmation_id"))
+		} else {
+			query = "SELECT m.* FROM investment.fd_master m WHERE COALESCE(m.is_deleted,false)=false"
+		}
+
 		args := make([]interface{}, 0)
 		position := 1
 
 		if fdID := strings.TrimSpace(r.URL.Query().Get("fd_id")); fdID != "" {
 			if keyCol := pickFirstExistingColumn(masterCols, "fd_id", "master_id", "confirmation_id"); keyCol != "" {
-				query += fmt.Sprintf(" AND %s = $%d", keyCol, position)
+				query += fmt.Sprintf(" AND m.%s = $%d", keyCol, position)
 				args = append(args, fdID)
 				position++
 			}
 		}
 		if entityID := strings.TrimSpace(r.URL.Query().Get("entity_id")); entityID != "" && masterCols["entity_id"] {
-			query += fmt.Sprintf(" AND entity_id = $%d", position)
+			query += fmt.Sprintf(" AND m.entity_id = $%d", position)
 			args = append(args, entityID)
 			position++
 		}
 		if confirmationID := strings.TrimSpace(r.URL.Query().Get("confirmation_id")); confirmationID != "" && masterCols["confirmation_id"] {
-			query += fmt.Sprintf(" AND confirmation_id = $%d", position)
+			query += fmt.Sprintf(" AND m.confirmation_id = $%d", position)
 			args = append(args, confirmationID)
 			position++
 		}
-		query += " ORDER BY updated_at DESC NULLS LAST"
+
+		// Order by audit timestamp (newest action first), fall back to updated_at
+		if auditTable != "" && auditRefCol != "" {
+			query += " ORDER BY aud.latest_audit_ts DESC NULLS LAST"
+		} else {
+			query += " ORDER BY m.updated_at DESC NULLS LAST"
+		}
 
 		rows, err := pgxPool.Query(ctx, query, args...)
 		if err != nil {
@@ -1242,33 +1283,28 @@ func GetFDMasterWithAudit(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// ── Enrich each FD row with its latest activation audit processing_status ──
-		// This lets the UI know whether an FD is PENDING_APPROVAL, APPROVED, REJECTED,
-		// APPROVAL_PENDING (engine), etc. without the client needing a separate audit call.
-		auditTable := resolveFDAuditTable(ctx, pgxPool)
-		if auditTable != "" {
-			schemaName, tableName := splitQualifiedTable(auditTable)
-			auditCols, _ := loadTableColumns(ctx, pgxPool, schemaName, tableName)
-			refCol := pickFirstExistingColumn(auditCols, "fd_id", "master_id", "confirmation_id")
-			if refCol != "" {
-				for i, row := range payload {
-					fdKey := ""
-					for _, k := range []string{"fd_id", "master_id", "confirmation_id"} {
-						if v, ok := row[k]; ok && v != nil {
-							fdKey = fmt.Sprintf("%v", v)
-							break
-						}
+		if auditTable != "" && auditRefCol != "" {
+			for i, row := range payload {
+				fdKey := ""
+				for _, k := range []string{"fd_id", "master_id", "confirmation_id"} {
+					if v, ok := row[k]; ok && v != nil {
+						fdKey = fmt.Sprintf("%v", v)
+						break
 					}
-					if fdKey == "" {
-						continue
-					}
-					var activationStatus string
-					_ = pgxPool.QueryRow(ctx, fmt.Sprintf(
-						`SELECT COALESCE(processing_status,'') FROM %s
-						 WHERE %s = $1
-						 ORDER BY requested_at DESC LIMIT 1`,
-						auditTable, refCol), fdKey).Scan(&activationStatus)
-					payload[i]["processing_status"] = activationStatus
 				}
+				if fdKey == "" {
+					continue
+				}
+				var activationStatus string
+				_ = pgxPool.QueryRow(ctx, fmt.Sprintf(
+					`SELECT COALESCE(processing_status,'') FROM %s
+					 WHERE %s = $1
+					 ORDER BY GREATEST(
+						COALESCE(requested_at, '1970-01-01'::timestamp),
+						COALESCE(checker_at, '1970-01-01'::timestamp)
+					 ) DESC LIMIT 1`,
+					auditTable, auditRefCol), fdKey).Scan(&activationStatus)
+				payload[i]["processing_status"] = activationStatus
 			}
 		}
 

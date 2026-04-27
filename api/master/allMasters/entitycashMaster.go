@@ -165,14 +165,14 @@ type cashEntityUpdateUpload struct {
 
 func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkRequest, cashEntityCreateUpload, error) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-	if strings.HasPrefix(contentType, "multipart/form-data") {
+	if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
 		}
 
 		userID := strings.TrimSpace(r.FormValue(constants.KeyUserID))
 		if userID == "" {
-			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf("user_id required in form")
+			return CashEntityBulkRequest{}, cashEntityCreateUpload{}, fmt.Errorf(constants.ErrUserIDRequired)
 		}
 
 		entityPayload := strings.TrimSpace(r.FormValue("entity_payload"))
@@ -219,14 +219,14 @@ func parseCreateAndSyncCashEntitiesRequest(r *http.Request) (CashEntityBulkReque
 
 func parseUpdateCashEntityBulkRequest(r *http.Request) (cashEntityUpdateRequest, cashEntityUpdateUpload, error) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-	if strings.HasPrefix(contentType, "multipart/form-data") {
+	if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("could not parse multipart form: %w", err)
 		}
 
 		userID := strings.TrimSpace(r.FormValue(constants.KeyUserID))
 		if userID == "" {
-			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf("user_id required in form")
+			return cashEntityUpdateRequest{}, cashEntityUpdateUpload{}, fmt.Errorf(constants.ErrUserIDRequired)
 		}
 
 		entityID := strings.TrimSpace(r.FormValue("entity_id"))
@@ -309,7 +309,7 @@ func CreateAndSyncCashEntities(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		req, upload, err := parseCreateAndSyncCashEntitiesRequest(r)
 		if err != nil {
 			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
-			if strings.HasPrefix(contentType, "multipart/form-data") {
+			if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 				api.RespondWithError(w, http.StatusBadRequest, err.Error())
 			} else {
 				api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSONShort)
@@ -928,7 +928,7 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 
@@ -950,20 +950,14 @@ func GetCashEntityLogoURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		accessibleEntityIDs := api.GetEntityIDsFromCtx(ctx)
-		if len(accessibleEntityIDs) == 0 {
-			api.RespondWithError(w, http.StatusNotFound, constants.ErrNoAccessibleEntitiesForRequest)
-			return
-		}
 
 		var uploadS3Key sql.NullString
 		err := pgxPool.QueryRow(ctx, `
 			SELECT upload_s3_key
 			FROM masterentitycash
 			WHERE entity_id = $1
-			  AND entity_id = ANY($2)
 			  AND is_deleted = false
-		`, req.EntityID, accessibleEntityIDs).Scan(&uploadS3Key)
+		`, req.EntityID).Scan(&uploadS3Key)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				api.RespondWithError(w, http.StatusNotFound, "Entity logo not found")
@@ -1002,7 +996,7 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		if err != nil {
 			contentType := strings.ToLower(strings.TrimSpace(r.Header.Get(constants.ContentTypeText)))
 			w.WriteHeader(http.StatusBadRequest)
-			if strings.HasPrefix(contentType, "multipart/form-data") {
+			if strings.HasPrefix(contentType, constants.ContentTypeMultipart) {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: err.Error()})
 			} else {
 				json.NewEncoder(w).Encode(map[string]interface{}{constants.ValueSuccess: false, constants.ValueError: constants.ErrInvalidJSONShort})
@@ -1426,8 +1420,6 @@ func UpdateCashEntityBulk(pgxPool *pgxpool.Pool) http.HandlerFunc {
 						sets = append(sets, fmt.Sprintf("is_deleted=$%d", pos))
 						args = append(args, newBool)
 						pos++
-					default:
-						// ignore unknown keys
 					}
 				}
 
@@ -1761,7 +1753,7 @@ func BulkRejectCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.EntityIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		// Get checker_by from session
@@ -1868,7 +1860,7 @@ func BulkApproveCashEntityActions(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			Comment   string   `json:"comment"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" || len(req.EntityIDs) == 0 {
-			api.RespondWithError(w, http.StatusBadRequest, "Invalid JSON or missing fields")
+			api.RespondWithError(w, http.StatusBadRequest, constants.ErrInvalidJSON)
 			return
 		}
 		// Get checker_by from session
@@ -2174,21 +2166,26 @@ func GetCashEntityNamesWithID(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// Additionally require that the latest audit processing_status for the entity is 'APPROVED',
 		// and if the entity has a parent, require the parent's latest audit processing_status is also 'APPROVED'.
 		query := `
-												SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
-												FROM masterentitycash m
-												LEFT JOIN LATERAL (
-													SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
-												) ma ON TRUE
-												LEFT JOIN masterentitycash p ON m.parent_entity_name = p.entity_name
-												LEFT JOIN LATERAL (
-													SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
-												) pa ON TRUE
-												WHERE m.entity_id = ANY($1)
-													AND m.active_status = 'Active'
-													AND (m.is_deleted = false OR m.is_deleted IS NULL)
-													AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
-													AND (p.entity_id IS NULL OR COALESCE(pa.processing_status, 'REJECTED') = 'APPROVED')
-												ORDER BY m.entity_name
+										SELECT m.entity_id, m.entity_name, m.entity_short_name, m.unique_identifier
+										FROM masterentitycash m
+										LEFT JOIN LATERAL (
+											SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = m.entity_id ORDER BY a.requested_at DESC LIMIT 1
+										) ma ON TRUE
+										LEFT JOIN LATERAL (
+											SELECT p.entity_id, a.processing_status
+											FROM masterentitycash p
+											JOIN LATERAL (
+												SELECT a.processing_status FROM auditactionentity a WHERE a.entity_id = p.entity_id ORDER BY a.requested_at DESC LIMIT 1
+											) a ON TRUE
+											WHERE p.entity_name = m.parent_entity_name
+											LIMIT 1
+										) pa ON TRUE
+										WHERE m.entity_id = ANY($1)
+											AND m.active_status = 'Active'
+											AND (m.is_deleted = false OR m.is_deleted IS NULL)
+											AND COALESCE(ma.processing_status, 'REJECTED') = 'APPROVED'
+											AND (m.parent_entity_name IS NULL OR m.parent_entity_name = '' OR pa.entity_id IS NULL OR COALESCE(pa.processing_status, 'REJECTED') = 'APPROVED')
+										ORDER BY m.entity_name
 								`
 		rows, err := pgxPool.Query(ctx, query, accessibleEntityIDs)
 		if err != nil {
@@ -2347,7 +2344,7 @@ func UploadEntityCash(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		} else {
 			userID = r.FormValue(constants.KeyUserID)
 			if userID == "" {
-				api.RespondWithError(w, http.StatusBadRequest, "user_id required in form")
+				api.RespondWithError(w, http.StatusBadRequest, constants.ErrUserIDRequired)
 				return
 			}
 		}
@@ -2623,7 +2620,7 @@ func (r *UploadValidationResult) addErr(row int, field, value, msg string) {
 
 // uploadEntityError writes a flat {success:false, error:"…"} JSON response.
 func uploadEntityError(w http.ResponseWriter, statusCode int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": false,

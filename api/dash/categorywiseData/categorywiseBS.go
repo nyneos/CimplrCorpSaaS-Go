@@ -3,16 +3,43 @@ package categorywisedata
 import (
 	"CimplrCorpSaas/api"
 	"CimplrCorpSaas/api/constants"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const (
+	defaultCategorywiseTxnListLimit = 50000
+	maxCategorywiseTxnListLimit     = 100000
+)
+
+// strFromReq resolves a filter: JSON body keys (queryKey + alternates) first, then URL query.
+func strFromReq(q url.Values, body map[string]any, queryKey string, bodyKeys ...string) string {
+	keys := append([]string{queryKey}, bodyKeys...)
+	for _, bk := range keys {
+		if body == nil {
+			break
+		}
+		if v, ok := body[bk].(string); ok {
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		}
+	}
+	if s := strings.TrimSpace(q.Get(queryKey)); s != "" {
+		return s
+	}
+	return ""
+}
 
 type CategoryAgg struct {
 	Category string  `json:"category"`
@@ -116,20 +143,73 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		q := r.URL.Query()
-		debug := strings.TrimSpace(q.Get("debug")) == "1"
-
-		entityF := q.Get("entity")
-		bankF := q.Get("bank")
-		currencyF := q.Get("currency")
-		horizon := q.Get("horizon")
-
-		// dynamic horizon (any positive integer, default 30)
-		days, err := strconv.Atoi(horizon)
-		if err != nil || days <= 0 {
-			days = 30
+		var body map[string]any
+		if bodyBytes, err := io.ReadAll(r.Body); err == nil && len(bodyBytes) > 0 {
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			_ = json.Unmarshal(bodyBytes, &body)
 		}
-		fromDate := time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
+		q := r.URL.Query()
+		debug := strings.TrimSpace(strFromReq(q, body, "debug")) == "1"
+
+		entityF := strFromReq(q, body, "entity")
+		bankF := strFromReq(q, body, "bank")
+		currencyF := strFromReq(q, body, "currency")
+		horizon := strFromReq(q, body, "horizon")
+		fromDateParam := strFromReq(q, body, "from_date", "fromDate")
+		toDateParam := strFromReq(q, body, "to_date", "toDate")
+		asOnDate := strFromReq(q, body, "as_on_date", "asOnDate")
+
+		// Resolve date window:
+		// - explicit from_date + to_date wins
+		// - else as_on_date alone means cumulative through that date (from 1970-01-01, or horizon days before as_on if horizon is set)
+		// - else rolling horizon ending today
+		const dashboardFromMin = "1970-01-01"
+		var fromDate, toDate string
+		if fromDateParam != "" && toDateParam != "" {
+			fromDate = fromDateParam
+			toDate = toDateParam
+		} else if asOnDate != "" {
+			toDate = asOnDate
+			fromDate = dashboardFromMin
+			if fromDateParam != "" {
+				fromDate = fromDateParam
+			} else {
+				days, err := strconv.Atoi(horizon)
+				if err != nil || days <= 0 {
+					days = 0
+				}
+				if days > 0 {
+					if t, err := time.Parse(constants.DateFormat, toDate); err == nil {
+						fromDate = t.AddDate(0, 0, -(days - 1)).Format(constants.DateFormat)
+					}
+				}
+			}
+		} else {
+			days, err := strconv.Atoi(horizon)
+			if err != nil || days <= 0 {
+				days = 30
+			}
+			toDate = time.Now().Format(constants.DateFormat)
+			fromDate = time.Now().AddDate(0, 0, -days).Format(constants.DateFormat)
+		}
+
+		// KPI balance window upper bound tracks transaction window end
+		if asOnDate == "" {
+			asOnDate = toDate
+		}
+
+		txnLimit := defaultCategorywiseTxnListLimit
+		if raw := strings.TrimSpace(strFromReq(q, body, "txn_limit", "txnLimit")); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil {
+				if n < 1 {
+					n = 1
+				}
+				if n > maxCategorywiseTxnListLimit {
+					n = maxCategorywiseTxnListLimit
+				}
+				txnLimit = n
+			}
+		}
 
 		allowedEntityIDs := api.GetEntityIDsFromCtx(ctx)
 		allowedAccountNumbers := ctxApprovedAccountNumbers(ctx)
@@ -148,6 +228,9 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 		// date filter on COALESCE(transaction_date, value_date)
 		filters = append(filters, fmt.Sprintf("COALESCE(t.transaction_date, t.value_date) >= $%d::date", arg))
 		args = append(args, fromDate)
+		arg++
+		filters = append(filters, fmt.Sprintf("COALESCE(t.transaction_date, t.value_date) <= $%d::date", arg))
+		args = append(args, toDate)
 		arg++
 
 		// mandatory scope filters from prevalidation context
@@ -169,8 +252,13 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 				return
 			}
+			eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			filters = append(filters, fmt.Sprintf("bs.entity_id = $%d", arg))
-			args = append(args, entityF)
+			args = append(args, eid)
 			arg++
 		}
 		if bankF != "" {
@@ -178,24 +266,39 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 				return
 			}
-			// bank name may exist on mba.bank_name or masterbank.mb.bank_name
-			filters = append(filters, fmt.Sprintf("(mba.bank_name = $%d OR mb.bank_name = $%d)", arg, arg))
-			args = append(args, bankF)
-			arg++
+			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+				filters = append(filters, fmt.Sprintf(constants.ErrBankIDFilter, arg))
+				args = append(args, bid)
+				arg++
+			} else {
+				bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
+				if !ok {
+					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					return
+				}
+				filters = append(filters, fmt.Sprintf("(lower(trim(COALESCE(mba.bank_name,''))) = $%d OR lower(trim(COALESCE(mb.bank_name,''))) = $%d)", arg, arg))
+				args = append(args, bankNorm)
+				arg++
+			}
 		}
 		if currencyF != "" {
 			if !api.IsCurrencyAllowed(ctx, currencyF) {
 				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
 				return
 			}
-			filters = append(filters, fmt.Sprintf("mba.currency = $%d", arg))
-			args = append(args, currencyF)
+			currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
+			filters = append(filters, fmt.Sprintf("upper(trim(COALESCE(mba.currency,''))) = $%d", arg))
+			args = append(args, currCode)
 			arg++
 		}
 
 		whereClause := ""
 		if len(filters) > 0 {
-			whereClause = "WHERE " + strings.Join(filters, " AND ")
+			whereClause = constants.ErrWhereClause + strings.Join(filters, " AND ")
 		}
 
 		/* ---------------- Category aggregation ---------------- */
@@ -309,14 +412,14 @@ LEFT JOIN LATERAL (
   ) ap2 ON ap2.bankstatementid = bs2.bank_statement_id
      AND ap2.processing_status = 'APPROVED'
   WHERE bs2.account_number = x.account_number
+    AND bs2.entity_id = x.entity_id
     AND COALESCE(tx.transaction_date, tx.value_date) >= $1::date
+    AND COALESCE(tx.transaction_date, tx.value_date) <= $2::date
 ) stmts ON TRUE
 ORDER BY x.entity_name, x.bank_name, x.account_number;
 `
 
-		// Note: above, the lateral already filters transactions by date using placeholder $1; additional filters
-		// for entity/bank/currency are applied in the outer subquery (x) so entities list is already filtered.
-		// If you want to further restrict transactions inside statements by bank or currency, extend the WHERE accordingly.
+		// Lateral uses $1/$2 for the same from/to window as the outer `whereClause` on transactions.
 
 		entityRows, err := pgxPool.Query(ctx, entitySQL, args...)
 		if err != nil {
@@ -386,7 +489,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 	   AND ap.processing_status = 'APPROVED'
 	` + whereClause + `
 	ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
-	LIMIT 2000;
+	LIMIT ` + strconv.Itoa(txnLimit) + `;
 	`
 
 		txnRows, err := pgxPool.Query(ctx, txnSQL, args...)
@@ -421,9 +524,12 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		kArg := 1
 		var kpiFilters []string
 
-		// limit to recent data by horizon
+		// limit to date window
 		kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.as_of_date, CURRENT_DATE) >= $%d::date", kArg))
 		kpiArgs = append(kpiArgs, fromDate)
+		kArg++
+		kpiFilters = append(kpiFilters, fmt.Sprintf("COALESCE(b.as_of_date, CURRENT_DATE) <= $%d::date", kArg))
+		kpiArgs = append(kpiArgs, asOnDate)
 		kArg++
 
 		// mandatory scope filters from prevalidation context
@@ -441,19 +547,35 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 		kArg++
 
 		if bankF != "" {
-			kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = $%d", kArg))
-			kpiArgs = append(kpiArgs, strings.ToLower(strings.TrimSpace(bankF)))
-			kArg++
+			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+				kpiFilters = append(kpiFilters, fmt.Sprintf(constants.ErrBankIDFilter, kArg))
+				kpiArgs = append(kpiArgs, bid)
+				kArg++
+			} else {
+				bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF)
+				if !ok {
+					http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+					return
+				}
+				kpiFilters = append(kpiFilters, fmt.Sprintf("lower(trim(COALESCE(b.bank_name, ''))) = $%d", kArg))
+				kpiArgs = append(kpiArgs, bankNorm)
+				kArg++
+			}
 		}
 		if currencyF != "" {
+			currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF)
+			if !ok {
+				http.Error(w, constants.ErrNoAccessibleBusinessUnit, http.StatusForbidden)
+				return
+			}
 			kpiFilters = append(kpiFilters, fmt.Sprintf("upper(trim(COALESCE(b.currency_code, ''))) = $%d", kArg))
-			kpiArgs = append(kpiArgs, strings.ToUpper(strings.TrimSpace(currencyF)))
+			kpiArgs = append(kpiArgs, currCode)
 			kArg++
 		}
 
 		kpiWhere := ""
 		if len(kpiFilters) > 0 {
-			kpiWhere = "WHERE " + strings.Join(kpiFilters, " AND ")
+			kpiWhere = constants.ErrWhereClause + strings.Join(kpiFilters, " AND ")
 		}
 
 		highestSQL := `
@@ -534,6 +656,108 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			}
 		}
 
+		// Fallback when manual balances are missing: last approved statement txn per (entity, account, currency)
+		// on or before as_on_date (running balance column), then aggregate like the KPIs above.
+		if highestBank == nil || lowestAcct == nil {
+			snapParts := []string{`COALESCE(t.transaction_date, t.value_date)::date <= $1::date`}
+			snapArgs := []interface{}{asOnDate}
+			sn := 2
+			snapParts = append(snapParts, fmt.Sprintf("bs.entity_id = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedEntityIDs)
+			sn++
+			snapParts = append(snapParts, fmt.Sprintf("bs.account_number = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedAccountNumbers)
+			sn++
+			snapParts = append(snapParts, fmt.Sprintf("lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedBanksNorm)
+			sn++
+			snapParts = append(snapParts, fmt.Sprintf("upper(trim(COALESCE(mba.currency, ''))) = ANY($%d)", sn))
+			snapArgs = append(snapArgs, allowedCurrenciesNorm)
+			sn++
+			if entityF != "" {
+				eid, ok := api.ResolveEntityIDForFilter(ctx, entityF)
+				if ok {
+					snapParts = append(snapParts, fmt.Sprintf("bs.entity_id = $%d", sn))
+					snapArgs = append(snapArgs, eid)
+					sn++
+				}
+			}
+			if bankF != "" {
+				if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
+					snapParts = append(snapParts, fmt.Sprintf(constants.ErrBankIDFilter, sn))
+					snapArgs = append(snapArgs, bid)
+					sn++
+				} else if bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF); ok {
+					snapParts = append(snapParts, fmt.Sprintf("(lower(trim(COALESCE(mba.bank_name,''))) = $%d OR lower(trim(COALESCE(mb.bank_name,''))) = $%d)", sn, sn))
+					snapArgs = append(snapArgs, bankNorm)
+					sn++
+				}
+			}
+			if currencyF != "" {
+				if currCode, ok := api.ResolveCurrencyCodeUpperForFilter(ctx, currencyF); ok {
+					snapParts = append(snapParts, fmt.Sprintf("upper(trim(COALESCE(mba.currency,''))) = $%d", sn))
+					snapArgs = append(snapArgs, currCode)
+					sn++
+				}
+			}
+			snapWhere := constants.ErrWhereClause + strings.Join(snapParts, " AND ")
+			rankedCTE := `
+WITH ranked AS (
+  SELECT
+    COALESCE(mba.bank_name, mb.bank_name, 'Unknown') AS bank_name,
+    bs.account_number,
+    upper(trim(COALESCE(mba.currency, ''))) AS currency_code,
+    COALESCE(t.balance, 0)::float8 AS balance,
+    COALESCE(t.transaction_date, t.value_date)::date AS eff_date,
+    ROW_NUMBER() OVER (
+      PARTITION BY bs.entity_id, bs.account_number, upper(trim(COALESCE(mba.currency, '')))
+      ORDER BY COALESCE(t.transaction_date, t.value_date) DESC NULLS LAST, t.transaction_id DESC
+    ) AS rn
+  FROM cimplrcorpsaas.bank_statement_transactions t
+  JOIN cimplrcorpsaas.bank_statements bs ON t.bank_statement_id = bs.bank_statement_id
+  LEFT JOIN public.masterbankaccount mba ON mba.account_number = bs.account_number AND COALESCE(mba.is_deleted, false) = false
+  LEFT JOIN public.masterbank mb ON mb.bank_id = mba.bank_id
+  JOIN (
+    SELECT DISTINCT ON (bankstatementid) bankstatementid, processing_status
+    FROM cimplrcorpsaas.auditactionbankstatement
+    ORDER BY bankstatementid, requested_at DESC
+  ) ap ON ap.bankstatementid = bs.bank_statement_id AND ap.processing_status = 'APPROVED'
+  ` + snapWhere + `
+)
+`
+			if highestBank == nil {
+				fbSQL := rankedCTE + `
+SELECT bank_name, SUM(balance)::float8 AS total
+FROM ranked WHERE rn = 1
+GROUP BY 1
+ORDER BY total DESC NULLS LAST
+LIMIT 1`
+				var b string
+				var tot float64
+				if err := pgxPool.QueryRow(ctx, fbSQL, snapArgs...).Scan(&b, &tot); err == nil {
+					highestBank = &BankBalanceKPI{Bank: b, Total: tot}
+				}
+			}
+			if lowestAcct == nil {
+				fbSQL := rankedCTE + `
+SELECT bank_name, account_number, balance, currency_code, to_char(eff_date, 'YYYY-MM-DD')
+FROM ranked WHERE rn = 1
+ORDER BY balance ASC NULLS LAST, account_number
+LIMIT 1`
+				var b, acct, ccy, asof string
+				var bal float64
+				if err := pgxPool.QueryRow(ctx, fbSQL, snapArgs...).Scan(&b, &acct, &bal, &ccy, &asof); err == nil {
+					lowestAcct = &LowestBalanceAccount{
+						Bank:     b,
+						Account:  acct,
+						Balance:  bal,
+						Currency: ccy,
+						AsOfDate: asof,
+					}
+				}
+			}
+		}
+
 		/* ---------------- Misclassified transactions section ---------------- */
 		misclassifiedSQL := `
 SELECT
@@ -568,7 +792,7 @@ JOIN (
 ` + whereClause + `
 AND COALESCE(t.misclassified_flag, false) = true
 ORDER BY COALESCE(t.transaction_date, t.value_date) DESC
-LIMIT 2000;
+LIMIT ` + strconv.Itoa(txnLimit) + `;
 `
 
 		misclassifiedRows, err := pgxPool.Query(ctx, misclassifiedSQL, args...)
@@ -651,6 +875,7 @@ LIMIT 2000;
 					AND lower(trim(COALESCE(mba.bank_name, mb.bank_name, ''))) = ANY($3)
 					AND upper(trim(COALESCE(mba.currency, ''))) = ANY($4)
 					AND bs.statement_period_end >= $5::date
+					AND bs.statement_period_end <= $6::date
 			`
 			var stmtCount int64
 			if err := pgxPool.QueryRow(ctx, stmtCountSQL,
@@ -659,23 +884,26 @@ LIMIT 2000;
 				allowedBanksNorm,
 				allowedCurrenciesNorm,
 				fromDate,
+				toDate,
 			).Scan(&stmtCount); err != nil {
 				stmtCount = -1
 			}
 
 			resp["debug"] = map[string]interface{}{
-				"horizon_days":          days,
-				"from_date":             fromDate,
-				"entity_filter":         entityF,
-				"bank_filter":           bankF,
-				"currency_filter":        currencyF,
-				"allowed_entity_ids":     len(allowedEntityIDs),
-				"allowed_accounts":       len(allowedAccountNumbers),
-				"allowed_banks":          len(allowedBanksNorm),
-				"allowed_currencies":     len(allowedCurrenciesNorm),
+				"horizon":                  horizon,
+				"from_date":                fromDate,
+				"to_date":                  toDate,
+				"txn_list_limit":           txnLimit,
+				"entity_filter":            entityF,
+				"bank_filter":              bankF,
+				"currency_filter":          currencyF,
+				"allowed_entity_ids":       len(allowedEntityIDs),
+				"allowed_accounts":         len(allowedAccountNumbers),
+				"allowed_banks":            len(allowedBanksNorm),
+				"allowed_currencies":       len(allowedCurrenciesNorm),
 				"approved_statement_count": stmtCount,
-				"approved_txn_count":     txnCount,
-				"note": "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
+				"approved_txn_count":       txnCount,
+				"note":                     "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
 			}
 		}
 

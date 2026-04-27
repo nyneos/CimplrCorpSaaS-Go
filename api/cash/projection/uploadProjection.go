@@ -68,10 +68,12 @@ func UploadCashflowProposalSimple(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			pgxPool,
 			files[0],
 			requestedBy,
-			proposalName,
-			recurrenceType,
-			effectiveDate,
-			currency,
+			proposalUploadOpts{
+				ProposalName:   proposalName,
+				RecurrenceType: recurrenceType,
+				EffectiveDate:  effectiveDate,
+				Currency:       currency,
+			},
 		)
 		if err != nil {
 			api.RespondWithError(w, statusCode, err.Error())
