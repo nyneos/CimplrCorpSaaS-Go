@@ -84,7 +84,7 @@ func GetTransactionDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy)
+		insertTransactionDownloadAudit(ctx, pgxPool, txType, req.TransactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -162,7 +162,7 @@ func GetTransactionBulkDownloadURL(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"transaction_id": transactionID,
 				"download_url":   downloadURL,
 			})
-			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy)
+			insertTransactionDownloadAudit(ctx, pgxPool, txType, transactionID, requestedBy, strings.TrimSpace(*uploadS3Key))
 		}
 
 		if len(files) == 0 {
