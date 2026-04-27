@@ -190,6 +190,9 @@ const (
 	ErrBeginTransactionFailed    = "begin transaction failed: %w"
 	ErrDuplicateKey              = "duplicate key"
 	ErrEmptyString               = "''::text"
+	ErrBankIDRequired            = "bank_id is required"
+	ErrBankIDFilter              = "mba.bank_id = $%d"
+	ErrWhereClause               = "WHERE "
 )
 
 // Date formats

@@ -267,7 +267,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
-				filters = append(filters, fmt.Sprintf("mba.bank_id = $%d", arg))
+				filters = append(filters, fmt.Sprintf(constants.ErrBankIDFilter, arg))
 				args = append(args, bid)
 				arg++
 			} else {
@@ -298,7 +298,7 @@ func GetCategorywiseBreakdownHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 
 		whereClause := ""
 		if len(filters) > 0 {
-			whereClause = "WHERE " + strings.Join(filters, " AND ")
+			whereClause = constants.ErrWhereClause + strings.Join(filters, " AND ")
 		}
 
 		/* ---------------- Category aggregation ---------------- */
@@ -548,7 +548,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		if bankF != "" {
 			if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
-				kpiFilters = append(kpiFilters, fmt.Sprintf("mba.bank_id = $%d", kArg))
+				kpiFilters = append(kpiFilters, fmt.Sprintf(constants.ErrBankIDFilter, kArg))
 				kpiArgs = append(kpiArgs, bid)
 				kArg++
 			} else {
@@ -575,7 +575,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 
 		kpiWhere := ""
 		if len(kpiFilters) > 0 {
-			kpiWhere = "WHERE " + strings.Join(kpiFilters, " AND ")
+			kpiWhere = constants.ErrWhereClause + strings.Join(kpiFilters, " AND ")
 		}
 
 		highestSQL := `
@@ -684,7 +684,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 			}
 			if bankF != "" {
 				if bid, ok := api.ResolveBankIDForFilter(ctx, bankF); ok {
-					snapParts = append(snapParts, fmt.Sprintf("mba.bank_id = $%d", sn))
+					snapParts = append(snapParts, fmt.Sprintf(constants.ErrBankIDFilter, sn))
 					snapArgs = append(snapArgs, bid)
 					sn++
 				} else if bankNorm, ok := api.ResolveBankNameNormForFilter(ctx, bankF); ok {
@@ -700,7 +700,7 @@ ORDER BY x.entity_name, x.bank_name, x.account_number;
 					sn++
 				}
 			}
-			snapWhere := "WHERE " + strings.Join(snapParts, " AND ")
+			snapWhere := constants.ErrWhereClause + strings.Join(snapParts, " AND ")
 			rankedCTE := `
 WITH ranked AS (
   SELECT
@@ -890,20 +890,20 @@ LIMIT ` + strconv.Itoa(txnLimit) + `;
 			}
 
 			resp["debug"] = map[string]interface{}{
-				"horizon":               horizon,
-				"from_date":             fromDate,
-				"to_date":               toDate,
-				"txn_list_limit":        txnLimit,
-				"entity_filter":         entityF,
-				"bank_filter":           bankF,
-				"currency_filter":        currencyF,
-				"allowed_entity_ids":     len(allowedEntityIDs),
-				"allowed_accounts":       len(allowedAccountNumbers),
-				"allowed_banks":          len(allowedBanksNorm),
-				"allowed_currencies":     len(allowedCurrenciesNorm),
+				"horizon":                  horizon,
+				"from_date":                fromDate,
+				"to_date":                  toDate,
+				"txn_list_limit":           txnLimit,
+				"entity_filter":            entityF,
+				"bank_filter":              bankF,
+				"currency_filter":          currencyF,
+				"allowed_entity_ids":       len(allowedEntityIDs),
+				"allowed_accounts":         len(allowedAccountNumbers),
+				"allowed_banks":            len(allowedBanksNorm),
+				"allowed_currencies":       len(allowedCurrenciesNorm),
 				"approved_statement_count": stmtCount,
-				"approved_txn_count":     txnCount,
-				"note": "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
+				"approved_txn_count":       txnCount,
+				"note":                     "If approved_statement_count or approved_txn_count is 0, this is typically because statements are not uploaded/approved for the scoped accounts, or all data is older than the horizon.",
 			}
 		}
 
