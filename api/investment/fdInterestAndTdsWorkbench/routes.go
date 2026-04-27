@@ -22,4 +22,5 @@ func RegisterFDInterestWorkbenchRoutes(mux *http.ServeMux, pool *pgxpool.Pool, d
 	mux.Handle("/investment/fd/tds-register/view", mid(http.HandlerFunc(GetTDSRegisterView(pool))))
 	mux.Handle("/investment/fd/tds-register/reconcile", mid(http.HandlerFunc(ReconcileTDSRegister(pool))))
 	mux.Handle("/investment/fd/tds-register/journal", mid(http.HandlerFunc(GetTDSJournalEntries(pool))))
+	mux.Handle("/investment/fd/tds-register/audit", mid(http.HandlerFunc(GetTDSReceiptAuditHandler(pool))))
 }
