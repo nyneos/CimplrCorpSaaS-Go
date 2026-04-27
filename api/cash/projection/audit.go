@@ -5,6 +5,7 @@ import (
 	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -32,17 +33,6 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		valid := false
-		for _, s := range auth.GetActiveSessions() {
-			if s.UserID == req.UserID {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			api.RespondWithError(w, http.StatusForbidden, constants.ErrUnauthorized)
-			return
-		}
 		if strings.TrimSpace(req.ProposalID) == "" {
 			api.RespondWithError(w, http.StatusBadRequest, "proposal_id cannot be empty")
 			return
@@ -81,7 +71,7 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				return
 			}
 
-			payload = append(payload, map[string]interface{}{
+			entry := map[string]interface{}{
 				"entity_id":    entityID,
 				"action":       action,
 				"status":       status,
@@ -91,15 +81,106 @@ func GetProjectionAuditHandler(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"checker_at":   ifaceToTimeString(checkerAt),
 				"comment":      ifaceToString(checkerComment),
 				"reason":       ifaceToString(reason),
-			})
+			}
+			if strings.EqualFold(action, "EDIT") {
+				if changes := buildProjectionChangeSummary(ctx, pgxPool, req.ProposalID); len(changes) > 0 {
+					entry["change_summary"] = changes
+				}
+			}
+
+			payload = append(payload, entry)
+
+			if decisionAction := projectionDecisionAction(action, status, checkerAt); decisionAction != "" {
+				payload = append(payload, map[string]interface{}{
+					"entity_id":    entityID,
+					"action":       decisionAction,
+					"status":       status,
+					"performed_by": projectionFirstNonEmpty(ifaceToString(checkerBy), performedBy),
+					"performed_at": ifaceToTimeString(checkerAt),
+					"checker_by":   ifaceToString(checkerBy),
+					"checker_at":   ifaceToTimeString(checkerAt),
+					"comment":      ifaceToString(checkerComment),
+					"reason":       ifaceToString(reason),
+				})
+			}
 		}
 		if err := rows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection audit history")
 			return
 		}
 
+		downloadRows, err := pgxPool.Query(ctx, `
+			SELECT proposal_id, requested_by, requested_at, file_name, upload_s3_key
+			FROM cimplrcorpsaas.audit_cashflow_proposal_downloads
+			WHERE proposal_id = $1
+			ORDER BY requested_at ASC, download_audit_id ASC
+		`, req.ProposalID)
+		if err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection download audit history")
+			return
+		}
+		defer downloadRows.Close()
+
+		for downloadRows.Next() {
+			var entityID, requestedBy string
+			var requestedAt sql.NullTime
+			var fileName, uploadKey sql.NullString
+			if err := downloadRows.Scan(&entityID, &requestedBy, &requestedAt, &fileName, &uploadKey); err != nil {
+				api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection download audit history")
+				return
+			}
+
+			payload = append(payload, map[string]interface{}{
+				"entity_id":     entityID,
+				"action":        "DOWNLOAD",
+				"status":        "COMPLETED",
+				"performed_by":  strings.TrimSpace(requestedBy),
+				"performed_at":  requestedAt.Time,
+				"checker_by":    "",
+				"checker_at":    nil,
+				"comment":       "",
+				"reason":        "",
+				"file_name":     fileName.String,
+				"upload_s3_key": uploadKey.String,
+				"source":        "PROJECTION",
+			})
+		}
+		if err := downloadRows.Err(); err != nil {
+			api.RespondWithError(w, http.StatusInternalServerError, "failed to read projection download audit history")
+			return
+		}
+
 		api.RespondWithPayload(w, true, "", payload)
 	}
+}
+
+func projectionDecisionAction(action, status string, checkerAt interface{}) string {
+	if ifaceToTimeString(checkerAt) == "" {
+		return ""
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "APPROVE", "REJECT":
+		return ""
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "APPROVED":
+		return "APPROVE"
+	case "REJECTED":
+		return "REJECT"
+	default:
+		return ""
+	}
+}
+
+func projectionFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func projectionRequestedBy(userID string) string {
@@ -117,16 +198,104 @@ func projectionRequestedBy(userID string) string {
 	return strings.TrimSpace(userID)
 }
 
-func insertProjectionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, proposalID, requestedBy string) {
-	if strings.TrimSpace(proposalID) == "" || strings.TrimSpace(requestedBy) == "" {
+func insertProjectionDownloadAudit(ctx context.Context, pgxPool *pgxpool.Pool, proposalID, requestedBy, uploadS3Key string) {
+	proposalID = strings.TrimSpace(proposalID)
+	requestedBy = strings.TrimSpace(requestedBy)
+	uploadS3Key = strings.TrimSpace(uploadS3Key)
+	if proposalID == "" {
+		return
+	}
+	if requestedBy == "" {
+		if userID, ok := ctx.Value("user_id").(string); ok {
+			requestedBy = strings.TrimSpace(userID)
+		}
+	}
+	if requestedBy == "" {
 		return
 	}
 
 	_, err := pgxPool.Exec(ctx, `
-		INSERT INTO cimplrcorpsaas.audit_action_cashflow_proposal (proposal_id, action_type, processing_status, requested_by, requested_at)
-		VALUES ($1, 'DOWNLOAD', 'COMPLETED', $2, now())
-	`, proposalID, requestedBy)
+		INSERT INTO cimplrcorpsaas.audit_cashflow_proposal_downloads (proposal_id, requested_by, requested_at, file_name, upload_s3_key)
+		VALUES ($1, $2, now(), $3, $4)
+	`, proposalID, requestedBy, projectionExtractAuditFileName(uploadS3Key), projectionNullIfEmpty(uploadS3Key))
 	if err != nil {
 		log.Printf("failed to insert projection download audit for %s: %v", proposalID, err)
 	}
+}
+
+func projectionNullIfEmpty(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return strings.TrimSpace(value)
+}
+
+func projectionExtractAuditFileName(uploadS3Key string) interface{} {
+	uploadS3Key = strings.TrimSpace(uploadS3Key)
+	if uploadS3Key == "" {
+		return nil
+	}
+
+	parts := strings.Split(uploadS3Key, "/")
+	name := strings.TrimSpace(parts[len(parts)-1])
+	if name == "" {
+		return nil
+	}
+	return name
+}
+
+func buildProjectionChangeSummary(ctx context.Context, pgxPool *pgxpool.Pool, proposalID string) []map[string]interface{} {
+	var (
+		proposalName, oldProposalName     string
+		effectiveDate, oldEffectiveDate   string
+		currencyCode, oldCurrencyCode     string
+		recurrenceType, oldRecurrenceType string
+	)
+
+	// Only changed fields will be included in the summary (not all fields)
+	err := pgxPool.QueryRow(ctx, `
+		SELECT
+			COALESCE(proposal_name, ''),
+			COALESCE(old_proposal_name, ''),
+			COALESCE(TO_CHAR(effective_date, 'YYYY-MM-DD'), ''),
+			COALESCE(TO_CHAR(old_effective_date, 'YYYY-MM-DD'), ''),
+			COALESCE(currency_code, ''),
+			COALESCE(old_currency_code, ''),
+			COALESCE(recurrence_type, ''),
+			COALESCE(old_recurrence_type, '')
+		FROM cimplrcorpsaas.cashflow_proposal
+		WHERE proposal_id = $1
+	`, proposalID).Scan(
+		&proposalName, &oldProposalName,
+		&effectiveDate, &oldEffectiveDate,
+		&currencyCode, &oldCurrencyCode,
+		&recurrenceType, &oldRecurrenceType,
+	)
+	if err != nil {
+		return nil
+	}
+
+	changes := make([]map[string]interface{}, 0)
+	// Only append if changed (not all fields)
+	appendProjectionChange(&changes, "Proposal Name", oldProposalName, proposalName)
+	appendProjectionChange(&changes, "Effective Date", oldEffectiveDate, effectiveDate)
+	appendProjectionChange(&changes, "Currency Code", oldCurrencyCode, currencyCode)
+	appendProjectionChange(&changes, "Recurrence Type", oldRecurrenceType, recurrenceType)
+	return changes
+}
+
+func appendProjectionChange(changes *[]map[string]interface{}, fieldName, oldValue, newValue string) {
+	// Only append if both old and new are non-empty and different, or if one is empty and the other is not
+	if strings.TrimSpace(oldValue) == strings.TrimSpace(newValue) {
+		return
+	}
+	// If both are empty, skip
+	if strings.TrimSpace(oldValue) == "" && strings.TrimSpace(newValue) == "" {
+		return
+	}
+	*changes = append(*changes, map[string]interface{}{
+		"field":     fieldName,
+		"old_value": oldValue,
+		"new_value": newValue,
+	})
 }

@@ -998,7 +998,7 @@ func GetProjectionDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		insertProjectionDownloadAudit(ctx, pgxPool, req.ProposalID, projectionRequestedBy(req.UserID))
+		insertProjectionDownloadAudit(ctx, pgxPool, req.ProposalID, projectionRequestedBy(req.UserID), key)
 
 		w.Header().Set(constants.ContentTypeText, constants.ContentTypeJSON)
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1065,7 +1065,7 @@ func GetProjectionBulkDownloadURLV2(pgxPool *pgxpool.Pool) http.HandlerFunc {
 				"proposal_id":  proposalID,
 				"download_url": downloadURL,
 			})
-			insertProjectionDownloadAudit(ctx, pgxPool, proposalID, requestedBy)
+			insertProjectionDownloadAudit(ctx, pgxPool, proposalID, requestedBy, key)
 		}
 
 		if len(files) == 0 {

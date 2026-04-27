@@ -72,7 +72,7 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 				return
 			}
 
-			payload = append(payload, map[string]interface{}{
+			entry := map[string]interface{}{
 				"audit_id":     auditID,
 				"entity_id":    entityID,
 				"action":       action.String,
@@ -83,7 +83,14 @@ func GetBankStatementAuditHandler(db *sql.DB) http.Handler {
 				"checker_at":   nullableTime(checkerAt),
 				"comment":      comment.String,
 				"reason":       reason.String,
-			})
+			}
+			if strings.EqualFold(action.String, "EDIT") {
+				if changes := buildBankStatementChangeSummary(ctx, db, body.BankStatementID); len(changes) > 0 {
+					entry["change_summary"] = changes
+				}
+			}
+
+			payload = append(payload, entry)
 		}
 		if err := rows.Err(); err != nil {
 			api.RespondWithError(w, http.StatusInternalServerError, "failed to read audit history")
@@ -335,5 +342,115 @@ func respondAuditPayload(w http.ResponseWriter, payload interface{}) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"data":    payload,
+	})
+}
+
+func buildBankStatementChangeSummary(ctx context.Context, db *sql.DB, bankStatementID string) []map[string]interface{} {
+	var (
+		entityID, oldEntityID                         string
+		accountNumber, oldAccountNumber               string
+		statementDate, oldStatementDate               string
+		openingBalance, oldOpeningBalance             string
+		closingBalance, oldClosingBalance             string
+		transactionDate, oldTransactionDate           string
+		description, oldDescription                   string
+		status, oldStatus                             string
+		accountHolderName, oldAccountHolderName       string
+		branchName, oldBranchName                     string
+		ifscCode, oldIFSCCode                         string
+		statementPeriod, oldStatementPeriod           string
+		chequeRefNo, oldChequeRefNo                   string
+		withdrawalAmount, oldWithdrawalAmount         string
+		depositAmount, oldDepositAmount               string
+		modeOfTransaction, oldModeOfTransaction       string
+	)
+
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(entityid, ''),
+			COALESCE(old_entityid, ''),
+			COALESCE(account_number, ''),
+			COALESCE(old_account_number, ''),
+			COALESCE(TO_CHAR(statementdate, 'YYYY-MM-DD'), ''),
+			COALESCE(TO_CHAR(old_statementdate, 'YYYY-MM-DD'), ''),
+			COALESCE(CAST(openingbalance AS text), ''),
+			COALESCE(CAST(old_openingbalance AS text), ''),
+			COALESCE(CAST(closingbalance AS text), ''),
+			COALESCE(CAST(old_closingbalance AS text), ''),
+			COALESCE(TO_CHAR(transactiondate, 'YYYY-MM-DD'), ''),
+			COALESCE(TO_CHAR(old_transactiondate, 'YYYY-MM-DD'), ''),
+			COALESCE(description, ''),
+			COALESCE(old_description, ''),
+			COALESCE(status, ''),
+			COALESCE(old_status, ''),
+			COALESCE(accountholdername, ''),
+			COALESCE(old_accountholdername, ''),
+			COALESCE(branchname, ''),
+			COALESCE(old_branchname, ''),
+			COALESCE(ifsccode, ''),
+			COALESCE(old_ifsccode, ''),
+			COALESCE(statement_period, ''),
+			COALESCE(old_statement_period, ''),
+			COALESCE(chequerefno, ''),
+			COALESCE(old_chequerefno, ''),
+			COALESCE(CAST(withdrawalamount AS text), ''),
+			COALESCE(CAST(old_withdrawalamount AS text), ''),
+			COALESCE(CAST(depositamount AS text), ''),
+			COALESCE(CAST(old_depositamount AS text), ''),
+			COALESCE(modeoftransaction, ''),
+			COALESCE(old_modeoftransaction, '')
+		FROM bank_statement
+		WHERE bankstatementid = $1
+	`, bankStatementID).Scan(
+		&entityID, &oldEntityID,
+		&accountNumber, &oldAccountNumber,
+		&statementDate, &oldStatementDate,
+		&openingBalance, &oldOpeningBalance,
+		&closingBalance, &oldClosingBalance,
+		&transactionDate, &oldTransactionDate,
+		&description, &oldDescription,
+		&status, &oldStatus,
+		&accountHolderName, &oldAccountHolderName,
+		&branchName, &oldBranchName,
+		&ifscCode, &oldIFSCCode,
+		&statementPeriod, &oldStatementPeriod,
+		&chequeRefNo, &oldChequeRefNo,
+		&withdrawalAmount, &oldWithdrawalAmount,
+		&depositAmount, &oldDepositAmount,
+		&modeOfTransaction, &oldModeOfTransaction,
+	)
+	if err != nil {
+		return nil
+	}
+
+	changes := make([]map[string]interface{}, 0)
+	appendBankStatementChange(&changes, "Entity ID", oldEntityID, entityID)
+	appendBankStatementChange(&changes, "Account Number", oldAccountNumber, accountNumber)
+	appendBankStatementChange(&changes, "Statement Date", oldStatementDate, statementDate)
+	appendBankStatementChange(&changes, "Opening Balance", oldOpeningBalance, openingBalance)
+	appendBankStatementChange(&changes, "Closing Balance", oldClosingBalance, closingBalance)
+	appendBankStatementChange(&changes, "Transaction Date", oldTransactionDate, transactionDate)
+	appendBankStatementChange(&changes, "Description", oldDescription, description)
+	appendBankStatementChange(&changes, "Status", oldStatus, status)
+	appendBankStatementChange(&changes, "Account Holder Name", oldAccountHolderName, accountHolderName)
+	appendBankStatementChange(&changes, "Branch Name", oldBranchName, branchName)
+	appendBankStatementChange(&changes, "IFSC Code", oldIFSCCode, ifscCode)
+	appendBankStatementChange(&changes, "Statement Period", oldStatementPeriod, statementPeriod)
+	appendBankStatementChange(&changes, "Cheque Ref No", oldChequeRefNo, chequeRefNo)
+	appendBankStatementChange(&changes, "Withdrawal Amount", oldWithdrawalAmount, withdrawalAmount)
+	appendBankStatementChange(&changes, "Deposit Amount", oldDepositAmount, depositAmount)
+	appendBankStatementChange(&changes, "Mode Of Transaction", oldModeOfTransaction, modeOfTransaction)
+	return changes
+}
+
+func appendBankStatementChange(changes *[]map[string]interface{}, fieldName, oldValue, newValue string) {
+	if strings.TrimSpace(oldValue) == strings.TrimSpace(newValue) {
+		return
+	}
+
+	*changes = append(*changes, map[string]interface{}{
+		"field":     fieldName,
+		"old_value": oldValue,
+		"new_value": newValue,
 	})
 }

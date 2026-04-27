@@ -2,7 +2,9 @@ package bankstatement
 
 import (
 	apictx "CimplrCorpSaas/api"
+	"CimplrCorpSaas/api/auth"
 	"CimplrCorpSaas/api/constants"
+	middlewares "CimplrCorpSaas/api/middlewares"
 	"CimplrCorpSaas/api/notification/catalog"
 	s3storage "CimplrCorpSaas/api/utils/s3storage"
 	"archive/zip"
@@ -24,6 +26,37 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lib/pq"
 )
+
+func auditActorDisplayName(ctx context.Context, userID string) string {
+	if session := middlewares.GetSessionFromContext(ctx); session != nil {
+		if name := strings.TrimSpace(session.Name); name != "" {
+			return name
+		}
+		if email := strings.TrimSpace(session.Email); email != "" {
+			return email
+		}
+		if id := strings.TrimSpace(session.UserID); id != "" {
+			return id
+		}
+	}
+
+	for _, session := range auth.GetActiveSessions() {
+		if session.UserID != userID {
+			continue
+		}
+		if name := strings.TrimSpace(session.Name); name != "" {
+			return name
+		}
+		if email := strings.TrimSpace(session.Email); email != "" {
+			return email
+		}
+		if id := strings.TrimSpace(session.UserID); id != "" {
+			return id
+		}
+	}
+
+	return strings.TrimSpace(userID)
+}
 
 // 1. Get all bank statements (POST, req: user_id)
 func GetAllBankStatementsHandler(db *sql.DB) http.Handler {
@@ -692,6 +725,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 		}
 		results := make([]map[string]interface{}, 0)
 		ctx := r.Context()
+		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
@@ -758,7 +792,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					})
 					continue
 				}
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "DELETE", "DELETED", body.UserID, time.Now(), body.Comment)
+				actionTime := time.Now()
+				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "DELETE", "DELETED", actorName, actionTime, body.Comment)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -919,6 +954,7 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 				// already reviewed and approved by the approver, so the derived balance
 				// does not need a separate approval cycle.
 				// Use WHERE NOT EXISTS to prevent duplicate audit rows if approval is called twice.
+				actionTime := time.Now()
 				_, err = tx.Exec(`
 				       INSERT INTO auditactionbankbalances (
 					       balance_id, actiontype, processing_status, requested_by, requested_at
@@ -931,8 +967,8 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					bsid,
 					"CREATE",
 					"APPROVED",
-					body.UserID,
-					time.Now(),
+					actorName,
+					actionTime,
 					bsid,
 				)
 				if err != nil {
@@ -944,7 +980,35 @@ func ApproveBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler
 					continue
 				}
 
-				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "APPROVE", "APPROVED", body.UserID, time.Now(), body.Comment)
+				_, err = tx.Exec(`
+				       INSERT INTO auditactionbankbalances (
+					       balance_id, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment
+				       )
+				       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+				       WHERE NOT EXISTS (
+				           SELECT 1 FROM auditactionbankbalances WHERE balance_id = $9 AND actiontype = 'APPROVE'
+				       )
+				       `,
+					bsid,
+					"APPROVE",
+					"APPROVED",
+					actorName,
+					actionTime,
+					actorName,
+					actionTime,
+					body.Comment,
+					bsid,
+				)
+				if err != nil {
+					results = append(results, map[string]interface{}{
+						"bank_statement_id": bsid,
+						"success":           false,
+						"error":             err.Error(),
+					})
+					continue
+				}
+
+				_, err = tx.Exec(`INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "APPROVE", "APPROVED", actorName, actionTime, actorName, actionTime, body.Comment)
 				if err != nil {
 					results = append(results, map[string]interface{}{
 						"bank_statement_id": bsid,
@@ -1006,6 +1070,7 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 		}
 		results := make([]map[string]interface{}, 0)
 		ctx := r.Context()
+		actorName := auditActorDisplayName(ctx, body.UserID)
 		for _, bsid := range body.BankStatementIDs {
 			var entityID string
 			if err := db.QueryRowContext(ctx, `SELECT entity_id FROM cimplrcorpsaas.bank_statements WHERE bank_statement_id = $1`, bsid).Scan(&entityID); err == nil {
@@ -1020,7 +1085,8 @@ func RejectBankStatementHandler(db *sql.DB, pgxPool *pgxpool.Pool) http.Handler 
 					}
 				}
 			}
-			_, err := db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6)`, bsid, "REJECT", "REJECTED", body.UserID, time.Now(), body.Comment)
+			actionTime := time.Now()
+			_, err := db.ExecContext(ctx, `INSERT INTO cimplrcorpsaas.auditactionbankstatement (bankstatementid, actiontype, processing_status, requested_by, requested_at, checker_by, checker_at, checker_comment) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, bsid, "REJECT", "REJECTED", actorName, actionTime, actorName, actionTime, body.Comment)
 			if err != nil {
 				results = append(results, map[string]interface{}{
 					"bank_statement_id": bsid,
